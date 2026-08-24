@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun test
+
+      # Marketplace installs symlink the cached clone and run no install or build
+      # step, so the committed dist/ bundle IS the artifact OMP loads
+      # (omp.extensions -> ./dist/index.js). A src change without a rebuilt bundle
+      # would ship stale behavior silently; fail here instead.
+      - name: Bundle is fresh
+        run: |
+          bun run build
+          git diff --exit-code dist/ \
+            || { echo "::error::dist/ is stale — run 'bun run build' and commit the bundle"; exit 1; }
+
+  py:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # uvx is not preinstalled on GitHub runners.
+      - uses: astral-sh/setup-uv@v5
+
+      # `_test_*.py` matches neither of pytest's default collection patterns, so a
+      # `pytest <dir>` invocation here collects nothing and passes vacuously. The one
+      # surviving script suite is stdlib unittest; run it as the module it is.
+      - name: Script tests
+        run: python3 skills/orchestrate/scripts/_test_worktree_sweep.py
+
+      - name: Prose gate
+        run: uvx slopvac README.md skills/orchestrate/SKILL.md --profile normal

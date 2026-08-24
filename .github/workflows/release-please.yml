@@ -1,0 +1,39 @@
+name: Release Please
+
+# TOKEN: the release pull request is authored with a GitHub App token
+# (RELEASE_APP_CLIENT_ID + RELEASE_APP_PRIVATE_KEY), never the default GITHUB_TOKEN,
+# and there is deliberately no fallback. GitHub does not trigger workflows from
+# GITHUB_TOKEN commits, so release-please would never get the post-merge run it needs
+# to cut the tag; every later push then reports "There are untagged, merged release
+# PRs outstanding - aborting" and the version silently never ships. Failing loudly on
+# a missing secret is better than shipping nothing. Mirrors
+# agentic-packages/.github/workflows/release-please.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Mint release-app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          # App token so the release PR's commits trigger the required PR checks.
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

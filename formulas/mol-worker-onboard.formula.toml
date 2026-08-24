@@ -1,0 +1,95 @@
+formula = "mol-worker-onboard"
+description = "static preamble a spawned worker runs before touching {{bead}}"
+type = "workflow"
+
+[vars.bead]
+required = true
+description = "the bead this worker was told to claim"
+
+[vars.role]
+required = true
+description = "the role label this worker pulls on"
+
+[vars.needs_worktree]
+default = "true"
+description = "false for read-only or artifact-only work that writes no repo files"
+
+[[steps]]
+id = "claim-bead"
+title = "claim {{bead}} from the {{role}} queue"
+type = "task"
+priority = 0
+labels = ["onboard", "phase:start"]
+description = """
+bd ready --parent <owner> --label agent:{{role}} --claim --json
+
+That is the implementer shape. Two corrections it does not cover:
+
+- a reviewer or researcher queue is wisps, and `bd ready` hides ephemeral beads
+  by default: those roles MUST add `--include-ephemeral` or the queue reads empty
+  while work waits in it
+- merge beads are deliberately unparented, so a shepherd pull MUST drop
+  `--parent` and filter on `--label pr:merge` instead
+
+A worker discovers its work by claiming a bead, never from a handle passed in
+the prompt. The claim is a database operation and needs no worktree. If it
+returns nothing, the work was taken: report NO_WORK and exit rather than
+widening the filter -- widening it pulls another role's work.
+"""
+
+[[steps]]
+id = "resolve-worktree"
+title = "confirm the isolated workspace for {{bead}}"
+type = "task"
+needs = ["claim-bead"]
+condition = "{{needs_worktree}}"
+labels = ["onboard", "phase:start"]
+description = """
+Your workspace is the session cwd: OMP provisioned an isolated worktree for this
+spawn and captures your commits on an `omp/task/<id>` branch. You never create,
+move, or remove a worktree, and you never push.
+
+metadata.worktree on the bead names the ARCHITECT's feature worktree, which is
+single-mutator and not yours to enter. Read it only to know where your branch
+will be integrated; if you find yourself inside it, stop and report.
+"""
+
+[[steps]]
+id = "verify-ownership"
+title = "verify the workspace is isolated and clean"
+type = "task"
+needs = ["claim-bead", "resolve-worktree"]
+condition = "{{needs_worktree}}"
+labels = ["onboard", "phase:start"]
+description = """
+git rev-parse --show-toplevel must print your session cwd, not the repo root and
+not the architect's feature worktree, and git status --porcelain must be clean
+before the first edit.
+
+A shared tree means two writers, and the loser's commits are the ones nobody
+notices: stop and report rather than editing. Reporting a mis-provisioned
+workspace is cheap; untangling mixed commits out of the feature branch is not.
+"""
+
+[[steps]]
+id = "confirm-scope"
+title = "read the scope and acceptance criteria on {{bead}}"
+type = "task"
+needs = ["claim-bead"]
+labels = ["onboard", "phase:start"]
+description = """
+The bead carries the brief. Read its description, comments, and scope metadata
+before the first edit. Work outside the stamped scope is what collides with a
+sibling worker.
+"""
+
+[[steps]]
+id = "begin-work"
+title = "begin work on {{bead}}"
+type = "task"
+needs = ["confirm-scope", "verify-ownership"]
+labels = ["onboard", "phase:start"]
+description = """
+All preconditions hold: bead claimed, isolated workspace confirmed clean, scope
+understood. Only now edit files.
+"""

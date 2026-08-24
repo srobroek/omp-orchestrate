@@ -1,0 +1,19 @@
+{
+  "name": "@srobroek/omp-orchestrate",
+  "version": "0.1.0",
+  "description": "Beads-backed multi-agent orchestration for the OMP coding agent: pull dispatch, claim contracts, worktree-per-feature, supervision, and merge gating.",
+  "license": "Apache-2.0",
+  "author": { "name": "Sjors Robroek" },
+  "type": "module",
+  "omp": { "extensions": ["./dist/index.js"] },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^18.0.4",
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun --external '@oh-my-pi/*'",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  }
+}

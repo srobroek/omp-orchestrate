@@ -1,0 +1,60 @@
+{
+  "agent": "implementer",
+  "tier": "T1",
+  "_comment": "Derived from architect.json: the same writer exit contract for a single node. Git evidence under apply=false is the captured branch plus the final commit sha (`metadata.branch`, `metadata.head_sha`) — the implementer never pushes; the architect integrates and pushes. Keeps `pause` so a worker waiting on an open escalation wisp is not bounced for the delay. It does NOT own decomposition, so it never creates feature beads; that is prose in the agent body, not a contract predicate. Like the architect it may never CLOSE its own node, and never writes merge_sha or pr — those belong to the shepherd.",
+  "completion": [
+    {
+      "check": "branch",
+      "require": "metadata.branch",
+      "when": "git"
+    },
+    {
+      "check": "delivery",
+      "require": "metadata.head_sha",
+      "when": "git"
+    },
+    {
+      "check": "output_ref",
+      "require": "metadata.output_ref",
+      "when": "artifact"
+    },
+    {
+      "check": "artifact_path",
+      "require": "artifact.output_ref contained",
+      "when": "artifact"
+    },
+    {
+      "check": "handoff",
+      "require": "label ~ ^agent:reviewer$",
+      "when": "git"
+    },
+    {
+      "check": "unclaimed",
+      "require": "assignee cleared",
+      "when": "git"
+    },
+    {
+      "check": "reported",
+      "require": "comment.verb in [REPORTED]"
+    }
+  ],
+  "authority": {
+    "deny_states": [
+      "closed"
+    ],
+    "deny_metadata": [
+      "merge_sha",
+      "pr"
+    ]
+  },
+  "escape": {
+    "state": "blocked",
+    "require": "comment.verb in [FAILED, BLOCKED]"
+  },
+  "pause": [
+    "open-escalation-wisp-linked-to-node"
+  ],
+  "bounce": {
+    "max_attempts": 3
+  }
+}

@@ -1,0 +1,206 @@
+formula = "mol-land-branch"
+description = "land {{branch}} for {{merge_bead}} through review, CI, and the {{repo}} merge slot"
+type = "workflow"
+
+[vars.merge_bead]
+required = true
+description = "the agent:integrator merge bead; the shepherd claims this and nothing else"
+
+[vars.node_bead]
+required = true
+description = "the work bead whose branch is landing; supplies the origin actor and worktree"
+
+[vars.repo]
+required = true
+description = "repository the branch lands in; owns the merge slot"
+
+[vars.branch]
+required = true
+description = "branch being landed, read from the merge bead's author-written branch anchor"
+
+[vars.want_fix_round]
+default = "false"
+description = "true when a reviewer returned changes_requested and the specialist must re-work before the PR is made ready"
+
+[[steps]]
+id = "open-draft-pr"
+title = "open the draft PR for {{branch}}"
+type = "task"
+priority = 1
+labels = ["land", "phase:stage"]
+description = """
+Open the PR as a DRAFT against the landing base. Draft is the interlock: the
+shepherd's own eligibility probe ignores drafts, so nothing can merge {{branch}}
+while review is still open.
+
+The branch and base anchors on {{merge_bead}} are author-written. Read them;
+never write them. If the pushed head does not match the branch anchor, stop and
+set {{merge_bead}} status=blocked with a BLOCKED comment -- a mismatch means the
+work bead was not reported from the branch this molecule is landing.
+"""
+
+[[steps]]
+id = "create-review-shells"
+title = "create every review-wisp shell before any reviewer starts"
+type = "task"
+priority = 1
+needs = ["open-draft-pr"]
+labels = ["land", "phase:review"]
+description = """
+The orchestrator creates ALL review-wisp shells and the {{merge_bead}} dependency
+edges up front, then activates each reviewer with exactly
+`CLAIM {review-wisp-id}`. Creating shells one at a time as reviewers finish lets
+the last verdict close a molecule that still has an unwritten dimension.
+
+A reviewer is read-only: it runs under `bd --readonly`, reads the PR and the
+branch, and needs no checkout of its own -- it never creates, enters, or writes a
+worktree. Its queue is wisps, so its pull carries `--include-ephemeral` or the
+queue reads empty. The reviewer discovers its work by claiming the wisp; the
+claim is the only thing that grants it.
+"""
+
+[[steps]]
+id = "restage-to-review"
+title = "move {{node_bead}} from reported to in_review"
+type = "task"
+needs = ["create-review-shells"]
+labels = ["land", "phase:review"]
+description = """
+`bd set-state {{node_bead}} state=in_review --reason "<why>"`.
+
+Restaging after the shells exist, not before, is what keeps the state honest: a
+node in `in_review` with no wisp to review it reads as work in progress that no
+actor owns.
+"""
+
+[[steps]]
+id = "collect-verdicts"
+title = "collect one verdict per review dimension"
+type = "task"
+priority = 1
+needs = ["restage-to-review"]
+labels = ["land", "phase:review"]
+description = """
+Every review wisp reaches a verdict before the specialist is woken. Findings stay
+ON the wisp -- the orchestrator creates shells and observes state, it never
+relays a finding, and the shepherd never judges one.
+
+The union of verdicts decides the route: all approve and the PR may be made
+ready; any `changes_requested` routes through fix-round. Wake the specialist with
+`CLAIM {{node_bead}}` only after every dimension has a verdict, never after the
+first.
+"""
+
+[[steps]]
+id = "fix-round"
+title = "apply the union of FIX items on {{node_bead}}"
+type = "task"
+needs = ["collect-verdicts"]
+condition = "{{want_fix_round}}"
+labels = ["land", "phase:review", "route:changes-requested"]
+description = """
+The SAME specialist re-claims {{node_bead}}, reads every open review wisp, and
+applies the union of FIX items -- not the first wisp's, and not a subset it
+agrees with. It replies on the PR to findings it rejects.
+
+The specialist re-works in its own isolated workspace, never in the feature
+worktree: its commits are captured on an `omp/task/<id>` branch, and the
+architect integrates that branch and pushes the new head. The specialist itself
+never pushes. A new head restarts collect-verdicts: verdicts are keyed to the
+head they were written against.
+"""
+
+[[steps]]
+id = "mark-ready"
+title = "make the draft PR ready for review"
+type = "task"
+needs = ["collect-verdicts", "fix-round"]
+labels = ["land", "phase:stage"]
+description = """
+The last approving reviewer closes the final review wisp and makes the PR ready.
+`collect-verdicts` is named here unconditionally on purpose -- with fix-round
+alone this step would lose its only edge when no fix round runs and become ready
+in parallel with the first step, marking an unreviewed PR ready with no error
+reported anywhere.
+
+Ready is the signal the shepherd's eligibility probe waits for. Until this step
+runs, the draft state holds the merge.
+"""
+
+[[steps]]
+id = "ci-green"
+title = "wait for CI to go green on the final head"
+type = "task"
+priority = 1
+needs = ["mark-ready"]
+labels = ["land", "phase:verify"]
+description = """
+Nothing polls this gate and no daemon closes it. The RUNNER is the shepherd's own
+patrol pass, whose first action every cycle is `bd gate check --type=gh`; that
+call is what resolves this gate and lets {{merge_bead}} re-enter the queue. If no
+shepherd is patrolling {{repo}}, this molecule waits forever.
+
+Point the gate at the actual run first: `bd gate discover` finds the run id for a
+`gh:run` gate, and the gate names no target otherwise. `bd gate check --escalate`
+marks a failed run for attention, which is the entry to mol-bounce.
+
+Never hold the merge slot across this wait.
+"""
+
+[steps.gate]
+type = "gh:run"
+timeout = "30m"
+
+[[steps]]
+id = "acquire-slot"
+title = "acquire the {{repo}} merge slot without waiting"
+type = "task"
+priority = 1
+needs = ["ci-green"]
+labels = ["land", "phase:land"]
+description = """
+`bd merge-slot create` is idempotent, once per run, with a stable holder such as
+`run-<id>-shepherd`. Acquire WITHOUT `--wait`.
+
+Contention is advisory: on a busy slot report the current holder and retry after
+release rather than proceeding. Release on every exit path -- success, conflict,
+CI wait, bounce, and failure. On restart, `bd merge-slot check` and verify remote
+state before releasing a slot whose holder is your own stable actor.
+"""
+
+[[steps]]
+id = "merge"
+title = "merge {{branch}} under an atomic head guard"
+type = "task"
+priority = 1
+needs = ["acquire-slot"]
+labels = ["land", "phase:land"]
+description = """
+Revalidate the exact PR head, base, checks, review state, and dependencies from
+GitHub with `gh` immediately before merging, then merge with an atomic head
+guard. A head that moved between ci-green and here is a stale merge, not a
+mergeable one.
+
+Stamp `integration_owner=orchestrate` on {{merge_bead}} so the standalone
+pr-shepherd's global drain leaves it alone. Never push a commit, edit the PR
+body, resolve a conflict, or close the PR as a substitute for a bounce.
+"""
+
+[[steps]]
+id = "verify-landed"
+title = "prove the exact landing and close {{merge_bead}}"
+type = "task"
+priority = 1
+needs = ["merge"]
+labels = ["land", "phase:verify"]
+description = """
+Prove the landing before recording it: the merge commit must contain the exact
+head that was guarded. Then
+`bd update {{merge_bead}} --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` and close
+{{merge_bead}}.
+
+Closing it unblocks the `[wisp:recovery] wipe-worktree <path>` wisp; reclaim that
+checkout through `worktree-sweep.sh` and close the wisp. Release the merge slot
+and the repository sheepdog with your own `bd` calls, and clear the sheepdog's
+assignee -- a closed wisp still naming you refuses the successor's claim.
+"""

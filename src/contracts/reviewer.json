@@ -1,0 +1,17 @@
+{
+  "agent": "reviewer",
+  "tier": "T1",
+  "_comment": "Claims a review wisp and writes the REVIEW verdict on its linked node. Approval closes the wisp; changes release it open for the next round.",
+  "completion": [
+    { "check": "verdict", "require": "linked.comment.verb in [REVIEW, BLOCKED]" }
+  ],
+  "authority": {
+    "deny_states": ["merged"],
+    "deny_metadata": ["push", "merge_sha", "pr"]
+  },
+  "escape": {
+    "state": "blocked",
+    "require": "comment.verb in [FAILED, BLOCKED]"
+  },
+  "bounce": { "max_attempts": 3 }
+}

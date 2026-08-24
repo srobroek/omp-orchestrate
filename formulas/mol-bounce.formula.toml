@@ -1,0 +1,117 @@
+formula = "mol-bounce"
+description = "return {{merge_bead}} to its origin worker behind one durable fix bead keyed {{failure_key}}"
+type = "workflow"
+
+[vars.merge_bead]
+required = true
+description = "the merge bead being bounced; stays open and parked, never closed"
+
+[vars.failure_key]
+required = true
+description = "failure identity over repo, failure kind, and exact detail; a review-bot round is keyed bot:<slug>@<head_sha>"
+
+[vars.route_label]
+required = true
+description = "routing label for the fix bead: the originating implementation role, e.g. agent:coder or agent:reviewer"
+
+[[steps]]
+id = "dedupe"
+title = "look for an existing fix bead keyed {{failure_key}}"
+type = "task"
+priority = 1
+labels = ["bounce", "phase:dedupe"]
+description = """
+Dedupe FIRST. Search every non-closed fix bead carrying {{failure_key}} before
+creating anything. The same key deduplicates sequential passes, so a repeated
+bounce of the same failure reuses the existing bead and this molecule stops here.
+
+Keying is what makes that safe. A review-bot round is keyed
+`bot:<slug>@<head_sha>` so a new push produces a NEW round rather than reopening a
+closed fix bead; a CI or conflict failure keys on repo, kind, and the exact check
+name or sorted conflict paths.
+
+On a concurrent creation race keep the OLDEST open fix bead and close the later
+one as its duplicate.
+"""
+
+[[steps]]
+id = "create-fix-bead"
+title = "create the unassigned fix bead for {{failure_key}}"
+type = "task"
+priority = 1
+needs = ["dedupe"]
+labels = ["bounce", "phase:route"]
+description = """
+`bd create ... --deps discovered-from:{{merge_bead}}`, UNASSIGNED, labelled
+{{route_label}}.
+
+It is a DURABLE bead and never a wisp. The whole mechanism is the blocking
+dependency edge park-merge-bead adds next, and that edge dies with a burned wisp:
+{{merge_bead}} would silently re-enter the queue with the failure unfixed.
+
+Carry EVIDENCE, not a copy of the findings: the exact PR, branch, failure, check
+name, origin actor, and origin bead. For a review-bot round carry POINTERS -- the
+summary review URL plus each comment's `path:line` and URL. The bot thread is live
+and its diff suggestions render only on the PR, so a copy is stale the moment it
+is written.
+
+Unassigned is deliberate. The specialist discovers this work by CLAIMING the fix
+bead and does the work in its own isolated workspace -- it never enters the
+feature worktree and never pushes; its commits are captured on an
+`omp/task/<id>` branch for the architect to integrate. The orchestrator routes;
+it never claims or relays the diagnosis.
+"""
+
+[[steps]]
+id = "park-merge-bead"
+title = "park {{merge_bead}} behind the fix bead"
+type = "task"
+priority = 1
+needs = ["create-fix-bead"]
+labels = ["bounce", "phase:route"]
+description = """
+Add the blocking dependency once, fix bead blocks {{merge_bead}}. A blocked merge
+bead stays out of `bd ready`, so nothing can land the branch until the fix bead
+closes -- and closing the fix bead re-readies every dependent merge bead on its
+own.
+
+{{merge_bead}} stays OPEN and parked. Closing it, or closing the PR, is not a
+bounce: it destroys the queue entry this molecule exists to preserve.
+"""
+
+[[steps]]
+id = "comment-disposition"
+title = "record the disposition on both beads"
+type = "task"
+needs = ["park-merge-bead"]
+labels = ["bounce", "phase:record"]
+description = """
+Correlate both beads with a stable marker carrying {{failure_key}}, so a later
+pass -- or a recovery after a crash mid-bounce -- can find this round instead of
+opening a second one.
+
+The comment states what happened and what unblocks it. It never states a verdict
+on a review finding: the specialist claiming the fix bead judges which findings
+are correct, applies those, and replies on the PR to the rest.
+"""
+
+[[steps]]
+id = "release-slot"
+title = "release the merge slot and the claim on {{merge_bead}}"
+type = "task"
+priority = 1
+needs = ["comment-disposition"]
+labels = ["bounce", "phase:release"]
+description = """
+Release the merge slot, release the claim on {{merge_bead}}, and release the
+repository sheepdog with your own `bd` calls. Clear the sheepdog's assignee too --
+a closed wisp still naming you refuses the successor's claim.
+
+A bounce is an exit path, and the slot is released on EVERY exit path. A slot held
+past a bounce blocks every other landing in the repository with nothing reporting
+why; the holder looks alive because the actor is.
+
+Leave the feature worktree alone. It is the architect's, the fix round's branch
+still has to be integrated into it, and it is reclaimed only after
+{{merge_bead}} finally closes.
+"""

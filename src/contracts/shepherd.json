@@ -1,0 +1,25 @@
+{
+  "agent": "shepherd",
+  "tier": "T2",
+  "_comment": "In-run merge shepherd (distinct from the standalone pr-shepherd daemon). Per-transaction authority: claims one merge bead, lands or bounces, releases. It legitimately writes merge_sha/pr and closes merge beads. deny_states blocks review verdicts. deny_metadata omits branch/base_sha because those are pre-existing merge-bead anchors and the evaluator cannot attribute field authorship. The bounce-route check (a bounced fix must carry metadata.stage=fix and metadata.origin) and the landed check (metadata.merge_sha when merged) are NOT here: both are conditional on which disposition was written, and the predicate grammar has no verb-conditional form. Until it does, shepherd.md prose owns them.",
+  "completion": [
+    { "check": "disposition", "require": "comment.verb in [LANDED, BOUNCED, IDLE, BLOCKED]" }
+  ],
+  "authority": {
+    "deny_states": [
+      "approved",
+      "changes_requested",
+      "reported"
+    ],
+    "deny_metadata": [
+      "output_ref"
+    ]
+  },
+  "escape": {
+    "state": "blocked",
+    "require": "comment.verb in [FAILED, BLOCKED]"
+  },
+  "bounce": {
+    "max_attempts": 3
+  }
+}

@@ -1,0 +1,118 @@
+formula = "mol-arch-setup"
+description = "static preamble the architect completes in {{repo}} before any worker claims {{owner_bead}}"
+type = "workflow"
+
+[vars.repo]
+required = true
+description = "repository root the worktree is created from"
+
+[vars.branch]
+required = true
+description = "branch the worktree is created on"
+
+[vars.owner_bead]
+required = true
+description = "epic or feature bead this worktree is provisioned for; the architect that claims it is its only mutator"
+
+[vars.copies_ignored]
+default = "true"
+description = "does the build need gitignored inputs copied in"
+
+[[steps]]
+id = "create-worktree"
+title = "create the worktree for {{branch}}"
+type = "task"
+priority = 1
+labels = ["arch-setup", "phase:provision"]
+description = """
+wt -C {{repo}} switch --create {{branch}} --no-cd -y
+
+Refuse to continue if the path already carries a bead var naming a different
+bead: one path serves one bead, and a second stamp makes the cross-check in
+bind-vars ambiguous for whoever adopts {{owner_bead}} later.
+"""
+
+[[steps]]
+id = "bind-vars"
+title = "stamp {{owner_bead}} on the worktree and the worktree on {{owner_bead}}"
+type = "task"
+needs = ["create-worktree"]
+labels = ["arch-setup", "phase:provision"]
+description = """
+wt -C <worktree> config state vars set bead={{owner_bead}}
+
+Then read it back:
+
+wt -C <worktree> step eval '{{ vars.bead }}' --format json
+
+The result must be {{owner_bead}}. This pair -- the bead var on the path and
+metadata.worktree on the bead (stamp-owner) -- is the whole binding. It records
+where the work lives; it grants nothing and blocks on nothing, so there is no
+handshake to complete and nothing to wait on. Activation is a pull: whoever
+takes {{owner_bead}} does it with `bd ready ... --claim` and then reads
+metadata.worktree to find this tree, cross-checking with the eval above. An
+unverified write leaves that cross-check failing at claim time.
+
+This tree is the architect's alone. Workers run in isolated workspaces and
+never enter it, so nothing here is provisioned for them.
+"""
+
+[[steps]]
+id = "verify-writable"
+title = "verify the worktree is clean and writable"
+type = "task"
+needs = ["bind-vars"]
+labels = ["arch-setup", "phase:provision"]
+description = """
+git -C <worktree> status --porcelain must print nothing, and the path must be
+writable. A dirty inherited worktree mixes someone else's work into the first
+commit made against {{owner_bead}}.
+"""
+
+[[steps]]
+id = "copy-ignored"
+title = "copy gitignored build inputs into the worktree"
+type = "task"
+needs = ["bind-vars"]
+condition = "{{copies_ignored}}"
+labels = ["arch-setup", "phase:provision"]
+description = """
+wt -C {{repo}} step copy-ignored --require-include <worktree>
+
+Skip only when the build genuinely needs no untracked inputs. A missing .env or
+target/ becomes a build failure attributed to the work rather than to setup.
+"""
+
+[[steps]]
+id = "stamp-owner"
+title = "stamp the worktree path on {{owner_bead}}"
+type = "task"
+needs = ["verify-writable"]
+labels = ["arch-setup", "phase:provision"]
+description = """
+bd update {{owner_bead}} --metadata '{"worktree":"<abs path>","branch":"{{branch}}"}'
+
+Metadata, not a label: exactly one worktree may be true per bead, and this single
+value is what the architect claiming {{owner_bead}} reads to find its tree. Two
+worktree labels would be two answers to a question with one answer.
+"""
+
+[[steps]]
+id = "ready-to-claim"
+title = "declare {{owner_bead}} ready to claim"
+type = "task"
+priority = 1
+needs = ["stamp-owner", "copy-ignored"]
+labels = ["arch-setup", "phase:provision"]
+description = """
+Preconditions all true: the worktree exists, its bead var reads {{owner_bead}},
+the tree is clean, ignored inputs are present, and metadata.worktree is stamped.
+Only now may work under {{owner_bead}} be pulled:
+`bd ready --parent {{owner_bead}} --label agent:<x> --claim` (add
+`--include-ephemeral` for wisp queues).
+
+The order is the rule, not a preference. A claim is how an actor discovers its
+work, and the claim carries no checkout with it. Readying {{owner_bead}} before
+this step invites a claim against an unprovisioned tree, and an already-consumed
+claim cannot be retried -- undoing it takes dead-claim recovery.
+"""

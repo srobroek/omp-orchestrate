@@ -1,0 +1,156 @@
+formula = "mol-arch-teardown"
+description = "static teardown the architect completes in {{repo}} once every worker on {{owner_bead}} has reported"
+type = "workflow"
+
+[vars.repo]
+required = true
+description = "repository root the worktree belongs to"
+
+[vars.branch]
+required = true
+description = "branch being torn down"
+
+[vars.owner_bead]
+required = true
+description = "epic or feature bead the worktree was provisioned for"
+
+[vars.epic]
+required = true
+description = "memory-key prefix for this run's epic-scoped bd memories"
+
+[vars.pushes]
+default = "true"
+description = "does this branch push and land, or is it artifact-only work"
+
+[[steps]]
+id = "children-done"
+title = "confirm no child of {{owner_bead}} is still live"
+type = "task"
+priority = 1
+labels = ["arch-teardown", "phase:release"]
+description = """
+bd list --parent {{owner_bead}} --status in_progress --json must be empty.
+
+A child that is still claimed is still committing onto its own captured
+`omp/task/<id>` branch, so the set of branches to integrate is not final yet.
+Tearing the feature worktree down under it strands those commits unintegrated.
+"""
+
+[[steps]]
+id = "integrate-branches"
+title = "cherry-pick every remaining omp/task/* branch for {{owner_bead}}"
+type = "task"
+priority = 1
+needs = ["children-done"]
+labels = ["arch-teardown", "phase:exit"]
+description = """
+Workers commit in isolated workspaces and never push; their commits arrive as
+`omp/task/<id>` branches in {{repo}} (`task.isolation.apply: false`). You are
+the only mutator of the feature worktree, so integration is yours and it happens
+here, before commit-work.
+
+git -C {{repo}} branch --list 'omp/task/*' lists the candidates. For each branch
+belonging to a child of {{owner_bead}}:
+
+git cherry {{branch}} <branch>
+
+`+` marks a commit whose patch is NOT yet in {{branch}}; `-` marks one already
+there. Ancestry checks are useless here -- integration is cherry-pick, so
+patch-id equivalence is the only proof. Cherry-pick every `+` commit serially,
+resolve conflicts as your own work, and re-run git cherry until the branch reads
+all `-`.
+
+Only then delete the branch, and delete only branches proven all `-`. A branch
+that still shows `+` blocks this step: never force-delete it, never discard the
+commits to make teardown pass. Stamp integrated=true on the child bead as each
+branch clears.
+"""
+
+[[steps]]
+id = "commit-work"
+title = "commit everything in the worktree"
+type = "task"
+needs = ["integrate-branches"]
+labels = ["arch-teardown", "phase:release"]
+description = """
+git -C <worktree> status --porcelain must print nothing when this step closes.
+Uncommitted changes are lost when the path is removed; never discard them to make
+this step pass.
+"""
+
+[[steps]]
+id = "push-branch"
+title = "push {{branch}} and record the sha"
+type = "task"
+needs = ["commit-work"]
+condition = "{{pushes}}"
+labels = ["arch-teardown", "phase:release"]
+description = """
+Push, then stamp the landed sha on {{owner_bead}} as metadata (single value).
+Artifact-only work skips this step and reports via its artifact path instead.
+"""
+
+[[steps]]
+id = "report-owner"
+title = "report on {{owner_bead}}"
+type = "task"
+priority = 1
+needs = ["commit-work"]
+labels = ["arch-teardown", "phase:release"]
+description = """
+Write the completion comment on {{owner_bead}} before clear-vars runs. Measured
+invariant, in this order: once the bead var is cleared, the link between the bead
+and its checkout is gone in both directions -- nothing on the path names the bead
+and nothing reconstructs which path the report was about. A report attempted after
+that has no state left to draw on.
+"""
+
+[[steps]]
+id = "clear-vars"
+title = "clear the worktree binding"
+type = "task"
+needs = ["report-owner", "push-branch"]
+labels = ["arch-teardown", "phase:release"]
+description = """
+wt -C <worktree> config state vars clear
+bd update {{owner_bead}} --metadata '{"worktree":null}'
+
+Clear both halves of the binding, and do it before prune-worktree. Measured
+invariant: a binding that outlives its work keeps answering for a path whose
+actor is gone, so the next claimer of {{owner_bead}} is sent to a checkout that no
+longer exists. Verify with `wt -C <worktree> step eval '{{ vars.bead }}'
+--format json` returning empty.
+"""
+
+[[steps]]
+id = "prune-worktree"
+title = "remove the worktree and reclaim its disk"
+type = "task"
+needs = ["clear-vars"]
+labels = ["arch-teardown", "phase:release"]
+description = """
+wt -C {{repo}} step prune --dry-run first, then without it.
+
+Build artifacts in dead worktrees fill the disk; prune's --min-age default of 1d
+means an immediate reclaim needs `wt remove` on this path instead. Never prune a
+path whose git status is dirty.
+"""
+
+[[steps]]
+id = "prune-memories"
+title = "prune the {{epic}}-* memories this run created"
+type = "task"
+needs = ["prune-worktree"]
+labels = ["arch-teardown", "phase:release"]
+description = """
+bd memories {{epic}} lists them. For each key, decide one of three:
+
+- still true beyond this epic: bd remember --key <k> with the generalised wording
+  (it overwrites in place, so rewrite rather than delete-and-recreate)
+- superseded within this run: bd remember --key <k> with the corrected wording
+- true only while {{epic}} was open: bd forget <k>
+
+Epic-scoped lessons expire with the epic that produced them, and nothing else
+expires them: a memory left behind is read by later runs as current. Run last, so
+the review covers what teardown itself learned.
+"""

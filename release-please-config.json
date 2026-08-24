@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": false,
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "component": "omp-orchestrate",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false,
+      "prerelease": true,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "agent": "*",
+  "tier": "generic-fallback",
+  "_comment": "Applied by the matcher-less SubagentStop hook to ANY agent that holds a claim but has no per-agent rules file (unlisted/ad-hoc agents, T3 conditional binding). Minimal contract: report before stopping, never close a node you didn't own, failure is a valid exit. This is the claim<->contract net for the whole fleet.",
+  "completion": [
+    { "check": "reported", "require": "comment.verb in [REPORTED]" }
+  ],
+  "authority": {
+    "deny_states": ["closed"],
+    "deny_metadata": ["merge_sha", "pr"]
+  },
+  "escape": {
+    "state": "blocked",
+    "require": "comment.verb in [FAILED, BLOCKED]"
+  },
+  "bounce": { "max_attempts": 3 }
+}

@@ -1,0 +1,156 @@
+formula = "mol-dead-claim-recovery"
+description = "recover {{bead}} from an actor that stopped reporting, without stealing live work"
+type = "workflow"
+
+[vars.bead]
+required = true
+description = "the bead whose claim looks dead"
+
+[vars.actor]
+required = true
+description = "the actor named in the bead's assignee"
+
+[vars.mode]
+default = "directed"
+description = "directed (re-assign to a named actor) or queue (return to the label pool)"
+
+[[steps]]
+id = "read-evidence"
+title = "gather evidence that {{actor}} is gone"
+type = "task"
+priority = 0
+labels = ["recovery", "phase:diagnose"]
+description = """
+Collect, do not judge. The bead's claim -- assignee plus status -- is the only
+authority on who owns this work, so start from `bd show {{bead}}`:
+
+- last comment timestamp and last status change
+- the captured branch `omp/task/{{actor}}`: `git log` on it, and
+  `git cherry <feature-branch> omp/task/{{actor}}` to see whether its commits are
+  already integrated. A dead worker never pushes, so this branch -- not a remote
+  ref -- is where its work survives
+- the checkout named in the bead's `metadata.worktree` (the architect's feature
+  worktree, not a worker's), and in it `git log` and `git status --porcelain`
+- whether {{actor}}'s process still exists, and whether the `hub` roster still
+  lists it
+- the cross-check: run wt's step eval in that checkout, asking it for the
+  bead var, and compare the answer to {{bead}}
+
+A mismatched or missing bead var in the checkout is evidence about the
+CHECKOUT -- it may be reused, stale, or never stamped. It is never a licence to
+take the bead.
+
+Age alone is never evidence. A long-running build looks identical to a dead
+actor from the beads side.
+"""
+
+[[steps]]
+id = "attempt-resume"
+title = "try to resume {{actor}} before displacing it"
+type = "task"
+needs = ["read-evidence"]
+labels = ["recovery", "phase:diagnose"]
+description = """
+If {{actor}} still exists, send it {{bead}} and stop this molecule -- a
+running actor that pulls its own bead needs no recovery. Displacing a live
+actor loses the uncommitted work in its checkout.
+"""
+
+[[steps]]
+id = "confirm-dead"
+title = "confirm the claim on {{bead}} may be recovered"
+type = "task"
+priority = 1
+needs = ["attempt-resume"]
+labels = ["recovery", "phase:decide"]
+description = """
+Present the evidence from read-evidence and the exact action intended, then
+close this gate only after the user confirms. The rules:
+
+- NEVER steal a claim because a timestamp is old. Age is not evidence.
+- A claim held by an actor that is genuinely gone is recovered ON EVIDENCE
+  ONLY -- the actor's absence, shown, not inferred.
+- Pre-assignment makes dead claims MORE likely, not less: a bead stamped with
+  an actor that never started, or that died before reporting, still reads as
+  owned. More pre-assignment means more of these, so the bar for recovery does
+  not drop as they get common.
+
+If the evidence does not establish absence, resolve nothing and close this
+molecule.
+"""
+
+[steps.gate]
+type = "human"
+
+[[steps]]
+id = "preserve-artifacts"
+title = "preserve whatever {{actor}} produced"
+type = "task"
+needs = ["confirm-dead"]
+labels = ["recovery", "phase:repair"]
+description = """
+A dead worker's work is already preserved: its commits sit on the captured
+`omp/task/*` branch, which outlives the worker, the architect, and the process.
+Stamp it as `recovered_branch` on {{bead}} so the next claimant resumes from it,
+and never delete a branch whose `git cherry` output still shows `+`.
+
+Only for a dead ARCHITECT is there a dirty tree to rescue: commit or stash the
+checkout from the bead's `metadata.worktree`, or copy its artifacts out, until
+`git status --porcelain` is empty. Never discard uncommitted work to make a
+recovery succeed, and never push on the dead actor's behalf.
+"""
+
+[[steps]]
+id = "release-claim"
+title = "release the claim on {{bead}}"
+type = "task"
+priority = 1
+needs = ["preserve-artifacts"]
+labels = ["recovery", "phase:repair"]
+description = """
+Releasing the claim means unassigning the bead: `bd unclaim` does not exist, so
+clear the assignee and set status back to open in one `bd update`. That single
+change is what makes {{bead}} available -- nothing else holds the work.
+
+Leave `metadata.worktree` alone if the checkout is still wanted; correct it if
+read-evidence found it pointing somewhere else.
+"""
+
+[[steps]]
+id = "reassign"
+title = "re-assign {{bead}} to a named actor"
+type = "task"
+needs = ["release-claim"]
+condition = "{{mode}} == directed"
+labels = ["recovery", "phase:repair", "route:directed"]
+description = """
+Stamp the new actor; provision its checkout via mol-arch-setup only when the new
+actor is an architect -- workers get an isolated workspace per spawn and need no
+provisioning. The new actor activates by pulling: `bd ready ... --claim` (plus
+`--include-ephemeral` on a wisp queue). Assigning a bead does not claim it.
+"""
+
+[[steps]]
+id = "requeue"
+title = "return {{bead}} to its label pool"
+type = "task"
+needs = ["release-claim"]
+condition = "{{mode}} == queue"
+labels = ["recovery", "phase:repair", "route:queue"]
+description = """
+Confirm the `agent:` label is intact and the assignee empty, so the next actor
+pulling that queue with `bd ready --label agent:<x> --claim` takes {{bead}} on
+its own. Nothing hands it over; the pull is the activation.
+"""
+
+[[steps]]
+id = "verify-recovered"
+title = "verify {{bead}} is claimable again"
+type = "task"
+needs = ["release-claim", "reassign", "requeue"]
+labels = ["recovery", "phase:verify"]
+description = """
+`bd ready` must list {{bead}} (`--include-ephemeral` if it is a wisp), or its new
+claim-holder must hold it. A bead that is neither ready nor claimed is stranded,
+which is the state this molecule exists to end.
+"""

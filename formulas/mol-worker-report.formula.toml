@@ -1,0 +1,111 @@
+formula = "mol-worker-report"
+description = "static exit sequence a worker runs to close out {{bead}}"
+type = "workflow"
+
+[vars.bead]
+required = true
+description = "the bead being reported"
+
+[vars.evidence]
+default = "git"
+description = "git (commit; the branch is captured), artifact (write a file and cite it), or none"
+
+[vars.spawned_children]
+default = "false"
+description = "did this worker delegate to children of its own"
+
+[[steps]]
+id = "self-verify"
+title = "run the verification {{bead}} asks for"
+type = "task"
+priority = 0
+labels = ["report", "phase:exit"]
+description = """
+Tests, lint, build -- whatever the bead's acceptance criteria name. Failing
+verification is a reportable outcome, not a reason to skip the step. Never
+report success over a failing run.
+"""
+
+[[steps]]
+id = "children-reported"
+title = "confirm every child of {{bead}} reported"
+type = "task"
+priority = 0
+needs = ["self-verify"]
+condition = "{{spawned_children}}"
+labels = ["report", "phase:exit"]
+description = """
+bd list --parent {{bead}} --status in_progress --json must be empty before you
+produce evidence. If a child is still writing, let it finish and re-run
+verification.
+
+Reporting while a child still writes means committing a partial tree, and the
+lost half is invisible: the parent's own review sees consistent-looking code.
+"""
+
+[[steps]]
+id = "commit-push"
+title = "commit the work for {{bead}}"
+type = "task"
+needs = ["self-verify", "children-reported"]
+condition = "{{evidence}} == git"
+labels = ["report", "phase:exit"]
+description = """
+Commit inside the isolated workspace you were given -- the session cwd, never
+the architect's feature worktree. Your commits are captured on an
+`omp/task/<id>` branch automatically (`task.isolation.apply: false`), so there
+is nothing to push and no branch to create: do not push, and do not merge.
+
+Uncommitted work is not captured. The branch is the only thing that survives
+this session, and the architect integrates it -- cite the branch name in the
+outcome comment so integration has a target.
+"""
+
+[[steps]]
+id = "write-artifact"
+title = "write the artifact for {{bead}}"
+type = "task"
+needs = ["self-verify", "children-reported"]
+condition = "{{evidence}} == artifact"
+labels = ["report", "phase:exit"]
+description = "Write one file under the stamped artifacts dir and record its path on the bead."
+
+[[steps]]
+id = "stamp-outcome"
+title = "record the outcome on {{bead}}"
+type = "task"
+needs = ["self-verify", "commit-push", "write-artifact"]
+labels = ["report", "phase:exit"]
+description = """
+One comment carrying the verdict, the evidence pointer (sha or artifact path),
+and anything left undone. Set the state label; do not invent a status bd cannot
+hold.
+"""
+
+[[steps]]
+id = "capture-lesson"
+title = "persist any durable lesson from {{bead}}"
+type = "task"
+needs = ["stamp-outcome"]
+labels = ["report", "phase:exit"]
+description = """
+Only for something a future run would otherwise rediscover -- not a work log,
+not what the bead already records. Decide against existing memory first:
+
+- an existing memory is now WRONG: bd remember "<lesson>" --key <existing-key>,
+  which overwrites in place
+- an existing memory is OBSOLETE: bd forget <existing-key>
+- neither: bd remember "<lesson>" --key <new-slug>
+"""
+
+[[steps]]
+id = "await-review"
+title = "hand {{bead}} to review and idle"
+type = "task"
+needs = ["capture-lesson"]
+labels = ["report", "phase:exit"]
+description = """
+Reported work is review's to move. Do not claim more work to fill review
+latency: idle until review returns a verdict or the run ends. A worker that
+recycles here burns the context its own bounce-back needs.
+"""

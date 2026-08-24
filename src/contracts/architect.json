@@ -1,0 +1,60 @@
+{
+  "agent": "architect",
+  "tier": "T1",
+  "_comment": "Single source of truth for the SubagentStop evaluator AND the generated 'Your bead contract' block in the agent definition (compile-time). Do not hand-edit the generated block. Lifecycle phases (reported/in_review/approved/...) are NOT bd statuses; they derive from status + labels + gates + review-wisp closure. A specialist never CLOSES its own node, so `closed` is the forbidden built-in status.",
+  "completion": [
+    {
+      "check": "branch",
+      "require": "metadata.branch",
+      "when": "git"
+    },
+    {
+      "check": "push",
+      "require": "metadata.push",
+      "when": "git"
+    },
+    {
+      "check": "output_ref",
+      "require": "metadata.output_ref",
+      "when": "artifact"
+    },
+    {
+      "check": "artifact_path",
+      "require": "artifact.output_ref contained",
+      "when": "artifact"
+    },
+    {
+      "check": "handoff",
+      "require": "label ~ ^agent:reviewer$",
+      "when": "git"
+    },
+    {
+      "check": "unclaimed",
+      "require": "assignee cleared",
+      "when": "git"
+    },
+    {
+      "check": "reported",
+      "require": "comment.verb in [REPORTED]"
+    }
+  ],
+  "authority": {
+    "deny_states": [
+      "closed"
+    ],
+    "deny_metadata": [
+      "merge_sha",
+      "pr"
+    ]
+  },
+  "escape": {
+    "state": "blocked",
+    "require": "comment.verb in [FAILED, BLOCKED]"
+  },
+  "pause": [
+    "open-escalation-wisp-linked-to-node"
+  ],
+  "bounce": {
+    "max_attempts": 3
+  }
+}
