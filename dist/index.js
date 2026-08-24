@@ -3590,7 +3590,8 @@ async function preflightSettings(pi, cwd) {
   }
   const deviations = settingsDeviations(observed2);
   const lines3 = deviations.map((deviation) => `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
-  const isolating = observed2["task.isolation.mode"] !== "none";
+  const mode = observed2["task.isolation.mode"];
+  const isolating = typeof mode === "string" && mode !== "none";
   if (isolating && !await sharedBeadsDatabase(cwd)) {
     lines3.push("beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Set BEADS_DOLT_SHARED_SERVER=1 (or `dolt.shared-server: true`), or require every agent to pass `bd -C " + cwd + "`");
   }

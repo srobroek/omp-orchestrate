@@ -271,6 +271,34 @@ describe("W5 shared-database precondition", () => {
 		await preflightSettings(rig.pi, cwd);
 		expect(String(rig.messages.at(-1)?.content ?? "")).toContain("per-checkout database");
 	});
+
+	test("an unreadable isolation mode warns about nothing", async () => {
+		// `omp` absent: nothing is known, so nothing is claimed. Reading a missing key
+		// as "isolating" would warn about a split database on a run with no isolation.
+		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(rig.messages).toEqual([]);
+	});
+
+	test("isolation explicitly off warns about nothing", async () => {
+		// Stubbed rather than read from the machine: the real `omp config get` reports
+		// whatever this host is configured for, which is not what this asserts.
+		const bin = join(cwd, "fake-omp");
+		await writeFile(
+			bin,
+			'#!/bin/sh\nif [ "$3" = "task.isolation.mode" ]; then printf \'{"key":"task.isolation.mode","value":"none"}\'; else exit 1; fi\n',
+			{ mode: 0o755 },
+		);
+		process.env.OMP_BIN = bin;
+
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		// A run without isolation shares one checkout, so it shares one database.
+		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("per-checkout database");
+	});
 });
 
 describe("the audit ledger on disk", () => {
