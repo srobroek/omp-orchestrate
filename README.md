@@ -44,6 +44,16 @@ handler degrades to fail-open instead of blocking every tool.
 | G4 | `yield` | exiting before the claimed bead's role contract is met |
 | G5 | `bash` | claiming a bead that routes to another role |
 
+## Rules
+
+Seven TTSR rules in `rules/` catch protocol slips in tool arguments before they run. They are
+advisory or tool-only, never a security boundary.
+
+Their conditions are evaluated by the host's regex engine, so a pattern that Python accepts
+proves nothing. After editing any rule, run `sh scripts/validate-rules.sh`, which asserts a
+firing and a non-firing case for each through `omp ttsr test`. It needs an installed `omp` and
+is therefore a local gate rather than a CI step.
+
 ## Commands
 
 | Command | Shows |
