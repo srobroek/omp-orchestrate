@@ -237,7 +237,14 @@ export async function gateExitContract(
 	if (bead === null) return undefined;
 
 	const role = orcRole(ctx) ?? roleFromLabels(bead.labels) ?? "generic";
-	const contract = CONTRACTS[role] ?? CONTRACTS.generic;
+	// `Object.hasOwn`, not a plain index: `role` is agent-reachable text -- a worker can
+	// write `bd label add <bead> agent:<name>` -- and `CONTRACTS` is an object literal, so
+	// an inherited key ("constructor", "toString") resolved to a truthy prototype member.
+	// The `?? CONTRACTS.generic` fallback never fired, `contract.completion ?? []` read as
+	// an empty check list, and the exit passed with its contract wholly unevaluated.
+	// `orcRole`/`roleFromLabels` now reject those names upstream; this keeps the property
+	// true here on its own, because the fallback is what makes a claim always judged.
+	const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
 	if (contract === undefined) return undefined;
 
 	const evidence = await collectEvidence(bead);
@@ -261,9 +268,13 @@ export async function gateExitContract(
 		}
 	}
 
+	// Lower-cased exactly like `status` above. Every `deny_states` entry is a lowercase
+	// state name, and case is not contractual for either carrier of the state -- but only
+	// `status` was folded, so a `state:CLOSED` label walked past the same denial that
+	// `status: "CLOSED"` was caught by.
 	const stateLabels = (bead.labels ?? [])
 		.filter(label => label.startsWith("state:"))
-		.map(label => label.slice("state:".length));
+		.map(label => label.slice("state:".length).toLowerCase());
 	for (const denied of contract.authority?.deny_states ?? []) {
 		if (status === denied || stateLabels.includes(denied)) {
 			failures.push({ check: "state-authority", detail: `status=${denied} set by a role forbidden to set it` });
@@ -271,7 +282,9 @@ export async function gateExitContract(
 	}
 
 	for (const denied of contract.authority?.deny_metadata ?? []) {
-		if (ORCHESTRATOR_ANCHORS[denied]) continue;
+		// `=== true`, same reason: an anchor list is a boolean table, and a `deny_metadata`
+		// key naming a prototype member would silently skip the denial it declares.
+		if (ORCHESTRATOR_ANCHORS[denied] === true) continue;
 		if (metadataString(bead, denied) !== undefined) {
 			failures.push({
 				check: "metadata-authority",

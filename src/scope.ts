@@ -12,42 +12,121 @@
  * negative puts two agents on one file."
  */
 
+/** One step of a compiled glob. Every step but `star` consumes exactly one character. */
+type CharStep = { kind: "any" } | { kind: "literal"; char: string } | { kind: "class"; member: RegExp };
+type Step = CharStep | { kind: "star" };
+
 /**
- * Python `fnmatch` semantics, which is what the original compared with.
+ * Compile a glob to steps, or `null` when a bracket group will not compile.
  *
- * `*` maps to `.*` and therefore crosses `/`, unlike a shell glob or `Bun.Glob`. That
- * difference is load-bearing: the original matches one glob string against another as
- * text, so `src/api/*` subsuming `src/api/*.py` depends on `*` spanning separators.
+ * A run of `*` collapses to one step, which is free: two adjacent "any characters" are
+ * one, so a glob padded with stars costs no more than a glob with a single one.
  */
-function fnmatch(text: string, pattern: string): boolean {
-	let source = "";
+function compile(pattern: string): Step[] | null {
+	const steps: Step[] = [];
 	for (let index = 0; index < pattern.length; index++) {
 		const char = pattern[index] as string;
 		if (char === "*") {
-			source += ".*";
-		} else if (char === "?") {
-			source += ".";
-		} else if (char === "[") {
-			const close = pattern.indexOf("]", index + 1);
-			if (close === -1) {
-				source += "\\[";
-			} else {
-				let group = pattern.slice(index + 1, close);
-				index = close;
-				if (group.startsWith("!")) group = `^${group.slice(1)}`;
-				source += `[${group}]`;
-			}
-		} else {
-			source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+			if (steps[steps.length - 1]?.kind !== "star") steps.push({ kind: "star" });
+			continue;
+		}
+		if (char === "?") {
+			steps.push({ kind: "any" });
+			continue;
+		}
+		if (char !== "[") {
+			steps.push({ kind: "literal", char });
+			continue;
+		}
+		const close = pattern.indexOf("]", index + 1);
+		// An unclosed bracket is a literal one.
+		if (close === -1) {
+			steps.push({ kind: "literal", char });
+			continue;
+		}
+		const group = pattern.slice(index + 1, close);
+		index = close;
+		const body = group.startsWith("!") ? `^${group.slice(1)}` : group;
+		try {
+			// One regexp per group, so the bracket dialect -- ranges, negation, whatever
+			// else -- stays exactly the one V8 implements rather than a hand-rolled guess.
+			steps.push({ kind: "class", member: new RegExp(`^[${body}]$`, "s") });
+		} catch {
+			return null;
 		}
 	}
-	try {
-		return new RegExp(`^${source}$`, "s").test(text);
-	} catch {
-		// An untranslatable pattern cannot be settled, and this module's bias is to
-		// treat what it cannot settle as a conflict.
-		return true;
+	return steps;
+}
+
+/**
+ * Greedy match with a single backtrack point.
+ *
+ * `star` is the only step of variable width, so remembering just the last one is
+ * complete, and `resume` only ever advances: the cost is bounded by text length times
+ * step count instead of growing exponentially in the number of stars.
+ */
+function matchSteps(text: string, steps: readonly Step[]): boolean {
+	let at = 0;
+	let step = 0;
+	let lastStar = -1;
+	let resume = 0;
+	while (at < text.length) {
+		const current = steps[step];
+		if (current?.kind === "star") {
+			lastStar = step;
+			step += 1;
+			resume = at;
+			continue;
+		}
+		const char = text[at] as string;
+		const hit =
+			current !== undefined &&
+			(current.kind === "any" || (current.kind === "literal" ? current.char === char : current.member.test(char)));
+		if (hit) {
+			step += 1;
+			at += 1;
+			continue;
+		}
+		if (lastStar === -1) return false;
+		// Let the last star swallow one more character and retry from just after it.
+		step = lastStar + 1;
+		resume += 1;
+		at = resume;
 	}
+	while (steps[step]?.kind === "star") step += 1;
+	return step === steps.length;
+}
+
+/** Longer than any real path, and far longer than any real scope glob. */
+const MAX_GLOB_LENGTH = 1024;
+
+/**
+ * Python `fnmatch` semantics, which is what the original compared with.
+ *
+ * `*` means "any characters" and therefore crosses `/`, unlike a shell glob or
+ * `Bun.Glob`. That difference is load-bearing: the original matches one glob string
+ * against another as text, so `src/api/*` subsuming `src/api/*.py` depends on `*`
+ * spanning separators.
+ *
+ * Matched step by step rather than by translating the glob into a regexp. That
+ * translation turned every `*` into `.*`, and a pattern carrying a dozen of them
+ * backtracked exponentially: the claim gate calls this on `metadata.scope`, which any
+ * agent can write, and the 38-character `src*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b` against
+ * a literal sibling scope took 7 seconds at sixteen stars and doubled per star. A gate
+ * that does not return blocks the bash call it was inspecting, so that is an outage.
+ *
+ * Exported so the parity suite can judge the rewrite against the retired translation
+ * directly; `scopesOverlap` is the only caller in the plugin.
+ */
+export function fnmatch(text: string, pattern: string): boolean {
+	// Neither operand is a path at this length, and comparing them would cost their
+	// product in character tests. Unsettleable, and this module's bias is to call what it
+	// cannot settle a conflict.
+	if (text.length > MAX_GLOB_LENGTH || pattern.length > MAX_GLOB_LENGTH) return true;
+	const steps = compile(pattern);
+	// An untranslatable bracket group cannot be settled either. Same bias.
+	if (steps === null) return true;
+	return matchSteps(text, steps);
 }
 
 /**

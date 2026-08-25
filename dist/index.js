@@ -228,7 +228,7 @@ function orcRole(ctx) {
   const match = ROLE_MARKER.exec(ctx.getSystemPrompt().join(`
 `));
   const declared = match?.[1];
-  return declared !== undefined && ORC_ROLES[declared] ? declared : undefined;
+  return declared !== undefined && ORC_ROLES[declared] === true ? declared : undefined;
 }
 function isBeadWriteFree(pi, ctx) {
   return sessionRole(pi) === "worker" && orcRole(ctx) === undefined;
@@ -238,41 +238,84 @@ function roleFromLabels(labels) {
     if (!label.startsWith("agent:"))
       continue;
     const candidate = label.slice("agent:".length);
-    if (ORC_ROLES[candidate])
+    if (ORC_ROLES[candidate] === true)
       return candidate;
   }
   return;
 }
 
 // src/scope.ts
-function fnmatch(text, pattern) {
-  let source = "";
+function compile(pattern) {
+  const steps = [];
   for (let index = 0;index < pattern.length; index++) {
     const char = pattern[index];
     if (char === "*") {
-      source += ".*";
-    } else if (char === "?") {
-      source += ".";
-    } else if (char === "[") {
-      const close = pattern.indexOf("]", index + 1);
-      if (close === -1) {
-        source += "\\[";
-      } else {
-        let group = pattern.slice(index + 1, close);
-        index = close;
-        if (group.startsWith("!"))
-          group = `^${group.slice(1)}`;
-        source += `[${group}]`;
-      }
-    } else {
-      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      if (steps[steps.length - 1]?.kind !== "star")
+        steps.push({ kind: "star" });
+      continue;
+    }
+    if (char === "?") {
+      steps.push({ kind: "any" });
+      continue;
+    }
+    if (char !== "[") {
+      steps.push({ kind: "literal", char });
+      continue;
+    }
+    const close = pattern.indexOf("]", index + 1);
+    if (close === -1) {
+      steps.push({ kind: "literal", char });
+      continue;
+    }
+    const group = pattern.slice(index + 1, close);
+    index = close;
+    const body = group.startsWith("!") ? `^${group.slice(1)}` : group;
+    try {
+      steps.push({ kind: "class", member: new RegExp(`^[${body}]$`, "s") });
+    } catch {
+      return null;
     }
   }
-  try {
-    return new RegExp(`^${source}$`, "s").test(text);
-  } catch {
-    return true;
+  return steps;
+}
+function matchSteps(text, steps) {
+  let at = 0;
+  let step = 0;
+  let lastStar = -1;
+  let resume = 0;
+  while (at < text.length) {
+    const current = steps[step];
+    if (current?.kind === "star") {
+      lastStar = step;
+      step += 1;
+      resume = at;
+      continue;
+    }
+    const char = text[at];
+    const hit = current !== undefined && (current.kind === "any" || (current.kind === "literal" ? current.char === char : current.member.test(char)));
+    if (hit) {
+      step += 1;
+      at += 1;
+      continue;
+    }
+    if (lastStar === -1)
+      return false;
+    step = lastStar + 1;
+    resume += 1;
+    at = resume;
   }
+  while (steps[step]?.kind === "star")
+    step += 1;
+  return step === steps.length;
+}
+var MAX_GLOB_LENGTH = 1024;
+function fnmatch(text, pattern) {
+  if (text.length > MAX_GLOB_LENGTH || pattern.length > MAX_GLOB_LENGTH)
+    return true;
+  const steps = compile(pattern);
+  if (steps === null)
+    return true;
+  return matchSteps(text, steps);
 }
 function deepWildcard(glob) {
   const cut = glob.lastIndexOf("/");
@@ -438,7 +481,7 @@ function skipTransparentPrefix(segment, from) {
       index += 1;
       continue;
     }
-    const prefix = TRANSPARENT_PREFIXES[token];
+    const prefix = Object.hasOwn(TRANSPARENT_PREFIXES, token) ? TRANSPARENT_PREFIXES[token] : undefined;
     if (prefix === undefined)
       break;
     index += 1;
@@ -522,7 +565,7 @@ function parseBdInvocation(segment) {
       skip = false;
       continue;
     }
-    if (VALUE_FLAGS[token]) {
+    if (VALUE_FLAGS[token] === true) {
       skip = true;
       continue;
     }
@@ -547,6 +590,17 @@ function bdInvocations(command) {
   }
   return found;
 }
+var SEPARATE_OPERAND_FLAGS = {
+  "-C": true,
+  "-c": true,
+  "--git-dir": true,
+  "--work-tree": true,
+  "--namespace": true,
+  "--exec-path": true,
+  "--config-env": true,
+  "-R": true,
+  "--repo": true
+};
 function invokesCommand(command, argv) {
   if (argv.length === 0)
     return false;
@@ -576,9 +630,16 @@ function invokesCommand(command, argv) {
     let matched = 1;
     while (cursor < segment.length && matched < argv.length) {
       const token = segment[cursor];
-      if (token === argv[matched])
+      if (token === argv[matched]) {
         matched += 1;
+        cursor += 1;
+        continue;
+      }
+      if (!token.startsWith("-"))
+        break;
       cursor += 1;
+      if (SEPARATE_OPERAND_FLAGS[token] === true)
+        cursor += 1;
     }
     if (matched === argv.length)
       return true;
@@ -1052,7 +1113,7 @@ async function gateExitContract(ctx, input) {
   if (bead === null)
     return;
   const role = orcRole(ctx) ?? roleFromLabels(bead.labels) ?? "generic";
-  const contract = CONTRACTS[role] ?? CONTRACTS.generic;
+  const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
   if (contract === undefined)
     return;
   const evidence = await collectEvidence(bead);
@@ -1071,14 +1132,14 @@ async function gateExitContract(ctx, input) {
       failures.push({ check: check.check, detail: `unsatisfied: ${check.require}` });
     }
   }
-  const stateLabels = (bead.labels ?? []).filter((label) => label.startsWith("state:")).map((label) => label.slice("state:".length));
+  const stateLabels = (bead.labels ?? []).filter((label) => label.startsWith("state:")).map((label) => label.slice("state:".length).toLowerCase());
   for (const denied of contract.authority?.deny_states ?? []) {
     if (status === denied || stateLabels.includes(denied)) {
       failures.push({ check: "state-authority", detail: `status=${denied} set by a role forbidden to set it` });
     }
   }
   for (const denied of contract.authority?.deny_metadata ?? []) {
-    if (ORCHESTRATOR_ANCHORS[denied])
+    if (ORCHESTRATOR_ANCHORS[denied] === true)
       continue;
     if (metadataString(bead, denied) !== undefined) {
       failures.push({
@@ -1144,13 +1205,87 @@ async function realpathOrUndefined(target) {
     return;
   }
 }
+function within(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path2.sep}`);
+}
 function isolationBase() {
   const configured = process.env.OMP_WORKTREE_DIR;
   if (configured !== undefined && configured.length > 0)
     return configured;
   return path2.join(process.env.HOME ?? "", ".omp", "wt");
 }
-async function gateWorktreeScope(ctx) {
+var MAX_HOPS = 32;
+var URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+async function resolveTarget(cwd, declared) {
+  if (declared.includes("\x00") || URI_TARGET.test(declared))
+    return;
+  const absolute = path2.isAbsolute(declared);
+  const { root } = path2.parse(declared);
+  let resolved = absolute ? root : cwd;
+  const pending = (absolute ? declared.slice(root.length) : declared).split(path2.sep).reverse();
+  let hops = 0;
+  while (pending.length > 0) {
+    const segment = pending.pop();
+    if (segment.length === 0 || segment === ".")
+      continue;
+    if (segment === "..") {
+      resolved = path2.dirname(resolved);
+      continue;
+    }
+    const candidate = path2.join(resolved, segment);
+    let link;
+    try {
+      link = await fs.readlink(candidate);
+    } catch {}
+    if (link === undefined) {
+      resolved = candidate;
+      continue;
+    }
+    if (++hops > MAX_HOPS)
+      return;
+    const linkRoot = path2.parse(link).root;
+    if (linkRoot.length > 0)
+      resolved = linkRoot;
+    pending.push(...link.slice(linkRoot.length).split(path2.sep).reverse());
+  }
+  return resolved;
+}
+var SECTION_HEADER = /^\[(.+)#[0-9A-Fa-f]{4}\]\s*$/;
+var MOVE_OP = /^MV\s+(?:"([^"]*)"|'([^']*)'|(\S.*?))\s*$/;
+function hashlineTargets(raw) {
+  if (typeof raw !== "string")
+    return [];
+  const targets = [];
+  for (const line of raw.split(`
+`)) {
+    const section = SECTION_HEADER.exec(line);
+    if (section?.[1] !== undefined) {
+      targets.push(section[1]);
+      continue;
+    }
+    const move = MOVE_OP.exec(line);
+    const destination = move?.[1] ?? move?.[2] ?? move?.[3];
+    if (destination !== undefined && destination.length > 0)
+      targets.push(destination);
+  }
+  return targets;
+}
+function declaredTargets(toolName, input) {
+  if (toolName === "write") {
+    const target = input.path;
+    return typeof target === "string" && target.length > 0 ? [target] : [];
+  }
+  if (toolName === "edit")
+    return hashlineTargets(input.input);
+  return [];
+}
+function names(relative, glob) {
+  const trimmed = glob.replace(/^\.?\/+/, "").replace(/\/+$/, "");
+  if (trimmed.length === 0)
+    return true;
+  return fnmatch(relative, trimmed) || fnmatch(relative, `${trimmed}/*`);
+}
+async function gateWorktreeScope(ctx, toolName, input) {
   const claim = observedClaim();
   if (!claim || claim.beadIds.length === 0)
     return;
@@ -1158,22 +1293,56 @@ async function gateWorktreeScope(ctx) {
   if (cwd === undefined)
     return;
   const base = await realpathOrUndefined(isolationBase());
-  if (base !== undefined && (cwd === base || cwd.startsWith(`${base}${path2.sep}`)))
+  if (base !== undefined && within(cwd, base))
     return;
+  const targets = [];
+  for (const declared of declaredTargets(toolName, input)) {
+    const resolved = await resolveTarget(cwd, declared);
+    if (resolved !== undefined)
+      targets.push({ declared, resolved });
+  }
+  const scoped = [];
   for (const beadId of claim.beadIds) {
     const bead = await bdShow(beadId);
-    const declared = metadataString(bead, "worktree");
-    if (declared === undefined)
+    const declaredTree = metadataString(bead, "worktree");
+    if (declaredTree === undefined)
       continue;
-    const expected = await realpathOrUndefined(declared);
-    if (expected === undefined)
+    const worktree = await realpathOrUndefined(declaredTree);
+    if (worktree === undefined)
       continue;
-    if (cwd !== expected && !cwd.startsWith(`${expected}${path2.sep}`)) {
+    if (!within(cwd, worktree)) {
       return {
         block: true,
         reason: `this session's cwd does not match metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
       };
     }
+    for (const target of targets) {
+      if (within(target.resolved, worktree))
+        continue;
+      return {
+        block: true,
+        reason: `'${target.declared}' resolves to '${target.resolved}', outside metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
+      };
+    }
+    const globs = scopeOf(bead?.metadata);
+    if (globs.length > 0)
+      scoped.push({ beadId, worktree, globs });
+  }
+  if (scoped.length === 0)
+    return;
+  for (const target of targets) {
+    const named = scoped.some(({ worktree, globs }) => {
+      const relative = path2.relative(worktree, target.resolved).split(path2.sep).join("/");
+      if (relative.length === 0)
+        return true;
+      return globs.some((glob) => names(relative, glob));
+    });
+    if (named)
+      continue;
+    return {
+      block: true,
+      reason: `'${target.declared}' is named by no claimed bead's metadata.scope \u2014 ${scoped.map(({ beadId, globs }) => `${beadId} (${globs.join(", ")})`).join(", ")}`
+    };
   }
   return;
 }
@@ -1241,7 +1410,7 @@ function lines(stdout) {
 }
 async function reapChild(child, options) {
   const outcome = { child: child.id, reaped: [] };
-  if (!TERMINAL[child.status])
+  if (TERMINAL[child.status] !== true)
     return outcome;
   resetReadBudget();
   const candidates = await candidateBeads(child);
@@ -1328,7 +1497,8 @@ var CONTRACTS2 = {
   generic: generic_default
 };
 async function contractFailures(bead) {
-  const contract = CONTRACTS2[roleFromLabels(bead.labels) ?? "generic"] ?? generic_default;
+  const role = roleFromLabels(bead.labels) ?? "generic";
+  const contract = Object.hasOwn(CONTRACTS2, role) ? CONTRACTS2[role] ?? generic_default : generic_default;
   const evidence = await collectEvidence2(bead);
   const status = (bead.status ?? "").toLowerCase();
   if (contract.escape?.state === status) {
@@ -1534,7 +1704,10 @@ var ADAPTERS = {
     slug: "coderabbitai",
     count: (body) => {
       const digits = /actionable comments posted:\s*(?<n>\d+)/i.exec(body ?? "")?.groups?.n;
-      return digits === undefined ? null : Number.parseInt(digits, 10);
+      if (digits === undefined)
+        return null;
+      const parsed = Number.parseInt(digits, 10);
+      return Number.isSafeInteger(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
     },
     note: 'CodeRabbit summary line "Actionable comments posted: N"',
     declined: indicatesDecline
@@ -1542,7 +1715,7 @@ var ADAPTERS = {
 };
 var GENERIC_NOTE = "no adapter: review state only";
 function adapterFor(slug) {
-  const exact = ADAPTERS[slug];
+  const exact = Object.hasOwn(ADAPTERS, slug) ? ADAPTERS[slug] : undefined;
   if (exact)
     return exact;
   for (const known of Object.keys(ADAPTERS)) {
@@ -1621,7 +1794,7 @@ function checkState(check) {
   if (status !== "")
     return status;
   const state = str(check.state).toLowerCase();
-  return STATUS_API_TERMINAL[state] ? "completed" : state;
+  return STATUS_API_TERMINAL[state] === true ? "completed" : state;
 }
 function waitMinutes(body) {
   const match = WAIT_FIGURE.exec(body ?? "");
@@ -1734,6 +1907,8 @@ function classifyBotReviews(payload, opts) {
     files: []
   };
   const unknown = (detail) => verdictOf(findings, "unknown", EXIT_UNKNOWN, detail);
+  if ((head ?? "").trim() === "")
+    return unknown("no head SHA to classify a round against");
   if (!isObject(payload))
     return unknown("payload must be a JSON object");
   const checks = arrayField(payload.checks);
@@ -3353,7 +3528,7 @@ var MUTATING_SUBCOMMANDS = {
 };
 function bdMutation(command) {
   for (const invocation of bdInvocations(command)) {
-    if (MUTATING_SUBCOMMANDS[invocation.subcommand])
+    if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true)
       return invocation.subcommand;
   }
   return;
@@ -3362,9 +3537,12 @@ var configuredAuditDir;
 function auditDir(cwd) {
   return configuredAuditDir ?? path5.join(cwd, ".orchestration", "audit");
 }
+var MAX_AUDIT_STEM = 200;
 function auditFileName(child) {
   const safe = child.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
-  return safe.length === 0 ? undefined : `${safe}.bdlog`;
+  if (safe.length === 0)
+    return;
+  return `${safe.slice(0, MAX_AUDIT_STEM)}.bdlog`;
 }
 async function appendAudit(dir, entry) {
   const name = auditFileName(entry.child);
@@ -3698,7 +3876,7 @@ function ompOrchestrate(pi) {
   registerSupervision(pi);
   registerWatchers(pi);
   pi.on("tool_call", async (event, ctx) => {
-    if (!GATED_TOOLS[event.toolName])
+    if (GATED_TOOLS[event.toolName] !== true)
       return;
     try {
       resetReadBudget();
@@ -3713,8 +3891,8 @@ function ompOrchestrate(pi) {
         if (eligibility)
           return eligibility;
       }
-      if (GATED_WRITE_TOOLS[event.toolName]) {
-        const scope = await gateWorktreeScope(ctx);
+      if (GATED_WRITE_TOOLS[event.toolName] === true) {
+        const scope = await gateWorktreeScope(ctx, event.toolName, input);
         if (scope)
           return scope;
       }

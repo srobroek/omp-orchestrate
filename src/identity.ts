@@ -32,17 +32,6 @@ const ORC_ROLES: Record<string, true> = {
 };
 
 /**
- * Roles that may not write to the working tree, so their agent definitions omit
- * `edit` and `write`. Listed here only for tests and documentation; the tool list
- * in the agent frontmatter is what actually enforces it.
- */
-export const TREE_READ_ONLY_ROLES: Record<string, true> = {
-	reviewer: true,
-	researcher: true,
-	shepherd: true,
-};
-
-/**
  * Declared by each `orc-*` agent body as a line of its own, e.g. `ORC-ROLE: implementer`.
  *
  * A marker in the body rather than a lookup of the agent's name: the body is the
@@ -76,7 +65,19 @@ export function sessionRole(pi: ExtensionAPI): SessionRole {
 export function orcRole(ctx: ExtensionContext): OrcRole | undefined {
 	const match = ROLE_MARKER.exec(ctx.getSystemPrompt().join("\n"));
 	const declared = match?.[1];
-	return declared !== undefined && ORC_ROLES[declared] ? (declared as OrcRole) : undefined;
+	// `=== true`, not truthiness: the marker text is untrusted, and `ORC_ROLES` is an
+	// object literal, so `ORC-ROLE: constructor` would otherwise resolve through
+	// `Object.prototype` and declare a role this plugin does not define. That flips two
+	// gates the permissive way at once -- `isBeadWriteFree` stops sandboxing the session,
+	// and `CONTRACTS[role]` in the exit gate resolves to a prototype member whose
+	// `completion` list is undefined, so every exit check is skipped.
+	//
+	// Only PART of the prototype is reachable from THIS carrier: `ROLE_MARKER` captures
+	// `[a-z][a-z-]*`, so `constructor` parses as a marker while `toString`, `valueOf` and
+	// `__proto__` never do. The own-property test is still the right shape rather than an
+	// over-fix -- that narrowing is a property of the regex, not of this check, and the
+	// label carrier below has no equivalent filter.
+	return declared !== undefined && ORC_ROLES[declared] === true ? (declared as OrcRole) : undefined;
 }
 
 /**
@@ -107,7 +108,11 @@ export function roleFromLabels(labels: readonly string[] | undefined): OrcRole |
 	for (const label of labels ?? []) {
 		if (!label.startsWith("agent:")) continue;
 		const candidate = label.slice("agent:".length);
-		if (ORC_ROLES[candidate]) return candidate as OrcRole;
+		// A bead label is agent-written text -- `bd label add <bead> agent:<name>` -- and
+		// nothing constrains its spelling the way `ROLE_MARKER` constrains a prompt marker.
+		// This is therefore the reachable half of the hazard `orcRole` describes, and for
+		// the whole inherited surface rather than the lowercase names alone.
+		if (ORC_ROLES[candidate] === true) return candidate as OrcRole;
 	}
 	return undefined;
 }

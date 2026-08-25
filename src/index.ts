@@ -6,7 +6,7 @@
  * agents, the formulas — is data OMP discovers from the package tree.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
 import { dispatchContract } from "./contract";
@@ -51,7 +51,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	 * must degrade to fail-open rather than bricking every tool in the session.
 	 */
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
-		if (!GATED_TOOLS[event.toolName]) return undefined;
+		if (GATED_TOOLS[event.toolName] !== true) return undefined;
 
 		try {
 			resetReadBudget();
@@ -67,8 +67,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (eligibility) return eligibility;
 			}
 
-			if (GATED_WRITE_TOOLS[event.toolName]) {
-				const scope = await gateWorktreeScope(ctx);
+			if (GATED_WRITE_TOOLS[event.toolName] === true) {
+				// G2 needs the input: its containment check is on the path the tool
+				// names, not only on the cwd the session sits in.
+				const scope = await gateWorktreeScope(ctx, event.toolName, input);
 				if (scope) return scope;
 			}
 

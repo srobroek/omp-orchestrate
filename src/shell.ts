@@ -180,7 +180,10 @@ function skipTransparentPrefix(segment: readonly string[], from: number): number
 			index += 1;
 			continue;
 		}
-		const prefix = TRANSPARENT_PREFIXES[token];
+		// Own keys only. An arbitrary token indexing this literal otherwise reaches
+		// `Object.prototype`, so `valueOf bd ready --claim` would be seen through as if
+		// `valueOf` were a runner prefix.
+		const prefix = Object.hasOwn(TRANSPARENT_PREFIXES, token) ? TRANSPARENT_PREFIXES[token] : undefined;
 		if (prefix === undefined) break;
 		index += 1;
 		while (index < segment.length) {
@@ -311,7 +314,12 @@ export function parseBdInvocation(segment: string[]): BdInvocation | null {
 			skip = false;
 			continue;
 		}
-		if (VALUE_FLAGS[token]) {
+		// `=== true`, as GROUPING and WRAPPER_SHELLS already do: a bead id that collides
+		// with an `Object.prototype` key (`__proto__`, `toString`, `constructor`) would
+		// otherwise resolve truthy here, and the parser would swallow the *following*
+		// positional as its operand -- dropping the real bead id and leaving the claim
+		// gate nothing to check.
+		if (VALUE_FLAGS[token] === true) {
 			skip = true;
 			continue;
 		}
@@ -342,6 +350,27 @@ export function bdInvocations(command: string): BdInvocation[] {
 }
 
 /**
+ * Global flags whose operand may be written as a separate token, so that operand
+ * belongs to the program rather than being its subcommand.
+ *
+ * Needed because the subcommand is matched positionally: without this,
+ * `git -C /repo worktree add` would present `/repo` as git's subcommand and the
+ * denial would be missed. The inline spellings (`--git-dir=<path>`) carry no separate
+ * operand and are covered by the plain flag skip. `-R`/`--repo` are gh's.
+ */
+const SEPARATE_OPERAND_FLAGS: Record<string, true> = {
+	"-C": true,
+	"-c": true,
+	"--git-dir": true,
+	"--work-tree": true,
+	"--namespace": true,
+	"--exec-path": true,
+	"--config-env": true,
+	"-R": true,
+	"--repo": true,
+};
+
+/**
  * True when any segment matches `argv` as a leading token sequence, ignoring an
  * `env`/assignment prefix. Used by the worktree gate for `git worktree` and
  * `gh pr checkout`, which must never run directly.
@@ -366,14 +395,27 @@ export function invokesCommand(command: string, argv: readonly string[]): boolea
 		if (head === undefined || basename(head) !== argv[0]) continue;
 		if (argv.length === 1) return true;
 
-		// Remaining argv words must appear in order among the following
-		// positionals, so `git -C /x worktree add` still matches `git worktree`.
+		// Both git and gh spell a subcommand as the first positionals after their own
+		// global flags -- `git [-c x] <cmd>`, `gh [-R x] <group> <cmd>` -- so the
+		// remaining argv words must be *consecutive positionals*, not merely present in
+		// order. Scanning for them anywhere refused legitimate reads whose operand
+		// happened to be the word: `git log --grep worktree` and `git commit -m worktree`
+		// both matched `git worktree`. Stopping at the first positional that is not the
+		// expected word is git's own grammar, and it keeps `git -C /repo worktree add`
+		// matching because a global flag's operand is skipped with the flag.
 		let cursor = index + 1;
 		let matched = 1;
 		while (cursor < segment.length && matched < argv.length) {
 			const token = segment[cursor] as string;
-			if (token === argv[matched]) matched += 1;
+			if (token === argv[matched]) {
+				matched += 1;
+				cursor += 1;
+				continue;
+			}
+			// A positional that is not the expected word names a different subcommand.
+			if (!token.startsWith("-")) break;
 			cursor += 1;
+			if (SEPARATE_OPERAND_FLAGS[token] === true) cursor += 1;
 		}
 		if (matched === argv.length) return true;
 	}

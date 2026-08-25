@@ -262,7 +262,9 @@ const MUTATING_SUBCOMMANDS: Record<string, true> = {
  */
 export function bdMutation(command: string): string | undefined {
 	for (const invocation of bdInvocations(command)) {
-		if (MUTATING_SUBCOMMANDS[invocation.subcommand]) return invocation.subcommand;
+		// `=== true`: a subcommand named `constructor` or `toString` would otherwise
+		// resolve through `Object.prototype` and be recorded as a bead mutation.
+		if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true) return invocation.subcommand;
 	}
 	return undefined;
 }
@@ -292,13 +294,29 @@ export interface AuditEntry {
 }
 
 /**
+ * The longest stem a ledger name carries, leaving room for `.bdlog` inside the 255-byte
+ * `NAME_MAX` every filesystem here enforces. The sanitiser below leaves only ASCII, so a
+ * character is a byte and the margin needs no encoding arithmetic.
+ */
+const MAX_AUDIT_STEM = 200;
+
+/**
  * A child id as a ledger file name, or `undefined` when nothing usable survives.
  * Ids arrive off the bus, and a path separator or a leading `..` in one would
  * write outside the ledger directory.
+ *
+ * Over-long ids are truncated rather than passed through: `appendFile` raises
+ * ENAMETOOLONG past `NAME_MAX` and the W2 handler only logs that, so the line was lost
+ * outright — a hole in the one record that says which child mutated which bead. Two long
+ * ids sharing a file costs a reader nothing, because every row carries `child` verbatim:
+ * the name is an index, not the datum.
  */
 export function auditFileName(child: string): string | undefined {
 	const safe = child.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
-	return safe.length === 0 ? undefined : `${safe}.bdlog`;
+	if (safe.length === 0) return undefined;
+	// Trimmed from the tail, so neither containment rule can be reintroduced: the
+	// sanitiser has already removed every separator and every leading dot.
+	return `${safe.slice(0, MAX_AUDIT_STEM)}.bdlog`;
 }
 
 /**

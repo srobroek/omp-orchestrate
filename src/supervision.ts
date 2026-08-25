@@ -130,7 +130,7 @@ export interface ReapOptions {
  */
 export async function reapChild(child: ChildLifecycle, options: ReapOptions): Promise<ReapOutcome> {
 	const outcome: ReapOutcome = { child: child.id, reaped: [] };
-	if (!TERMINAL[child.status]) return outcome;
+	if (TERMINAL[child.status] !== true) return outcome;
 
 	// The reaper runs off a bus event, so nothing has reset the per-turn read budget
 	// for it. Left exhausted by the turn's gates, the contract re-check would read
@@ -334,10 +334,15 @@ const CONTRACTS: Record<string, RoleContract> = {
  * failed to *finish*, and correcting that is the shepherd's duty, not a reclamation.
  *
  * The role comes from the bead's routing label rather than a session, because the
- * session whose contract is in question no longer exists.
+ * session whose contract is in question no longer exists. That label is worker-writable,
+ * so the lookup tests own properties: a bare index resolves `agent:constructor` through
+ * `Object.prototype`, and the truthy Function it returns defeats the `?? generic`
+ * fallback, leaving `contract.completion` undefined and every check silently skipped.
+ * A dead child could therefore label its way out of being reclaimed.
  */
 async function contractFailures(bead: BdBead): Promise<string[]> {
-	const contract = CONTRACTS[roleFromLabels(bead.labels) ?? "generic"] ?? generic;
+	const role = roleFromLabels(bead.labels) ?? "generic";
+	const contract = Object.hasOwn(CONTRACTS, role) ? (CONTRACTS[role] ?? generic) : generic;
 	const evidence = await collectEvidence(bead);
 	const status = (bead.status ?? "").toLowerCase();
 

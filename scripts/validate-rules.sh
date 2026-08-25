@@ -41,6 +41,7 @@ check orc-bd-actor-prefix.md   miss tool bash 'BEADS_ACTOR=impl BD_ACTOR=impl bd
 check orc-bd-actor-prefix.md   miss tool bash 'bd show orc-1 --json'
 
 check orc-one-claim.md         fire tool bash 'bd update orc-1 orc-2 --claim'
+check orc-one-claim.md         fire tool bash "sh -c 'bd update orc-1 orc-2 --claim'"
 check orc-one-claim.md         miss tool bash 'bd update orc-1 --claim'
 
 check orc-comment-verbs.md     fire tool bash 'bd comment orc-1 "finished the thing"'
