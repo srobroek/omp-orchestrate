@@ -25,6 +25,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { resetReadBudget } from "./bd";
 import { ensurePatrolWisp } from "./supervision";
 
 /**
@@ -155,6 +156,13 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
 		throw new Error(`active-run marker is already bound to ${existing.run_id}`);
 	}
 	await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
+	// Binding is its own dispatch, so it owns its read budget. `bd.ts` caps reads per
+	// dispatch and only the `tool_call` handler resets the counter; a slash command
+	// arriving after twelve gated reads in the same turn would otherwise find the
+	// budget spent, and `bdList` returns without spawning when it is -- so the patrol
+	// existence check silently reports "none linked" and arming is skipped. Failing
+	// open there costs a reconciliation sweep, which is exactly what the patrol is.
+	resetReadBudget();
 	await ensurePatrolWisp(runId, cwd);
 }
 

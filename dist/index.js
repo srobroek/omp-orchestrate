@@ -1657,6 +1657,7 @@ async function bindRun(cwd, runId) {
     throw new Error(`active-run marker is already bound to ${existing.run_id}`);
   }
   await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
+  resetReadBudget();
   await ensurePatrolWisp(runId, cwd);
 }
 function registerRunCommands(pi) {

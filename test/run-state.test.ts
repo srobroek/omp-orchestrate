@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir, realpath, rm, writeFile, mkdir } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { bdList } from "../src/bd";
 import { activateRun, bindRun, isRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
 
 let cwd: string;
@@ -329,6 +330,25 @@ describe("bindRun arms the patrol wisp", () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-1");
 		expect((await assertProbed()).filter(call => call.args.startsWith("create "))).toEqual([]);
+	});
+
+	test("consults the dependents query even when the turn's read budget is spent", async () => {
+		// The real defect a CI runner exposed. `bd.ts` caps reads per dispatch and only
+		// the `tool_call` handler resets the counter, so `/orchestrate-bind` arriving
+		// after twelve gated reads in the same turn found the budget spent. `bdList`
+		// then returns WITHOUT spawning, so the existence check reports "none linked".
+		//
+		// The consequence is not a missing patrol -- `bdRun`'s create is not budgeted,
+		// so one is still armed -- it is a DUPLICATE one, because the check that would
+		// have found the live patrol never ran. Asserting the dependents query fires is
+		// therefore the assertion that matters; asserting a create would pass either way.
+		await writeStub('[{"id":"w-1","status":"open","wisp_type":"patrol"}]');
+		for (let spent = 0; spent < 15; spent += 1) await bdList(["show", "orc-1", "--json"]);
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-1");
+		const seen = await assertProbed();
+		// And with the query restored, the live patrol is still not duplicated.
+		expect(seen.filter(call => call.args.startsWith("create "))).toEqual([]);
 	});
 
 	test("a closed patrol is re-armed", async () => {
