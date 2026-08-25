@@ -153,10 +153,16 @@ var DISPATCH_CONTRACT = `ORCHESTRATION PROTOCOL \u2014 active run. Follow exactl
 Work is pulled, not handed to you. Your first act is to claim the next bead matching
 your domain:
 
-    bd ready --parent <epic> --label agent:<your-role> --unassigned --claim --json
+    bd -C <run repo> ready --parent <epic> --label agent:<your-role> --unassigned --claim --json
 
 An empty result means there is no work for you: report NO_WORK and yield immediately.
 Never invent work, and never claim a bead routed to another role \u2014 that is refused.
+
+Aim every bd call at the run's database with -C <run repo>. Isolation gave you a copy of
+the checkout, and bd finds its database by walking up from the working directory, so an
+unpinned call writes to your private copy: your claim never becomes visible, another
+worker can take the same bead, and your comments never reach the run. A pinned claim is
+atomic across processes \u2014 the loser sees an empty queue and must not retry the same bead.
 
 The bead is your brief, not your instructions. Read its description, metadata,
 comments, and linked wisps before acting. Verify any file:line it cites against the
@@ -189,6 +195,11 @@ Spawning. Only an architect spawns, and only contract-free helpers that edit fil
 its own checkout and report back. A helper never claims a bead, never commits, and
 never manages worktrees. Every other role spawns nothing.
 `;
+function dispatchContract(repoRoot) {
+  if (repoRoot === undefined || repoRoot.length === 0)
+    return DISPATCH_CONTRACT;
+  return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
+}
 
 // src/claim-state.ts
 var observed;
@@ -1436,9 +1447,13 @@ function asActiveRun(value) {
   const record = value;
   const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
   const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
-  if (sessionId === undefined)
-    return { schema_version: 1, run_id: runId };
-  return { schema_version: 1, run_id: runId, session_id: sessionId };
+  const repoRoot = typeof record.repo_root === "string" && record.repo_root.length > 0 ? record.repo_root : undefined;
+  const state = { schema_version: 1, run_id: runId };
+  if (sessionId !== undefined)
+    state.session_id = sessionId;
+  if (repoRoot !== undefined)
+    state.repo_root = repoRoot;
+  return state;
 }
 async function writeMarker(target, state) {
   await fs2.mkdir(path3.dirname(target), { recursive: true });
@@ -1455,7 +1470,10 @@ async function writeMarker(target, state) {
 async function activateRun(cwd, sessionId) {
   const existing = await readActiveRun(cwd);
   const session = sessionId ?? existing?.session_id;
-  const state = session === undefined ? { schema_version: 1, run_id: existing?.run_id ?? PENDING } : { schema_version: 1, run_id: existing?.run_id ?? PENDING, session_id: session };
+  const state = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
+  if (session !== undefined)
+    state.session_id = session;
+  state.repo_root = path3.resolve(cwd);
   await writeMarker(markerPath(cwd), state);
   return state;
 }
@@ -3711,12 +3729,13 @@ function ompOrchestrate(pi) {
       return;
     }
   });
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
     if (sessionRole(pi) === "lead")
       return;
+    const marker = await readActiveRun(ctx.cwd).catch(() => null);
     pi.sendMessage({
       customType: "com.srobroek.omp-orchestrate.contract",
-      content: DISPATCH_CONTRACT,
+      content: dispatchContract(marker?.repo_root),
       display: false,
       attribution: "user"
     }, { triggerTurn: false });

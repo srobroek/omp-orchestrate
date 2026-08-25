@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { activateRun, bindRun, isRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
 
@@ -45,9 +45,16 @@ describe("markerPath", () => {
 });
 
 describe("activateRun", () => {
-	test("a fresh repository activates as pending", async () => {
+	test("a fresh repository activates as pending, naming its own root", async () => {
 		const state = await activateRun(cwd, "session-a");
-		expect(state).toEqual({ schema_version: 1, run_id: "pending", session_id: "session-a" });
+		// `repo_root` is resolved, so a worker reading a copy of this marker still
+		// finds the original checkout rather than its clone.
+		expect(state).toEqual({
+			schema_version: 1,
+			run_id: "pending",
+			session_id: "session-a",
+			repo_root: resolve(cwd),
+		});
 		expect(await readActiveRun(cwd)).toEqual(state);
 	});
 
@@ -74,7 +81,11 @@ describe("activateRun", () => {
 	test("omits session_id entirely when never supplied", async () => {
 		const state = await activateRun(cwd);
 		expect("session_id" in state).toBe(false);
-		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({ schema_version: 1, run_id: "pending" });
+		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({
+			schema_version: 1,
+			run_id: "pending",
+			repo_root: resolve(cwd),
+		});
 	});
 
 	test("leaves no temporary file behind", async () => {
@@ -85,8 +96,9 @@ describe("activateRun", () => {
 
 	test("writes marker keys in sorted order", async () => {
 		await activateRun(cwd, "session-a");
+		const root = resolve(cwd);
 		expect(await readFile(markerPath(cwd), "utf8")).toBe(
-			'{"run_id":"pending","schema_version":1,"session_id":"session-a"}\n',
+			`{"repo_root":${JSON.stringify(root)},"run_id":"pending","schema_version":1,"session_id":"session-a"}\n`,
 		);
 	});
 });
