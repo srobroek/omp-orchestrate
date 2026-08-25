@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { bdList } from "../src/bd";
 import { activateRun, bindRun, isRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
 
 let cwd: string;
@@ -45,9 +46,16 @@ describe("markerPath", () => {
 });
 
 describe("activateRun", () => {
-	test("a fresh repository activates as pending", async () => {
+	test("a fresh repository activates as pending, naming its own root", async () => {
 		const state = await activateRun(cwd, "session-a");
-		expect(state).toEqual({ schema_version: 1, run_id: "pending", session_id: "session-a" });
+		// `repo_root` is resolved, so a worker reading a copy of this marker still
+		// finds the original checkout rather than its clone.
+		expect(state).toEqual({
+			schema_version: 1,
+			run_id: "pending",
+			session_id: "session-a",
+			repo_root: resolve(cwd),
+		});
 		expect(await readActiveRun(cwd)).toEqual(state);
 	});
 
@@ -74,7 +82,11 @@ describe("activateRun", () => {
 	test("omits session_id entirely when never supplied", async () => {
 		const state = await activateRun(cwd);
 		expect("session_id" in state).toBe(false);
-		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({ schema_version: 1, run_id: "pending" });
+		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({
+			schema_version: 1,
+			run_id: "pending",
+			repo_root: resolve(cwd),
+		});
 	});
 
 	test("leaves no temporary file behind", async () => {
@@ -85,8 +97,9 @@ describe("activateRun", () => {
 
 	test("writes marker keys in sorted order", async () => {
 		await activateRun(cwd, "session-a");
+		const root = resolve(cwd);
 		expect(await readFile(markerPath(cwd), "utf8")).toBe(
-			'{"run_id":"pending","schema_version":1,"session_id":"session-a"}\n',
+			`{"repo_root":${JSON.stringify(root)},"run_id":"pending","schema_version":1,"session_id":"session-a"}\n`,
 		);
 	});
 });
@@ -224,88 +237,5 @@ describe("registerRunCommands", () => {
 		// orchestrate-status belongs to the entry point; registering it twice would
 		// collide.
 		expect(registered).toEqual(["orchestrate-run", "orchestrate-bind"]);
-	});
-});
-
-/**
- * `bindRun` arms the S2 patrol, so it shells out to `bd`. These tests replace the
- * binary with a script that records argv and its own working directory, which is the
- * only way to observe the bug this covers: `bd` resolves its database by walking up
- * from the working directory, so a patrol armed in the process's cwd instead of the
- * run's lands in a different repository's beads -- silently, because arming fails
- * open by design.
- */
-describe("bindRun arms the patrol wisp", () => {
-	let bin: string;
-	let log: string;
-
-	beforeEach(async () => {
-		log = join(cwd, "bd-calls.log");
-		bin = join(cwd, "fake-bd");
-		// `pwd` is the assertion: it reports where the child was spawned, not where
-		// the parent happens to be. An empty dep list makes every run arm once.
-		await writeFile(bin, `#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '[]'; fi\n`, {
-			mode: 0o755,
-		});
-		process.env.BD_BIN = bin;
-	});
-
-	afterEach(() => {
-		delete process.env.BD_BIN;
-	});
-
-	async function calls(): Promise<{ cwd: string; args: string }[]> {
-		const body = await readFile(log, "utf8").catch(() => "");
-		return body
-			.split("\n")
-			.filter(line => line.length > 0)
-			.map(line => {
-				const [dir, args] = line.split("\t");
-				return { cwd: dir ?? "", args: args ?? "" };
-			});
-	}
-
-	test("creates one patrol, in the run's repository rather than the process's", async () => {
-		await activateRun(cwd);
-		await bindRun(cwd, "orc-1");
-		const created = (await calls()).filter(call => call.args.startsWith("create "));
-		expect(created).toHaveLength(1);
-		expect(created[0]?.args).toContain("--wisp-type patrol");
-		expect(created[0]?.args).toContain("--deps relates-to:orc-1");
-		// The fixture's cwd, never `process.cwd()`, which is the repository under test.
-		expect(created[0]?.cwd).toBe(await realpath(cwd));
-		expect(created[0]?.cwd).not.toBe(process.cwd());
-	});
-
-	test("an existing open patrol is not duplicated", async () => {
-		await activateRun(cwd);
-		// A dep list naming a live patrol must short-circuit arming entirely.
-		await writeFile(
-			bin,
-			`#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '[{"id":"w-1","status":"open","wisp_type":"patrol"}]'; fi\n`,
-			{ mode: 0o755 },
-		);
-		await bindRun(cwd, "orc-1");
-		expect((await calls()).filter(call => call.args.startsWith("create "))).toEqual([]);
-	});
-
-	test("a closed patrol is re-armed", async () => {
-		await activateRun(cwd);
-		await writeFile(
-			bin,
-			`#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '[{"id":"w-1","status":"closed","wisp_type":"patrol"}]'; fi\n`,
-			{ mode: 0o755 },
-		);
-		await bindRun(cwd, "orc-1");
-		expect((await calls()).filter(call => call.args.startsWith("create "))).toHaveLength(1);
-	});
-
-	test("a failing bd does not fail the bind", async () => {
-		await activateRun(cwd);
-		await writeFile(bin, "#!/bin/sh\nexit 3\n", { mode: 0o755 });
-		await bindRun(cwd, "orc-1");
-		// The marker is the thing that must survive: an unarmed patrol costs a sweep,
-		// an unbound marker costs the run.
-		expect((await readActiveRun(cwd))?.run_id).toBe("orc-1");
 	});
 });

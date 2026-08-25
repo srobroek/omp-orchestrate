@@ -262,7 +262,9 @@ const MUTATING_SUBCOMMANDS: Record<string, true> = {
  */
 export function bdMutation(command: string): string | undefined {
 	for (const invocation of bdInvocations(command)) {
-		if (MUTATING_SUBCOMMANDS[invocation.subcommand]) return invocation.subcommand;
+		// `=== true`: a subcommand named `constructor` or `toString` would otherwise
+		// resolve through `Object.prototype` and be recorded as a bead mutation.
+		if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true) return invocation.subcommand;
 	}
 	return undefined;
 }
@@ -292,13 +294,29 @@ export interface AuditEntry {
 }
 
 /**
+ * The longest stem a ledger name carries, leaving room for `.bdlog` inside the 255-byte
+ * `NAME_MAX` every filesystem here enforces. The sanitiser below leaves only ASCII, so a
+ * character is a byte and the margin needs no encoding arithmetic.
+ */
+const MAX_AUDIT_STEM = 200;
+
+/**
  * A child id as a ledger file name, or `undefined` when nothing usable survives.
  * Ids arrive off the bus, and a path separator or a leading `..` in one would
  * write outside the ledger directory.
+ *
+ * Over-long ids are truncated rather than passed through: `appendFile` raises
+ * ENAMETOOLONG past `NAME_MAX` and the W2 handler only logs that, so the line was lost
+ * outright — a hole in the one record that says which child mutated which bead. Two long
+ * ids sharing a file costs a reader nothing, because every row carries `child` verbatim:
+ * the name is an index, not the datum.
  */
 export function auditFileName(child: string): string | undefined {
 	const safe = child.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
-	return safe.length === 0 ? undefined : `${safe}.bdlog`;
+	if (safe.length === 0) return undefined;
+	// Trimmed from the tail, so neither containment rule can be reintroduced: the
+	// sanitiser has already removed every separator and every leading dot.
+	return `${safe.slice(0, MAX_AUDIT_STEM)}.bdlog`;
 }
 
 /**
@@ -696,18 +714,35 @@ let settingsChecked = false;
  * claims stop excluding each other, because two workers can hold the same bead in
  * two databases.
  *
- * Shared-server mode is what makes the database one thing; failing that, each agent
- * has to aim its own calls with `bd -C <run repo>`.
+ * Any server mode makes the database one thing, because the client then resolves a
+ * host and port rather than a path, which a filesystem copy cannot change. Both
+ * carriers are read, verified by running `bd init --shared-server` in a scratch
+ * repository and inspecting what it wrote: it persists `dolt.shared-server: true` in
+ * `config.yaml` AND `dolt_mode: "server"` in `metadata.json`. Reading only the
+ * config key would nag a project configured with plain `bd init --server`, which
+ * sets the metadata field alone and is equally immune to isolation.
+ *
+ * Failing all of those, each agent has to aim its own calls with `bd -C <run repo>`.
  */
 async function sharedBeadsDatabase(cwd: string): Promise<boolean> {
 	if (process.env.BEADS_DOLT_SHARED_SERVER === "1") return true;
+
+	// `bd` writes this as a flat dotted key (`dolt.shared-server: true`), while a
+	// hand-written file may nest it under `dolt:`. Matching the leaf covers both, and
+	// excluding `#` keeps the commented defaults `bd init` ships from reading as set.
+	const config = await fs.readFile(path.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
+	if (/^[^#\n]*\bshared-server:\s*true/m.test(config)) return true;
+
+	const metadata = await fs.readFile(path.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
 	try {
-		const config = await fs.readFile(path.join(cwd, ".beads", "config.yaml"), "utf8");
-		// A commented default (`# dolt:`) must not read as enabled.
-		return /^[^#\n]*\bshared-server:\s*true/m.test(config);
+		const parsed: unknown = JSON.parse(metadata);
+		if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
+			return parsed.dolt_mode === "server";
+		}
 	} catch {
-		return false;
+		// A malformed or absent metadata file proves nothing either way.
 	}
+	return false;
 }
 
 /**
@@ -744,11 +779,21 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 	// the opposite of this function's rule of warning only about what it can prove.
 	const mode = observed["task.isolation.mode"];
 	const isolating = typeof mode === "string" && mode !== "none";
-	if (isolating && !(await sharedBeadsDatabase(cwd))) {
+	// A repository with no beads database has no claims to split, so the precondition
+	// does not apply and saying so is noise. Observed in the field: this fired in a
+	// repository that had never run `bd init`, where the advice was unactionable.
+	const tracked = await fs
+		.stat(path.join(cwd, ".beads"))
+		.then(entry => entry.isDirectory())
+		.catch(() => false);
+	if (tracked && isolating && !(await sharedBeadsDatabase(cwd))) {
+		// Remedies in the order beads documents them. Setting the env var ALONE is not
+		// one: with `metadata.json` still pinning `dolt_mode: embedded`, bd reports
+		// "using the shared server for this run" and then fails with `database not
+		// found`, because the server serves a different data directory than the
+		// embedded engine wrote to. Verified by walking into exactly that state.
 		lines.push(
-			"beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Set BEADS_DOLT_SHARED_SERVER=1 (or `dolt.shared-server: true`), or require every agent to pass `bd -C " +
-				cwd +
-				"`",
+			`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`,
 		);
 	}
 

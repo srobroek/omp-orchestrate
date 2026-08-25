@@ -83,7 +83,16 @@ const ADAPTERS: Record<string, Adapter> = {
 		slug: "coderabbitai",
 		count: (body) => {
 			const digits = /actionable comments posted:\s*(?<n>\d+)/i.exec(body ?? "")?.groups?.n;
-			return digits === undefined ? null : Number.parseInt(digits, 10);
+			if (digits === undefined) return null;
+			const parsed = Number.parseInt(digits, 10);
+			// CLAMP, for the reason `reopenInstant` clamps: the figure is the bot's own prose,
+			// so it is data this tool does not control. `parseInt` on enough digits returns
+			// Infinity, which rendered as `actionable=Infinity` and JSON-serialised to `null`
+			// -- a field typed `number` reaching the caller as null. Returning `null` instead
+			// would be worse than either: it reads as "no verdict at head yet" and waits
+			// forever on a round that already answered. Any figure past a real round means
+			// the same thing operationally, and every value here is only ever tested `> 0`.
+			return Number.isSafeInteger(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
 		},
 		note: 'CodeRabbit summary line "Actionable comments posted: N"',
 		declined: indicatesDecline,
@@ -96,7 +105,12 @@ const ADAPTERS: Record<string, Adapter> = {
 const GENERIC_NOTE = "no adapter: review state only";
 
 function adapterFor(slug: string): Adapter {
-	const exact = ADAPTERS[slug];
+	// `Object.hasOwn`, not a plain index: the slug is caller data (`--bots`,
+	// `$PR_REVIEW_BOTS`), and a slug naming an `Object.prototype` member -- "constructor",
+	// "toString" -- resolved through the prototype chain to a truthy non-Adapter, whose
+	// missing `.declined`/`.count` threw a TypeError out of a function documented never to
+	// throw.
+	const exact = Object.hasOwn(ADAPTERS, slug) ? ADAPTERS[slug] : undefined;
 	if (exact) return exact;
 	for (const known of Object.keys(ADAPTERS)) {
 		// PARITY: a variant slug ("coderabbit") reuses the table entry unchanged, so the
@@ -208,7 +222,10 @@ function checkState(check: Record<string, unknown>): string {
 	const status = str(check.status).toLowerCase();
 	if (status !== "") return status;
 	const state = str(check.state).toLowerCase();
-	return STATUS_API_TERMINAL[state] ? "completed" : state;
+	// `=== true`, for the same prototype-chain reason as `adapterFor`: a check whose state
+	// is the literal "constructor" read as `completed`, grading a round the bot had not
+	// answered yet.
+	return STATUS_API_TERMINAL[state] === true ? "completed" : state;
 }
 
 /** Minutes until the bot says it will review again, from any wording. */
@@ -311,7 +328,10 @@ export interface BotReviewVerdict {
 }
 
 export interface ClassifyOptions {
-	/** The exact head SHA a round must match. */
+	/**
+	 * The exact head SHA a round must match. A blank one is refused as unread evidence:
+	 * it is the frame of reference every comparison below needs.
+	 */
 	head: string;
 	slugs: string[];
 	/** Injected so decline-window arithmetic stays deterministic in tests. */
@@ -409,6 +429,14 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
 		files: [],
 	};
 	const unknown = (detail: string): BotReviewVerdict => verdictOf(findings, "unknown", EXIT_UNKNOWN, detail);
+
+	// A blank head is unread evidence, not a PR with nothing on it.
+	// {@link fetchBotReviewEvidence} already refuses a head-less `gh pr view`, but the
+	// comparison lives HERE, and with head="" a review carrying no `commit_id` compared
+	// equal to it and returned `clean`, exit 0 -- an approval synthesised out of a round
+	// that named no commit at all. Every other verdict at a blank head is equally
+	// unfounded, so this refuses before reading the payload rather than per-branch.
+	if ((head ?? "").trim() === "") return unknown("no head SHA to classify a round against");
 
 	if (!isObject(payload)) return unknown("payload must be a JSON object");
 	const checks = arrayField(payload.checks);

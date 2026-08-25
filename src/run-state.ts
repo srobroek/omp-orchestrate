@@ -25,13 +25,24 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { resetReadBudget } from "./bd";
 import { ensurePatrolWisp } from "./supervision";
 
-/** The marker's on-disk shape. */
+/**
+ * The marker's on-disk shape.
+ *
+ * `repo_root` is the run repository's absolute path, and it is what makes the
+ * marker useful to an isolated worker. Isolation hands a child a filesystem copy of
+ * the checkout, so the child's own cwd is the clone and every relative path it
+ * resolves -- including the beads database `bd` discovers by walking up -- belongs
+ * to that copy. The copied marker still names the original, which is the only way a
+ * worker can aim its `bd` calls at the run's database rather than its private one.
+ */
 export interface ActiveRun {
 	schema_version: 1;
 	run_id: string;
 	session_id?: string;
+	repo_root?: string;
 }
 
 /** Run id written before the run epic exists. Bindable; never treated as bound. */
@@ -76,15 +87,23 @@ export async function readActiveRun(cwd: string): Promise<ActiveRun | null> {
 	return asActiveRun(parsed);
 }
 
-/** Normalise a parsed marker body, or `null` when it is not a marker at all. */
+/**
+ * Normalise a parsed marker body, or `null` when it is not a marker at all.
+ *
+ * Optional fields are omitted rather than set to `undefined`, so a marker rewritten
+ * from a parsed one stays byte-identical instead of gaining `null`s.
+ */
 function asActiveRun(value: unknown): ActiveRun | null {
 	if (typeof value === "string") return value.length > 0 ? { schema_version: 1, run_id: value } : null;
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
 	const record = value as Record<string, unknown>;
 	const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
 	const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
-	if (sessionId === undefined) return { schema_version: 1, run_id: runId };
-	return { schema_version: 1, run_id: runId, session_id: sessionId };
+	const repoRoot = typeof record.repo_root === "string" && record.repo_root.length > 0 ? record.repo_root : undefined;
+	const state: ActiveRun = { schema_version: 1, run_id: runId };
+	if (sessionId !== undefined) state.session_id = sessionId;
+	if (repoRoot !== undefined) state.repo_root = repoRoot;
+	return state;
 }
 
 /** Write the marker atomically, leaving no temporary behind on either path. */
@@ -110,10 +129,11 @@ async function writeMarker(target: string, state: ActiveRun): Promise<void> {
 export async function activateRun(cwd: string, sessionId?: string): Promise<ActiveRun> {
 	const existing = await readActiveRun(cwd);
 	const session = sessionId ?? existing?.session_id;
-	const state: ActiveRun =
-		session === undefined
-			? { schema_version: 1, run_id: existing?.run_id ?? PENDING }
-			: { schema_version: 1, run_id: existing?.run_id ?? PENDING, session_id: session };
+	const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
+	if (session !== undefined) state.session_id = session;
+	// Resolved here, where the path is the real checkout: a worker reads this out of
+	// its own copy of the marker and can no longer tell the two apart.
+	state.repo_root = path.resolve(cwd);
 	await writeMarker(markerPath(cwd), state);
 	return state;
 }
@@ -136,7 +156,19 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
 		throw new Error(`active-run marker is already bound to ${existing.run_id}`);
 	}
 	await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
-	await ensurePatrolWisp(runId, cwd);
+	// Binding is its own dispatch, so it owns its read budget. `bd.ts` caps reads per
+	// dispatch and only the `tool_call` handler resets the counter, so a slash command
+	// arriving after twelve gated reads in the same turn would find the budget spent.
+	// `bdList` returns without spawning when it is, so the patrol existence check
+	// reports "none linked" and a second patrol is armed beside the live one.
+	resetReadBudget();
+	// Arming must not fail the bind, which this function's contract already promises:
+	// the marker is written by now, so a caller told the bind failed may retry or
+	// abandon a run that is in fact bound. An unarmed patrol costs one reconciliation
+	// sweep; a caller misled about the marker costs the run. The internals already
+	// fail open on a missing or failing `bd`, so reaching this catch means something
+	// unexpected threw -- which is exactly when the marker matters most.
+	await ensurePatrolWisp(runId, cwd).catch(() => {});
 }
 
 /**
@@ -186,7 +218,9 @@ export function registerRunCommands(pi: ExtensionAPI): void {
 			try {
 				// `bindRun` arms the S2 patrol wisp; this handler only reports.
 				await bindRun(ctx.sessionManager.getCwd(), runId);
-				ctx.ui.notify(`orchestrate run bound to ${runId}; patrol armed`, "info");
+				// Not "patrol armed": arming fails open, so the bind succeeding does not
+				// prove a patrol exists. `/orchestrate-status` reports the run's wisps.
+				ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

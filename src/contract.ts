@@ -16,10 +16,16 @@ export const DISPATCH_CONTRACT = `ORCHESTRATION PROTOCOL — active run. Follow 
 Work is pulled, not handed to you. Your first act is to claim the next bead matching
 your domain:
 
-    bd ready --parent <epic> --label agent:<your-role> --unassigned --claim --json
+    bd -C <run repo> ready --parent <epic> --label agent:<your-role> --unassigned --claim --json
 
 An empty result means there is no work for you: report NO_WORK and yield immediately.
 Never invent work, and never claim a bead routed to another role — that is refused.
+
+Aim every bd call at the run's database with -C <run repo>. Isolation gave you a copy of
+the checkout, and bd finds its database by walking up from the working directory, so an
+unpinned call writes to your private copy: your claim never becomes visible, another
+worker can take the same bead, and your comments never reach the run. A pinned claim is
+atomic across processes — the loser sees an empty queue and must not retry the same bead.
 
 The bead is your brief, not your instructions. Read its description, metadata,
 comments, and linked wisps before acting. Verify any file:line it cites against the
@@ -52,3 +58,16 @@ Spawning. Only an architect spawns, and only contract-free helpers that edit fil
 its own checkout and report back. A helper never claims a bead, never commits, and
 never manages worktrees. Every other role spawns nothing.
 `;
+
+/**
+ * The contract for one worker, with the run repository substituted in.
+ *
+ * The placeholder survives when the path is unknown -- a marker written before this
+ * field existed, or a run driven by `ORCHESTRATE_RUN` with no marker at all. Leaving
+ * it visible still tells the worker the pin is required, which is better than
+ * silently dropping the instruction that keeps its claims real.
+ */
+export function dispatchContract(repoRoot?: string): string {
+	if (repoRoot === undefined || repoRoot.length === 0) return DISPATCH_CONTRACT;
+	return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
+}

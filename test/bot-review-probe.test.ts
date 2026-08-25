@@ -568,6 +568,30 @@ describe("wait arithmetic", () => {
 		expect(reopen?.toISOString()).toBe("2026-08-06T11:00:00.000Z");
 		expect(reopenInstant(POSTED, -5)?.toISOString()).toBe("2026-07-30T11:00:00.000Z");
 	});
+
+	test("an absurd actionable count stays a real integer, and still bounces", () => {
+		// Same class as the clamp above, on the other figure the bot writes in prose.
+		// `parseInt` on enough digits returns Infinity, which rendered as
+		// `actionable=Infinity` and JSON-serialised to `null` -- a `number`-typed field
+		// reaching the caller as null. The verdict must not soften either: reading an
+		// unrepresentable count as "no verdict yet" would wait forever on a round that
+		// already answered.
+		const data = payload({
+			checks: [{ name: "CodeRabbit", status: "COMPLETED" }],
+			reviews: [review({ body: `Actionable comments posted: ${"9".repeat(400)}` })],
+		});
+		const result = classify(data);
+
+		expect(result.verdict).toBe("actionable");
+		expect(result.code).toBe(EXIT_ACTIONABLE);
+		expect(Number.isSafeInteger(result.findings.actionable)).toBe(true);
+		expect(result.findings.actionable).toBeGreaterThan(0);
+		// What the tool actually hands back: the details payload round-trips as a number.
+		expect(JSON.parse(JSON.stringify({ actionable: result.findings.actionable }))).toEqual({
+			actionable: Number.MAX_SAFE_INTEGER,
+		});
+		expect(renderBotReview(result)).not.toContain("Infinity");
+	});
 });
 
 /** Answer `gh` from a transcript keyed by joined argv, and record every call. */

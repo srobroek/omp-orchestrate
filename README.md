@@ -46,7 +46,7 @@ handler degrades to fail-open instead of blocking every tool.
 
 ## Rules
 
-Seven TTSR rules in `rules/` catch protocol slips in tool arguments. They fire before a command
+Eight TTSR rules in `rules/` catch protocol slips in tool arguments. They fire before a command
 runs. Each one is advisory or tool-only, never a security boundary.
 
 The host's regex engine evaluates these conditions, so a pattern Python accepts proves nothing.

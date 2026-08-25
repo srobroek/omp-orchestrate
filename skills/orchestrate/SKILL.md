@@ -143,7 +143,7 @@ Required settings. The model silently degrades without every one of them:
 | `task.isolation.merge` | `branch` | commits are captured as a branch, not replayed |
 | `task.isolation.apply` | `false` | the runtime reports "captured on branch, not merged" and leaves the architect's tree untouched. Integration stays an explicit architect act |
 | `task.enableEffort` | `true` | defaults **false** platform-wide. Without it, the per-entry `effort` is silently ignored |
-| `BEADS_DOLT_SHARED_SERVER` | `1` | isolation gives each worker a copy of the checkout, and `bd` finds its database by walking up from the working directory. Without shared-server mode each worker writes a private database, so its claims, comments and statuses never reach the run, and two workers can hold one bead |
+| `bd -C <run repo>` | on every call | isolation gives each agent a copy of the checkout, and `bd` finds its database by walking up from the working directory. An unpinned call writes the private copy, so claims, comments and statuses never reach the run, and two agents can hold one bead |
 
 Depth is `lead(0) → architect(1) → worker(2)`, inside `task.maxRecursionDepth: 2`.
 `task.maxConcurrency` bounds wave width: a wave that finishes early is cheap to respawn,
@@ -151,9 +151,18 @@ one that is too big idles against the cap.
 
 The database rule outranks the other four. Isolation working correctly is what splits the
 database, so a run whose settings block is perfect still loses every claim. A bead created in
-a copied checkout is invisible in the original. Where shared-server mode is unavailable, every
-agent must aim its own calls at the run's checkout with `bd -C <run repo>`. The extension
-reports both preconditions once per session, in a `WARN settings` comment on the run epic.
+a copied checkout is invisible in the original, and this reaches architects as much as workers.
+
+The pin is the cheapest fix and needs nothing installed. Beads also documents a shared
+`dolt sql-server`: one server per machine, one database per project, started with `bd init
+--shared-server` on a NEW project. Converting an existing project is a migration, not a flag --
+server mode reads a different data directory, so it starts empty until `bd backup init <path>`,
+`bd backup sync`, and `bd backup restore --force <path>` carry the data across. Setting
+`BEADS_DOLT_SHARED_SERVER` alone leaves `metadata.json` pinning `embedded`, and bd then fails
+with `database not found`.
+
+The extension reports both preconditions once per session, in a `WARN settings` comment on the
+run epic.
 
 A wave launched into a degraded MCP server or LSP is diagnosable from the bead trail: the
 extension writes a `WARN preflight: <servers> degraded` comment on the epic and lets the

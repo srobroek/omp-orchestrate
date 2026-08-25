@@ -6,17 +6,17 @@
  * agents, the formulas — is data OMP discovers from the package tree.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
-import { DISPATCH_CONTRACT } from "./contract";
+import { dispatchContract } from "./contract";
 import { gateClaimEligibility } from "./gates/claim";
 import { gateExitContract } from "./gates/exit";
 import { gateBeadWriteFree } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { sessionRole } from "./identity";
-import { registerRunCommands } from "./run-state";
+import { readActiveRun, registerRunCommands } from "./run-state";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerConflictProbe } from "./tools/conflict-probe";
@@ -51,7 +51,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	 * must degrade to fail-open rather than bricking every tool in the session.
 	 */
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
-		if (!GATED_TOOLS[event.toolName]) return undefined;
+		if (GATED_TOOLS[event.toolName] !== true) return undefined;
 
 		try {
 			resetReadBudget();
@@ -67,8 +67,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (eligibility) return eligibility;
 			}
 
-			if (GATED_WRITE_TOOLS[event.toolName]) {
-				const scope = await gateWorktreeScope(ctx);
+			if (GATED_WRITE_TOOLS[event.toolName] === true) {
+				// G2 needs the input: its containment check is on the path the tool
+				// names, not only on the cwd the session sits in.
+				const scope = await gateWorktreeScope(ctx, event.toolName, input);
 				if (scope) return scope;
 			}
 
@@ -91,13 +93,19 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	 * `attribution: "user"` is required: any other value normalises to `"agent"`
 	 * (`session/messages.ts:654`), and the contract must read as authority rather
 	 * than as something the model said to itself.
+	 *
+	 * The repository comes from the marker rather than `ctx.cwd`, because in an
+	 * isolated worker those differ: the cwd is the clone, and the marker -- copied in
+	 * with the rest of the checkout -- still names the original. That path is what
+	 * makes the contract's `bd -C` pin resolvable.
 	 */
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		if (sessionRole(pi) === "lead") return;
+		const marker = await readActiveRun(ctx.cwd).catch(() => null);
 		pi.sendMessage(
 			{
 				customType: "com.srobroek.omp-orchestrate.contract",
-				content: DISPATCH_CONTRACT,
+				content: dispatchContract(marker?.repo_root),
 				display: false,
 				attribution: "user",
 			},

@@ -1,6 +1,6 @@
 ---
 description: "bd update --claim naming more than one bead id"
-condition: "(?:^|[\\s;|&])bd\\s+update\\b(?=[^\\n]*--claim)(?=[^\\n]*\\s[A-Za-z][A-Za-z0-9_-]*-\\d+\\s+[A-Za-z][A-Za-z0-9_-]*-\\d+)"
+condition: "(?:^|[\\s;|&('\"])bd\\s+update\\b(?=[^\\n]*--claim)(?=[^\\n]*\\s[A-Za-z][A-Za-z0-9_-]*-\\d+\\s+[A-Za-z][A-Za-z0-9_-]*-\\d+)"
 scope: "tool:bash, tool:eval"
 interruptMode: "tool-only"
 ---
