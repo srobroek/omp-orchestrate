@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 .DS_Store
 .beads/
+# Executable test stubs: the temp dir may be mounted noexec on CI.
+.stub-*/

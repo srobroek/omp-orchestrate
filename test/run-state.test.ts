@@ -250,13 +250,20 @@ describe("registerRunCommands", () => {
 describe("bindRun arms the patrol wisp", () => {
 	let bin: string;
 	let log: string;
+	let stubDir: string;
 	let probe = 0;
 
 	/**
 	 * Install a stub `bd` that records every invocation and answers `dep list` with
 	 * `depJson`. The ledger is unique per test: a shared path let one test read
-	 * another's calls, which is how a Linux runner saw six `create`s where this
-	 * machine saw none.
+	 * another's calls, which is how a Linux runner reported six `create`s.
+	 *
+	 * The stub lives under the repository rather than the temp directory it drives.
+	 * A runner whose temp filesystem is mounted `noexec` cannot execute a script
+	 * there, and `bdRun` swallows a spawn failure by design, so the whole fixture
+	 * went silently inert and every "no create" expectation passed vacuously. The
+	 * repository checkout is executable by construction, since the test runner itself
+	 * was loaded from it.
 	 */
 	async function writeStub(depJson: string): Promise<void> {
 		await writeFile(
@@ -268,16 +275,18 @@ describe("bindRun arms the patrol wisp", () => {
 
 	beforeEach(async () => {
 		probe += 1;
-		log = join(cwd, `bd-calls-${probe}.log`);
-		bin = join(cwd, `fake-bd-${probe}`);
+		stubDir = await mkdtemp(join(process.cwd(), ".stub-"));
+		log = join(stubDir, `bd-calls-${probe}.log`);
+		bin = join(stubDir, `fake-bd-${probe}`);
 		// `pwd` is the assertion: it reports where the child was spawned, not where
 		// the parent happens to be. An empty dep list makes every run arm once.
 		await writeStub("[]");
 		process.env.BD_BIN = bin;
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		delete process.env.BD_BIN;
+		await rm(stubDir, { recursive: true, force: true });
 	});
 
 	async function calls(): Promise<{ cwd: string; args: string }[]> {
