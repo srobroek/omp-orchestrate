@@ -37,14 +37,20 @@ role contract. Never paste the protocol into a prompt.
    `task.isolation.apply: false`, so their commits are captured on `omp/task/<id>`
    branches and no worker touches the architect's checkout. The architect integrates those
    branches when it chooses (rule: push, don't merge).
-5. **Only the architect spawns.** It may spawn the four other `orc-*` roles plus
-   contract-free helpers that edit files in its own checkout while it waits on them. A
-   helper never claims a bead, never commits, and never manages a worktree. Every other
-   role spawns nothing.
+5. **Only the architect spawns a role that claims beads.** It may spawn the four other
+   `orc-*` roles plus contract-free helpers that edit files in its own checkout while it
+   waits on them. A helper never claims a bead, never commits, and never manages a
+   worktree. A worker has one exception, live only once its agent declares
+   `spawns: librarian`: that agent returns a structured result to its caller, so an
+   external-library question needs no wisp, no bead and no consent -- the answer is the
+   spawn's return value. A worker may spawn an agent whose frontmatter declares an explicit
+   `tools:` list omitting `write`, `edit` and `task`, and nothing else. Everything further
+   goes through its architect.
 6. **Route content peer to peer.** A blocked worker writes an escalation wisp. A
-   researcher answers it with a durable `ADVICE` comment. A reviewer writes its FIX
-   material on the review wisp. You create shells, wake actors, and read state -- you never
-   relay questions, findings, or briefs.
+   researcher answers it with a durable `ADVICE` comment and pings the worker that asked,
+   never the architect that spawned it. A reviewer writes its FIX material on the review
+   wisp. You create shells, wake actors, and read state -- you never relay questions,
+   findings, or briefs. The four hops are in `references/roles.md`.
 7. **Never wait live on a gate or a peer.** A gate is not work: CI, release workflows, bot
    rounds, long reviewers. Park the bead with what is awaited and how to resume, take the
    next ready node, and exit when only external waits remain. A run that ends mid-stream
@@ -74,7 +80,8 @@ role contract. Never paste the protocol into a prompt.
    ```
    EPIC=$(bd create "orchestrate run-<id>" --type epic --silent \
      --metadata '{"run_id":"run-<id>","primary_branch":"main","base_sha":"<sha>",
-                  "artifacts":"<abs>/.orchestration/run-<id>/artifacts","origin":"<lead-actor>"}')
+                  "artifacts":"<abs>/.orchestration/run-<id>/artifacts",
+                  "origin_actor":"<lead-actor>"}')
    bd create "patrol run-<id>" --ephemeral --wisp-type patrol --deps relates-to:"$EPIC" --silent
    ```
 
@@ -113,8 +120,8 @@ that leaves one bead's scope is a decision bead: `references/decisions.md`.
 
 A poured SpecKit molecule already is a dependency-aware DAG. Detect it by `spec_id` plus
 `metadata.spec_dir` on the beads under the feature. The architect adopts the implement-step
-children as its decomposition: add the `orc-node` label and one `agent:<role>` routing
-label, stamp `scope` metadata, and reconcile each step against the code. Phase steps route
+children as its decomposition: add the `orc-node` label, stamp one `role=<role>` routing
+key, stamp `scope` metadata, and reconcile each step against the code. Phase steps route
 by their `skill_hints`. `speckit-verify` and `speckit-sync` keep their own agents, and human
 gates resolve with `bd gate resolve`.
 
@@ -143,23 +150,23 @@ Required settings. The model silently degrades without every one of them:
 | `task.isolation.merge` | `branch` | commits are captured as a branch, not replayed |
 | `task.isolation.apply` | `false` | the runtime reports "captured on branch, not merged" and leaves the architect's tree untouched. Integration stays an explicit architect act |
 | `task.enableEffort` | `true` | defaults **false** platform-wide. Without it, the per-entry `effort` is silently ignored |
-| `bd -C <run repo>` | on every call | isolation gives each agent a copy of the checkout, and `bd` finds its database by walking up from the working directory. An unpinned call writes the private copy, so claims, comments and statuses never reach the run, and two agents can hold one bead |
+| beads storage | per-project Dolt server | `dolt_mode: server` in `.beads/metadata.json`. Under a server, bd resolves the database by host and port from `.beads/dolt-server.port`, which travels with a copied checkout, so every isolated agent reaches the run's database. Embedded mode resolves by walking up from cwd, so isolation silently splits the database |
+| `task.maxRecursionDepth` | `3` | a worker's helper sits at depth 3, and at the default `2` the `lead → architect → worker` chain already fills the ladder. Necessary for the `librarian` shortcut, not sufficient: the worker agent must also declare `spawns: librarian` |
 
-Depth is `lead(0) → architect(1) → worker(2)`, inside `task.maxRecursionDepth: 2`.
-`task.maxConcurrency` bounds wave width: a wave that finishes early is cheap to respawn,
-one that is too big idles against the cap.
+Depth is `lead(0) → architect(1) → worker(2) → leaf(3)`, and it is only half the gate. An
+agent with no `spawns:` key spawns nothing at any depth, so raising the ceiling alone changes
+nothing. Neither condition ever lets a worker spawn a role that claims beads: that stays the
+architect's, by contract rather than by depth.
 
-The database rule outranks the other four. Isolation working correctly is what splits the
-database, so a run whose settings block is perfect still loses every claim. A bead created in
-a copied checkout is invisible in the original, and this reaches architects as much as workers.
+`task.maxConcurrency` bounds wave width: a wave that finishes early is cheap to respawn, one
+that is too big idles against the cap.
 
-The pin is the cheapest fix and needs nothing installed. Beads also documents a shared
-`dolt sql-server`: one server per machine, one database per project, started with `bd init
---shared-server` on a NEW project. Converting an existing project is a migration, not a flag --
-server mode reads a different data directory, so it starts empty until `bd backup init <path>`,
-`bd backup sync`, and `bd backup restore --force <path>` carry the data across. Setting
-`BEADS_DOLT_SHARED_SERVER` alone leaves `metadata.json` pinning `embedded`, and bd then fails
-with `database not found`.
+The storage rule outranks the other five. Under embedded mode a bead created in a copied
+checkout is invisible in the original -- claims, comments and statuses never reach the run,
+and two agents can hold one bead. Converting an existing embedded project is a migration,
+not a flag: server mode reads a different data directory, so it starts empty until
+`bd backup init <path>`, `bd backup sync`, and `bd backup restore --force <path>` carry the
+data across.
 
 The extension reports both preconditions once per session, in a `WARN settings` comment on the
 run epic.
@@ -170,18 +177,23 @@ spawn proceed. It never holds a wave.
 
 ## Pull loops
 
-Every role's first act is its own claim. `--claim` is atomic and first-wins, so a lost race
-returns empty and mutates nothing. `bd ready --claim` takes the first bead matching the
-filter. `bd update --claim` is idempotent for the same actor. An empty result means
-`NO_WORK`: report it and yield rather than widening the filter.
+Every role's first act is its own claim. `--claim` is atomic and first-wins, so one bead is
+never held twice. `bd ready --claim` takes the first bead matching the filter, and
+`bd update --claim` is idempotent for the same actor.
+
+Read the result before deciding. An empty result means `NO_WORK`: report it and yield
+rather than widening the filter. A claim error naming a serialization conflict is the
+loser of a simultaneous claim, not an empty queue: retry the identical pull instead of
+reporting `NO_WORK`. `references/dispatch-contract.md` carries the error signatures and the
+retry budget.
 
 | Role | Claim |
 |---|---|
-| `orc-architect` | `bd ready --parent <run-epic> --label agent:architect --unassigned --claim --json` |
-| `orc-implementer` | `bd ready --parent <epic> --label agent:implementer --unassigned --claim --json` |
-| `orc-reviewer` | `bd ready --include-ephemeral --parent <epic> --label agent:reviewer --unassigned --claim --json` |
-| `orc-researcher` | `bd ready --include-ephemeral --parent <epic> --label agent:researcher --unassigned --claim --json` |
-| `orc-shepherd` | `bd ready --label agent:integrator --unassigned --claim --json` |
+| `orc-architect` | `bd ready --parent <run-epic> --metadata-field role=architect --unassigned --claim --json` |
+| `orc-implementer` | `bd ready --parent <epic> --metadata-field role=implementer --unassigned --claim --json` |
+| `orc-reviewer` | `bd ready --include-ephemeral --parent <epic> --metadata-field role=reviewer --unassigned --claim --json` |
+| `orc-researcher` | `bd ready --include-ephemeral --parent <epic> --metadata-field role=researcher --unassigned --claim --json` |
+| `orc-shepherd` | `bd ready --metadata-field role=shepherd --unassigned --claim --json` |
 
 Without these two filter facts, both queues read empty forever:
 
@@ -196,7 +208,7 @@ is terminal.
 
 ## Review and merge
 
-1. A worker reports: evidence stamped, `agent:reviewer` label added, assignee cleared,
+1. A worker reports: evidence stamped, the `agent:reviewer` label added, assignee cleared,
    `REPORTED` comment written. Its commits are already on `omp/task/<id>`.
 2. The architect integrates those branches into its feature tree, serially, resolving
    conflicts as its own work. With the branches integrated, it creates one review wisp for
@@ -205,9 +217,9 @@ is terminal.
    A `CHANGES` verdict returns the node to its queue with the union of FIX items attached.
    The last reviewer to approve closes the final wisp and makes the PR ready.
 4. The architect creates the merge bead and spawns a shepherd. A merge bead carries
-   **labels `pr:merge` + `agent:integrator`, no parent, and no type of its own** --
+   **label `pr:merge`, metadata `role=shepherd`, no parent, and no type of its own** --
    `merge-request` is a `bd ready -t` filter alias, not a creatable type. Stamp these keys:
-   `repo`, `branch`, `base_sha`, `origin`, `integration_owner=orchestrate`. The cross-run
+   `repo`, `branch`, `base_sha`, `origin_bead`, `integration_owner=orchestrate`. The cross-run
    queue finds the bead by those keys, and the standalone drain refuses it.
 5. The shepherd is ephemeral and two-phase across the CI gate. Phase one reviews the
    landing unit, opens or readies the PR, creates the gate. It yields **without** holding
@@ -221,10 +233,10 @@ is terminal.
    - queue-priority adjustment
    - reading the real CI and bot outcomes
    - informing the architect by comment on the feature bead
-6. A bounce writes bead state first: fix bead created unassigned, assignee cleared, routing
-   label restored. It wakes the bead's `metadata.origin` architect last, with a
-   content-free `hub` send. The state is complete without the message. The message only
-   saves a round trip.
+6. A bounce writes bead state first: fix bead created unassigned, assignee cleared, `role`
+   routing key restored. It wakes the architect owning the bead's `origin_bead` feature
+   last, with a content-free `hub` send. The state is complete without the message, which
+   only saves a round trip. A bead stamped before the key split carries `origin` instead.
 
 Probe evidence with these tools, and never read the evidence by eye:
 
@@ -272,7 +284,7 @@ cost and say so in their own refusal text. Do not design a control on top of fri
 | Layer | Surface | Status |
 |---|---|---|
 | exit contract | `tool_call` on `yield`, in every claim-holding session including the architect's | **fail-closed.** Resolves the caller's bead from live `bd` state, evaluates the role's contract, blocks with the unmet checks named. |
-| claim routing + scope | `tool_call` on `bash` (`bd … --claim`) | friction. Refuses a bead routed to another role, or one whose `scope` overlaps a live claim. |
+| claim routing + scope | `tool_call` on `bash` (`bd … --claim`) | friction. Refuses a bead routed to another role, or one whose `scope` overlaps a live claim. Also refuses a non-architect write to `metadata.role`, so a route is re-pointed only by the actor that decomposed the epic. `bd create` stays exempt: filing new work routed is open to every role. |
 | read-only `bd` | `tool_call` on `bash` | friction. Imposes `BD_READONLY=1` on a session holding no bead contract -- a helper, not an `orc-*` role, whose contracts need `bd` writes. |
 | worktree confinement | `tool_call` on `bash`, `edit`, `write` | friction. Refuses edits outside the tree the claimed bead names. |
 | Worktrunk bypass | `tool_call` on `bash` | friction. Denies `git worktree`, `gh pr checkout`, and writes to `specs/*/tasks.md`. |
