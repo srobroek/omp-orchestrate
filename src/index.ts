@@ -15,7 +15,8 @@ import { gateClaimEligibility } from "./gates/claim";
 import { gateCommentVerb } from "./gates/comment-verb";
 import { gateExitContract } from "./gates/exit";
 import { gateOneClaim } from "./gates/one-claim";
-import { gateBeadWriteFree } from "./gates/readonly";
+import { runPinEnv } from "./gates/pin";
+import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { sessionRole } from "./identity";
@@ -93,8 +94,15 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (scope) return scope;
 			}
 
-			// Last, and only for `bash`: a revision rather than a refusal.
-			if (event.toolName === "bash") return gateBeadWriteFree(pi, ctx, input);
+			// Last, and only for `bash`: a revision rather than a refusal. Both
+			// environment gates contribute to one result, because a contract-free
+			// helper working in an isolated workspace needs each of them.
+			if (event.toolName === "bash") {
+				return reviseBashEnv(input, {
+					...beadWriteFreeEnv(pi, ctx),
+					...(await runPinEnv(ctx, input)),
+				});
+			}
 
 			return undefined;
 		} catch (error) {

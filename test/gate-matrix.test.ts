@@ -28,7 +28,8 @@ import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
 import { gateOneClaim } from "../src/gates/one-claim";
-import { gateBeadWriteFree } from "../src/gates/readonly";
+import { runPinEnv } from "../src/gates/pin";
+import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
 
 /** Beads `bdShow` resolves, by id. A missing key models an unreadable bead. */
@@ -126,7 +127,10 @@ async function gateChain(
 		const scope = await gateWorktreeScope(ctx, toolName, input);
 		if (scope) return scope;
 	}
-	if (toolName === "bash") return gateBeadWriteFree(WORKER, ctx, input);
+	// Mirrors `index.ts`: both environment gates contribute to one revision.
+	if (toolName === "bash") {
+		return reviseBashEnv(input, { ...beadWriteFreeEnv(WORKER, ctx), ...(await runPinEnv(ctx, input)) });
+	}
 	return undefined;
 }
 

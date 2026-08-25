@@ -36,27 +36,6 @@ check orc-ready-ephemeral.md   miss tool bash 'bd ready --parent orc-1 --label a
 check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
 check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
 
-# orc-bd-pin: an unpinned bd call reads and writes the copy inside an isolated
-# workspace. Every spelling of the pin must suppress it, or the reminder becomes
-# noise the moment an agent complies.
-check orc-bd-pin.md            fire tool bash 'bd ready --parent orc-1 --label agent:implementer --unassigned --claim --json'
-check orc-bd-pin.md            fire tool bash 'bd update orc-1 --claim'
-check orc-bd-pin.md            fire tool bash 'cd /repo && bd comment orc-1 "REPORTED done"'
-check orc-bd-pin.md            miss tool bash 'bd -C /repo ready --parent orc-1 --claim --json'
-check orc-bd-pin.md            miss tool bash 'bd -C=/repo ready --parent orc-1 --claim --json'
-check orc-bd-pin.md            miss tool bash 'bd --directory /repo update orc-1 --claim'
-check orc-bd-pin.md            miss tool bash 'bd --directory=/repo update orc-1 --claim'
-check orc-bd-pin.md            miss tool bash 'bd ready --parent orc-1 --claim -C /repo'
-check orc-bd-pin.md            miss tool bash 'bd -C/repo ready --parent orc-1 --claim --json'
-check orc-bd-pin.md            miss tool bash 'bd -Crepo/sub update orc-1 --claim'
-# Known limitation, encoded rather than left to be discovered: the condition is
-# line-scoped, so a pin anywhere on the line suppresses every bd call on it. A
-# chain whose SECOND call is pinned hides an unpinned first one. Closing it needs
-# per-invocation parsing, which a regex layer cannot do -- the gate layer sees
-# these argv properly.
-check orc-bd-pin.md            miss tool bash 'bd update orc-1 --claim && bd -C /repo show orc-1'
-check orc-bd-pin.md            miss tool bash 'git status'
-
 # A bug bead with no parent or no route is unpullable: no queue filter can reach it.
 check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --silent'
 check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --parent orc-1 --silent'

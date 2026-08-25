@@ -1418,204 +1418,12 @@ function gateOneClaim(ctx, input) {
   return;
 }
 
-// src/gates/readonly.ts
-var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
-function gateBeadWriteFree(pi, ctx, input) {
-  if (!isBeadWriteFree(pi, ctx))
-    return;
-  const existingEnv = input.env;
-  const env = existingEnv !== null && typeof existingEnv === "object" ? { ...existingEnv } : {};
-  if (env.BD_READONLY === "1")
-    return;
-  env.BD_READONLY = "1";
-  const revised = {};
-  for (const key of BASH_PARAMS) {
-    if (key in input)
-      revised[key] = input[key];
-  }
-  revised.env = env;
-  return { input: revised };
-}
-
-// src/gates/worktree.ts
-import path2 from "path";
-import fs from "fs/promises";
-var GATED_WRITE_TOOLS = { bash: true, edit: true, write: true };
-async function realpathOrUndefined(target) {
-  try {
-    return await fs.realpath(target);
-  } catch {
-    return;
-  }
-}
-function within(child, parent) {
-  return child === parent || child.startsWith(`${parent}${path2.sep}`);
-}
-function isolationBase() {
-  const configured = process.env.OMP_WORKTREE_DIR;
-  if (configured !== undefined && configured.length > 0)
-    return configured;
-  return path2.join(process.env.HOME ?? "", ".omp", "wt");
-}
-var MAX_HOPS = 32;
-var URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
-async function resolveTarget(cwd, declared) {
-  if (declared.includes("\x00") || URI_TARGET.test(declared))
-    return;
-  const absolute = path2.isAbsolute(declared);
-  const { root } = path2.parse(declared);
-  let resolved = absolute ? root : cwd;
-  const pending = (absolute ? declared.slice(root.length) : declared).split(path2.sep).reverse();
-  let hops = 0;
-  while (pending.length > 0) {
-    const segment = pending.pop();
-    if (segment.length === 0 || segment === ".")
-      continue;
-    if (segment === "..") {
-      resolved = path2.dirname(resolved);
-      continue;
-    }
-    const candidate = path2.join(resolved, segment);
-    let link;
-    try {
-      link = await fs.readlink(candidate);
-    } catch {}
-    if (link === undefined) {
-      resolved = candidate;
-      continue;
-    }
-    if (++hops > MAX_HOPS)
-      return;
-    const linkRoot = path2.parse(link).root;
-    if (linkRoot.length > 0)
-      resolved = linkRoot;
-    pending.push(...link.slice(linkRoot.length).split(path2.sep).reverse());
-  }
-  return resolved;
-}
-var SECTION_HEADER = /^\[(.+)#[0-9A-Fa-f]{4}\]\s*$/;
-var MOVE_OP = /^MV\s+(?:"([^"]*)"|'([^']*)'|(\S.*?))\s*$/;
-function hashlineTargets(raw) {
-  if (typeof raw !== "string")
-    return [];
-  const targets = [];
-  for (const line of raw.split(`
-`)) {
-    const section = SECTION_HEADER.exec(line);
-    if (section?.[1] !== undefined) {
-      targets.push(section[1]);
-      continue;
-    }
-    const move = MOVE_OP.exec(line);
-    const destination = move?.[1] ?? move?.[2] ?? move?.[3];
-    if (destination !== undefined && destination.length > 0)
-      targets.push(destination);
-  }
-  return targets;
-}
-function declaredTargets(toolName, input) {
-  if (toolName === "write") {
-    const target = input.path;
-    return typeof target === "string" && target.length > 0 ? [target] : [];
-  }
-  if (toolName === "edit")
-    return hashlineTargets(input.input);
-  return [];
-}
-function names(relative, glob) {
-  const trimmed = glob.replace(/^\.?\/+/, "").replace(/\/+$/, "");
-  if (trimmed.length === 0)
-    return true;
-  return fnmatch(relative, trimmed) || fnmatch(relative, `${trimmed}/*`);
-}
-async function gateWorktreeScope(ctx, toolName, input) {
-  const claim = observedClaim();
-  if (!claim || claim.beadIds.length === 0)
-    return;
-  const cwd = await realpathOrUndefined(ctx.cwd);
-  if (cwd === undefined)
-    return;
-  const base = await realpathOrUndefined(isolationBase());
-  if (base !== undefined && within(cwd, base))
-    return;
-  const targets = [];
-  for (const declared of declaredTargets(toolName, input)) {
-    const resolved = await resolveTarget(cwd, declared);
-    if (resolved !== undefined)
-      targets.push({ declared, resolved });
-  }
-  const scoped = [];
-  for (const beadId of claim.beadIds) {
-    const bead = await bdShow(beadId);
-    const declaredTree = metadataString(bead, "worktree");
-    if (declaredTree === undefined)
-      continue;
-    const worktree = await realpathOrUndefined(declaredTree);
-    if (worktree === undefined)
-      continue;
-    if (!within(cwd, worktree)) {
-      return {
-        block: true,
-        reason: `this session's cwd does not match metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
-      };
-    }
-    for (const target of targets) {
-      if (within(target.resolved, worktree))
-        continue;
-      return {
-        block: true,
-        reason: `'${target.declared}' resolves to '${target.resolved}', outside metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
-      };
-    }
-    const globs = scopeOf(bead?.metadata);
-    if (globs.length > 0)
-      scoped.push({ beadId, worktree, globs });
-  }
-  if (scoped.length === 0)
-    return;
-  for (const target of targets) {
-    const named = scoped.some(({ worktree, globs }) => {
-      const relative = path2.relative(worktree, target.resolved).split(path2.sep).join("/");
-      if (relative.length === 0)
-        return true;
-      return globs.some((glob) => names(relative, glob));
-    });
-    if (named)
-      continue;
-    return {
-      block: true,
-      reason: `'${target.declared}' is named by no claimed bead's metadata.scope \u2014 ${scoped.map(({ beadId, globs }) => `${beadId} (${globs.join(", ")})`).join(", ")}`
-    };
-  }
-  return;
-}
-
-// src/gates/wt-guard.ts
-var FORBIDDEN = [
-  {
-    argv: ["git", "worktree"],
-    reason: "worktrees are managed by wt; use 'wt switch --create <branch>' rather than 'git worktree'"
-  },
-  {
-    argv: ["gh", "pr", "checkout"],
-    reason: "use 'wt switch' rather than 'gh pr checkout'; the checkout must stay bound to its bead"
-  }
-];
-function gateWorktrunkOwnership(input) {
-  const command = input.command;
-  if (typeof command !== "string" || command.length === 0)
-    return;
-  for (const forbidden of FORBIDDEN) {
-    if (invokesCommand(command, forbidden.argv)) {
-      return { block: true, reason: forbidden.reason };
-    }
-  }
-  return;
-}
+// src/gates/pin.ts
+import * as path3 from "path";
 
 // src/run-state.ts
-import fs2 from "fs/promises";
-import path3 from "path";
+import fs from "fs/promises";
+import path2 from "path";
 
 // src/supervision.ts
 var TERMINAL = { aborted: true, completed: true, failed: true };
@@ -1832,13 +1640,13 @@ var RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 function markerPath(cwd) {
   const configured = process.env.ORCHESTRATE_MARKER_FILE;
   if (configured !== undefined && configured.length > 0)
-    return path3.resolve(cwd, configured);
-  return path3.join(cwd, ".orchestration", ".active-run");
+    return path2.resolve(cwd, configured);
+  return path2.join(cwd, ".orchestration", ".active-run");
 }
 async function readActiveRun(cwd) {
   let raw;
   try {
-    raw = (await fs2.readFile(markerPath(cwd), "utf8")).trim();
+    raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
   } catch {
     return null;
   }
@@ -1869,14 +1677,14 @@ function asActiveRun(value) {
   return state;
 }
 async function writeMarker(target, state) {
-  await fs2.mkdir(path3.dirname(target), { recursive: true });
+  await fs.mkdir(path2.dirname(target), { recursive: true });
   const temporary = `${target}.${process.pid}.tmp`;
   try {
-    await fs2.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}
+    await fs.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}
 `, "utf8");
-    await fs2.rename(temporary, target);
+    await fs.rename(temporary, target);
   } catch (error) {
-    await fs2.rm(temporary, { force: true }).catch(() => {});
+    await fs.rm(temporary, { force: true }).catch(() => {});
     throw error;
   }
 }
@@ -1886,7 +1694,7 @@ async function activateRun(cwd, sessionId) {
   const state = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
   if (session !== undefined)
     state.session_id = session;
-  state.repo_root = path3.resolve(cwd);
+  state.repo_root = path2.resolve(cwd);
   await writeMarker(markerPath(cwd), state);
   return state;
 }
@@ -1928,6 +1736,228 @@ function registerRunCommands(pi) {
       }
     }
   });
+}
+
+// src/gates/pin.ts
+var BEADS_SUBDIR = ".beads";
+async function runPinEnv(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (bdInvocations(command).length === 0)
+    return;
+  const cwd = ctx.cwd ?? process.cwd();
+  const marker = await readActiveRun(cwd).catch(() => null);
+  const root = marker?.repo_root;
+  if (root === undefined || root.length === 0)
+    return;
+  const relative2 = path3.relative(root, cwd);
+  const inside = relative2.length === 0 || !relative2.startsWith("..") && !path3.isAbsolute(relative2);
+  if (inside)
+    return;
+  return { BEADS_DIR: path3.join(root, BEADS_SUBDIR) };
+}
+
+// src/gates/readonly.ts
+var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
+function beadWriteFreeEnv(pi, ctx) {
+  return isBeadWriteFree(pi, ctx) ? { BD_READONLY: "1" } : undefined;
+}
+function reviseBashEnv(input, additions) {
+  const existing = input.env;
+  const env = existing !== null && typeof existing === "object" ? { ...existing } : {};
+  let changed = false;
+  for (const [key, value] of Object.entries(additions)) {
+    if (env[key] === value)
+      continue;
+    env[key] = value;
+    changed = true;
+  }
+  if (!changed)
+    return;
+  const revised = {};
+  for (const key of BASH_PARAMS) {
+    if (key in input)
+      revised[key] = input[key];
+  }
+  revised.env = env;
+  return { input: revised };
+}
+
+// src/gates/worktree.ts
+import path4 from "path";
+import fs2 from "fs/promises";
+var GATED_WRITE_TOOLS = { bash: true, edit: true, write: true };
+async function realpathOrUndefined(target) {
+  try {
+    return await fs2.realpath(target);
+  } catch {
+    return;
+  }
+}
+function within(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path4.sep}`);
+}
+function isolationBase() {
+  const configured = process.env.OMP_WORKTREE_DIR;
+  if (configured !== undefined && configured.length > 0)
+    return configured;
+  return path4.join(process.env.HOME ?? "", ".omp", "wt");
+}
+var MAX_HOPS = 32;
+var URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+async function resolveTarget(cwd, declared) {
+  if (declared.includes("\x00") || URI_TARGET.test(declared))
+    return;
+  const absolute = path4.isAbsolute(declared);
+  const { root } = path4.parse(declared);
+  let resolved = absolute ? root : cwd;
+  const pending = (absolute ? declared.slice(root.length) : declared).split(path4.sep).reverse();
+  let hops = 0;
+  while (pending.length > 0) {
+    const segment = pending.pop();
+    if (segment.length === 0 || segment === ".")
+      continue;
+    if (segment === "..") {
+      resolved = path4.dirname(resolved);
+      continue;
+    }
+    const candidate = path4.join(resolved, segment);
+    let link;
+    try {
+      link = await fs2.readlink(candidate);
+    } catch {}
+    if (link === undefined) {
+      resolved = candidate;
+      continue;
+    }
+    if (++hops > MAX_HOPS)
+      return;
+    const linkRoot = path4.parse(link).root;
+    if (linkRoot.length > 0)
+      resolved = linkRoot;
+    pending.push(...link.slice(linkRoot.length).split(path4.sep).reverse());
+  }
+  return resolved;
+}
+var SECTION_HEADER = /^\[(.+)#[0-9A-Fa-f]{4}\]\s*$/;
+var MOVE_OP = /^MV\s+(?:"([^"]*)"|'([^']*)'|(\S.*?))\s*$/;
+function hashlineTargets(raw) {
+  if (typeof raw !== "string")
+    return [];
+  const targets = [];
+  for (const line of raw.split(`
+`)) {
+    const section = SECTION_HEADER.exec(line);
+    if (section?.[1] !== undefined) {
+      targets.push(section[1]);
+      continue;
+    }
+    const move = MOVE_OP.exec(line);
+    const destination = move?.[1] ?? move?.[2] ?? move?.[3];
+    if (destination !== undefined && destination.length > 0)
+      targets.push(destination);
+  }
+  return targets;
+}
+function declaredTargets(toolName, input) {
+  if (toolName === "write") {
+    const target = input.path;
+    return typeof target === "string" && target.length > 0 ? [target] : [];
+  }
+  if (toolName === "edit")
+    return hashlineTargets(input.input);
+  return [];
+}
+function names(relative2, glob) {
+  const trimmed = glob.replace(/^\.?\/+/, "").replace(/\/+$/, "");
+  if (trimmed.length === 0)
+    return true;
+  return fnmatch(relative2, trimmed) || fnmatch(relative2, `${trimmed}/*`);
+}
+async function gateWorktreeScope(ctx, toolName, input) {
+  const claim = observedClaim();
+  if (!claim || claim.beadIds.length === 0)
+    return;
+  const cwd = await realpathOrUndefined(ctx.cwd);
+  if (cwd === undefined)
+    return;
+  const base = await realpathOrUndefined(isolationBase());
+  if (base !== undefined && within(cwd, base))
+    return;
+  const targets = [];
+  for (const declared of declaredTargets(toolName, input)) {
+    const resolved = await resolveTarget(cwd, declared);
+    if (resolved !== undefined)
+      targets.push({ declared, resolved });
+  }
+  const scoped = [];
+  for (const beadId of claim.beadIds) {
+    const bead = await bdShow(beadId);
+    const declaredTree = metadataString(bead, "worktree");
+    if (declaredTree === undefined)
+      continue;
+    const worktree = await realpathOrUndefined(declaredTree);
+    if (worktree === undefined)
+      continue;
+    if (!within(cwd, worktree)) {
+      return {
+        block: true,
+        reason: `this session's cwd does not match metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
+      };
+    }
+    for (const target of targets) {
+      if (within(target.resolved, worktree))
+        continue;
+      return {
+        block: true,
+        reason: `'${target.declared}' resolves to '${target.resolved}', outside metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
+      };
+    }
+    const globs = scopeOf(bead?.metadata);
+    if (globs.length > 0)
+      scoped.push({ beadId, worktree, globs });
+  }
+  if (scoped.length === 0)
+    return;
+  for (const target of targets) {
+    const named = scoped.some(({ worktree, globs }) => {
+      const relative2 = path4.relative(worktree, target.resolved).split(path4.sep).join("/");
+      if (relative2.length === 0)
+        return true;
+      return globs.some((glob) => names(relative2, glob));
+    });
+    if (named)
+      continue;
+    return {
+      block: true,
+      reason: `'${target.declared}' is named by no claimed bead's metadata.scope \u2014 ${scoped.map(({ beadId, globs }) => `${beadId} (${globs.join(", ")})`).join(", ")}`
+    };
+  }
+  return;
+}
+
+// src/gates/wt-guard.ts
+var FORBIDDEN = [
+  {
+    argv: ["git", "worktree"],
+    reason: "worktrees are managed by wt; use 'wt switch --create <branch>' rather than 'git worktree'"
+  },
+  {
+    argv: ["gh", "pr", "checkout"],
+    reason: "use 'wt switch' rather than 'gh pr checkout'; the checkout must stay bound to its bead"
+  }
+];
+function gateWorktrunkOwnership(input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  for (const forbidden of FORBIDDEN) {
+    if (invokesCommand(command, forbidden.argv)) {
+      return { block: true, reason: forbidden.reason };
+    }
+  }
+  return;
 }
 
 // src/tools/bot-review-probe.ts
@@ -2278,8 +2308,8 @@ var spawnExec2 = async (argv, opts) => {
 function prViewArgv(repo, pr) {
   return ["gh", "pr", "view", pr, "--repo", repo, "--json", "headRefOid,statusCheckRollup"];
 }
-function ghApiArgv(path4) {
-  return ["gh", "api", "--paginate", "--slurp", path4];
+function ghApiArgv(path5) {
+  return ["gh", "api", "--paginate", "--slurp", path5];
 }
 async function ghJson(argv, exec, opts) {
   const label = argv.slice(1).join(" ");
@@ -2299,8 +2329,8 @@ async function ghJson(argv, exec, opts) {
     return { ok: false, error: `gh ${label} returned unreadable JSON: ${String(error)}` };
   }
 }
-async function ghPaginatedJson(path4, exec, opts) {
-  const read = await ghJson(ghApiArgv(path4), exec, opts);
+async function ghPaginatedJson(path5, exec, opts) {
+  const read = await ghJson(ghApiArgv(path5), exec, opts);
   if (!read.ok)
     return read;
   if (!Array.isArray(read.value))
@@ -2490,9 +2520,9 @@ function parseMergeTreeOutput(stdout) {
 function intersectPaths(a, b) {
   const right = new Set(b);
   const both = new Set;
-  for (const path4 of a) {
-    if (right.has(path4))
-      both.add(path4);
+  for (const path5 of a) {
+    if (right.has(path5))
+      both.add(path5);
   }
   return [...both].sort();
 }
@@ -2648,7 +2678,7 @@ function registerConflictProbe(pi) {
 }
 
 // src/tools/resolve-queue-dispatch.ts
-import path4 from "path";
+import path5 from "path";
 var REPOSITORY_RE = /^[^/\s]+\/[^/\s]+$/;
 var HEAD_SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 var REQUIRED_PULL_REQUEST_FIELDS = [
@@ -3254,7 +3284,7 @@ function registerResolveQueueDispatch(pi, read = readSnapshotFile) {
           return report(failed(1, `invalid watcher record: nodes is not JSON: ${message(error)}`));
         }
       } else if (params.nodesFile !== undefined) {
-        const file = params.cwd === undefined ? params.nodesFile : path4.resolve(params.cwd, params.nodesFile);
+        const file = params.cwd === undefined ? params.nodesFile : path5.resolve(params.cwd, params.nodesFile);
         try {
           nodes = JSON.parse(await read(file));
         } catch (error) {
@@ -3651,7 +3681,7 @@ function registerRunStatus(pi) {
 
 // src/watchers.ts
 import fs3 from "fs/promises";
-import path5 from "path";
+import path6 from "path";
 var PROGRESS_CHANNEL = "task:subagent:progress";
 var SUBAGENT_EVENT_CHANNEL = "task:subagent:event";
 var MCP_STATUS_CHANNEL = "mcp:connection-status";
@@ -3779,7 +3809,7 @@ function bdMutation(command) {
 }
 var configuredAuditDir;
 function auditDir(cwd) {
-  return configuredAuditDir ?? path5.join(cwd, ".orchestration", "audit");
+  return configuredAuditDir ?? path6.join(cwd, ".orchestration", "audit");
 }
 var MAX_AUDIT_STEM = 200;
 function auditFileName(child) {
@@ -3793,7 +3823,7 @@ async function appendAudit(dir, entry) {
   if (name === undefined)
     return;
   await fs3.mkdir(dir, { recursive: true });
-  await fs3.appendFile(path5.join(dir, name), `${JSON.stringify(entry)}
+  await fs3.appendFile(path6.join(dir, name), `${JSON.stringify(entry)}
 `, "utf8");
 }
 function exitCodeOf(result, isError) {
@@ -4011,10 +4041,10 @@ var settingsChecked = false;
 async function sharedBeadsDatabase(cwd) {
   if (process.env.BEADS_DOLT_SHARED_SERVER === "1")
     return true;
-  const config = await fs3.readFile(path5.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
+  const config = await fs3.readFile(path6.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
   if (/^[^#\n]*\bshared-server:\s*true/m.test(config))
     return true;
-  const metadata = await fs3.readFile(path5.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
+  const metadata = await fs3.readFile(path6.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
   try {
     const parsed = JSON.parse(metadata);
     if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
@@ -4037,7 +4067,7 @@ async function preflightSettings(pi, cwd) {
   const lines3 = deviations.map((deviation) => `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
   const mode = observed2["task.isolation.mode"];
   const isolating = typeof mode === "string" && mode !== "none";
-  const tracked = await fs3.stat(path5.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
+  const tracked = await fs3.stat(path6.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
   if (tracked && isolating && !await sharedBeadsDatabase(cwd)) {
     lines3.push(`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`);
   }
@@ -4155,8 +4185,12 @@ function ompOrchestrate(pi) {
         if (scope)
           return scope;
       }
-      if (event.toolName === "bash")
-        return gateBeadWriteFree(pi, ctx, input);
+      if (event.toolName === "bash") {
+        return reviseBashEnv(input, {
+          ...beadWriteFreeEnv(pi, ctx),
+          ...await runPinEnv(ctx, input)
+        });
+      }
       return;
     } catch (error) {
       pi.logger.error("orchestrate gate failed open", {

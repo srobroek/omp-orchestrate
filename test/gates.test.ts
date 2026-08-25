@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
-import { gateBeadWriteFree } from "../src/gates/readonly";
+import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
 
 function api(toolNames: string[]): ExtensionAPI {
@@ -15,6 +15,15 @@ function context(prompt: string): ExtensionContext {
 }
 
 const WORKER_TOOLS = ["bash", "read", "yield"];
+
+/**
+ * G1 as `index.ts` applies it: the gate decides the environment and one shared builder
+ * turns it into the revision, so the assertions below are on what a `bash` call
+ * actually executes with.
+ */
+function gateBeadWriteFree(pi: ExtensionAPI, ctx: ExtensionContext, input: Record<string, unknown>) {
+	return reviseBashEnv(input, { ...beadWriteFreeEnv(pi, ctx) });
+}
 
 describe("G1 bead-write-free sandbox", () => {
 	test("imposes BD_READONLY on an unmarked worker", () => {
