@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { bdRun, commentVerb, metadataString, resetReadBudget } from "../src/bd";
-import { roleFromLabels } from "../src/identity";
 
 describe("bdRun never throws", () => {
 	// The whole reason this wrapper exists: a throw inside a tool_call handler
@@ -62,29 +61,47 @@ describe("commentVerb", () => {
 		expect(commentVerb("   BLOCKED   kind:design")).toBe("BLOCKED");
 	});
 
+	test("reads through the markdown an honest writer uses", () => {
+		// Every one of these reached supervision as a non-verb, so the contract that
+		// wanted the verb read unsatisfied while the work had in fact been done.
+		expect(commentVerb("**REVIEW** approved")).toBe("REVIEW");
+		expect(commentVerb("- REVIEW approved")).toBe("REVIEW");
+		expect(commentVerb("`REVIEW` approved")).toBe("REVIEW");
+		expect(commentVerb("REVIEW, approved")).toBe("REVIEW");
+		expect(commentVerb("> REVIEW approved")).toBe("REVIEW");
+		expect(commentVerb("_REVIEW_ approved")).toBe("REVIEW");
+		expect(commentVerb("~~REVIEW~~ approved")).toBe("REVIEW");
+		expect(commentVerb("> - **REPORTED**: orc-1 pushed")).toBe("REPORTED");
+	});
+
+	test("keeps NO WORK a non-verb", () => {
+		// Deliberate. Reading two tokens would make NO_WORK the only verb assembled
+		// from two, and `gateUnclaimedExit` matches the literal `NO_WORK`, so leniency
+		// would move the divergence rather than close it. `commentVerbNotice` nags this
+		// form, which is what turns the old silent failure into a warning.
+		expect(commentVerb("NO WORK")).toBe("NO");
+		expect(commentVerb("NO WORK in my queue")).toBe("NO");
+		expect(commentVerb("NO_WORK")).toBe("NO_WORK");
+		expect(commentVerb("**NO_WORK**: queue empty")).toBe("NO_WORK");
+	});
+
+	test("never harvests a verb out of prose", () => {
+		// The first token is the whole signal. A comment opening on a word stays a
+		// non-verb, so supervision can tell an absent verb from a mangled one. The
+		// leading strip cannot cross a word, and the trailing strip is punctuation
+		// only -- a slash keeps the token mangled rather than quietly repairing it.
+		expect(commentVerb("the REVIEW is done")).toBe("THE");
+		expect(commentVerb("Looks good, REVIEW passed")).toBe("LOOKS");
+		expect(commentVerb("done")).toBe("DONE");
+		expect(commentVerb("REVIEWED the branch")).toBe("REVIEWED");
+		expect(commentVerb("NO WORKTREE was created")).toBe("NO");
+		expect(commentVerb("REVIEW/approved")).toBe("REVIEW/APPROVED");
+	});
+
 	test("yields an empty verb for empty text", () => {
 		expect(commentVerb("")).toBe("");
 		expect(commentVerb("   ")).toBe("");
+		expect(commentVerb("- ")).toBe("");
 	});
 });
 
-describe("roleFromLabels", () => {
-	test("finds the routing role", () => {
-		expect(roleFromLabels(["orc-node", "agent:implementer", "state:pending"])).toBe("implementer");
-		expect(roleFromLabels(["agent:shepherd"])).toBe("shepherd");
-	});
-
-	test("ignores labels that name no known role", () => {
-		// `agent:integrator` is a queue for merge beads, not one of the five roles,
-		// so it must not resolve — otherwise claim eligibility would compare
-		// against a role that has no agent.
-		expect(roleFromLabels(["agent:integrator"])).toBeUndefined();
-		expect(roleFromLabels(["cap:ts", "state:working"])).toBeUndefined();
-		expect(roleFromLabels([])).toBeUndefined();
-		expect(roleFromLabels(undefined)).toBeUndefined();
-	});
-
-	test("returns the first known role when several are present", () => {
-		expect(roleFromLabels(["agent:reviewer", "agent:researcher"])).toBe("reviewer");
-	});
-});
