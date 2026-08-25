@@ -248,8 +248,10 @@ describe("W5 shared-database precondition", () => {
 	});
 
 	test("a repo-local database under isolation is reported even with clean settings", async () => {
-		// No config file and no shared-server env: the default `bd init` layout.
+		// The default `bd init` layout: a `.beads` directory with no shared-server
+		// marker in either carrier.
 		await stubOmp("worktree");
+		await mkdir(join(cwd, ".beads"), { recursive: true });
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
@@ -264,6 +266,17 @@ describe("W5 shared-database precondition", () => {
 		expect(notice).toContain("bd init --shared-server");
 		expect(notice).toContain("bd backup restore");
 		expect(notice).not.toContain("Set BEADS_DOLT_SHARED_SERVER=1");
+	});
+
+	test("a repository with no beads database says nothing", async () => {
+		// Observed in the field: this warning fired in a repository that had never run
+		// `bd init`, where there are no claims to split and the advice was
+		// unactionable. The precondition applies to runs that track work in beads.
+		await stubOmp("worktree");
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
 	});
 
 	test("the flat dotted key bd actually writes silences it", async () => {

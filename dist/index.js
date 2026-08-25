@@ -3794,7 +3794,8 @@ async function preflightSettings(pi, cwd) {
   const lines3 = deviations.map((deviation) => `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
   const mode = observed2["task.isolation.mode"];
   const isolating = typeof mode === "string" && mode !== "none";
-  if (isolating && !await sharedBeadsDatabase(cwd)) {
+  const tracked = await fs3.stat(path5.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
+  if (tracked && isolating && !await sharedBeadsDatabase(cwd)) {
     lines3.push(`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`);
   }
   if (lines3.length === 0)

@@ -779,7 +779,14 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 	// the opposite of this function's rule of warning only about what it can prove.
 	const mode = observed["task.isolation.mode"];
 	const isolating = typeof mode === "string" && mode !== "none";
-	if (isolating && !(await sharedBeadsDatabase(cwd))) {
+	// A repository with no beads database has no claims to split, so the precondition
+	// does not apply and saying so is noise. Observed in the field: this fired in a
+	// repository that had never run `bd init`, where the advice was unactionable.
+	const tracked = await fs
+		.stat(path.join(cwd, ".beads"))
+		.then(entry => entry.isDirectory())
+		.catch(() => false);
+	if (tracked && isolating && !(await sharedBeadsDatabase(cwd))) {
 		// Remedies in the order beads documents them. Setting the env var ALONE is not
 		// one: with `metadata.json` still pinning `dolt_mode: embedded`, bd reports
 		// "using the shared server for this run" and then fails with `database not
