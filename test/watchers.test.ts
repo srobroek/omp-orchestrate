@@ -15,6 +15,7 @@ import {
 	noteMcpStatus,
 	noteProgress,
 	progressSample,
+	DECLARED_MODEL_ROLES,
 	preflightSettings,
 	registerWatchers,
 	resetWatchers,
@@ -24,6 +25,7 @@ import {
 	stallMinutes,
 	sweepStalls,
 } from "../src/watchers";
+import declaredSurface from "./declared-surface.json";
 
 const MINUTE = 60_000;
 
@@ -258,13 +260,14 @@ describe("W5 shared-database precondition", () => {
 		const notice = String(rig.messages.at(-1)?.content ?? "");
 		expect(notice).toContain("per-checkout database");
 		expect(notice).toContain("two workers can hold one bead");
-		// All three documented remedies, cheapest first. The env var is deliberately NOT
-		// offered alone: with `metadata.json` still pinning embedded, bd announces it is
-		// using the shared server and then fails with `database not found`, because the
-		// server serves a different data directory than the embedded engine wrote to.
-		expect(notice).toContain("bd -C");
-		expect(notice).toContain("bd init --shared-server");
+		// The pin is no longer offered as a remedy: this project requires a per-project
+		// Dolt server, and `-C` buys nothing under one. The env var is deliberately NOT
+		// offered alone either: with `metadata.json` still pinning embedded, bd announces
+		// it is using the shared server and then fails with `database not found`.
+		expect(notice).toContain("per-project Dolt server");
+		expect(notice).toContain("bd init --server");
 		expect(notice).toContain("bd backup restore");
+		expect(notice).not.toContain("bd -C");
 		expect(notice).not.toContain("Set BEADS_DOLT_SHARED_SERVER=1");
 	});
 
@@ -277,6 +280,59 @@ describe("W5 shared-database precondition", () => {
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
 		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
+	});
+
+	/**
+	 * `DECLARED_MODEL_ROLES` names roles OMP does not ship. An unconfigured alias resolves
+	 * to undefined with no warning and falls back to the session default, so the whole
+	 * value of declaring one is that its absence is announced.
+	 */
+	async function stubOmpRoles(roles: string | undefined): Promise<void> {
+		const bin = join(cwd, "fake-omp-roles");
+		// `roles === undefined` leaves the key unreadable, which is a different state from
+		// an empty object: unreadable proves nothing, empty proves the role is absent.
+		const branch =
+			roles === undefined
+				? "exit 1"
+				: `printf '{"key":"modelRoles","value":${roles.replace(/'/g, "'\\''")}}'`;
+		await writeFile(
+			bin,
+			`#!/bin/sh\nif [ "$3" = "modelRoles" ]; then ${branch}; else exit 1; fi\n`,
+			{ mode: 0o755 },
+		);
+		process.env.OMP_BIN = bin;
+	}
+
+	test.each([
+		["an empty roles object", "{}", true],
+		["roles that omit it", '{"plan":"x/y:high","task":"x/y:auto"}', true],
+		["roles that configure it", '{"reviewer":"mantle/openai.gpt-5.6-sol:medium"}', false],
+	])("a declared model role missing from %s warns=%p", async (_label, roles, wantWarning) => {
+		await stubOmpRoles(roles);
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		const notice = rig.messages.map(message => String(message.content)).join("\n");
+		expect(notice.includes("modelRoles.reviewer is not configured")).toBe(wantWarning);
+	});
+
+	test("an unreadable roles setting says nothing, since it proves nothing", async () => {
+		// This function's rule is to warn only about what it can prove. A setting that did
+		// not answer is not evidence the role is absent.
+		await stubOmpRoles(undefined);
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain(
+			"modelRoles.reviewer",
+		);
+	});
+
+	test("the declared list matches the one the suite asserts against", () => {
+		// Two carriers, one truth: src announces an absent role, the manifest is what
+		// test/agents.test.ts accepts as a non-built-in alias. Drift would let an agent
+		// name a role nothing announces.
+		expect([...DECLARED_MODEL_ROLES]).toEqual(declaredSurface.modelRoles.roles);
 	});
 
 	test("the flat dotted key bd actually writes silences it", async () => {
@@ -380,6 +436,116 @@ describe("W5 shared-database precondition", () => {
 		await preflightSettings(rig.pi, cwd);
 		// A run without isolation shares one checkout, so it shares one database.
 		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("per-checkout database");
+	});
+});
+
+/**
+ * Prerequisites are ensured, not merely named: the deviating project-ownable settings
+ * are written into the run repository's own `.omp/config.yml`, because the global
+ * config differs per machine and a run can start on any of them. Settings load at
+ * process start, so the write repairs the next session and the message says restart.
+ */
+describe("the settings preflight writes the project config", () => {
+	async function stubDeviantOmp(): Promise<void> {
+		const bin = join(cwd, "fake-omp-deviant");
+		await writeFile(
+			bin,
+			[
+				"#!/bin/sh",
+				'case "$3" in',
+				'  task.isolation.mode) printf \'{"key":"k","value":"worktree"}\';;',
+				'  task.isolation.merge) printf \'{"key":"k","value":"patch"}\';;',
+				'  task.isolation.apply) printf \'{"key":"k","value":true}\';;',
+				'  task.enableEffort) printf \'{"key":"k","value":false}\';;',
+				'  task.maxRecursionDepth) printf \'{"key":"k","value":2}\';;',
+				"  *) exit 1;;",
+				"esac",
+			].join("\n"),
+			{ mode: 0o755 },
+		);
+		process.env.OMP_BIN = bin;
+	}
+
+	const configFile = () => join(cwd, ".omp", "config.yml");
+
+	afterEach(async () => {
+		delete process.env.OMP_BIN;
+		await rm(join(cwd, ".omp"), { recursive: true, force: true });
+	});
+
+	test("deviating ownable settings land in .omp/config.yml, and the message says restart", async () => {
+		await stubDeviantOmp();
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+
+		const written = Bun.YAML.parse(await readFile(configFile(), "utf8")) as {
+			task: { isolation: { merge: string; apply: boolean }; enableEffort: boolean; maxRecursionDepth: number };
+		};
+		expect(written.task.isolation.merge).toBe("branch");
+		expect(written.task.isolation.apply).toBe(false);
+		expect(written.task.enableEffort).toBe(true);
+		expect(written.task.maxRecursionDepth).toBe(3);
+
+		const notice = String(rig.messages.at(-1)?.content ?? "");
+		expect(notice).toContain("task.maxRecursionDepth is 2");
+		expect(notice).toContain("written to");
+		expect(notice).toContain("Restart the run");
+	});
+
+	test("an existing config keeps its unrelated keys", async () => {
+		await stubDeviantOmp();
+		await mkdir(join(cwd, ".omp"), { recursive: true });
+		await writeFile(configFile(), 'task:\n  agentModelOverrides:\n    operator: "@smol"\n');
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+
+		const written = Bun.YAML.parse(await readFile(configFile(), "utf8")) as {
+			task: { agentModelOverrides: { operator: string }; isolation: { merge: string } };
+		};
+		expect(written.task.agentModelOverrides.operator).toBe("@smol");
+		expect(written.task.isolation.merge).toBe("branch");
+	});
+
+	test("a file that does not parse is left alone", async () => {
+		// Rewriting a file we cannot read destroys whatever it held, so the preflight
+		// falls back to the warn-only tail.
+		await stubDeviantOmp();
+		await mkdir(join(cwd, ".omp"), { recursive: true });
+		const broken = "task: [unclosed\n";
+		await writeFile(configFile(), broken);
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+
+		expect(await readFile(configFile(), "utf8")).toBe(broken);
+		const notice = String(rig.messages.at(-1)?.content ?? "");
+		expect(notice).toContain("Fix and restart the run");
+	});
+
+	test("clean settings write nothing", async () => {
+		const bin = join(cwd, "fake-omp-clean");
+		await writeFile(
+			bin,
+			[
+				"#!/bin/sh",
+				'case "$3" in',
+				'  task.isolation.mode) printf \'{"key":"k","value":"worktree"}\';;',
+				'  task.isolation.merge) printf \'{"key":"k","value":"branch"}\';;',
+				'  task.isolation.apply) printf \'{"key":"k","value":false}\';;',
+				'  task.enableEffort) printf \'{"key":"k","value":true}\';;',
+				'  task.maxRecursionDepth) printf \'{"key":"k","value":3}\';;',
+				"  *) exit 1;;",
+				"esac",
+			].join("\n"),
+			{ mode: 0o755 },
+		);
+		process.env.OMP_BIN = bin;
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(await readFile(configFile(), "utf8").catch(() => "absent")).toBe("absent");
 	});
 });
 

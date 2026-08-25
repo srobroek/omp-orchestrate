@@ -45,6 +45,21 @@ const GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
 
 /**
+ * Model roles this plugin's agents name that OMP does NOT ship.
+ *
+ * OMP's built-ins are exactly `default`, `smol`, `slow`, `vision`, `plan`, `designer`,
+ * `commit`, `tiny`, `task` and `advisor` (`config/model-roles.ts`). Anything else is a
+ * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
+ * unconfigured alias without warning -- so the run must announce it instead.
+ *
+ * `reviewer` is here because a critic must not share the model family it judges, and no
+ * built-in expresses that: `slow` and `plan` are the authoring tier.
+ *
+ * `test/declared-surface.json` carries the same list and the suite asserts they agree.
+ */
+export const DECLARED_MODEL_ROLES: readonly string[] = ["reviewer"];
+
+/**
  * Run id written before the run epic exists (`run-state.ts:37`). A marker still
  * carrying it names no bead, so there is nothing to annotate.
  */
@@ -520,15 +535,23 @@ interface GoalNotice {
 let relayedGoal: string | undefined;
 
 /**
- * The epics of one run. A bound run reaches its epics three ways — the run epic
- * itself, an epic parented under it, and an epic stamped `metadata.origin` (the
- * routing convention) — and an unbound marker reaches all of them, because there
+ * The epics of one run. A bound run reaches its epics three ways -- the run epic
+ * itself, an epic parented under it, and an epic stamped `metadata.run_epic` (the
+ * run-membership stamp) -- and an unbound marker reaches all of them, because there
  * is no run to filter by.
+ *
+ * `metadata.origin` is the pre-split spelling of that stamp, still read so a run
+ * already in flight keeps reaching its epics. Either key holds a run epic id here,
+ * so the fallback cannot match an actor handle by accident.
  */
 export function runEpics(epics: readonly BdBead[], runId: string | undefined): BdBead[] {
 	if (runId === undefined) return [...epics];
 	return epics.filter(
-		epic => epic.id === runId || epic.parent === runId || metadataString(epic, "origin") === runId,
+		epic =>
+			epic.id === runId ||
+			epic.parent === runId ||
+			metadataString(epic, "run_epic") === runId ||
+			metadataString(epic, "origin") === runId,
 	);
 }
 
@@ -641,6 +664,13 @@ const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
 		satisfied: value => value === true,
 		consequence: "the per-spawn effort is silently ignored, so every agent runs at the session default",
 	},
+	{
+		key: "task.maxRecursionDepth",
+		want: "3 or more",
+		satisfied: value => typeof value === "number" && value >= 3,
+		consequence:
+			"a worker's helper sits at depth 3, so at the default 2 no worker can spawn librarian, scout, or operator",
+	},
 ];
 
 /** One setting that deviates, named with what it should be and what that costs. */
@@ -746,6 +776,84 @@ async function sharedBeadsDatabase(cwd: string): Promise<boolean> {
 }
 
 /**
+ * The value each project-ownable requirement should carry in `<run repo>/.omp/config.yml`.
+ *
+ * Only settings whose correct value is the same for every machine belong here. The
+ * global config cannot be trusted to carry them -- a run can start on any machine, and
+ * root config differing per machine is exactly why the project file exists. Storage
+ * mode and `modelRoles` stay out: the first is a migration, not a value, and the
+ * second names machine-specific model selectors nothing here can guess.
+ */
+const OWNABLE_VALUES: Record<string, unknown> = {
+	"task.isolation.mode": "auto",
+	"task.isolation.merge": "branch",
+	"task.isolation.apply": false,
+	"task.enableEffort": true,
+	"task.maxRecursionDepth": 3,
+};
+
+/** Render a plain tree as YAML. Objects and scalars only -- all this file ever holds. */
+function renderYaml(node: Record<string, unknown>, indent = ""): string {
+	let out = "";
+	for (const [key, value] of Object.entries(node)) {
+		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+			out += `${indent}${key}:\n${renderYaml(value as Record<string, unknown>, `${indent}  `)}`;
+		} else {
+			out += `${indent}${key}: ${JSON.stringify(value)}\n`;
+		}
+	}
+	return out;
+}
+
+/**
+ * Write the deviating project-ownable settings into `<run repo>/.omp/config.yml`.
+ *
+ * Settings are read once at process start, so this cannot repair the RUNNING session --
+ * it makes the next start correct, and the preflight message says to restart. An
+ * existing file is merged, not clobbered: unrelated keys survive, though comments do
+ * not. A file that exists but does not parse is left alone entirely, because rewriting
+ * a file we cannot read destroys whatever it held.
+ *
+ * Returns the file path when written, undefined when nothing was safe to write.
+ */
+async function ensureProjectSettings(cwd: string, keys: readonly string[]): Promise<string | undefined> {
+	const ownable = keys.filter(key => key in OWNABLE_VALUES);
+	if (ownable.length === 0) return undefined;
+
+	const file = path.join(cwd, ".omp", "config.yml");
+	let root: Record<string, unknown> = {};
+	const existing = await fs.readFile(file, "utf8").catch(() => undefined);
+	if (existing !== undefined && existing.trim().length > 0) {
+		try {
+			const parsed: unknown = Bun.YAML.parse(existing);
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+			root = structuredClone(parsed) as Record<string, unknown>;
+		} catch {
+			return undefined;
+		}
+	}
+
+	for (const key of ownable) {
+		const segments = key.split(".");
+		let node = root;
+		for (const segment of segments.slice(0, -1)) {
+			const next = node[segment];
+			if (next === null || typeof next !== "object" || Array.isArray(next)) node[segment] = {};
+			node = node[segment] as Record<string, unknown>;
+		}
+		node[segments[segments.length - 1] as string] = OWNABLE_VALUES[key];
+	}
+
+	try {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.writeFile(file, renderYaml(root));
+		return file;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Report deviating settings once per session, on the notification surface and on
  * the run epic.
  *
@@ -787,24 +895,63 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 		.then(entry => entry.isDirectory())
 		.catch(() => false);
 	if (tracked && isolating && !(await sharedBeadsDatabase(cwd))) {
-		// Remedies in the order beads documents them. Setting the env var ALONE is not
-		// one: with `metadata.json` still pinning `dolt_mode: embedded`, bd reports
-		// "using the shared server for this run" and then fails with `database not
-		// found`, because the server serves a different data directory than the
-		// embedded engine wrote to. Verified by walking into exactly that state.
+		// The prerequisite is a per-project Dolt server: bd then resolves the database by
+		// host and port from `.beads/dolt-server.port`, which travels with a copied
+		// checkout, so every isolated agent reaches the run's database. No setting can
+		// repair an embedded project -- server mode reads a different data directory, so
+		// conversion is a migration. Setting the env var ALONE is not a fix: with
+		// `metadata.json` still pinning `dolt_mode: embedded`, bd reports "using the
+		// shared server for this run" then fails with `database not found`. Verified by
+		// walking into exactly that state.
 		lines.push(
-			`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`,
+			`beads is running embedded, a per-checkout database, and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. This project requires a per-project Dolt server. On a NEW project: \`bd init --server\`. On THIS project, migrate: \`bd backup init <path>\`, \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`,
 		);
 	}
 
+	// `orc-reviewer` names `@reviewer`, which is NOT one of OMP's ten built-in roles. An
+	// alias OMP cannot resolve returns undefined with NO warning and falls back to the
+	// session default, so an unconfigured consumer would silently run its reviewer on the
+	// author's own model -- losing the family separation the role exists to provide.
+	//
+	// Announced here because a prerequisite that fails silently is the defect this whole
+	// preflight exists to prevent. `test/declared-surface.json` holds the same list, and
+	// the suite asserts the two agree, so neither can drift alone.
+	//
+	// An UNREADABLE setting is skipped, matching this function's rule of warning only
+	// about what it can prove. An empty object is not unreadable: it proves the role is
+	// absent, which is exactly the case worth warning about.
+	const roles = await readSetting("modelRoles", cwd);
+	if (typeof roles === "object" && roles !== null) {
+		for (const role of DECLARED_MODEL_ROLES) {
+			if (Object.hasOwn(roles, role)) continue;
+			lines.push(
+				`modelRoles.${role} is not configured, so \`@${role}\` resolves to nothing and the agent naming it silently runs the session default -- add it, or accept that a critic shares the family it judges`,
+			);
+		}
+	}
+
 	if (lines.length === 0) return deviations;
+
+	// Ensure, not merely warn: the project-ownable values are written into the run
+	// repository's own `.omp/config.yml`, because the global config differs per machine
+	// and a run can start on any of them. Settings load at process start, so the write
+	// repairs the NEXT session; the message says to restart rather than pretending the
+	// running one was fixed.
+	const written = await ensureProjectSettings(
+		cwd,
+		deviations.map(deviation => deviation.key),
+	);
+	const tail =
+		written === undefined
+			? "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable."
+			: `The project-ownable settings above were written to ${written} (existing keys kept, comments not preserved). Restart the run to load them; the rest need your hands.`;
 
 	pi.sendMessage({
 		customType: SETTINGS_PREFLIGHT_MESSAGE,
 		content: [
 			"WARN settings: this run's coordination contract is not fully in force.",
 			...lines.map(line => `- ${line}`),
-			"Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.",
+			tail,
 		].join("\n"),
 		display: true,
 	});
