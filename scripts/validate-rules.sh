@@ -57,9 +57,6 @@ check orc-bd-pin.md            miss tool bash 'bd -Crepo/sub update orc-1 --clai
 check orc-bd-pin.md            miss tool bash 'bd update orc-1 --claim && bd -C /repo show orc-1'
 check orc-bd-pin.md            miss tool bash 'git status'
 
-check orc-comment-verbs.md     fire tool bash 'bd comment orc-1 "finished the thing"'
-check orc-comment-verbs.md     miss tool bash 'bd comment orc-1 "REPORTED finished the thing"'
-
 # A bug bead with no parent or no route is unpullable: no queue filter can reach it.
 check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --silent'
 check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --parent orc-1 --silent'

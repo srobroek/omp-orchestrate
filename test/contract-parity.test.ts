@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
-import { DISPATCH_CONTRACT, dispatchContract } from "../src/contract";
+import { COMMENT_VERBS, DISPATCH_CONTRACT, dispatchContract, PROTOCOL_VERBS } from "../src/contract";
 
 const REFERENCE = "skills/orchestrate/references/dispatch-contract.md";
 
@@ -22,6 +22,28 @@ describe("dispatch contract parity", () => {
 		// Without the pointer, the next reader has no way to know which copy leads.
 		const fileText = await fs.readFile(REFERENCE, "utf8");
 		expect(fileText).toContain("src/contract.ts");
+	});
+});
+
+/**
+ * G8 refuses a comment body whose first word is not in `COMMENT_VERBS`, and the worker
+ * learns which words those are from the injected contract. If the two drift, a worker
+ * follows the text it was given and is refused for it — so the table's protocol half is
+ * asserted against the text that teaches it.
+ */
+describe("comment verb parity", () => {
+	test("the contract names all 11 protocol verbs, and the gate admits each", () => {
+		const line = /Verbs \(11\): ([\s\S]*?)\. One verb/.exec(DISPATCH_CONTRACT)?.[1] ?? "";
+		const named = line.split(/\s+/).filter(word => word.length > 0);
+
+		expect(named).toEqual([...PROTOCOL_VERBS]);
+		for (const verb of named) expect(COMMENT_VERBS[verb]).toBe(true);
+	});
+
+	test("every verb the gate admits is uppercase, as commentVerb produces", () => {
+		// `commentVerb` uppercases the body's first token before the lookup, so a
+		// lower-case entry here would be unreachable.
+		for (const verb of Object.keys(COMMENT_VERBS)) expect(verb).toBe(verb.toUpperCase());
 	});
 });
 

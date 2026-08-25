@@ -195,6 +195,34 @@ Spawning. Only an architect spawns, and only contract-free helpers that edit fil
 its own checkout and report back. A helper never claims a bead, never commits, and
 never manages worktrees. Every other role spawns nothing.
 `;
+var PROTOCOL_VERBS = [
+  "BLOCKED",
+  "ADVICE",
+  "REPORTED",
+  "REVIEW",
+  "FIX",
+  "CONFLICT",
+  "APPROVE",
+  "MERGED",
+  "DISMISS",
+  "ASK",
+  "NO_WORK"
+];
+var COMMENT_VERBS = {
+  ...Object.fromEntries(PROTOCOL_VERBS.map((verb) => [verb, true])),
+  FAILED: true,
+  LANDED: true,
+  BOUNCED: true,
+  IDLE: true,
+  RECLAIM: true,
+  STALL: true,
+  WARN: true,
+  GOAL: true,
+  BOUNCE: true,
+  NOTE: true,
+  WAITING_HUMAN: true,
+  LOCAL_DECISION: true
+};
 function dispatchContract(repoRoot) {
   if (repoRoot === undefined || repoRoot.length === 0)
     return DISPATCH_CONTRACT;
@@ -867,6 +895,53 @@ async function gateClaimEligibility(ctx, input) {
   return;
 }
 
+// src/gates/comment-verb.ts
+var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+var REDIRECTION = /^\d*(?:>>?|<)/;
+var EXPANSION = /[$`]/;
+function commentBody(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  for (let index = 0;index < invocation.rest.length; index++) {
+    const token = invocation.rest[index];
+    if (next >= operands.length || token !== operands[next])
+      continue;
+    next += 1;
+    if (!BEAD_ID.test(token))
+      continue;
+    const body = invocation.rest[index + 1];
+    if (body === undefined || body.startsWith("-"))
+      return;
+    if (REDIRECTION.test(body))
+      return;
+    return body;
+  }
+  return;
+}
+function gateCommentVerb(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  for (const invocation of bdInvocations(command)) {
+    const grouped = invocation.subcommand === "comments" && invocation.positionals[0] === "add";
+    if (invocation.subcommand !== "comment" && !grouped)
+      continue;
+    const body = commentBody(invocation);
+    if (body === undefined)
+      continue;
+    const verb = commentVerb(body);
+    if (EXPANSION.test(verb) || COMMENT_VERBS[verb] === true)
+      continue;
+    return {
+      block: true,
+      reason: `this comment opens with '${verb}', which is not a protocol verb; lead with one so the bead history reads without narration \u2014 the 11-verb set, a disposition (LANDED, BOUNCED, IDLE, FAILED), or a supervision verb. Free prose belongs after the verb, not instead of it.`
+    };
+  }
+  return;
+}
+
 // src/gates/exit.ts
 import path from "path";
 // src/contracts/architect.json
@@ -1302,7 +1377,7 @@ async function gateExitContract(ctx, input) {
 }
 
 // src/gates/one-claim.ts
-var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+var BEAD_ID2 = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
 function claimedBeadIds(invocation) {
   const operands = invocation.positionals;
   let next = 0;
@@ -1311,7 +1386,7 @@ function claimedBeadIds(invocation) {
   for (const token of invocation.rest) {
     if (next < operands.length && token === operands[next]) {
       next += 1;
-      if (BEAD_ID.test(token) && !run.includes(token))
+      if (BEAD_ID2.test(token) && !run.includes(token))
         run.push(token);
       continue;
     }
@@ -4071,6 +4146,9 @@ function ompOrchestrate(pi) {
         const eligibility = await gateClaimEligibility(ctx, input);
         if (eligibility)
           return eligibility;
+        const verb = gateCommentVerb(ctx, input);
+        if (verb)
+          return verb;
       }
       if (GATED_WRITE_TOOLS[event.toolName] === true) {
         const scope = await gateWorktreeScope(ctx, event.toolName, input);

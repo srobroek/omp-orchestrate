@@ -12,6 +12,7 @@ import { bdList, bdRun, resetReadBudget } from "./bd";
 import { dispatchContract } from "./contract";
 import { gateActorAttribution } from "./gates/actor";
 import { gateClaimEligibility } from "./gates/claim";
+import { gateCommentVerb } from "./gates/comment-verb";
 import { gateExitContract } from "./gates/exit";
 import { gateOneClaim } from "./gates/one-claim";
 import { gateBeadWriteFree } from "./gates/readonly";
@@ -78,6 +79,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;
+
+				// Independent of the claim chain: a comment names no bead to claim, and
+				// the check is one more parse of a command already tokenised above.
+				const verb = gateCommentVerb(ctx, input);
+				if (verb) return verb;
 			}
 
 			if (GATED_WRITE_TOOLS[event.toolName] === true) {
