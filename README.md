@@ -17,19 +17,33 @@ After linking, restart the session. OMP loads a new extension module only at sta
 
 ## Agents
 
-Each agent names one built-in OMP model role and sets no thinking level. The plugin defines no roles of its
-own. Tune the tiers by editing `modelRoles` in your own configuration.
+Each agent names an OMP model role and sets no thinking level, so the tier travels with the role rather
+than the file. Tune them by editing `modelRoles` in your own configuration.
 
 | Agent | Role | Edits code | May spawn |
 | --- | --- | --- | --- |
-| `orc-architect` | `@plan` | yes | the other four, plus `scout` and `sonic` |
-| `orc-implementer` | `@task` | yes | no |
-| `orc-shepherd` | `@task` | no | no |
-| `orc-reviewer` | `@smol` | no | no |
-| `orc-researcher` | `@smol` | no | no |
+| `orc-architect` | `@plan` | yes | the other four, plus eight borrowed helpers |
+| `orc-implementer` | `@task` | yes | `librarian`, `scout`, `operator` |
+| `orc-shepherd` | `@task` | no | nothing |
+| `orc-reviewer` | `@reviewer` | no | nothing |
+| `orc-researcher` | `@smol` | no | nothing |
 
-Only the architect may spawn. It also holds the feature branch, so it is the one agent that outlives a
-single bead.
+Only the architect may spawn a role that claims a bead. A worker may spawn helpers instead. A helper:
+
+- claims no bead
+- makes no commit
+- manages no worktree
+
+The architect holds the feature branch, so it is the one agent that outlives a single bead.
+
+## Required configuration
+
+| Setting | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `modelRoles.reviewer` | model selector | none | `orc-reviewer` names `@reviewer`, which OMP does not ship. Unset, the reviewer runs the session model and shares the family it judges. Point it at another family. |
+| `task.maxRecursionDepth` | number | `2` | A helper runs at depth 3. At `2` no worker can spawn one. Set `3`. |
+
+A run reports either of these as a `WARN settings` notice on its epic.
 
 ## Gates
 

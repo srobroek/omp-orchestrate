@@ -94,8 +94,8 @@ bd info >/dev/null 2>&1 || bd init --stealth --prefix orc
 | `bug` | mid-run defect, linked `discovered-from` its finder |
 | `decision` | architecture decision record. The `adr` skill and `bd lint` already handle these |
 
-Merge beads carry no type of their own. Readers identify them by the labels `pr:merge` +
-`agent:integrator`, never by a type. `merge-request` is a filter alias accepted by
+Merge beads carry no type of their own. Readers identify them by the label `pr:merge` plus
+metadata `role=shepherd`, never by a type. `merge-request` is a filter alias accepted by
 `bd ready -t` and is NOT a creatable type: `bd create -t merge-request` is rejected.
 
 `bd` is internally inconsistent about types. An adopted vocabulary MUST stay inside the
@@ -118,13 +118,17 @@ passed, which is why the review and research queues carry that flag and the othe
 
 | Object | Beads representation |
 |---|---|
-| Run | one **epic** bead. Metadata `run_id` `primary_branch` `base_sha` `artifacts` (abs dir) `origin`, with an optional `swarm` handle |
-| Architect domain | **epic** bead, one architect. Metadata `origin` `artifacts_dir` `worktree` |
+| Run | one **epic** bead. Metadata `run_id` `primary_branch` `base_sha` `artifacts` (abs dir) `origin_actor`, with an optional `swarm` handle |
+| Architect domain | **epic** bead, one architect. Metadata `run_epic` `artifacts_dir` `worktree` |
 | Feature | **feature** bead: one Worktrunk branch, one PR. Metadata `worktree` `branch` `base_sha` |
-| DAG node | **task** bead under its feature, label `orc-node` + one `agent:<role>` label. Metadata `node`, `scope` (JSON array of globs), `execution_kind`, `origin` |
+| DAG node | **task** bead under its feature, label `orc-node`. Metadata `role`, `node`, `scope` (JSON array of globs), `execution_kind`, `origin_actor` |
 | Node dep | `bd dep add <dependent> <dependency>` (`blocks` type), one per edge |
-| Merge bead | labels `pr:merge` + `agent:integrator`, **no parent**. Metadata `repo` `branch` `base_sha` `origin` `integration_owner` |
+| Merge bead | label `pr:merge`, **no parent**. Metadata `role=shepherd` `repo` `branch` `base_sha` `origin_bead` `integration_owner` |
 | Git anchors | stamped per the contract below |
+
+Three distinct keys above, not one key spelled three ways: `origin_actor` an actor handle,
+`run_epic` run membership, `origin_bead` a comment target. `references/lifecycle.md` holds the
+contract, and every reader still accepts a pre-split `origin`.
 
 ```
 EPIC=$(bd create "orchestrate run-<id>" --type epic --silent \
@@ -132,8 +136,8 @@ EPIC=$(bd create "orchestrate run-<id>" --type epic --silent \
 # `bd swarm validate "$EPIC" --json` gates the structure and needs no marker.
 # Only create a marker (`bd swarm create "$EPIC"`, handle -> metadata key `swarm`)
 # when coordinator discovery or an external scheduler needs a durable handle.
-T1=$(bd create "t1: <desc>" --parent "$FEATURE" --labels orc-node,agent:implementer --silent \
-  --metadata '{"node":"t1","scope":["src/auth/**"],"execution_kind":"git"}')
+T1=$(bd create "t1: <desc>" --parent "$FEATURE" --labels orc-node --silent \
+  --metadata '{"role":"implementer","node":"t1","scope":["src/auth/**"],"execution_kind":"git"}')
 bd dep add "$T3" "$T1"        # t3 depends on t1
 bd dep cycles                 # must stay clean
 ```
@@ -155,7 +159,7 @@ bd update <bead> --status <status>                    # only where status change
 | Enum state | Bead status | `state:` label | Set by / how |
 |---|---|---|---|
 | `pending` | `open` | `state:pending` | creator at `bd create` (lead for epics, architect for features and tasks) |
-| `ready` | `open` | -- (derived, never stored) | `bd ready --parent <epic> --label agent:<role> --unassigned` |
+| `ready` | `open` | -- (derived, never stored) | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` |
 | `working` | `in_progress` | `state:working` | the claimant itself: `bd ready … --claim` (atomic, first-wins, sets assignee) then `set-state` |
 | `reported` | `in_progress` | `state:reported` | worker, after its commits are captured |
 | `in_review` | `in_progress` | `state:in_review` | architect, when it creates the review wisps |
@@ -181,10 +185,11 @@ Semantics that fall out of the status column:
   `bd ready`. Stranded downstream = `bd dep tree <bead>`.
 - **`bd ready` excludes** gated beads, `in_progress`, `blocked`, `deferred`, and (by
   default) ephemeral beads. The ready front is therefore dep-correct by construction.
-- **Review handoff is one enforced field.** The exit gate evaluates `label ~
-  ^agent:reviewer$` on the reporting bead, and that label is the whole enforced handoff. A
-  cleared assignee and `status=in_progress` are separate contract checks, evaluated
-  independently -- never as one joined condition.
+- **Review handoff is one enforced field, and it is a label.** The exit gate evaluates
+  `label ~ ^agent:reviewer$` on the reporting bead, and that label is the whole enforced
+  handoff. It signals "ready for the next role"; it does not route. A cleared assignee and
+  `status=in_progress` are separate contract checks, evaluated independently -- never as one
+  joined condition.
 
 ## Git-anchor contract
 
@@ -204,7 +209,7 @@ Anchors are stamped so any later session can find where work physically lives:
 | When | Who | Stamp |
 |---|---|---|
 | Feature worktree prepared | architect | `wt switch --create <branch> --base <base> --no-cd --format=json`, stamp the Worktrunk var `bead=<feature-id>` on the branch (`wt config state vars set bead <feature-id> --branch <branch>`), stamp the feature's `branch`, canonical `worktree`, `base_sha` |
-| Task dispatched | architect | nothing to provision: the runtime creates the isolated copy. Stamp `scope`, `execution_kind`, `origin` on the task bead |
+| Task dispatched | architect | nothing to provision: the runtime creates the isolated copy. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
 | Worker reported | worker | `metadata.branch=omp/task/<id>` plus `push=<commit sha>` (the captured head) |
 | Branch reclaimed after a child died | extension (reaper) | `recovered_branch=omp/task/<id>` |
 | Branch proven integrated | extension (reaper) | `integrated=true`, then the branch is deleted |
@@ -223,21 +228,44 @@ merge anchors survive checkout teardown.
   against that value.
 - Clear the pointer only after the claim is released and the checkout is reclaimed.
 
-Choosing between a label and a metadata key is a cardinality rule, not a style preference.
-Both filter on `bd ready` and both compose with `--claim`, so filterability does not
-distinguish them.
+Choosing between a label and a metadata key is a cardinality rule plus an authority rule,
+not a style preference. Both filter on `bd ready` and both compose with `--claim`, so
+filterability does not distinguish them.
 
 | Carrier | Cardinality | Carries |
 |---|---|---|
-| Label | multi-value. A bead holds every label added | multi-value routing: `agent:`, `pr:`, `state:`, `kind:`, `lang:`, `evidence:` |
-| Metadata | single-value per key. `--metadata` merges per key on write, so stamps never clobber `node` or `scope` | single-value enforcement: `worktree`, `branch`, `scope`, `base_sha`, `actor`, `origin`, `merge_sha`, `stage` |
+| Label | multi-value. A bead holds every label added | multi-value classification: `pr:`, `state:`, `kind:`, `lang:`, `evidence:` |
+| Metadata | single-value per key. `--metadata` merges per key on write, so stamps never clobber `node` or `scope` | single-value enforcement: `role`, `worktree`, `branch`, `scope`, `base_sha`, `actor`, `origin_actor`, `origin_bead`, `run_epic`, `merge_sha`, `stage` |
 
-A bead can hold `agent:implementer` AND `agent:reviewer` at once. A stage pipeline built on
-labels accumulated `stage:implement` + `stage:review` + `stage:fix` and sat in three queues
-simultaneously. Single-value keys therefore MUST be metadata: `worktree` as a label would
-mean two confinement boundaries and a write guard that cannot choose. Worktree resolution is
-also "own `metadata.worktree` else inherit from parent", and that walk reads exactly one
-value per bead, so two worktree labels make it ambiguous at every level.
+Cardinality first. A label set accumulates: a stage pipeline built on labels collected
+`stage:implement` + `stage:review` + `stage:fix` and sat in three queues simultaneously.
+Single-value keys therefore MUST be metadata: `worktree` as a label would mean two
+confinement boundaries and a write guard that cannot choose. Worktree resolution is also
+"own `metadata.worktree` else inherit from parent", and that walk reads exactly one value
+per bead, so two worktree labels make it ambiguous at every level.
+
+Authority second. The route is `metadata.role` rather than the old `agent:<role>` label
+because a metadata write can be refused per role:
+
+- the write seam admits `--metadata`, `--set-metadata` and `--unset-metadata` against `role`
+  only from the architect that decomposed the epic.
+- a role contract can deny keys outright through `deny_metadata`.
+- nothing equivalent exists for labels. There is no `deny_labels` and no seam that refuses a
+  label write, so under label routing any role could re-point any bead.
+
+That hole was exercised for real: a worker-writable label let a dead child label its way out
+of reclamation. A route deciding who may claim work has to sit on the carrier that can say
+no.
+
+Two consequences follow, and they are not symmetric. `bd create` is exempt, so any role may
+file NEW work already routed -- an unrouted bug bead reaches no queue and strands. And the
+handoff a worker writes stays the `agent:reviewer` label precisely because it is not a
+route: the worker signals the next role without touching who may claim the bead.
+
+`pr:merge` and `kind:incidental` stay labels for the same reason as that signal. They
+classify, nothing claims on them, and no role needs to be refused the right to write them.
+Labels remain legal as advisory annotation. They simply stopped being authoritative for
+routing.
 
 Flag forms: `bd update --metadata` takes a JSON string or `@file.json`, and
 `--set-metadata key=value` is the repeatable form. Labels use `--add-label`,
@@ -252,7 +280,7 @@ conflicts with everything). A claim that overlaps a live one is refused with bot
 named.
 
 ```
-bd ready --parent <epic> --label agent:<role> --unassigned --claim --json
+bd ready --parent <epic> --metadata-field role=<role> --unassigned --claim --json
 ```
 
 That is one command, not a list-then-pick: the claim is atomic and first-wins, and an actor
@@ -266,9 +294,10 @@ real mechanism.
 
 ## Events: audit records + comments
 
-The acting agent records every material protocol verb (`blocked advice reported review fix
-conflict approve merged dismiss ask` + `failed`/`note`) as two writes, with identity from
-`BEADS_ACTOR=<actor>`:
+`reported blocked failed review advice landed bounced conflict idle no_work ask note
+local_decision` -- the 13 verbs an acting agent may write. `src/contracts/grammar.json` leads
+the set; the other five are the extension's voice. The acting agent records each material
+verb as two writes, with identity from `BEADS_ACTOR=<actor>`:
 
 ```
 bd audit record --actor <actor> --kind tool_call --tool-name orc.<verb> \
@@ -339,21 +368,27 @@ strand a third way: the bead is open and unassigned, yet missing an anchor the c
 queue matches on. Before close-out, run this query.
 
 ```bash
-bd list --label-any pr:merge,agent:integrator --status open --json \
+{ bd list --label pr:merge --status open --json
+  bd list --metadata-field role=shepherd --status open --json; } \
   | jq -r '.[] | select((.labels|index("pr:merge")|not)
-      or (.labels|index("agent:integrator")|not)
-      or ([.metadata.repo,.metadata.origin,.metadata.branch]|any(.==null))) | .id'
+      or (.metadata.role != "shepherd")
+      or ([.metadata.repo,(.metadata.origin_bead // .metadata.origin),.metadata.branch]|any(.==null))) | .id' \
+  | sort -u
 ```
+
+The `//` fallback accepts a pre-split merge bead, which carries `origin` where a new one
+carries `origin_bead`.
 
 Empty output passes the gate. Any id listed is drainable by nobody: the cross-run queue
 finds a merge bead only when every anchor is present. A run on bd 1.2.2 made merge beads
-holding `agent:integrator` alone, so `bd list --label pr:merge` returned nothing against
-beads that existed. Presence checks pass that run; label checks do not.
+carrying one marker alone, so a single-filter listing returned nothing against beads that
+existed. That is why the net unions both markers and then re-checks each one in `jq`: a
+filter on the marker a bead is missing can never find it.
 
 ## SpecKit / external frameworks
 
 A poured SpecKit molecule already IS a dependency-aware run DAG. When one drives the work,
 its implement-step children ARE the node beads. Never pour a second molecule and never build
-a second graph: add the `orc-node` label, one `agent:<role>` routing label, and `scope`
-metadata to the existing step beads. The claim rule, the state mapping, and the anchor
-contract then apply unchanged.
+a second graph: add the `orc-node` label, stamp one `role=<role>` routing key, and stamp
+`scope` metadata on the existing step beads. The claim rule, the state mapping, and the
+anchor contract then apply unchanged.
