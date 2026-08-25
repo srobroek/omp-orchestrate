@@ -1,0 +1,36 @@
+{
+ "note": "The external surface that agents/orc-*.md depends on. test/agents.test.ts asserts this file and the agent definitions agree in both directions, so neither can drift alone. A name added here is a claim that a run needs it. A name here that no agent references fails the suite.",
+ "modelRoles": {
+  "note": "Model roles beyond OMP's built-in MODEL_ROLE_IDS that a `model:` alias may name. An alias OMP cannot resolve returns undefined with no warning, then falls back to the session default, so a name here is a run prerequisite. `DECLARED_MODEL_ROLES` in src/watchers.ts carries the same list and announces an absent one through the settings preflight; the suite asserts the two lists agree so neither can drift alone.",
+  "roles": [
+   "reviewer"
+  ]
+ },
+ "spawnRoles": {
+  "note": "The only roles that may hold a `spawns:` allowlist. Every other role declares no key at all. The executor normalises an unset value to \"none\" before the spawn policy runs, so an absent key is the denial. An empty key would read as a grant and still deny.",
+  "roles": [
+   "architect",
+   "implementer",
+   "reviewer"
+  ]
+ },
+ "pluginAgents": {
+  "note": "Spawn-allowlist names that neither a bundled OMP agent nor this repo provides, keyed by the package that must be installed for the grant to be spawnable. Two install layouts are accepted: <plugins>/node_modules/<package>, and the marketplace cache's <marketplace>___<plugin>___<version>.",
+  "byPackage": {
+   "@srobroek/build": [
+    "operator"
+   ],
+   "@srobroek/delivery": [
+    "pr-reviewer"
+   ],
+   "@srobroek/design": [
+    "ui-ux-specialist"
+   ],
+   "@srobroek/quality": [
+    "adversarial-challenger",
+    "docs-guard",
+    "lint-guard"
+   ]
+  }
+ }
+}
