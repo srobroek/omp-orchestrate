@@ -737,7 +737,13 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 	// The database check is independent of the settings: isolation working correctly
 	// is exactly what splits the database, so a run with a perfect settings block can
 	// still lose every claim.
-	const isolating = observed["task.isolation.mode"] !== "none";
+	//
+	// An unreadable mode is not evidence of isolation. `observed` holds only the keys
+	// that answered, so testing `!== "none"` would read a missing key as "isolating"
+	// and warn about a split database on a run that may have no isolation at all --
+	// the opposite of this function's rule of warning only about what it can prove.
+	const mode = observed["task.isolation.mode"];
+	const isolating = typeof mode === "string" && mode !== "none";
 	if (isolating && !(await sharedBeadsDatabase(cwd))) {
 		lines.push(
 			"beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Set BEADS_DOLT_SHARED_SERVER=1 (or `dolt.shared-server: true`), or require every agent to pass `bd -C " +

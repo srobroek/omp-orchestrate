@@ -41,8 +41,18 @@ handler degrades to fail-open instead of blocking every tool.
 | G1 | `bash` | bead writes from a session under no contract, by imposing `BD_READONLY=1` |
 | G2 | `bash`, `edit`, `write` | edits outside the worktree that the claimed bead names |
 | G3 | `bash` | `git worktree` and `gh pr checkout`, which bypass Worktrunk |
-| G4 | `yield` | exiting before the claimed bead's role contract is met |
+| G4 | `yield` | exiting before the claimed bead's role contract is met. Also a role-marked worker that claimed nothing, whose exit reaches no bead and no branch. That second refusal fires once, so a revived worker is never trapped |
 | G5 | `bash` | claiming a bead that routes to another role |
+
+## Rules
+
+Seven TTSR rules in `rules/` catch protocol slips in tool arguments. They fire before a command
+runs. Each one is advisory or tool-only, never a security boundary.
+
+The host's regex engine evaluates these conditions, so a pattern Python accepts proves nothing.
+After editing a rule, run `sh scripts/validate-rules.sh`. It asserts one firing case and one
+quiet case per rule through `omp ttsr test`. It needs an installed `omp`, so it stays a local
+gate rather than a CI step.
 
 ## Commands
 
