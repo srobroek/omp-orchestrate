@@ -10,6 +10,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
 import { dispatchContract } from "./contract";
+import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { gateExitContract } from "./gates/exit";
 import { gateBeadWriteFree } from "./gates/readonly";
@@ -63,6 +64,14 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				const ownership = gateWorktrunkOwnership(input);
 				if (ownership) return ownership;
 
+				// G6 before G5: it is a parse plus one marker read where G5 shells out to
+				// `bd show` and `bd list`, and a call refused for its pin must not first be
+				// recorded as a claim -- G2 would then trust a claim that never happened. It
+				// takes `pi` because three of its four findings are notices rather than
+				// refusals, and a notice leaves through `sendMessage`, not the return value.
+				const discipline = await gateBdDiscipline(pi, ctx, input);
+				if (discipline) return discipline;
+
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;
 			}
@@ -102,6 +111,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		if (sessionRole(pi) === "lead") return;
 		const marker = await readActiveRun(ctx.cwd).catch(() => null);
+		// No run, no contract. Measured without this guard: a plain subagent spawned in
+		// this repository received the protocol, obeyed it over its own brief, pulled an
+		// empty queue for a role that does not exist, and yielded NO_WORK -- the injected
+		// text outranked the task it was actually given.
+		if (marker === null) return;
 		pi.sendMessage(
 			{
 				customType: "com.srobroek.omp-orchestrate.contract",
@@ -136,12 +150,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("orchestrate-roster", {
-		description: "Pull-queue depth for each routing label",
+		description: "Pull-queue depth for each role",
 		handler: async (_args, ctx) => {
 			resetReadBudget();
 			const lines: string[] = [];
 			for (const role of ["architect", "implementer", "reviewer", "researcher", "shepherd"]) {
-				const ready = await bdList(["ready", "--label", `agent:${role}`, "--unassigned", "--json"]);
+				const ready = await bdList(["ready", "--metadata-field", `role=${role}`, "--unassigned", "--json"]);
 				lines.push(`${role}: ${ready.length} ready`);
 			}
 			ctx.ui.notify(lines.join("\n"), "info");
