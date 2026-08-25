@@ -97,22 +97,128 @@ export function isBeadWriteFree(pi: ExtensionAPI, ctx: ExtensionContext): boolea
 	return sessionRole(pi) === "worker" && orcRole(ctx) === undefined;
 }
 
+/** Which carrier a bead's routing role was read from. */
+export type RoleCarrier = "metadata" | "legacy-label";
+
+/** A bead's routing role, the carrier it came from, and that carrier as written. */
+export interface BeadRouting {
+	role: OrcRole;
+	from: RoleCarrier;
+	/**
+	 * The carrier verbatim -- `role=implementer`, or the label `agent:integrator`.
+	 *
+	 * Quoted back in a refusal so the message names what is actually on the bead. A
+	 * spelling derived from the resolved role would lie for every legacy suffix that is
+	 * not its own role's name.
+	 */
+	spelling: string;
+}
+
+/** A bead's routing fields. Structural on purpose, so this module imports no bd types. */
+export interface RoutedBead {
+	labels?: readonly string[];
+	metadata?: Record<string, unknown> | string;
+}
+
+/** The metadata key that routes a bead. The only authoritative carrier. */
+export const ROUTING_KEY = "role";
+
+const LEGACY_ROLE_LABEL = "agent:";
+
 /**
- * The role named by a bead's labels, or `undefined` when it routes to none.
+ * Legacy `agent:<suffix>` suffixes that name a role, mapped to the role they name.
  *
- * Used by the claim-eligibility gate to compare a bead's routing against the
- * claiming session's declared role. Callers build the label with
- * `` `agent:${role}` `` directly.
+ * Read only when a bead carries no `metadata.role`, so a run already in flight keeps
+ * routing across the move. A bead filed after the move never reaches this table.
+ *
+ * `integrator` is here because it named no role at all, and that was a live defect
+ * rather than a spelling worth preserving: the old resolver returned `undefined` for it,
+ * so the claim gate let any role take a merge bead named by id, while the queue-filter
+ * comparison refused a shepherd pulling `--label agent:integrator` because the raw token
+ * never equalled its declared `shepherd`. Unpullable one way and unguarded the other.
+ * Mapping it closes both for the beads that still carry it, without making `integrator`
+ * a value anything writes.
  */
-export function roleFromLabels(labels: readonly string[] | undefined): OrcRole | undefined {
-	for (const label of labels ?? []) {
-		if (!label.startsWith("agent:")) continue;
-		const candidate = label.slice("agent:".length);
-		// A bead label is agent-written text -- `bd label add <bead> agent:<name>` -- and
-		// nothing constrains its spelling the way `ROLE_MARKER` constrains a prompt marker.
-		// This is therefore the reachable half of the hazard `orcRole` describes, and for
-		// the whole inherited surface rather than the lowercase names alone.
-		if (ORC_ROLES[candidate] === true) return candidate as OrcRole;
+const LEGACY_LABEL_ROLES: Record<string, OrcRole> = {
+	architect: "architect",
+	implementer: "implementer",
+	reviewer: "reviewer",
+	researcher: "researcher",
+	shepherd: "shepherd",
+	integrator: "shepherd",
+};
+
+/**
+ * The role a legacy `agent:<suffix>` label names, or `undefined` for any other label.
+ *
+ * Shared by the bead resolver and the claim gate's queue-filter check, so one legacy
+ * spelling cannot mean two different things in the two places that read it.
+ */
+export function legacyRoleFromLabel(label: string): OrcRole | undefined {
+	if (!label.startsWith(LEGACY_ROLE_LABEL)) return undefined;
+	const suffix = label.slice(LEGACY_ROLE_LABEL.length);
+	// `Object.hasOwn`, not a bare index: a bead label is agent-written text --
+	// `bd label add <bead> agent:<name>` -- and nothing constrains its spelling the way
+	// `ROLE_MARKER` constrains a prompt marker. Under a bare index `agent:constructor`
+	// resolves through `Object.prototype` and yields a truthy Function, which defeated
+	// every `?? generic` fallback downstream and let a dead child label its way out of
+	// reclamation.
+	return Object.hasOwn(LEGACY_LABEL_ROLES, suffix) ? LEGACY_LABEL_ROLES[suffix] : undefined;
+}
+
+/**
+ * `metadata.role` as written, or `undefined` when absent.
+ *
+ * Tolerates the JSON-string form some `bd` subcommands emit for the whole map, because
+ * routing must resolve identically whichever shape the read handed back.
+ */
+function routingValue(metadata: Record<string, unknown> | string | undefined): string | undefined {
+	let record: Record<string, unknown>;
+	if (typeof metadata === "string") {
+		try {
+			const parsed: unknown = JSON.parse(metadata);
+			if (parsed === null || typeof parsed !== "object") return undefined;
+			record = parsed as Record<string, unknown>;
+		} catch {
+			return undefined;
+		}
+	} else if (metadata === undefined || metadata === null) {
+		return undefined;
+	} else {
+		record = metadata;
+	}
+	// Own-property test for the same reason as the label carrier: this map arrives from
+	// `JSON.parse`, so it inherits `Object.prototype`, and a bead carrying no routing
+	// stamp must read as unrouted rather than as whatever the prototype holds.
+	if (!Object.hasOwn(record, ROUTING_KEY)) return undefined;
+	const value = record[ROUTING_KEY];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The role a bead routes to, or `undefined` when it routes to none.
+ *
+ * `metadata.role` is authoritative and wins outright; a legacy `agent:<role>` label is
+ * read only when the stamp is absent. Metadata is the carrier because it is the only one
+ * a role contract can refuse: `authority.deny_metadata` exists, there is no
+ * `deny_labels`, and no presence test on a label could enforce one. Under the old scheme
+ * any role could relabel any bead and re-point the queue it is pulled from.
+ *
+ * A bead legitimately carries `metadata.role=implementer` and the label `agent:reviewer`
+ * at once after a handoff. That is not a conflict: the label is the ready-for-review
+ * signal and it routes nothing.
+ */
+export function beadRouting(bead: RoutedBead | null | undefined): BeadRouting | undefined {
+	const declared = routingValue(bead?.metadata);
+	// `=== true` on an object literal, and the metadata carrier is deliberately strict to
+	// the five real roles: `integrator` is a legacy label suffix, never a stamped value.
+	if (declared !== undefined && ORC_ROLES[declared] === true) {
+		return { role: declared as OrcRole, from: "metadata", spelling: `${ROUTING_KEY}=${declared}` };
+	}
+
+	for (const label of bead?.labels ?? []) {
+		const role = legacyRoleFromLabel(label);
+		if (role !== undefined) return { role, from: "legacy-label", spelling: label };
 	}
 	return undefined;
 }

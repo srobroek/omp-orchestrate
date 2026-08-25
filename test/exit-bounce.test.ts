@@ -240,6 +240,44 @@ describe("G4 unclaimed exit", () => {
 		expect(await gateExitContract(CTX, { result: { data: "NO_WORK: implementer queue is empty" } })).toBeUndefined();
 	});
 
+	/**
+	 * The other honest claimless exit. The pull hands the loser of a simultaneous claim
+	 * a Dolt serialization failure and nothing else, even with a second bead still
+	 * unclaimed -- so this worker's queue was not empty and `NO_WORK` would be false.
+	 */
+	test.each([
+		["the Dolt error", "dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts"],
+		["the SQL state alone", "claim lost after 3 retries at 2s/5s/10s, last error 40001"],
+		["the prose signature", "BLOCKED: three pulls lost, the last a serialization failure"],
+	])("a contention exit quoting %s is allowed", async (_label, quoted) => {
+		expect(await gateExitContract(CTX, { result: { data: quoted } })).toBeUndefined();
+		// No bead, so nothing to mutate either way.
+		expect(issued).toEqual([]);
+	});
+
+	// Otherwise the claim is optional: any worker skips it by asserting a race it never
+	// ran. The quoted error is the one part of the exit only a real pull produces.
+	test.each(["BLOCKED", "BLOCKED: could not claim anything", "BLOCKED: contention on the queue, giving up"])(
+		"a bare BLOCKED carrying no error is still refused (%s)",
+		async data => {
+			expect((await gateExitContract(CTX, { result: { data } }))?.block).toBe(true);
+			expect(issued).toEqual([]);
+		},
+	);
+
+	test("the refusal names both claimless exits and never sends a lost race to NO_WORK", async () => {
+		const reason = (await gateExitContract(CTX, { result: { data: "done" } }))?.reason ?? "";
+
+		// Empty queue -- NO_WORK. Lost race -- retry, then quote the error.
+		expect(reason).toContain("NO_WORK");
+		expect(reason).toContain("Error 1213");
+		expect(reason).toContain("serialization failure");
+		expect(reason).toContain("Never report NO_WORK for a race you lost");
+		// The superseded advice, pinned: it sent the loser of a race to report an empty
+		// queue that was not empty.
+		expect(reason).not.toContain("report NO_WORK and yield");
+	});
+
 	test("a contract-free session is not asked to claim anything", async () => {
 		// No ORC-ROLE marker: an architect helper or a bundled spawn, neither of
 		// which pulls work, so insisting on a claim would break both.

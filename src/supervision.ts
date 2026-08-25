@@ -27,7 +27,7 @@ import researcher from "./contracts/researcher.json";
 import reviewer from "./contracts/reviewer.json";
 import shepherd from "./contracts/shepherd.json";
 import { applies, type Evidence, resourceKind, satisfies } from "./gates/exit";
-import { roleFromLabels } from "./identity";
+import { beadRouting } from "./identity";
 
 /** The `task:subagent:lifecycle` fields this module reads. */
 export interface ChildLifecycle {
@@ -210,7 +210,14 @@ async function reapBead(bead: BdBead, child: ChildLifecycle, branch: string | un
 	}
 
 	const why = failures.length > 0 ? failures.join(", ") : "claim still held";
-	await reclaim(bead, `RECLAIM child ${child.id} exited without completing: ${why}`, branch);
+	// Provenance rides the RECLAIM comment, because bd's comment history is the run's
+	// durable audit trail and this reclamation judged the bead against a contract chosen
+	// by a legacy label. A reader needs to know the routing carrier that decided which
+	// contract was applied, and needs it where the decision is recorded.
+	const routing = beadRouting(bead);
+	const carrier =
+		routing?.from === "legacy-label" ? ` (contract from legacy ${routing.spelling}; stamp metadata.role)` : "";
+	await reclaim(bead, `RECLAIM child ${child.id} exited without completing: ${why}${carrier}`, branch);
 	return { bead: bead.id, case: "incomplete", failures };
 }
 
@@ -333,15 +340,21 @@ const CONTRACTS: Record<string, RoleContract> = {
  * deliberately not re-checked — a role that wrote a field it does not own has not
  * failed to *finish*, and correcting that is the shepherd's duty, not a reclamation.
  *
- * The role comes from the bead's routing label rather than a session, because the
- * session whose contract is in question no longer exists. That label is worker-writable,
- * so the lookup tests own properties: a bare index resolves `agent:constructor` through
- * `Object.prototype`, and the truthy Function it returns defeats the `?? generic`
- * fallback, leaving `contract.completion` undefined and every check silently skipped.
- * A dead child could therefore label its way out of being reclaimed.
+ * The role comes from the bead's routing rather than from a session, because the session
+ * whose contract is in question no longer exists. `metadata.role` is authoritative and a
+ * legacy `agent:<role>` label is the fallback, which fixes a misjudgement as well as
+ * closing a hole: a handed-off node carries `agent:reviewer` alongside its own routing, so
+ * a label-first lookup judged a finished implementer node against the REVIEWER contract.
+ *
+ * `Object.hasOwn` stays even though `beadRouting` now returns a closed union. Under a bare
+ * index the old label lookup resolved `agent:constructor` through `Object.prototype`, and
+ * the truthy Function it returned defeated the `?? generic` fallback, leaving
+ * `contract.completion` undefined and every check silently skipped -- a dead child could
+ * label its way out of being reclaimed. The fallback is what makes every claim judged, so
+ * it must hold on this line alone.
  */
 async function contractFailures(bead: BdBead): Promise<string[]> {
-	const role = roleFromLabels(bead.labels) ?? "generic";
+	const role = beadRouting(bead)?.role ?? "generic";
 	const contract = Object.hasOwn(CONTRACTS, role) ? (CONTRACTS[role] ?? generic) : generic;
 	const evidence = await collectEvidence(bead);
 	const status = (bead.status ?? "").toLowerCase();

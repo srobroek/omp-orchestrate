@@ -1,7 +1,7 @@
 {
   "agent": "*",
   "tier": "generic-fallback",
-  "_comment": "Applied by the matcher-less SubagentStop hook to ANY agent that holds a claim but has no per-agent rules file (unlisted/ad-hoc agents, T3 conditional binding). Minimal contract: report before stopping, never close a node you didn't own, failure is a valid exit. This is the claim<->contract net for the whole fleet.",
+  "_comment": "Applied by the matcher-less SubagentStop hook to ANY agent that holds a claim but has no per-agent rules file (unlisted/ad-hoc agents, T3 conditional binding). Minimal contract: report before stopping, never close a node you didn't own, failure is a valid exit. This is the claim<->contract net for the whole fleet. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. An unlisted role reaches this file and is therefore denied routing writes, which is the fail-closed direction.",
   "completion": [
     { "check": "reported", "require": "comment.verb in [REPORTED]" }
   ],

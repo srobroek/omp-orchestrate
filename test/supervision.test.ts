@@ -72,7 +72,7 @@ function bead(fields: Record<string, unknown> = {}): BdBead {
 		id: "orc-1",
 		status: "in_progress",
 		labels: ["agent:implementer"],
-		metadata: { actor: "impl-7" },
+		metadata: { actor: "impl-7", role: "implementer" },
 		...fields,
 	} as BdBead;
 }
@@ -190,7 +190,11 @@ describe("reapChild — semantic incompletion", () => {
 		// Delivered nothing: no REPORTED comment, and a git-kind bead owes a branch,
 		// a push, a reviewer hand-off and a released claim.
 		world.stamped = [
-			bead({ status: "open", assignee: null, metadata: { actor: "impl-7", worktree: "/wt", execution_kind: "git" } }),
+			bead({
+				status: "open",
+				assignee: null,
+				metadata: { actor: "impl-7", role: "implementer", worktree: "/wt", execution_kind: "git" },
+			}),
 		];
 
 		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
@@ -215,6 +219,31 @@ describe("reapChild — semantic incompletion", () => {
 
 		expect(outcome.reaped).toEqual([]);
 		expect(ran.filter(argv => argv[0] === "comment" || argv[0] === "update")).toEqual([]);
+	});
+
+	test("a bead still routed by a legacy label says so in the reclamation", async () => {
+		// The reaper picks the contract from the bead, because the session that held it is
+		// gone. When a legacy label made that choice, the RECLAIM comment records it: bd's
+		// comment history is the run's durable audit trail, and the note names the bead
+		// that still needs its stamp.
+		world.claimed = [bead({ assignee: "impl-7", metadata: { actor: "impl-7" } })];
+		world.comments["orc-1"] = ["REPORTED shipped it"];
+
+		await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+
+		expect(comment()).toBe(
+			"RECLAIM child impl-7 exited without completing: claim still held " +
+				"(contract from legacy agent:implementer; stamp metadata.role)",
+		);
+	});
+
+	test("a metadata-routed bead adds no provenance note", async () => {
+		world.claimed = [bead({ assignee: "impl-7" })];
+		world.comments["orc-1"] = ["REPORTED shipped it"];
+
+		await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+
+		expect(comment()).toBe("RECLAIM child impl-7 exited without completing: claim still held");
 	});
 });
 

@@ -1,7 +1,7 @@
 {
   "agent": "architect",
   "tier": "T1",
-  "_comment": "Single source of truth for the SubagentStop evaluator AND the generated 'Your bead contract' block in the agent definition (compile-time). Do not hand-edit the generated block. Lifecycle phases (reported/in_review/approved/...) are NOT bd statuses; they derive from status + labels + gates + review-wisp closure. A specialist never CLOSES its own node, so `closed` is the forbidden built-in status.",
+  "_comment": "Single source of truth for the SubagentStop evaluator AND the generated 'Your bead contract' block in the agent definition (compile-time). Do not hand-edit the generated block. Lifecycle phases (reported/in_review/approved/...) are NOT bd statuses; they derive from status + labels + gates + review-wisp closure. A specialist never CLOSES its own node, so `closed` is the forbidden built-in status. ROUTING: the architect is the one role that MAY write metadata.role, because it decomposes its epic and routes each node. deny_metadata cannot express that, being a presence test on the claimed bead rather than an authorship test. G5 grants it at the write seam (ROUTING_WRITERS in src/gates/claim.ts). The `handoff` check stays on the `agent:reviewer` LABEL, which is a ready-for-review signal and routes nothing now that metadata.role is authoritative.",
   "completion": [
     {
       "check": "branch",
