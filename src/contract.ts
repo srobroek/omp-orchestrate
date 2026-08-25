@@ -60,6 +60,68 @@ never manages worktrees. Every other role spawns nothing.
 `;
 
 /**
+ * The 11 verbs the contract above names, in its own order.
+ *
+ * Kept beside the text that declares them so the two cannot drift; the parity test
+ * asserts every one of them still appears in `DISPATCH_CONTRACT`.
+ */
+export const PROTOCOL_VERBS = [
+	"BLOCKED",
+	"ADVICE",
+	"REPORTED",
+	"REVIEW",
+	"FIX",
+	"CONFLICT",
+	"APPROVE",
+	"MERGED",
+	"DISMISS",
+	"ASK",
+	"NO_WORK",
+] as const;
+
+/**
+ * Every verb a bead comment may lead with: the 11 above, the dispositions and escapes
+ * the role contracts test for, the verbs this extension writes itself, and the three
+ * the skill defines for a worker.
+ *
+ * Assembled from the repository rather than from the `orc-comment-verbs` regex this
+ * table replaces, and each entry has a use site:
+ *
+ *  - `FAILED` — the escape clause of every role contract, `comment.verb in [FAILED,
+ *    BLOCKED]` (`src/contracts/implementer.json:52` and its five siblings).
+ *  - `LANDED`, `BOUNCED`, `IDLE` — the shepherd's disposition
+ *    (`src/contracts/shepherd.json:6`).
+ *  - `RECLAIM` — the reaper's comment when a child dies still holding a bead
+ *    (`src/supervision.ts:201`).
+ *  - `STALL`, `WARN`, `GOAL` — the watchers' comments (`src/watchers.ts:206`, `:506`,
+ *    `:560`).
+ *  - `BOUNCE` — written when the exit contract's bounce budget is spent
+ *    (`src/gates/exit.ts:305`).
+ *  - `NOTE`, `WAITING_HUMAN`, `LOCAL_DECISION` — the skill's own comment contracts
+ *    (`skills/orchestrate/references/lifecycle.md:343`, `:226`, and
+ *    `references/beads-store.md:44`).
+ *
+ * The regex also admitted `BRIEF`, which nothing in this repository defines or writes.
+ * It is dropped rather than carried: a verb with no use site cannot be the reason a
+ * comment is accepted.
+ */
+export const COMMENT_VERBS: Record<string, true> = {
+	...Object.fromEntries(PROTOCOL_VERBS.map(verb => [verb, true])),
+	FAILED: true,
+	LANDED: true,
+	BOUNCED: true,
+	IDLE: true,
+	RECLAIM: true,
+	STALL: true,
+	WARN: true,
+	GOAL: true,
+	BOUNCE: true,
+	NOTE: true,
+	WAITING_HUMAN: true,
+	LOCAL_DECISION: true,
+};
+
+/**
  * The contract for one worker, with the run repository substituted in.
  *
  * The placeholder survives when the path is unknown -- a marker written before this

@@ -195,21 +195,38 @@ Spawning. Only an architect spawns, and only contract-free helpers that edit fil
 its own checkout and report back. A helper never claims a bead, never commits, and
 never manages worktrees. Every other role spawns nothing.
 `;
+var PROTOCOL_VERBS = [
+  "BLOCKED",
+  "ADVICE",
+  "REPORTED",
+  "REVIEW",
+  "FIX",
+  "CONFLICT",
+  "APPROVE",
+  "MERGED",
+  "DISMISS",
+  "ASK",
+  "NO_WORK"
+];
+var COMMENT_VERBS = {
+  ...Object.fromEntries(PROTOCOL_VERBS.map((verb) => [verb, true])),
+  FAILED: true,
+  LANDED: true,
+  BOUNCED: true,
+  IDLE: true,
+  RECLAIM: true,
+  STALL: true,
+  WARN: true,
+  GOAL: true,
+  BOUNCE: true,
+  NOTE: true,
+  WAITING_HUMAN: true,
+  LOCAL_DECISION: true
+};
 function dispatchContract(repoRoot) {
   if (repoRoot === undefined || repoRoot.length === 0)
     return DISPATCH_CONTRACT;
   return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
-}
-
-// src/claim-state.ts
-var observed;
-function recordClaim(observation) {
-  if (observation.actor.length === 0 || observation.beadIds.length === 0)
-    return;
-  observed = observation;
-}
-function observedClaim() {
-  return observed;
 }
 
 // src/identity.ts
@@ -242,132 +259,6 @@ function roleFromLabels(labels) {
       return candidate;
   }
   return;
-}
-
-// src/scope.ts
-function compile(pattern) {
-  const steps = [];
-  for (let index = 0;index < pattern.length; index++) {
-    const char = pattern[index];
-    if (char === "*") {
-      if (steps[steps.length - 1]?.kind !== "star")
-        steps.push({ kind: "star" });
-      continue;
-    }
-    if (char === "?") {
-      steps.push({ kind: "any" });
-      continue;
-    }
-    if (char !== "[") {
-      steps.push({ kind: "literal", char });
-      continue;
-    }
-    const close = pattern.indexOf("]", index + 1);
-    if (close === -1) {
-      steps.push({ kind: "literal", char });
-      continue;
-    }
-    const group = pattern.slice(index + 1, close);
-    index = close;
-    const body = group.startsWith("!") ? `^${group.slice(1)}` : group;
-    try {
-      steps.push({ kind: "class", member: new RegExp(`^[${body}]$`, "s") });
-    } catch {
-      return null;
-    }
-  }
-  return steps;
-}
-function matchSteps(text, steps) {
-  let at = 0;
-  let step = 0;
-  let lastStar = -1;
-  let resume = 0;
-  while (at < text.length) {
-    const current = steps[step];
-    if (current?.kind === "star") {
-      lastStar = step;
-      step += 1;
-      resume = at;
-      continue;
-    }
-    const char = text[at];
-    const hit = current !== undefined && (current.kind === "any" || (current.kind === "literal" ? current.char === char : current.member.test(char)));
-    if (hit) {
-      step += 1;
-      at += 1;
-      continue;
-    }
-    if (lastStar === -1)
-      return false;
-    step = lastStar + 1;
-    resume += 1;
-    at = resume;
-  }
-  while (steps[step]?.kind === "star")
-    step += 1;
-  return step === steps.length;
-}
-var MAX_GLOB_LENGTH = 1024;
-function fnmatch(text, pattern) {
-  if (text.length > MAX_GLOB_LENGTH || pattern.length > MAX_GLOB_LENGTH)
-    return true;
-  const steps = compile(pattern);
-  if (steps === null)
-    return true;
-  return matchSteps(text, steps);
-}
-function deepWildcard(glob) {
-  const cut = glob.lastIndexOf("/");
-  return (cut === -1 ? "" : glob.slice(0, cut)).includes("*");
-}
-function literalPrefix(glob) {
-  const star = glob.indexOf("*");
-  const head = star === -1 ? glob : glob.slice(0, star);
-  return head.replace(/\/+$/, "");
-}
-function scopesOverlap(a, b) {
-  for (const globA of a) {
-    const prefixA = literalPrefix(globA);
-    for (const globB of b) {
-      const prefixB = literalPrefix(globB);
-      if (prefixA.length === 0 || prefixB.length === 0)
-        return true;
-      if (prefixA.startsWith(`${prefixB}/`) || prefixB.startsWith(`${prefixA}/`))
-        return true;
-      if (prefixA === prefixB) {
-        if (!globA.includes("*") || !globB.includes("*"))
-          return true;
-        if (deepWildcard(globA) || deepWildcard(globB))
-          return true;
-        if (fnmatch(globA, globB) || fnmatch(globB, globA))
-          return true;
-        continue;
-      }
-      if (fnmatch(prefixA, globB) || fnmatch(prefixB, globA))
-        return true;
-      if (prefixA.startsWith(prefixB) && deepWildcard(globB) || prefixB.startsWith(prefixA) && deepWildcard(globA)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-function scopeOf(metadata) {
-  const raw = metadata?.scope;
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed))
-        return parsed.filter((entry) => typeof entry === "string");
-    } catch {
-      return [raw];
-    }
-    return [raw];
-  }
-  if (Array.isArray(raw))
-    return raw.filter((entry) => typeof entry === "string");
-  return [];
 }
 
 // src/shell.ts
@@ -647,6 +538,269 @@ function invokesCommand(command, argv) {
   return false;
 }
 
+// src/gates/actor.ts
+var READ_SUBCOMMANDS = {
+  blocked: true,
+  children: true,
+  comments: true,
+  context: true,
+  count: true,
+  doctor: true,
+  export: true,
+  graph: true,
+  history: true,
+  info: true,
+  lint: true,
+  list: true,
+  memories: true,
+  ping: true,
+  preflight: true,
+  prime: true,
+  query: true,
+  ready: true,
+  recall: true,
+  search: true,
+  show: true,
+  stale: true,
+  status: true,
+  statuses: true,
+  types: true,
+  version: true,
+  where: true
+};
+var ADMIN_SUBCOMMANDS = {
+  admin: true,
+  backup: true,
+  bootstrap: true,
+  "codex-hook": true,
+  compact: true,
+  completion: true,
+  config: true,
+  dolt: true,
+  flatten: true,
+  gc: true,
+  help: true,
+  hooks: true,
+  human: true,
+  init: true,
+  migrate: true,
+  onboard: true,
+  prune: true,
+  purge: true,
+  quickstart: true,
+  "recompute-blocked": true,
+  "rename-prefix": true,
+  restore: true,
+  setup: true,
+  sql: true,
+  upgrade: true,
+  vc: true,
+  worktree: true
+};
+var SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+var READ_ACTIONS = {
+  get: true,
+  list: true,
+  show: true,
+  status: true,
+  tree: true
+};
+var WRITE_ACTIONS = {
+  add: true,
+  append: true,
+  claim: true,
+  close: true,
+  create: true,
+  delete: true,
+  edit: true,
+  release: true,
+  remove: true,
+  resolve: true,
+  rm: true,
+  set: true,
+  update: true
+};
+var ACTOR_KEYS = ["BEADS_ACTOR", "BD_ACTOR"];
+function writesBeads(invocation) {
+  if (invocation.hasClaim)
+    return invocation.subcommand !== "ready";
+  const subcommand = invocation.subcommand;
+  if (!SUBCOMMAND.test(subcommand))
+    return false;
+  if (ADMIN_SUBCOMMANDS[subcommand] === true)
+    return false;
+  const action = invocation.positionals[0] ?? "";
+  if (WRITE_ACTIONS[action] === true)
+    return true;
+  if (READ_ACTIONS[action] === true)
+    return false;
+  return READ_SUBCOMMANDS[subcommand] !== true;
+}
+function envCarriesActor(env) {
+  if (env === null || typeof env !== "object")
+    return false;
+  const record = env;
+  return ACTOR_KEYS.some((key) => typeof record[key] === "string" && record[key].length > 0);
+}
+function gateActorAttribution(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  if (envCarriesActor(input.env))
+    return;
+  for (const invocation of bdInvocations(command)) {
+    if (!writesBeads(invocation))
+      continue;
+    if (ACTOR_KEYS.some((key) => (invocation.assignments.get(key) ?? "").length > 0))
+      continue;
+    const written = invocation.hasClaim ? `${invocation.subcommand} --claim` : invocation.subcommand;
+    return {
+      block: true,
+      reason: `'bd ${written}' writes beads under no identity; prefix it with BEADS_ACTOR=<metadata.actor> BD_ACTOR=<metadata.actor> so the audit trail names the acting role`
+    };
+  }
+  return;
+}
+
+// src/claim-state.ts
+var observed;
+function recordClaim(observation) {
+  if (observation.actor.length === 0 || observation.beadIds.length === 0)
+    return;
+  observed = observation;
+}
+function observedClaim() {
+  return observed;
+}
+
+// src/scope.ts
+function compile(pattern) {
+  const steps = [];
+  for (let index = 0;index < pattern.length; index++) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (steps[steps.length - 1]?.kind !== "star")
+        steps.push({ kind: "star" });
+      continue;
+    }
+    if (char === "?") {
+      steps.push({ kind: "any" });
+      continue;
+    }
+    if (char !== "[") {
+      steps.push({ kind: "literal", char });
+      continue;
+    }
+    const close = pattern.indexOf("]", index + 1);
+    if (close === -1) {
+      steps.push({ kind: "literal", char });
+      continue;
+    }
+    const group = pattern.slice(index + 1, close);
+    index = close;
+    const body = group.startsWith("!") ? `^${group.slice(1)}` : group;
+    try {
+      steps.push({ kind: "class", member: new RegExp(`^[${body}]$`, "s") });
+    } catch {
+      return null;
+    }
+  }
+  return steps;
+}
+function matchSteps(text, steps) {
+  let at = 0;
+  let step = 0;
+  let lastStar = -1;
+  let resume = 0;
+  while (at < text.length) {
+    const current = steps[step];
+    if (current?.kind === "star") {
+      lastStar = step;
+      step += 1;
+      resume = at;
+      continue;
+    }
+    const char = text[at];
+    const hit = current !== undefined && (current.kind === "any" || (current.kind === "literal" ? current.char === char : current.member.test(char)));
+    if (hit) {
+      step += 1;
+      at += 1;
+      continue;
+    }
+    if (lastStar === -1)
+      return false;
+    step = lastStar + 1;
+    resume += 1;
+    at = resume;
+  }
+  while (steps[step]?.kind === "star")
+    step += 1;
+  return step === steps.length;
+}
+var MAX_GLOB_LENGTH = 1024;
+function fnmatch(text, pattern) {
+  if (text.length > MAX_GLOB_LENGTH || pattern.length > MAX_GLOB_LENGTH)
+    return true;
+  const steps = compile(pattern);
+  if (steps === null)
+    return true;
+  return matchSteps(text, steps);
+}
+function deepWildcard(glob) {
+  const cut = glob.lastIndexOf("/");
+  return (cut === -1 ? "" : glob.slice(0, cut)).includes("*");
+}
+function literalPrefix(glob) {
+  const star = glob.indexOf("*");
+  const head = star === -1 ? glob : glob.slice(0, star);
+  return head.replace(/\/+$/, "");
+}
+function scopesOverlap(a, b) {
+  for (const globA of a) {
+    const prefixA = literalPrefix(globA);
+    for (const globB of b) {
+      const prefixB = literalPrefix(globB);
+      if (prefixA.length === 0 || prefixB.length === 0)
+        return true;
+      if (prefixA.startsWith(`${prefixB}/`) || prefixB.startsWith(`${prefixA}/`))
+        return true;
+      if (prefixA === prefixB) {
+        if (!globA.includes("*") || !globB.includes("*"))
+          return true;
+        if (deepWildcard(globA) || deepWildcard(globB))
+          return true;
+        if (fnmatch(globA, globB) || fnmatch(globB, globA))
+          return true;
+        continue;
+      }
+      if (fnmatch(prefixA, globB) || fnmatch(prefixB, globA))
+        return true;
+      if (prefixA.startsWith(prefixB) && deepWildcard(globB) || prefixB.startsWith(prefixA) && deepWildcard(globA)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function scopeOf(metadata) {
+  const raw = metadata?.scope;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed))
+        return parsed.filter((entry) => typeof entry === "string");
+    } catch {
+      return [raw];
+    }
+    return [raw];
+  }
+  if (Array.isArray(raw))
+    return raw.filter((entry) => typeof entry === "string");
+  return [];
+}
+
 // src/gates/claim.ts
 function readyLabelRoles(rest) {
   const roles = [];
@@ -737,6 +891,53 @@ async function gateClaimEligibility(ctx, input) {
     }
     if (actor.length > 0)
       recordClaim({ actor, beadIds: claim.positionals });
+  }
+  return;
+}
+
+// src/gates/comment-verb.ts
+var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+var REDIRECTION = /^\d*(?:>>?|<)/;
+var EXPANSION = /[$`]/;
+function commentBody(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  for (let index = 0;index < invocation.rest.length; index++) {
+    const token = invocation.rest[index];
+    if (next >= operands.length || token !== operands[next])
+      continue;
+    next += 1;
+    if (!BEAD_ID.test(token))
+      continue;
+    const body = invocation.rest[index + 1];
+    if (body === undefined || body.startsWith("-"))
+      return;
+    if (REDIRECTION.test(body))
+      return;
+    return body;
+  }
+  return;
+}
+function gateCommentVerb(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  for (const invocation of bdInvocations(command)) {
+    const grouped = invocation.subcommand === "comments" && invocation.positionals[0] === "add";
+    if (invocation.subcommand !== "comment" && !grouped)
+      continue;
+    const body = commentBody(invocation);
+    if (body === undefined)
+      continue;
+    const verb = commentVerb(body);
+    if (EXPANSION.test(verb) || COMMENT_VERBS[verb] === true)
+      continue;
+    return {
+      block: true,
+      reason: `this comment opens with '${verb}', which is not a protocol verb; lead with one so the bead history reads without narration \u2014 the 11-verb set, a disposition (LANDED, BOUNCED, IDLE, FAILED), or a supervision verb. Free prose belongs after the verb, not instead of it.`
+    };
   }
   return;
 }
@@ -1175,204 +1376,54 @@ async function gateExitContract(ctx, input) {
   };
 }
 
-// src/gates/readonly.ts
-var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
-function gateBeadWriteFree(pi, ctx, input) {
-  if (!isBeadWriteFree(pi, ctx))
-    return;
-  const existingEnv = input.env;
-  const env = existingEnv !== null && typeof existingEnv === "object" ? { ...existingEnv } : {};
-  if (env.BD_READONLY === "1")
-    return;
-  env.BD_READONLY = "1";
-  const revised = {};
-  for (const key of BASH_PARAMS) {
-    if (key in input)
-      revised[key] = input[key];
-  }
-  revised.env = env;
-  return { input: revised };
-}
-
-// src/gates/worktree.ts
-import path2 from "path";
-import fs from "fs/promises";
-var GATED_WRITE_TOOLS = { bash: true, edit: true, write: true };
-async function realpathOrUndefined(target) {
-  try {
-    return await fs.realpath(target);
-  } catch {
-    return;
-  }
-}
-function within(child, parent) {
-  return child === parent || child.startsWith(`${parent}${path2.sep}`);
-}
-function isolationBase() {
-  const configured = process.env.OMP_WORKTREE_DIR;
-  if (configured !== undefined && configured.length > 0)
-    return configured;
-  return path2.join(process.env.HOME ?? "", ".omp", "wt");
-}
-var MAX_HOPS = 32;
-var URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
-async function resolveTarget(cwd, declared) {
-  if (declared.includes("\x00") || URI_TARGET.test(declared))
-    return;
-  const absolute = path2.isAbsolute(declared);
-  const { root } = path2.parse(declared);
-  let resolved = absolute ? root : cwd;
-  const pending = (absolute ? declared.slice(root.length) : declared).split(path2.sep).reverse();
-  let hops = 0;
-  while (pending.length > 0) {
-    const segment = pending.pop();
-    if (segment.length === 0 || segment === ".")
-      continue;
-    if (segment === "..") {
-      resolved = path2.dirname(resolved);
+// src/gates/one-claim.ts
+var BEAD_ID2 = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+function claimedBeadIds(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  let run = [];
+  let longest = [];
+  for (const token of invocation.rest) {
+    if (next < operands.length && token === operands[next]) {
+      next += 1;
+      if (BEAD_ID2.test(token) && !run.includes(token))
+        run.push(token);
       continue;
     }
-    const candidate = path2.join(resolved, segment);
-    let link;
-    try {
-      link = await fs.readlink(candidate);
-    } catch {}
-    if (link === undefined) {
-      resolved = candidate;
-      continue;
-    }
-    if (++hops > MAX_HOPS)
-      return;
-    const linkRoot = path2.parse(link).root;
-    if (linkRoot.length > 0)
-      resolved = linkRoot;
-    pending.push(...link.slice(linkRoot.length).split(path2.sep).reverse());
+    if (run.length > longest.length)
+      longest = run;
+    run = [];
   }
-  return resolved;
+  return run.length > longest.length ? run : longest;
 }
-var SECTION_HEADER = /^\[(.+)#[0-9A-Fa-f]{4}\]\s*$/;
-var MOVE_OP = /^MV\s+(?:"([^"]*)"|'([^']*)'|(\S.*?))\s*$/;
-function hashlineTargets(raw) {
-  if (typeof raw !== "string")
-    return [];
-  const targets = [];
-  for (const line of raw.split(`
-`)) {
-    const section = SECTION_HEADER.exec(line);
-    if (section?.[1] !== undefined) {
-      targets.push(section[1]);
+function gateOneClaim(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  for (const invocation of bdInvocations(command)) {
+    if (!invocation.hasClaim)
       continue;
-    }
-    const move = MOVE_OP.exec(line);
-    const destination = move?.[1] ?? move?.[2] ?? move?.[3];
-    if (destination !== undefined && destination.length > 0)
-      targets.push(destination);
-  }
-  return targets;
-}
-function declaredTargets(toolName, input) {
-  if (toolName === "write") {
-    const target = input.path;
-    return typeof target === "string" && target.length > 0 ? [target] : [];
-  }
-  if (toolName === "edit")
-    return hashlineTargets(input.input);
-  return [];
-}
-function names(relative, glob) {
-  const trimmed = glob.replace(/^\.?\/+/, "").replace(/\/+$/, "");
-  if (trimmed.length === 0)
-    return true;
-  return fnmatch(relative, trimmed) || fnmatch(relative, `${trimmed}/*`);
-}
-async function gateWorktreeScope(ctx, toolName, input) {
-  const claim = observedClaim();
-  if (!claim || claim.beadIds.length === 0)
-    return;
-  const cwd = await realpathOrUndefined(ctx.cwd);
-  if (cwd === undefined)
-    return;
-  const base = await realpathOrUndefined(isolationBase());
-  if (base !== undefined && within(cwd, base))
-    return;
-  const targets = [];
-  for (const declared of declaredTargets(toolName, input)) {
-    const resolved = await resolveTarget(cwd, declared);
-    if (resolved !== undefined)
-      targets.push({ declared, resolved });
-  }
-  const scoped = [];
-  for (const beadId of claim.beadIds) {
-    const bead = await bdShow(beadId);
-    const declaredTree = metadataString(bead, "worktree");
-    if (declaredTree === undefined)
+    if (invocation.subcommand === "ready")
       continue;
-    const worktree = await realpathOrUndefined(declaredTree);
-    if (worktree === undefined)
-      continue;
-    if (!within(cwd, worktree)) {
-      return {
-        block: true,
-        reason: `this session's cwd does not match metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
-      };
-    }
-    for (const target of targets) {
-      if (within(target.resolved, worktree))
-        continue;
-      return {
-        block: true,
-        reason: `'${target.declared}' resolves to '${target.resolved}', outside metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
-      };
-    }
-    const globs = scopeOf(bead?.metadata);
-    if (globs.length > 0)
-      scoped.push({ beadId, worktree, globs });
-  }
-  if (scoped.length === 0)
-    return;
-  for (const target of targets) {
-    const named = scoped.some(({ worktree, globs }) => {
-      const relative = path2.relative(worktree, target.resolved).split(path2.sep).join("/");
-      if (relative.length === 0)
-        return true;
-      return globs.some((glob) => names(relative, glob));
-    });
-    if (named)
+    const beadIds = claimedBeadIds(invocation);
+    if (beadIds.length < 2)
       continue;
     return {
       block: true,
-      reason: `'${target.declared}' is named by no claimed bead's metadata.scope \u2014 ${scoped.map(({ beadId, globs }) => `${beadId} (${globs.join(", ")})`).join(", ")}`
+      reason: `'bd ${invocation.subcommand} --claim' names ${beadIds.length} beads (${beadIds.join(", ")}); one activation owns at most one bead. Claim '${beadIds[0]}', finish or release it, then claim the next \u2014 parallel work belongs to parallel agents, not parallel claims.`
     };
   }
   return;
 }
 
-// src/gates/wt-guard.ts
-var FORBIDDEN = [
-  {
-    argv: ["git", "worktree"],
-    reason: "worktrees are managed by wt; use 'wt switch --create <branch>' rather than 'git worktree'"
-  },
-  {
-    argv: ["gh", "pr", "checkout"],
-    reason: "use 'wt switch' rather than 'gh pr checkout'; the checkout must stay bound to its bead"
-  }
-];
-function gateWorktrunkOwnership(input) {
-  const command = input.command;
-  if (typeof command !== "string" || command.length === 0)
-    return;
-  for (const forbidden of FORBIDDEN) {
-    if (invokesCommand(command, forbidden.argv)) {
-      return { block: true, reason: forbidden.reason };
-    }
-  }
-  return;
-}
+// src/gates/pin.ts
+import * as path3 from "path";
 
 // src/run-state.ts
-import fs2 from "fs/promises";
-import path3 from "path";
+import fs from "fs/promises";
+import path2 from "path";
 
 // src/supervision.ts
 var TERMINAL = { aborted: true, completed: true, failed: true };
@@ -1589,13 +1640,13 @@ var RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 function markerPath(cwd) {
   const configured = process.env.ORCHESTRATE_MARKER_FILE;
   if (configured !== undefined && configured.length > 0)
-    return path3.resolve(cwd, configured);
-  return path3.join(cwd, ".orchestration", ".active-run");
+    return path2.resolve(cwd, configured);
+  return path2.join(cwd, ".orchestration", ".active-run");
 }
 async function readActiveRun(cwd) {
   let raw;
   try {
-    raw = (await fs2.readFile(markerPath(cwd), "utf8")).trim();
+    raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
   } catch {
     return null;
   }
@@ -1626,14 +1677,14 @@ function asActiveRun(value) {
   return state;
 }
 async function writeMarker(target, state) {
-  await fs2.mkdir(path3.dirname(target), { recursive: true });
+  await fs.mkdir(path2.dirname(target), { recursive: true });
   const temporary = `${target}.${process.pid}.tmp`;
   try {
-    await fs2.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}
+    await fs.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}
 `, "utf8");
-    await fs2.rename(temporary, target);
+    await fs.rename(temporary, target);
   } catch (error) {
-    await fs2.rm(temporary, { force: true }).catch(() => {});
+    await fs.rm(temporary, { force: true }).catch(() => {});
     throw error;
   }
 }
@@ -1643,7 +1694,7 @@ async function activateRun(cwd, sessionId) {
   const state = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
   if (session !== undefined)
     state.session_id = session;
-  state.repo_root = path3.resolve(cwd);
+  state.repo_root = path2.resolve(cwd);
   await writeMarker(markerPath(cwd), state);
   return state;
 }
@@ -1685,6 +1736,228 @@ function registerRunCommands(pi) {
       }
     }
   });
+}
+
+// src/gates/pin.ts
+var BEADS_SUBDIR = ".beads";
+async function runPinEnv(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (bdInvocations(command).length === 0)
+    return;
+  const cwd = ctx.cwd ?? process.cwd();
+  const marker = await readActiveRun(cwd).catch(() => null);
+  const root = marker?.repo_root;
+  if (root === undefined || root.length === 0)
+    return;
+  const relative2 = path3.relative(root, cwd);
+  const inside = relative2.length === 0 || !relative2.startsWith("..") && !path3.isAbsolute(relative2);
+  if (inside)
+    return;
+  return { BEADS_DIR: path3.join(root, BEADS_SUBDIR) };
+}
+
+// src/gates/readonly.ts
+var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
+function beadWriteFreeEnv(pi, ctx) {
+  return isBeadWriteFree(pi, ctx) ? { BD_READONLY: "1" } : undefined;
+}
+function reviseBashEnv(input, additions) {
+  const existing = input.env;
+  const env = existing !== null && typeof existing === "object" ? { ...existing } : {};
+  let changed = false;
+  for (const [key, value] of Object.entries(additions)) {
+    if (env[key] === value)
+      continue;
+    env[key] = value;
+    changed = true;
+  }
+  if (!changed)
+    return;
+  const revised = {};
+  for (const key of BASH_PARAMS) {
+    if (key in input)
+      revised[key] = input[key];
+  }
+  revised.env = env;
+  return { input: revised };
+}
+
+// src/gates/worktree.ts
+import path4 from "path";
+import fs2 from "fs/promises";
+var GATED_WRITE_TOOLS = { bash: true, edit: true, write: true };
+async function realpathOrUndefined(target) {
+  try {
+    return await fs2.realpath(target);
+  } catch {
+    return;
+  }
+}
+function within(child, parent) {
+  return child === parent || child.startsWith(`${parent}${path4.sep}`);
+}
+function isolationBase() {
+  const configured = process.env.OMP_WORKTREE_DIR;
+  if (configured !== undefined && configured.length > 0)
+    return configured;
+  return path4.join(process.env.HOME ?? "", ".omp", "wt");
+}
+var MAX_HOPS = 32;
+var URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
+async function resolveTarget(cwd, declared) {
+  if (declared.includes("\x00") || URI_TARGET.test(declared))
+    return;
+  const absolute = path4.isAbsolute(declared);
+  const { root } = path4.parse(declared);
+  let resolved = absolute ? root : cwd;
+  const pending = (absolute ? declared.slice(root.length) : declared).split(path4.sep).reverse();
+  let hops = 0;
+  while (pending.length > 0) {
+    const segment = pending.pop();
+    if (segment.length === 0 || segment === ".")
+      continue;
+    if (segment === "..") {
+      resolved = path4.dirname(resolved);
+      continue;
+    }
+    const candidate = path4.join(resolved, segment);
+    let link;
+    try {
+      link = await fs2.readlink(candidate);
+    } catch {}
+    if (link === undefined) {
+      resolved = candidate;
+      continue;
+    }
+    if (++hops > MAX_HOPS)
+      return;
+    const linkRoot = path4.parse(link).root;
+    if (linkRoot.length > 0)
+      resolved = linkRoot;
+    pending.push(...link.slice(linkRoot.length).split(path4.sep).reverse());
+  }
+  return resolved;
+}
+var SECTION_HEADER = /^\[(.+)#[0-9A-Fa-f]{4}\]\s*$/;
+var MOVE_OP = /^MV\s+(?:"([^"]*)"|'([^']*)'|(\S.*?))\s*$/;
+function hashlineTargets(raw) {
+  if (typeof raw !== "string")
+    return [];
+  const targets = [];
+  for (const line of raw.split(`
+`)) {
+    const section = SECTION_HEADER.exec(line);
+    if (section?.[1] !== undefined) {
+      targets.push(section[1]);
+      continue;
+    }
+    const move = MOVE_OP.exec(line);
+    const destination = move?.[1] ?? move?.[2] ?? move?.[3];
+    if (destination !== undefined && destination.length > 0)
+      targets.push(destination);
+  }
+  return targets;
+}
+function declaredTargets(toolName, input) {
+  if (toolName === "write") {
+    const target = input.path;
+    return typeof target === "string" && target.length > 0 ? [target] : [];
+  }
+  if (toolName === "edit")
+    return hashlineTargets(input.input);
+  return [];
+}
+function names(relative2, glob) {
+  const trimmed = glob.replace(/^\.?\/+/, "").replace(/\/+$/, "");
+  if (trimmed.length === 0)
+    return true;
+  return fnmatch(relative2, trimmed) || fnmatch(relative2, `${trimmed}/*`);
+}
+async function gateWorktreeScope(ctx, toolName, input) {
+  const claim = observedClaim();
+  if (!claim || claim.beadIds.length === 0)
+    return;
+  const cwd = await realpathOrUndefined(ctx.cwd);
+  if (cwd === undefined)
+    return;
+  const base = await realpathOrUndefined(isolationBase());
+  if (base !== undefined && within(cwd, base))
+    return;
+  const targets = [];
+  for (const declared of declaredTargets(toolName, input)) {
+    const resolved = await resolveTarget(cwd, declared);
+    if (resolved !== undefined)
+      targets.push({ declared, resolved });
+  }
+  const scoped = [];
+  for (const beadId of claim.beadIds) {
+    const bead = await bdShow(beadId);
+    const declaredTree = metadataString(bead, "worktree");
+    if (declaredTree === undefined)
+      continue;
+    const worktree = await realpathOrUndefined(declaredTree);
+    if (worktree === undefined)
+      continue;
+    if (!within(cwd, worktree)) {
+      return {
+        block: true,
+        reason: `this session's cwd does not match metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
+      };
+    }
+    for (const target of targets) {
+      if (within(target.resolved, worktree))
+        continue;
+      return {
+        block: true,
+        reason: `'${target.declared}' resolves to '${target.resolved}', outside metadata.worktree on claimed bead '${beadId}'; another actor owns that tree`
+      };
+    }
+    const globs = scopeOf(bead?.metadata);
+    if (globs.length > 0)
+      scoped.push({ beadId, worktree, globs });
+  }
+  if (scoped.length === 0)
+    return;
+  for (const target of targets) {
+    const named = scoped.some(({ worktree, globs }) => {
+      const relative2 = path4.relative(worktree, target.resolved).split(path4.sep).join("/");
+      if (relative2.length === 0)
+        return true;
+      return globs.some((glob) => names(relative2, glob));
+    });
+    if (named)
+      continue;
+    return {
+      block: true,
+      reason: `'${target.declared}' is named by no claimed bead's metadata.scope \u2014 ${scoped.map(({ beadId, globs }) => `${beadId} (${globs.join(", ")})`).join(", ")}`
+    };
+  }
+  return;
+}
+
+// src/gates/wt-guard.ts
+var FORBIDDEN = [
+  {
+    argv: ["git", "worktree"],
+    reason: "worktrees are managed by wt; use 'wt switch --create <branch>' rather than 'git worktree'"
+  },
+  {
+    argv: ["gh", "pr", "checkout"],
+    reason: "use 'wt switch' rather than 'gh pr checkout'; the checkout must stay bound to its bead"
+  }
+];
+function gateWorktrunkOwnership(input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  for (const forbidden of FORBIDDEN) {
+    if (invokesCommand(command, forbidden.argv)) {
+      return { block: true, reason: forbidden.reason };
+    }
+  }
+  return;
 }
 
 // src/tools/bot-review-probe.ts
@@ -2035,8 +2308,8 @@ var spawnExec2 = async (argv, opts) => {
 function prViewArgv(repo, pr) {
   return ["gh", "pr", "view", pr, "--repo", repo, "--json", "headRefOid,statusCheckRollup"];
 }
-function ghApiArgv(path4) {
-  return ["gh", "api", "--paginate", "--slurp", path4];
+function ghApiArgv(path5) {
+  return ["gh", "api", "--paginate", "--slurp", path5];
 }
 async function ghJson(argv, exec, opts) {
   const label = argv.slice(1).join(" ");
@@ -2056,8 +2329,8 @@ async function ghJson(argv, exec, opts) {
     return { ok: false, error: `gh ${label} returned unreadable JSON: ${String(error)}` };
   }
 }
-async function ghPaginatedJson(path4, exec, opts) {
-  const read = await ghJson(ghApiArgv(path4), exec, opts);
+async function ghPaginatedJson(path5, exec, opts) {
+  const read = await ghJson(ghApiArgv(path5), exec, opts);
   if (!read.ok)
     return read;
   if (!Array.isArray(read.value))
@@ -2247,9 +2520,9 @@ function parseMergeTreeOutput(stdout) {
 function intersectPaths(a, b) {
   const right = new Set(b);
   const both = new Set;
-  for (const path4 of a) {
-    if (right.has(path4))
-      both.add(path4);
+  for (const path5 of a) {
+    if (right.has(path5))
+      both.add(path5);
   }
   return [...both].sort();
 }
@@ -2405,7 +2678,7 @@ function registerConflictProbe(pi) {
 }
 
 // src/tools/resolve-queue-dispatch.ts
-import path4 from "path";
+import path5 from "path";
 var REPOSITORY_RE = /^[^/\s]+\/[^/\s]+$/;
 var HEAD_SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 var REQUIRED_PULL_REQUEST_FIELDS = [
@@ -3011,7 +3284,7 @@ function registerResolveQueueDispatch(pi, read = readSnapshotFile) {
           return report(failed(1, `invalid watcher record: nodes is not JSON: ${message(error)}`));
         }
       } else if (params.nodesFile !== undefined) {
-        const file = params.cwd === undefined ? params.nodesFile : path4.resolve(params.cwd, params.nodesFile);
+        const file = params.cwd === undefined ? params.nodesFile : path5.resolve(params.cwd, params.nodesFile);
         try {
           nodes = JSON.parse(await read(file));
         } catch (error) {
@@ -3408,7 +3681,7 @@ function registerRunStatus(pi) {
 
 // src/watchers.ts
 import fs3 from "fs/promises";
-import path5 from "path";
+import path6 from "path";
 var PROGRESS_CHANNEL = "task:subagent:progress";
 var SUBAGENT_EVENT_CHANNEL = "task:subagent:event";
 var MCP_STATUS_CHANNEL = "mcp:connection-status";
@@ -3536,7 +3809,7 @@ function bdMutation(command) {
 }
 var configuredAuditDir;
 function auditDir(cwd) {
-  return configuredAuditDir ?? path5.join(cwd, ".orchestration", "audit");
+  return configuredAuditDir ?? path6.join(cwd, ".orchestration", "audit");
 }
 var MAX_AUDIT_STEM = 200;
 function auditFileName(child) {
@@ -3550,7 +3823,7 @@ async function appendAudit(dir, entry) {
   if (name === undefined)
     return;
   await fs3.mkdir(dir, { recursive: true });
-  await fs3.appendFile(path5.join(dir, name), `${JSON.stringify(entry)}
+  await fs3.appendFile(path6.join(dir, name), `${JSON.stringify(entry)}
 `, "utf8");
 }
 function exitCodeOf(result, isError) {
@@ -3768,10 +4041,10 @@ var settingsChecked = false;
 async function sharedBeadsDatabase(cwd) {
   if (process.env.BEADS_DOLT_SHARED_SERVER === "1")
     return true;
-  const config = await fs3.readFile(path5.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
+  const config = await fs3.readFile(path6.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
   if (/^[^#\n]*\bshared-server:\s*true/m.test(config))
     return true;
-  const metadata = await fs3.readFile(path5.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
+  const metadata = await fs3.readFile(path6.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
   try {
     const parsed = JSON.parse(metadata);
     if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
@@ -3794,7 +4067,7 @@ async function preflightSettings(pi, cwd) {
   const lines3 = deviations.map((deviation) => `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
   const mode = observed2["task.isolation.mode"];
   const isolating = typeof mode === "string" && mode !== "none";
-  const tracked = await fs3.stat(path5.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
+  const tracked = await fs3.stat(path6.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
   if (tracked && isolating && !await sharedBeadsDatabase(cwd)) {
     lines3.push(`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`);
   }
@@ -3894,17 +4167,30 @@ function ompOrchestrate(pi) {
         const ownership = gateWorktrunkOwnership(input);
         if (ownership)
           return ownership;
+        const attribution = gateActorAttribution(ctx, input);
+        if (attribution)
+          return attribution;
+        const exclusivity = gateOneClaim(ctx, input);
+        if (exclusivity)
+          return exclusivity;
         const eligibility = await gateClaimEligibility(ctx, input);
         if (eligibility)
           return eligibility;
+        const verb = gateCommentVerb(ctx, input);
+        if (verb)
+          return verb;
       }
       if (GATED_WRITE_TOOLS[event.toolName] === true) {
         const scope = await gateWorktreeScope(ctx, event.toolName, input);
         if (scope)
           return scope;
       }
-      if (event.toolName === "bash")
-        return gateBeadWriteFree(pi, ctx, input);
+      if (event.toolName === "bash") {
+        return reviseBashEnv(input, {
+          ...beadWriteFreeEnv(pi, ctx),
+          ...await runPinEnv(ctx, input)
+        });
+      }
       return;
     } catch (error) {
       pi.logger.error("orchestrate gate failed open", {

@@ -10,9 +10,13 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
 import { dispatchContract } from "./contract";
+import { gateActorAttribution } from "./gates/actor";
 import { gateClaimEligibility } from "./gates/claim";
+import { gateCommentVerb } from "./gates/comment-verb";
 import { gateExitContract } from "./gates/exit";
-import { gateBeadWriteFree } from "./gates/readonly";
+import { gateOneClaim } from "./gates/one-claim";
+import { runPinEnv } from "./gates/pin";
+import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { sessionRole } from "./identity";
@@ -63,8 +67,24 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				const ownership = gateWorktrunkOwnership(input);
 				if (ownership) return ownership;
 
+				// Before G5: an unattributed claim must not be recorded as this
+				// session's, and the check is a parse with no lookups.
+				const attribution = gateActorAttribution(ctx, input);
+				if (attribution) return attribution;
+
+				// Also before G5, and for the same reason: a refused multi-bead claim
+				// must not be recorded, or G2 would hold the session to two trees it
+				// was never allowed to claim.
+				const exclusivity = gateOneClaim(ctx, input);
+				if (exclusivity) return exclusivity;
+
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;
+
+				// Independent of the claim chain: a comment names no bead to claim, and
+				// the check is one more parse of a command already tokenised above.
+				const verb = gateCommentVerb(ctx, input);
+				if (verb) return verb;
 			}
 
 			if (GATED_WRITE_TOOLS[event.toolName] === true) {
@@ -74,8 +94,15 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (scope) return scope;
 			}
 
-			// Last, and only for `bash`: a revision rather than a refusal.
-			if (event.toolName === "bash") return gateBeadWriteFree(pi, ctx, input);
+			// Last, and only for `bash`: a revision rather than a refusal. Both
+			// environment gates contribute to one result, because a contract-free
+			// helper working in an isolated workspace needs each of them.
+			if (event.toolName === "bash") {
+				return reviseBashEnv(input, {
+					...beadWriteFreeEnv(pi, ctx),
+					...(await runPinEnv(ctx, input)),
+				});
+			}
 
 			return undefined;
 		} catch (error) {

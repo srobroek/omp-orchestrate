@@ -38,24 +38,40 @@ import { isBeadWriteFree } from "../identity";
  */
 const BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"] as const;
 
-/** Impose `BD_READONLY=1` when this session holds no bead contract. */
-export function gateBeadWriteFree(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	input: Record<string, unknown>,
-): ToolCallEventResult | undefined {
+/** `BD_READONLY=1` when this session holds no bead contract, nothing otherwise. */
+export function beadWriteFreeEnv(pi: ExtensionAPI, ctx: ExtensionContext): Record<string, string> | undefined {
 	// Unresolvable identity means no rewrite: sandboxing a writer by mistake would
 	// break every run, while missing a helper's stray write only loses a guard.
-	if (!isBeadWriteFree(pi, ctx)) return undefined;
+	return isBeadWriteFree(pi, ctx) ? { BD_READONLY: "1" } : undefined;
+}
 
-	const existingEnv = input.env;
+/**
+ * One revision carrying every gate's environment addition, or nothing when the call
+ * already has them all.
+ *
+ * A `tool_call` handler returns a single result, so the gates that impose an
+ * environment cannot each return their own revision: G1 sandboxes a contract-free
+ * helper and G9 aims `bd` at the run's database, and a helper inside an isolated
+ * workspace needs both. They contribute additions and this builds the one revision.
+ *
+ * An addition already present is dropped rather than rewritten, so a call the gates
+ * have nothing to add to re-enters no revalidation path.
+ */
+export function reviseBashEnv(
+	input: Record<string, unknown>,
+	additions: Record<string, string>,
+): ToolCallEventResult | undefined {
+	const existing = input.env;
 	const env: Record<string, unknown> =
-		existingEnv !== null && typeof existingEnv === "object" ? { ...existingEnv } : {};
+		existing !== null && typeof existing === "object" ? { ...existing } : {};
 
-	// Already imposed: nothing to revise, and returning an identical input would
-	// pointlessly re-enter the revalidation path.
-	if (env.BD_READONLY === "1") return undefined;
-	env.BD_READONLY = "1";
+	let changed = false;
+	for (const [key, value] of Object.entries(additions)) {
+		if (env[key] === value) continue;
+		env[key] = value;
+		changed = true;
+	}
+	if (!changed) return undefined;
 
 	const revised: Record<string, unknown> = {};
 	for (const key of BASH_PARAMS) {
