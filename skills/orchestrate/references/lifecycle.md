@@ -288,6 +288,93 @@ evidence and disposition to that closed bead or its decision bead. When behaviou
 change, create follow-up work with a `discovered-from` link; do not reopen the completed bead
 or rewrite its terminal evidence.
 
+## Incidental bug beads
+
+A worker that trips over a pre-existing defect outside its scope fixes it in passing when
+trivial, and otherwise files one bug bead. Filing is a record, not self-dispatch: the worker
+keeps its own scope, its own evidence, and its own bead.
+
+Such a bead enters the run routed, or it does not enter it at all. Every queue pulls with
+`--parent <epic>` plus one `agent:<role>` label. An unparented or unlabelled bug bead is
+invisible to all of them, and it lands in the stranded query, which fails close-out.
+
+| Field | Value |
+|---|---|
+| parent | the epic the filing worker sits under, so that epic's queues and every `bd list --parent <epic>` close-out scan see it |
+| route | exactly one `agent:<role>` label, the role that would do the fix -- `agent:implementer` for a code defect, never `agent:architect` |
+| assignee | empty, so the next worker claims it atomically through `bd ready … --claim`. Every queue here is an `--unassigned` pull, so an assigned bug leaves `bd ready` and shows only under `bd list --assignee` |
+| provenance | `discovered-from` its finder, plus the label `kind:incidental` |
+
+Merge beads are the one deliberate unparented exception, and a bug bead never copies it.
+`discovered-from` does not gate `bd ready`, so that link costs the bead no readiness.
+
+Route it to the role that would fix it, never to `agent:architect`:
+
+- the parent link is how the owning architect sees it. Its own sweeps, `bd list --parent
+  <epic>`, and every close-out scan already carry the bead, so a triage label adds no
+  visibility.
+- `agent:architect` is the queue that hands an architect an epic to own, and a bug bead is not
+  an epic.
+- fix-role routing degrades safely. An implementer pulls and fixes the bug even when no
+  architect triages it, while a bug parked in the architect queue drains on nobody's contract.
+
+The filer does not assign the bead, does not open an epic or feature for it, and does not
+`bd dep add` its own bead behind it. The defect is incidental, so blocking on it would stall
+work already proven independent of it.
+
+`kind:incidental` separates an adopted bug from the architect's own decomposition. Two carriers
+could hold that marker:
+
+| Carrier | Verdict |
+|---|---|
+| label `kind:incidental` | chosen. `kind:` is an established namespace, and labels are multi-value, so the marker rides the `--labels` flag the route already needs. It reads back with `bd list --parent <epic> --label kind:incidental` |
+| `metadata.incidental` | rejected. Single-value, one more key to register in the metadata contract, and read with jq instead of a label filter |
+
+The bead carries no `orc-node` label either. It is nobody's DAG node until an architect adopts
+it and adds one.
+
+```
+bd -C <run repo> create "<what is broken>" --type bug --parent <epic> \
+  --labels agent:implementer,kind:incidental \
+  --deps discovered-from:<your-bead> \
+  --metadata '{"scope":["<glob>"],"execution_kind":"git","origin":"<your-bead>"}' --silent
+```
+
+Then comment `NOTE` with the new id on your own bead, and record `orc.note`. The history then
+shows how a bead the architect never decomposed arrived under its epic.
+
+The wake is optional, content-free, and last:
+
+- write the bead, comment on it, then at most ring a doorbell.
+- the bead is complete without the message, so a failed send changes nothing. Never retry it,
+  and never block on it.
+- the message carries no instructions and no description of the bug. The bead is the brief.
+- it buys triage while the run is live rather than at close-out, plus the revival of an
+  architect parked past `task.agentIdleTtlMs`. One saved round trip, nothing more.
+
+A worker sends nothing. Its own exit is the doorbell: the child terminal event resumes the
+architect, which then reads the reporting bead, its `NOTE`, and the `discovered-from` link. The
+wake belongs to the lead, or to an architect handing a bug to a sibling architect. Both already
+hold the peer id, and neither is about to exit.
+
+| Metadata key | Why a worker cannot address the wake with it |
+|---|---|
+| `origin` | not an agent id at all. It holds an actor handle on a run epic or a helper bead, and a bead id on a merge bead or a bounced fix. This bug bead stamps the finder's bead |
+| `actor` | the agent id, stamped by dispatch and readable with `bd show <epic> --json`. It goes stale the moment the lead replaces an architect, and no worker can check the roster for liveness |
+
+An open incidental bug bead never blocks close-out. It is open, unassigned, and ungated, which
+makes it ready. A ready bead is never stranded, never `in_progress`, and never `blocked`. Those
+are the conditions that gate reads.
+
+The architect hands it off three ways:
+
+- adopt it into the current decomposition.
+- reparent it to the epic that owns that code.
+- park it with `bd update <bug> --status deferred`, and name it by id in the run report.
+  `deferred` keeps it out of `bd ready`, while its parent keeps it findable.
+
+`bd list --type bug` audits every incidental bug at any time, without touching a queue.
+
 ## Cleanup
 
 Three kinds of tree exist, and only one of them is swept:
