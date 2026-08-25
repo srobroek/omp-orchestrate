@@ -50,7 +50,8 @@ dependency edge park-merge-bead adds next, and that edge dies with a burned wisp
 {{merge_bead}} would silently re-enter the queue with the failure unfixed.
 
 Carry EVIDENCE, not a copy of the findings: the exact PR, branch, failure, check
-name, origin actor, and origin bead. For a review-bot round carry POINTERS -- the
+name, `origin_actor` (the handle the fix routes back to), and `origin_bead` (the
+merge bead it came from). For a review-bot round carry POINTERS -- the
 summary review URL plus each comment's `path:line` and URL. The bot thread is live
 and its diff suggestions render only on the PR, so a copy is stale the moment it
 is written.

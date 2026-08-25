@@ -39,7 +39,17 @@ export interface StatusNode {
 	assignee?: string;
 	/** `metadata.role`: who this routes to while it is still unclaimed. */
 	role?: string;
-	/** `metadata.origin`: which run or formula poured this bead. */
+	/** `metadata.run_epic`: the run epic this bead was poured under. */
+	run_epic?: string;
+	/** `metadata.origin_actor`: the actor handle a bounce or report routes back to. */
+	origin_actor?: string;
+	/** `metadata.origin_bead`: the bead id a bounce or report routes back to. */
+	origin_bead?: string;
+	/**
+	 * Legacy `metadata.origin`, carried verbatim under its own name. That key held an
+	 * actor handle, a bead id, or a run epic id, and which one is not recoverable from
+	 * the value, so the report never files it under one of the three above.
+	 */
 	origin?: string;
 	parent?: string;
 	/** In the blocked set `bd blocked` returned. */
@@ -159,6 +169,12 @@ function toNode(bead: BdBead, blocked: ReadonlySet<string>): StatusNode {
 	if (typeof assignee === "string" && assignee.length > 0) node.assignee = assignee;
 	const role = metaString(bead, "role");
 	if (role !== undefined) node.role = role;
+	const runEpic = metaString(bead, "run_epic");
+	if (runEpic !== undefined) node.run_epic = runEpic;
+	const originActor = metaString(bead, "origin_actor");
+	if (originActor !== undefined) node.origin_actor = originActor;
+	const originBead = metaString(bead, "origin_bead");
+	if (originBead !== undefined) node.origin_bead = originBead;
 	const origin = metaString(bead, "origin");
 	if (origin !== undefined) node.origin = origin;
 	const parent = field(bead, "parent");
@@ -352,6 +368,11 @@ function nodeLine(node: StatusNode, indent: string): string {
 	if (node.assignee) bits.push(`@${node.assignee}`);
 	else if (node.role) bits.push(`role=${node.role}`);
 	if (node.blocked) bits.push("blocked");
+	// Each bit names the key it came from: an actor handle, a bead id and a run epic id
+	// are indistinguishable as values, so the label is what makes the line readable.
+	if (node.run_epic) bits.push(`run_epic=${node.run_epic}`);
+	if (node.origin_actor) bits.push(`origin_actor=${node.origin_actor}`);
+	if (node.origin_bead) bits.push(`origin_bead=${node.origin_bead}`);
 	if (node.origin) bits.push(`origin=${node.origin}`);
 	const tail = bits.length > 0 ? `  [${bits.join(" ")}]` : "";
 	// `?` marks a project-defined `state:` phase with no glyph of its own.
