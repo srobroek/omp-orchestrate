@@ -110,13 +110,3 @@ an agent declaring no tools: list at all inherits write and task, which is why s
 never a helper.
 `;
 
-/**
- * The contract for one worker, with the run repository substituted in.
- *
- * The placeholder survives when the path is unknown -- a marker written before this
- * field existed, or a run driven by `ORCHESTRATE_RUN` with no marker at all.
- */
-export function dispatchContract(repoRoot?: string): string {
-	if (repoRoot === undefined || repoRoot.length === 0) return DISPATCH_CONTRACT;
-	return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
-}

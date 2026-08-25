@@ -46,15 +46,12 @@ describe("markerPath", () => {
 });
 
 describe("activateRun", () => {
-	test("a fresh repository activates as pending, naming its own root", async () => {
+	test("a fresh repository activates as pending", async () => {
 		const state = await activateRun(cwd, "session-a");
-		// `repo_root` is resolved, so a worker reading a copy of this marker still
-		// finds the original checkout rather than its clone.
 		expect(state).toEqual({
 			schema_version: 1,
 			run_id: "pending",
 			session_id: "session-a",
-			repo_root: resolve(cwd),
 		});
 		expect(await readActiveRun(cwd)).toEqual(state);
 	});
@@ -85,7 +82,6 @@ describe("activateRun", () => {
 		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({
 			schema_version: 1,
 			run_id: "pending",
-			repo_root: resolve(cwd),
 		});
 	});
 
@@ -97,10 +93,24 @@ describe("activateRun", () => {
 
 	test("writes marker keys in sorted order", async () => {
 		await activateRun(cwd, "session-a");
-		const root = resolve(cwd);
 		expect(await readFile(markerPath(cwd), "utf8")).toBe(
-			`{"repo_root":${JSON.stringify(root)},"run_id":"pending","schema_version":1,"session_id":"session-a"}\n`,
+			`{"run_id":"pending","schema_version":1,"session_id":"session-a"}\n`,
 		);
+	});
+
+	test("a marker from before the pin was retired still reads, without its dead field", async () => {
+		// `repo_root` was written for the `bd -C` substitution and is read by nothing.
+		// Removing it from the type must not strand a run activated by an older build:
+		// the field is dropped on read rather than rejected, and re-activation stops
+		// writing it.
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(
+			markerPath(cwd),
+			`{"repo_root":${JSON.stringify(resolve(cwd))},"run_id":"orc-9","schema_version":1}\n`,
+		);
+		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
+		expect(await activateRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
+		expect(await readFile(markerPath(cwd), "utf8")).toBe(`{"run_id":"orc-9","schema_version":1}\n`);
 	});
 });
 

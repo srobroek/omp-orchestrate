@@ -239,11 +239,6 @@ writes rather than the tool list: librarian's body limits them to /tmp/librarian
 an agent declaring no tools: list at all inherits write and task, which is why sonic is
 never a helper.
 `;
-function dispatchContract(repoRoot) {
-  if (repoRoot === undefined || repoRoot.length === 0)
-    return DISPATCH_CONTRACT;
-  return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
-}
 // src/contracts/grammar.json
 var grammar_default = {
   _comment: "The protocol verb set, and the source of truth for it. src/gates/bd.ts ENFORCES this set, by calling `commentVerb` and comparing against these entries -- one implementation, so the guard and the parser cannot disagree. skills/orchestrate/references/message-grammar.md restates it for humans and is written by hand; test/grammar-parity.test.ts fails when the gate's set or that reference diverges from this file, in either direction, so edit here first and let the test name what else must move. A verb is what `commentVerb` in src/bd.ts yields: strip a leading run of bullet, blockquote, emphasis, tick and strikethrough markers, take the first whitespace token, strip trailing emphasis, ticks and sentence punctuation, uppercase. Case and ordinary markdown are therefore free; only the first token counts, and a multi-word verb needs its underscore. Nothing else in a comment is protocol. A non-verb is warned, not refused, and only inside an active run. Adding a verb here without a writer and a source is how a vocabulary rots: an entry sourced `inferred` is a judgement call recorded as one, not a constraint the code enforces.",
@@ -1170,12 +1165,9 @@ function asActiveRun(value) {
   const record = value;
   const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
   const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
-  const repoRoot = typeof record.repo_root === "string" && record.repo_root.length > 0 ? record.repo_root : undefined;
   const state = { schema_version: 1, run_id: runId };
   if (sessionId !== undefined)
     state.session_id = sessionId;
-  if (repoRoot !== undefined)
-    state.repo_root = repoRoot;
   return state;
 }
 async function writeMarker(target, state) {
@@ -1196,7 +1188,6 @@ async function activateRun(cwd, sessionId) {
   const state = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
   if (session !== undefined)
     state.session_id = session;
-  state.repo_root = path2.resolve(cwd);
   await writeMarker(markerPath(cwd), state);
   return state;
 }
@@ -4678,7 +4669,7 @@ function ompOrchestrate(pi) {
       return;
     pi.sendMessage({
       customType: "com.srobroek.omp-orchestrate.contract",
-      content: dispatchContract(marker?.repo_root),
+      content: DISPATCH_CONTRACT,
       display: false,
       attribution: "user"
     }, { triggerTurn: false });

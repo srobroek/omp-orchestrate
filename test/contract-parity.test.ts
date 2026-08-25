@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
-import { DISPATCH_CONTRACT, dispatchContract } from "../src/contract";
+import { DISPATCH_CONTRACT } from "../src/contract";
 
 const REFERENCE = "skills/orchestrate/references/dispatch-contract.md";
 
@@ -42,11 +42,5 @@ describe("the database resolution", () => {
 		expect(DISPATCH_CONTRACT).toContain(".beads/dolt-server.port");
 		// The embedded walk-up story is the claim that was false here.
 		expect(DISPATCH_CONTRACT).not.toContain("walking up from the working directory");
-	});
-
-	test("an unknown repository returns the template unchanged", () => {
-		for (const missing of [undefined, ""]) {
-			expect(dispatchContract(missing)).toBe(DISPATCH_CONTRACT);
-		}
 	});
 });

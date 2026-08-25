@@ -9,7 +9,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
-import { dispatchContract } from "./contract";
+import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { gateExitContract } from "./gates/exit";
@@ -110,10 +110,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	 * (`session/messages.ts:654`), and the contract must read as authority rather
 	 * than as something the model said to itself.
 	 *
-	 * The repository comes from the marker rather than `ctx.cwd`, because in an
-	 * isolated worker those differ: the cwd is the clone, and the marker -- copied in
-	 * with the rest of the checkout -- still names the original. That path is what
-	 * makes the contract's `bd -C` pin resolvable.
+	 * The marker is read for one reason only: it is the run gate. Its `repo_root` used to
+	 * be substituted into the contract for a `bd -C` pin, and both are gone -- under a
+	 * per-project Dolt server bd resolves the database by host and port, so a worker needs
+	 * no path from us.
 	 */
 	pi.on("session_start", async (_event, ctx) => {
 		if (sessionRole(pi) === "lead") return;
@@ -126,7 +126,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 		pi.sendMessage(
 			{
 				customType: "com.srobroek.omp-orchestrate.contract",
-				content: dispatchContract(marker?.repo_root),
+				content: DISPATCH_CONTRACT,
 				display: false,
 				attribution: "user",
 			},

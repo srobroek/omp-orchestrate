@@ -38,9 +38,6 @@ import {
 } from "../src/gates/bd";
 import { type BdInvocation, bdInvocations } from "../src/shell";
 
-/** The `repo_root` the marker carries. A path, not a directory that has to exist. */
-const RUN_REPO = "/run/repo";
-
 /** Every `-C` spelling a call may carry, plus the bare form. None is required any more. */
 const PINS = ["", "-C /run/repo ", "--directory /run/repo ", "--directory=/run/repo "];
 
@@ -449,7 +446,7 @@ beforeAll(async () => {
 	root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "orc-gate-bd-")));
 	inRun = await marked(
 		path.join(root, "in-run"),
-		JSON.stringify({ schema_version: 1, run_id: "orc-1", repo_root: RUN_REPO }),
+		JSON.stringify({ schema_version: 1, run_id: "orc-1" }),
 	);
 	legacyMarker = await marked(path.join(root, "legacy"), "orc-1");
 	outsideRun = path.join(root, "outside-run");

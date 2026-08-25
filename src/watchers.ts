@@ -752,7 +752,8 @@ let settingsChecked = false;
  * config key would nag a project configured with plain `bd init --server`, which
  * sets the metadata field alone and is equally immune to isolation.
  *
- * Failing all of those, each agent has to aim its own calls with `bd -C <run repo>`.
+ * There is no per-agent remedy left. `bd -C <run repo>` was the old one, and it is gone
+ * with the pin: under a per-project server the path is not what resolves the database.
  */
 async function sharedBeadsDatabase(cwd: string): Promise<boolean> {
 	if (process.env.BEADS_DOLT_SHARED_SERVER === "1") return true;
