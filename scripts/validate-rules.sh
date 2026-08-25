@@ -7,6 +7,11 @@
 #
 # Local gate, deliberately not in CI: it needs an installed `omp`, which the CI
 # runners do not have. Run it after touching any rule frontmatter.
+#
+# Four bd rules used to live here -- the -C pin, the actor prefix, the comment verb and
+# the bug-bead route. They are `src/gates/bd.ts` now, because a regex cannot see whether a
+# run is active and so nagged every session that mentioned `bd`. Their corpus moved to
+# `test/gate-bd.test.ts`, which runs in CI. Do not re-add them here.
 set -u
 cd "$(dirname "$0")/.." 2>/dev/null || cd ~/personal/dev/omp-orchestrate || exit 2
 
@@ -36,46 +41,9 @@ check orc-ready-ephemeral.md   miss tool bash 'bd ready --parent orc-1 --label a
 check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
 check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
 
-check orc-bd-actor-prefix.md   fire tool bash 'bd update orc-1 --claim'
-check orc-bd-actor-prefix.md   miss tool bash 'BEADS_ACTOR=impl BD_ACTOR=impl bd update orc-1 --claim'
-check orc-bd-actor-prefix.md   miss tool bash 'bd show orc-1 --json'
-
 check orc-one-claim.md         fire tool bash 'bd update orc-1 orc-2 --claim'
 check orc-one-claim.md         fire tool bash "sh -c 'bd update orc-1 orc-2 --claim'"
 check orc-one-claim.md         miss tool bash 'bd update orc-1 --claim'
-
-# orc-bd-pin: an unpinned bd call reads and writes the copy inside an isolated
-# workspace. Every spelling of the pin must suppress it, or the reminder becomes
-# noise the moment an agent complies.
-check orc-bd-pin.md            fire tool bash 'bd ready --parent orc-1 --label agent:implementer --unassigned --claim --json'
-check orc-bd-pin.md            fire tool bash 'bd update orc-1 --claim'
-check orc-bd-pin.md            fire tool bash 'cd /repo && bd comment orc-1 "REPORTED done"'
-check orc-bd-pin.md            miss tool bash 'bd -C /repo ready --parent orc-1 --claim --json'
-check orc-bd-pin.md            miss tool bash 'bd -C=/repo ready --parent orc-1 --claim --json'
-check orc-bd-pin.md            miss tool bash 'bd --directory /repo update orc-1 --claim'
-check orc-bd-pin.md            miss tool bash 'bd --directory=/repo update orc-1 --claim'
-check orc-bd-pin.md            miss tool bash 'bd ready --parent orc-1 --claim -C /repo'
-check orc-bd-pin.md            miss tool bash 'bd -C/repo ready --parent orc-1 --claim --json'
-check orc-bd-pin.md            miss tool bash 'bd -Crepo/sub update orc-1 --claim'
-# Known limitation, encoded rather than left to be discovered: the condition is
-# line-scoped, so a pin anywhere on the line suppresses every bd call on it. A
-# chain whose SECOND call is pinned hides an unpinned first one. Closing it needs
-# per-invocation parsing, which a regex layer cannot do -- the gate layer sees
-# these argv properly.
-check orc-bd-pin.md            miss tool bash 'bd update orc-1 --claim && bd -C /repo show orc-1'
-check orc-bd-pin.md            miss tool bash 'git status'
-
-check orc-comment-verbs.md     fire tool bash 'bd comment orc-1 "finished the thing"'
-check orc-comment-verbs.md     miss tool bash 'bd comment orc-1 "REPORTED finished the thing"'
-
-# A bug bead with no parent or no route is unpullable: no queue filter can reach it.
-check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --silent'
-check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --parent orc-1 --silent'
-check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --labels agent:implementer --silent'
-check orc-bug-bead-routing.md  miss tool bash 'bd -C /repo create "x" --type bug --parent orc-1 --labels agent:implementer,kind:incidental --silent'
-# Ordinary node and epic creation must stay silent.
-check orc-bug-bead-routing.md  miss tool bash 'bd create "an epic" --type epic --silent'
-check orc-bug-bead-routing.md  miss tool bash 'bd create "a task" --type task --labels agent:implementer --silent'
 
 check orc-spawn-isolated.md    fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
 check orc-spawn-isolated.md    miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'

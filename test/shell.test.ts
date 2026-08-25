@@ -163,6 +163,31 @@ describe("transparent runners and wrapper shells", () => {
 		expect(found[0]?.positionals).toEqual(["orc-1"]);
 	});
 
+	test("a glued subshell close does not hide the claim flag", () => {
+		// `(bd ... --claim)` tokenises with the paren fused to BOTH ends: `(bd` never
+		// basenamed as `bd`, and the tail read `--claim)`, so `hasClaim` was false and
+		// `gateClaimEligibility` filtered the call out -- skipping the cross-role refusal
+		// and the scope check on a claim that was really being made. The pin gate could not
+		// see it either, because such a call is normally pinned.
+		for (const command of [`(${CLAIM})`, `((${CLAIM}))`, `{${CLAIM};}`]) {
+			const found = bdInvocations(command);
+			expect(found).toHaveLength(1);
+			expect(found[0]?.subcommand).toBe("update");
+			expect(found[0]?.hasClaim).toBe(true);
+			expect(found[0]?.positionals).toEqual(["orc-1"]);
+		}
+	});
+
+	test("a balanced bracket inside a value survives stripping", () => {
+		// The strip counts balance rather than trimming, or `--metadata '{"role":"x"}'` would
+		// arrive as unparseable JSON and a readable route would read as unroutable. Single
+		// quotes are the form that reaches the gate with its JSON intact.
+		const json = bdInvocations(`(bd -C /r create x --type bug --metadata '{"role":"impl"}')`);
+		expect(json[0]?.rest.at(-1)).toBe('{"role":"impl"}');
+		const prose = bdInvocations(`bd -C /r comment orc-1 "REPORTED done (see x)"`);
+		expect(prose[0]?.rest.at(-1)).toBe("REPORTED done (see x)");
+	});
+
 	test("the worktree denials survive the same wrapping", () => {
 		for (const command of [
 			"sh -c 'git worktree add /tmp/x'",
