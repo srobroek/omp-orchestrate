@@ -266,6 +266,58 @@ describe("W5 shared-database precondition", () => {
 		expect(notice).not.toContain("Set BEADS_DOLT_SHARED_SERVER=1");
 	});
 
+	test("the flat dotted key bd actually writes silences it", async () => {
+		// Verbatim from a scratch `bd init --shared-server`: a flat `dolt.shared-server`
+		// key, not the nested block a reader might assume.
+		await stubOmp("worktree");
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		await writeFile(join(cwd, ".beads", "config.yaml"), "dolt.shared-server: true\n");
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
+	});
+
+	test("server mode declared only in metadata.json silences it", async () => {
+		// `bd init --server` sets the metadata field without the config key, and a
+		// client that resolves a host and port cannot be redirected by a file copy.
+		// Reading only config.yaml would nag a correctly configured project forever.
+		await stubOmp("worktree");
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		await writeFile(
+			join(cwd, ".beads", "metadata.json"),
+			JSON.stringify({ backend: "dolt", dolt_mode: "server", dolt_database: "proj" }),
+		);
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
+	});
+
+	test("metadata pinning embedded still reports", async () => {
+		// The default `bd init` layout, which is exactly the case that loses claims.
+		await stubOmp("worktree");
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		await writeFile(
+			join(cwd, ".beads", "metadata.json"),
+			JSON.stringify({ backend: "dolt", dolt_mode: "embedded", dolt_database: "proj" }),
+		);
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(String(rig.messages.at(-1)?.content ?? "")).toContain("per-checkout database");
+	});
+
+	test("a malformed metadata file proves nothing and still reports", async () => {
+		await stubOmp("worktree");
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		await writeFile(join(cwd, ".beads", "metadata.json"), "{ not json");
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(String(rig.messages.at(-1)?.content ?? "")).toContain("per-checkout database");
+	});
+
 	test("shared-server mode via the environment silences it", async () => {
 		await stubOmp("worktree");
 		process.env.BEADS_DOLT_SHARED_SERVER = "1";

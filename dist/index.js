@@ -3768,12 +3768,17 @@ var settingsChecked = false;
 async function sharedBeadsDatabase(cwd) {
   if (process.env.BEADS_DOLT_SHARED_SERVER === "1")
     return true;
+  const config = await fs3.readFile(path5.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
+  if (/^[^#\n]*\bshared-server:\s*true/m.test(config))
+    return true;
+  const metadata = await fs3.readFile(path5.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
   try {
-    const config = await fs3.readFile(path5.join(cwd, ".beads", "config.yaml"), "utf8");
-    return /^[^#\n]*\bshared-server:\s*true/m.test(config);
-  } catch {
-    return false;
-  }
+    const parsed = JSON.parse(metadata);
+    if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
+      return parsed.dolt_mode === "server";
+    }
+  } catch {}
+  return false;
 }
 async function preflightSettings(pi, cwd) {
   if (settingsChecked)

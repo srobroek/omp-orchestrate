@@ -714,18 +714,35 @@ let settingsChecked = false;
  * claims stop excluding each other, because two workers can hold the same bead in
  * two databases.
  *
- * Shared-server mode is what makes the database one thing; failing that, each agent
- * has to aim its own calls with `bd -C <run repo>`.
+ * Any server mode makes the database one thing, because the client then resolves a
+ * host and port rather than a path, which a filesystem copy cannot change. Both
+ * carriers are read, verified by running `bd init --shared-server` in a scratch
+ * repository and inspecting what it wrote: it persists `dolt.shared-server: true` in
+ * `config.yaml` AND `dolt_mode: "server"` in `metadata.json`. Reading only the
+ * config key would nag a project configured with plain `bd init --server`, which
+ * sets the metadata field alone and is equally immune to isolation.
+ *
+ * Failing all of those, each agent has to aim its own calls with `bd -C <run repo>`.
  */
 async function sharedBeadsDatabase(cwd: string): Promise<boolean> {
 	if (process.env.BEADS_DOLT_SHARED_SERVER === "1") return true;
+
+	// `bd` writes this as a flat dotted key (`dolt.shared-server: true`), while a
+	// hand-written file may nest it under `dolt:`. Matching the leaf covers both, and
+	// excluding `#` keeps the commented defaults `bd init` ships from reading as set.
+	const config = await fs.readFile(path.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
+	if (/^[^#\n]*\bshared-server:\s*true/m.test(config)) return true;
+
+	const metadata = await fs.readFile(path.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
 	try {
-		const config = await fs.readFile(path.join(cwd, ".beads", "config.yaml"), "utf8");
-		// A commented default (`# dolt:`) must not read as enabled.
-		return /^[^#\n]*\bshared-server:\s*true/m.test(config);
+		const parsed: unknown = JSON.parse(metadata);
+		if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
+			return parsed.dolt_mode === "server";
+		}
 	} catch {
-		return false;
+		// A malformed or absent metadata file proves nothing either way.
 	}
+	return false;
 }
 
 /**
