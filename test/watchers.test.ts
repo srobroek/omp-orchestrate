@@ -226,6 +226,22 @@ describe("bdMutationEvent across both runtime shapes", () => {
  * the copy is invisible in the original.
  */
 describe("W5 shared-database precondition", () => {
+	/**
+	 * Stub the settings CLI. Without it these tests read whatever this host is
+	 * configured for -- which passed locally and failed on a CI runner that has no
+	 * `omp` at all, where every key reads as unknown and the check correctly stays
+	 * quiet. The precondition under test is the database, so isolation is pinned on.
+	 */
+	async function stubOmp(mode: string): Promise<void> {
+		const bin = join(cwd, "fake-omp");
+		await writeFile(
+			bin,
+			`#!/bin/sh\nif [ "$3" = "task.isolation.mode" ]; then printf '{"key":"task.isolation.mode","value":"${mode}"}'; else exit 1; fi\n`,
+			{ mode: 0o755 },
+		);
+		process.env.OMP_BIN = bin;
+	}
+
 	afterEach(() => {
 		delete process.env.BEADS_DOLT_SHARED_SERVER;
 		delete process.env.OMP_BIN;
@@ -233,6 +249,7 @@ describe("W5 shared-database precondition", () => {
 
 	test("a repo-local database under isolation is reported even with clean settings", async () => {
 		// No config file and no shared-server env: the default `bd init` layout.
+		await stubOmp("worktree");
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
@@ -245,6 +262,7 @@ describe("W5 shared-database precondition", () => {
 	});
 
 	test("shared-server mode via the environment silences it", async () => {
+		await stubOmp("worktree");
 		process.env.BEADS_DOLT_SHARED_SERVER = "1";
 		const rig = harness();
 		resetWatchers();
@@ -253,6 +271,7 @@ describe("W5 shared-database precondition", () => {
 	});
 
 	test("shared-server mode declared in the beads config silences it", async () => {
+		await stubOmp("worktree");
 		await mkdir(join(cwd, ".beads"), { recursive: true });
 		await writeFile(join(cwd, ".beads", "config.yaml"), "dolt:\n  shared-server: true\n");
 		const rig = harness();
@@ -264,6 +283,7 @@ describe("W5 shared-database precondition", () => {
 	test("the commented-out default does not read as enabled", async () => {
 		// `bd init` ships every key commented; treating that as configured would hide
 		// the failure on exactly the layout that has it.
+		await stubOmp("worktree");
 		await mkdir(join(cwd, ".beads"), { recursive: true });
 		await writeFile(join(cwd, ".beads", "config.yaml"), "# dolt:\n#   shared-server: true\n");
 		const rig = harness();
@@ -283,15 +303,7 @@ describe("W5 shared-database precondition", () => {
 	});
 
 	test("isolation explicitly off warns about nothing", async () => {
-		// Stubbed rather than read from the machine: the real `omp config get` reports
-		// whatever this host is configured for, which is not what this asserts.
-		const bin = join(cwd, "fake-omp");
-		await writeFile(
-			bin,
-			'#!/bin/sh\nif [ "$3" = "task.isolation.mode" ]; then printf \'{"key":"task.isolation.mode","value":"none"}\'; else exit 1; fi\n',
-			{ mode: 0o755 },
-		);
-		process.env.OMP_BIN = bin;
+		await stubOmp("none");
 
 		const rig = harness();
 		resetWatchers();
