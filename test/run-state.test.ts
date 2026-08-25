@@ -250,15 +250,29 @@ describe("registerRunCommands", () => {
 describe("bindRun arms the patrol wisp", () => {
 	let bin: string;
 	let log: string;
+	let probe = 0;
+
+	/**
+	 * Install a stub `bd` that records every invocation and answers `dep list` with
+	 * `depJson`. The ledger is unique per test: a shared path let one test read
+	 * another's calls, which is how a Linux runner saw six `create`s where this
+	 * machine saw none.
+	 */
+	async function writeStub(depJson: string): Promise<void> {
+		await writeFile(
+			bin,
+			`#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '${depJson}'; fi\n`,
+			{ mode: 0o755 },
+		);
+	}
 
 	beforeEach(async () => {
-		log = join(cwd, "bd-calls.log");
-		bin = join(cwd, "fake-bd");
+		probe += 1;
+		log = join(cwd, `bd-calls-${probe}.log`);
+		bin = join(cwd, `fake-bd-${probe}`);
 		// `pwd` is the assertion: it reports where the child was spawned, not where
 		// the parent happens to be. An empty dep list makes every run arm once.
-		await writeFile(bin, `#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '[]'; fi\n`, {
-			mode: 0o755,
-		});
+		await writeStub("[]");
 		process.env.BD_BIN = bin;
 	});
 
@@ -277,10 +291,21 @@ describe("bindRun arms the patrol wisp", () => {
 			});
 	}
 
+	/**
+	 * Every arming path must consult the dependents query exactly once. Asserting it
+	 * keeps the "no create" expectations from passing vacuously when the stub never
+	 * ran at all -- the failure mode that hid a real defect from this suite.
+	 */
+	async function assertProbed(): Promise<{ cwd: string; args: string }[]> {
+		const seen = await calls();
+		expect(seen.filter(call => call.args.startsWith("dep list "))).toHaveLength(1);
+		return seen;
+	}
+
 	test("creates one patrol, in the run's repository rather than the process's", async () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-1");
-		const created = (await calls()).filter(call => call.args.startsWith("create "));
+		const created = (await assertProbed()).filter(call => call.args.startsWith("create "));
 		expect(created).toHaveLength(1);
 		expect(created[0]?.args).toContain("--wisp-type patrol");
 		expect(created[0]?.args).toContain("--deps relates-to:orc-1");
@@ -290,26 +315,18 @@ describe("bindRun arms the patrol wisp", () => {
 	});
 
 	test("an existing open patrol is not duplicated", async () => {
-		await activateRun(cwd);
 		// A dep list naming a live patrol must short-circuit arming entirely.
-		await writeFile(
-			bin,
-			`#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '[{"id":"w-1","status":"open","wisp_type":"patrol"}]'; fi\n`,
-			{ mode: 0o755 },
-		);
+		await writeStub('[{"id":"w-1","status":"open","wisp_type":"patrol"}]');
+		await activateRun(cwd);
 		await bindRun(cwd, "orc-1");
-		expect((await calls()).filter(call => call.args.startsWith("create "))).toEqual([]);
+		expect((await assertProbed()).filter(call => call.args.startsWith("create "))).toEqual([]);
 	});
 
 	test("a closed patrol is re-armed", async () => {
+		await writeStub('[{"id":"w-1","status":"closed","wisp_type":"patrol"}]');
 		await activateRun(cwd);
-		await writeFile(
-			bin,
-			`#!/bin/sh\nprintf '%s\\t%s\\n' "$(pwd)" "$*" >> ${JSON.stringify(log)}\nif [ "$1" = "dep" ]; then printf '[{"id":"w-1","status":"closed","wisp_type":"patrol"}]'; fi\n`,
-			{ mode: 0o755 },
-		);
 		await bindRun(cwd, "orc-1");
-		expect((await calls()).filter(call => call.args.startsWith("create "))).toHaveLength(1);
+		expect((await assertProbed()).filter(call => call.args.startsWith("create "))).toHaveLength(1);
 	});
 
 	test("a failing bd does not fail the bind", async () => {
