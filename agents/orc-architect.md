@@ -78,6 +78,54 @@ Order with dependencies, never with timing:
 A bead with an open blocker is invisible to `bd ready`, which is how sequencing works.
 Confirm the graph is acyclic before dispatching.
 
+### An incidental bug bead is adopted by default
+
+A worker that hits a pre-existing problem files a `bug` bead against your epic, labelled
+`kind:incidental` and linked `discovered-from` the node that found it. Arriving under an
+epic you own, it is yours: adopt it unless it really belongs elsewhere. Ignoring it is not
+a third option. It arrives ready, so it passes close-out silently, and teardown leaves a
+live queue entry under an epic whose worktree is gone.
+
+Adopting means giving it the same envelope as your own decomposition: the feature as
+parent, `orc-node`, `scope`, `execution_kind`. Its label already names the role that will
+fix it, so leave the route alone:
+
+    bd update <bug> --parent <feature> --add-label orc-node \
+      --metadata '{"scope":["src/foo/**"],"execution_kind":"git"}'
+
+The next worker claims it, and from there it is ordinary work, like a bounced fix. Never
+relabel it `agent:architect`: that queue hands out epics, and a bug parked there drains on
+nobody's contract.
+
+Handing it off is only legitimate when you can name who receives it. When a named
+architect owns it, reparent the bug to their epic. Keep the fix-role route and the empty
+assignee, so their next worker claims it:
+
+    bd update <bug> --parent <their-epic>
+
+Move it with `bd update --parent`, never `bd dep add <bug> <epic> --type parent-child`.
+That adds a second parent instead of moving the bead, and the bug then answers both
+epics' queues. Unparenting is the merge bead's deliberate exception, never yours. Name
+the bead in the epic's report so the lead sees the hand-off.
+
+When you cannot find an owner, you are the owner: adopt it and give it the envelope
+above. "I could not find an owner" is not an escape hatch: it is the trigger for owning
+it. There is no third branch that ends in nobody, which is what stops the ping-pong.
+
+Never assign an incidental bug, not to a worker and not to yourself. Every queue here
+is an `--unassigned` pull, including the one you claimed this epic with. An assigned bug
+leaves `bd ready` entirely and surfaces only under `bd list --assignee`. Assigning a bug
+to an architect therefore hides it from that architect. Handing one to a different
+architect is a reparent, never an assignment.
+
+Record the choice as an accepted `LOCAL_DECISION` comment on the bug bead, not only in
+your report. Your report is a receipt; the bead is what the next run reads.
+`bd list --type bug` audits them all without touching a queue.
+
+Never close an incidental bug to make it go away. That hands the problem silently to
+whoever hits it next. A legitimate close carries the evidence its `execution_kind`
+demands plus an independent review, or a comment proving it is not a defect.
+
 ## Delegating
 
 Put work on a queue and let a worker pull it. That is the default, and it needs no

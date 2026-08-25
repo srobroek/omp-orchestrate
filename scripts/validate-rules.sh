@@ -46,6 +46,15 @@ check orc-one-claim.md         miss tool bash 'bd update orc-1 --claim'
 check orc-comment-verbs.md     fire tool bash 'bd comment orc-1 "finished the thing"'
 check orc-comment-verbs.md     miss tool bash 'bd comment orc-1 "REPORTED finished the thing"'
 
+# A bug bead with no parent or no route is unpullable: no queue filter can reach it.
+check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --silent'
+check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --parent orc-1 --silent'
+check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --labels agent:implementer --silent'
+check orc-bug-bead-routing.md  miss tool bash 'bd -C /repo create "x" --type bug --parent orc-1 --labels agent:implementer,kind:incidental --silent'
+# Ordinary node and epic creation must stay silent.
+check orc-bug-bead-routing.md  miss tool bash 'bd create "an epic" --type epic --silent'
+check orc-bug-bead-routing.md  miss tool bash 'bd create "a task" --type task --labels agent:implementer --silent'
+
 check orc-spawn-isolated.md    fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
 check orc-spawn-isolated.md    miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'
 check orc-wait-grammar.md      fire text - 'WAIT: then CLAIM the bead'
