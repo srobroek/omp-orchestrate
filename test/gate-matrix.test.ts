@@ -20,7 +20,6 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -28,7 +27,8 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
-import { gateBeadWriteFree } from "../src/gates/readonly";
+import { gateOneClaim } from "../src/gates/one-claim";
+import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
 
 /** Beads `bdShow` resolves, by id. A missing key models an unreadable bead. */
@@ -102,6 +102,9 @@ const WORKER = api(["bash", "edit", "write", "read", "yield"]);
  * G1's revision, because a handler returns a single result and a refusal must win over
  * a revision of an input that will not run.
  *
+ * G6 is the one check left out: it raises notices rather than refusals, so it changes no
+ * row here, and `test/gate-bd.test.ts` drives it against the corpus shapes it exists for.
+ *
  * G2 is handed the tool name and the input, because its containment check is on the path
  * an `edit` or `write` names and not only on the cwd the session sits in.
  */
@@ -113,6 +116,8 @@ async function gateChain(
 	if (toolName === "bash") {
 		const ownership = gateWorktrunkOwnership(input);
 		if (ownership) return ownership;
+		const exclusivity = gateOneClaim(ctx, input);
+		if (exclusivity) return exclusivity;
 		const eligibility = await gateClaimEligibility(ctx, input);
 		if (eligibility) return eligibility;
 	}
@@ -120,7 +125,10 @@ async function gateChain(
 		const scope = await gateWorktreeScope(ctx, toolName, input);
 		if (scope) return scope;
 	}
-	if (toolName === "bash") return gateBeadWriteFree(WORKER, ctx, input);
+	// Mirrors `index.ts`: the environment gate contributes to one revision.
+	if (toolName === "bash") {
+		return reviseBashEnv(input, { ...beadWriteFreeEnv(WORKER, ctx) });
+	}
 	return undefined;
 }
 
@@ -355,18 +363,19 @@ describe("G5 multi-bead claims", () => {
 		["the foreign bead named second", `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${FOREIGN_BEAD} --claim`],
 		["the foreign bead named first", `BEADS_ACTOR=${ACTOR} bd update ${FOREIGN_BEAD} ${BEAD} --claim`],
 	])("refuses a multi-bead claim smuggling another role's bead, with %s", async (_label, command) => {
-		// Every id is evaluated, not just the first, so position is no evasion.
-		const result = await bash(command);
+		// Driven at G5 directly rather than through the chain, because G7 now refuses a
+		// two-bead claim before G5 sees it. G5's own routing check is what this asserts,
+		// and it evaluates every id rather than just the first, so position is no evasion.
+		const result = await gateClaimEligibility(ctxAt(owned), { command });
 
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain(FOREIGN_BEAD);
 	});
 
 	test("G5 itself does not refuse two beads of this session's own role", async () => {
-		// FINDING: G5 evaluates each named bead's routing and never the count, so the
-		// one-bead-per-activation invariant is not a gate at all. It is the
-		// `orc-one-claim` TTSR rule below, whose `tool-only` interrupt aborts the call
-		// before the command runs.
+		// G5 evaluates each named bead's routing and never the count, so the
+		// one-bead-per-activation invariant is not G5's. It is G7's — see
+		// `test/one-claim.test.ts` — and the row below is where the chain shows it.
 		const command = `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SAME_TREE} --claim`;
 
 		expect(await gateClaimEligibility(ctxAt(owned), { command })).toBeUndefined();
@@ -374,18 +383,28 @@ describe("G5 multi-bead claims", () => {
 		expect(observedClaim()?.beadIds).toEqual([BEAD, SAME_TREE]);
 	});
 
-	test("two beads in one tree pass the whole chain", async () => {
-		// The same finding at the surface an agent meets: when both beads name the tree
-		// the session is sitting in, nothing downstream objects either.
-		expect(await bash(`BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SAME_TREE} --claim`)).toBeUndefined();
+	test("two beads in one tree are refused by the chain, and claim nothing", async () => {
+		// The finding this group used to record — two beads naming one tree pass every
+		// gate — is closed. G7 runs before G5, so the claim is refused and never
+		// recorded, which is what keeps G2 from later holding the session to a bead it
+		// was not allowed to take.
+		const result = await bash(`BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SAME_TREE} --claim`);
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain(SAME_TREE);
+		// Untouched: still the one bead `beforeEach` seeded, so G5 never ran.
+		expect(observedClaim()?.beadIds).toEqual([BEAD]);
+		expect(shown).toEqual([]);
 	});
 
-	test("two beads in two trees refuse the claiming command itself", async () => {
-		// `bash` is a gated write tool, so G2 runs on the claim command too, against the
-		// claim G5 has just recorded. A second tree therefore refuses the very call that
-		// claimed it — and every mutation after it, in either tree, since the cwd must
-		// sit inside *every* claimed bead's worktree.
-		const result = await bash(`BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SECOND} --claim`);
+	test("two beads in two trees refuse every mutation after the claim", async () => {
+		// G2 runs on `bash` too, against the claim G5 recorded, so the cwd must sit
+		// inside *every* claimed bead's worktree. Recorded through G5 directly, since
+		// G7 refuses the claiming command itself before G5 is reached.
+		const command = `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SECOND} --claim`;
+		expect(await gateClaimEligibility(ctxAt(owned), { command })).toBeUndefined();
+
+		const result = await gateWorktreeScope(ctxAt(owned), "bash", { command });
 
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain(SECOND);
@@ -475,72 +494,5 @@ describe("G1 refuses nothing", () => {
 
 		expect(result?.block).toBeUndefined();
 		expect(result?.input?.env).toEqual({ BD_READONLY: "1" });
-	});
-});
-
-/**
- * The one-bead-per-activation invariant, which lives in a TTSR rule rather than a gate.
- *
- * `orc-one-claim` declares `interruptMode: tool-only`, so a match aborts the tool call
- * before the command runs — that is where the refusal G5 does not issue comes from. The
- * host regex engine evaluates the condition, so it is asserted here with `RegExp`
- * against the raw command string, which is the text OMP matches for a `tool:bash`
- * scope. `scripts/validate-rules.sh` covers the same rules through `omp ttsr test`, but
- * it needs an installed `omp` and so cannot be part of this suite.
- */
-function ruleCondition(file: string): RegExp {
-	const body = readFileSync(path.join(import.meta.dir, "..", "rules", file), "utf8");
-	const declared = /^condition: (".*")$/m.exec(body)?.[1];
-	if (declared === undefined) throw new Error(`no condition in rules/${file}`);
-	const pattern = JSON.parse(declared) as string;
-	// The rulebook translates a leading (?i)/(?m)/(?s) into native flags before
-	// compiling; raw `new RegExp` throws on it. Mirror that or a rule that gains an
-	// inline flag takes this whole file down at module load.
-	const inline = /^\((\?[ims]+)\)/.exec(pattern);
-	return inline === null ? new RegExp(pattern) : new RegExp(pattern.slice(inline[0].length), inline[1].slice(1));
-}
-
-describe("orc-one-claim, the rule that owns multi-bead claims", () => {
-	const rule = ruleCondition("orc-one-claim.md");
-
-	test.each([
-		["bare", "bd update orc-1 orc-2 --claim"],
-		["actor-prefixed", `BEADS_ACTOR=${ACTOR} bd update orc-1 orc-2 --claim`],
-		["behind timeout", "timeout 30 bd update orc-1 orc-2 --claim"],
-		["second in a chain", "git status && bd update orc-1 orc-2 --claim"],
-		["three ids", "bd update orc-1 orc-2 orc-3 --claim"],
-	])("fires on a multi-bead claim %s", (_label, command) => {
-		expect(rule.test(command)).toBe(true);
-	});
-
-	test.each([
-		["a single-bead claim", "bd update orc-1 --claim"],
-		["an actor-prefixed single-bead claim", `BEADS_ACTOR=${ACTOR} bd update orc-1 --claim`],
-		["a multi-id update that claims nothing", "bd update orc-1 orc-2 --status closed"],
-		["a read of two beads", "bd show orc-1 orc-2 --json"],
-	])("stays quiet on %s", (_label, command) => {
-		expect(rule.test(command)).toBe(false);
-	});
-
-	test.each([
-		["sh -c", `sh -c 'bd update orc-1 orc-2 --claim'`],
-		["bash -lc", `bash -lc "bd update orc-1 orc-2 --claim"`],
-		["eval", `eval 'bd update orc-1 orc-2 --claim'`],
-		["an unspaced subshell", "(bd update orc-1 orc-2 --claim)"],
-	])("fires on a multi-bead claim quoted inside a %s payload", (_label, command) => {
-		// This row was the reverse assertion until the rule's leading class was widened
-		// from `[\s;|&]` to `[\s;|&('"]`: a quote or an opening paren is now an accepted
-		// left boundary, so the wrapped payloads a refused agent reaches for no longer
-		// slip past the regex layer.
-		expect(rule.test(command)).toBe(true);
-	});
-
-	test("does not fire when the bead ids arrive through a variable", () => {
-		// FINDING, and the residue that no widening reaches: the condition needs two
-		// literal `<name>-<digits>` ids after `bd update`, and `$ids` is neither. Nothing
-		// refuses this command — the gate layer cannot see it either, because
-		// `src/shell.ts` expands no variables by design and documents dynamic
-		// construction as out of reach: the line names no bead until a shell runs it.
-		expect(rule.test(`ids="orc-1 orc-2"; bd update $ids --claim`)).toBe(false);
 	});
 });

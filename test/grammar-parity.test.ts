@@ -21,7 +21,7 @@ import { type BdInvocation, bdInvocations } from "../src/shell";
 
 const ROOT = join(import.meta.dir, "..");
 const REFERENCE = "skills/orchestrate/references/message-grammar.md";
-/** The pin the gate's own refusal mandates, so only the verb check can speak. */
+/** A `-C` spelling on every line, so the pin's presence is never the variable under test. */
 const RUN_REPO = "/run/repo";
 
 /** The single invocation a one-command line parses to. */
@@ -35,7 +35,7 @@ function only(command: string): BdInvocation {
 
 /** What the gate says about a comment body, or `undefined` when it says nothing. */
 function noticeOn(text: string): string | undefined {
-	return commentVerbNotice(only(`bd -C ${RUN_REPO} comment orc-1 "${text}"`), RUN_REPO);
+	return commentVerbNotice(only(`bd -C ${RUN_REPO} comment orc-1 "${text}"`));
 }
 
 /**
@@ -126,7 +126,9 @@ describe("the gate", () => {
 	test("refuses a token no grammar entry defines", () => {
 		// The shapes a cut verb leaves behind, and the near-misses of live ones. Each
 		// must nag: a stale verb that still passes is a contract nothing can review.
-		for (const token of ["ACK", "DONE", "OK", "PROGRESS", "REVIEWED", "NO", "WORK", "CLAIM", "WAIT"]) {
+		// BRIEF is here because it is the one verb the deleted regex admitted with no use
+		// site anywhere in this repository: the single place the acceptance set narrowed.
+		for (const token of ["ACK", "DONE", "OK", "PROGRESS", "REVIEWED", "NO", "WORK", "CLAIM", "WAIT", "BRIEF"]) {
 			expect({ token, fires: noticeOn(`${token} something happened`) !== undefined }).toEqual({
 				token,
 				fires: true,
@@ -172,5 +174,56 @@ describe("every entry", () => {
 			expect(entry.source.where.length).toBeGreaterThan(0);
 			expect(entry.meaning.length).toBeGreaterThan(0);
 		}
+	});
+});
+
+/**
+ * The verbs something else in this repository demands, asserted against the set the gate
+ * admits.
+ *
+ * Migrated from the deleted `test/comment-verb.test.ts`, which held its own verb table to
+ * these two claims. Grammar entries cite their use sites in prose; these read the use sites
+ * instead, so a contract that starts requiring a verb the grammar never declared fails here
+ * rather than at a worker's exit.
+ */
+describe("the verbs with a use site", () => {
+	test("every verb a role contract requires is declared, and the gate admits it", () => {
+		// Nagging one of these would nag the comment that satisfies the contract demanding
+		// it, which is how an advisory teaches agents to ignore it.
+		const required = new Set<string>();
+		for (const file of ["architect", "generic", "implementer", "researcher", "reviewer", "shepherd"]) {
+			const body = readFileSync(join(ROOT, "src/contracts", `${file}.json`), "utf8");
+			for (const [, list] of body.matchAll(/comment\.verb in \[([^\]]*)\]/g)) {
+				for (const verb of (list as string).split(",")) required.add(verb.trim());
+			}
+		}
+
+		// The predicates are the point: an empty set would make this pass vacuously.
+		expect(required.size).toBeGreaterThan(0);
+		for (const verb of required) {
+			expect({ verb, declared: declared.includes(verb), notice: noticeOn(`${verb} done`) }).toEqual({
+				verb,
+				declared: true,
+				notice: undefined,
+			});
+		}
+	});
+
+	test("every verb this extension writes itself is declared, and the gate admits it", () => {
+		// `src/supervision.ts`, `src/watchers.ts`, and `src/gates/exit.ts` write these, so a
+		// worker mirroring one to a bead must not be nagged for it.
+		for (const verb of ["RECLAIM", "STALL", "WARN", "GOAL", "BOUNCE"]) {
+			expect({ verb, declared: declared.includes(verb), notice: noticeOn(`${verb} something`) }).toEqual({
+				verb,
+				declared: true,
+				notice: undefined,
+			});
+		}
+	});
+
+	test("every declared verb is uppercase, as commentVerb produces", () => {
+		// `commentVerb` uppercases the body's first token before the lookup, so a
+		// lower-case entry would be a verb the grammar promises and the gate can never see.
+		for (const verb of declared) expect(verb).toBe(verb.toUpperCase());
 	});
 });

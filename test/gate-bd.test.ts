@@ -1,20 +1,27 @@
 /**
- * G6 — bd call discipline, and the corpus four deleted TTSR rules leave behind.
+ * G6 — bd call discipline, and the corpus the deleted TTSR rules leave behind.
  *
  * `rules/orc-bd-pin.md`, `rules/orc-bd-actor-prefix.md`, `rules/orc-comment-verbs.md` and
- * `rules/orc-bug-bead-routing.md` were these four checks written as regexes over a command
+ * `rules/orc-bug-bead-routing.md` were these checks written as regexes over a command
  * string. Every case their corpus pinned is here: each row was added to catch a real
  * defect, and a row that survives the carrier change is the only proof the conversion lost
  * nothing. `scripts/validate-rules.sh` ran them through `omp ttsr test`, which needs an
  * installed `omp`, so this suite could never have held them before.
  *
- * Two levels, for one reason. The four checks are pure predicates over a parsed
- * invocation, so the old fire/miss rows port onto them exactly -- unpinned spellings
- * included, which matters because the entry point now refuses those before any notice is
- * collected, and a notice row written against an unpinned command would assert nothing.
- * The entry point then owns what a regex could not express at all: the run marker as the
- * sole discriminator, per-invocation judgement inside one line, dedup, and silence on
- * input it cannot parse.
+ * The pin is not among the checks. It is retired outright -- this project runs a
+ * per-project Dolt server, which resolves by host and port and travels with a copied
+ * checkout -- so every pin spelling appears here only as a shape the surviving checks must
+ * judge identically, which is what `atEveryPin` crosses them against.
+ *
+ * Two levels, for one reason. The three checks are pure predicates over a parsed
+ * invocation, so the old fire/miss rows port onto them exactly. The entry point then owns
+ * what a regex could not express at all: the run marker as the sole discriminator,
+ * per-invocation judgement inside one line, dedup, and silence on input it cannot parse.
+ *
+ * Rows marked as migrated came from `test/actor.test.ts` and `test/comment-verb.test.ts`,
+ * the two suites that arrived with the separate gates this consolidated one replaced. Each
+ * was scored against 4,673 commands recovered from 587 local session transcripts, so they
+ * carry corpus evidence this file would otherwise have lost.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -34,7 +41,7 @@ import { type BdInvocation, bdInvocations } from "../src/shell";
 /** The `repo_root` the marker carries. A path, not a directory that has to exist. */
 const RUN_REPO = "/run/repo";
 
-/** Every pin spelling a compliant call is written with, plus the bare form. */
+/** Every `-C` spelling a call may carry, plus the bare form. None is required any more. */
 const PINS = ["", "-C /run/repo ", "--directory /run/repo ", "--directory=/run/repo "];
 
 /**
@@ -74,13 +81,13 @@ const UNATTRIBUTED = [
 
 describe("the identity notice", () => {
 	test.each(atEveryPin(UNATTRIBUTED))("fires on %s", command => {
-		expect(actorNotice(only(command), RUN_REPO)).toContain("WARN bd identity");
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
 
 	test.each(atEveryPin(["BEADS_ACTOR=impl BD_ACTOR=impl bd update orc-1 --claim"]))(
 		"stays quiet on %s",
 		command => {
-			expect(actorNotice(only(command), RUN_REPO)).toBeUndefined();
+			expect(actorNotice(only(command))).toBeUndefined();
 		},
 	);
 
@@ -94,7 +101,7 @@ describe("the identity notice", () => {
 		["the env form", "env BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo update orc-1 --claim"],
 		["env with a valueless flag", "env -i BEADS_ACTOR=impl bd -C /run/repo close orc-1"],
 	])("accepts %s", (_label, command) => {
-		expect(actorNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(actorNotice(only(command))).toBeUndefined();
 	});
 
 	test.each([
@@ -103,7 +110,7 @@ describe("the identity notice", () => {
 		["a list", "bd -C /run/repo list --status open"],
 		["a blocked query", "bd -C /run/repo blocked --json"],
 	])("leaves %s alone", (_label, command) => {
-		expect(actorNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(actorNotice(only(command))).toBeUndefined();
 	});
 
 	test.each([
@@ -119,16 +126,92 @@ describe("the identity notice", () => {
 		// `src/gates/claim.ts` reads the environment to record a claim for G2.
 		["the --actor flag standing in for it", "bd -C /run/repo --actor impl update orc-1 --claim"],
 	])("fires on %s", (_label, command) => {
-		expect(actorNotice(only(command), RUN_REPO)).toContain("WARN bd identity");
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
 
-	test("FINDING: a claiming ready pull is not judged a mutation", () => {
-		// `bd ready --claim` writes, and the mutating list -- taken verbatim from the
-		// deleted condition -- does not name `ready`. Widening it is a protocol decision
-		// about the pull loop's identity, not part of moving the check to a gate, so the
-		// parity is pinned here rather than changed in passing.
+	test("the claiming queue pull is exempt, because it precedes the identity", () => {
+		// `bd ready --claim` writes, and is the one write left unattributed on purpose:
+		// dispatch puts `metadata.actor` on the bead and the worker reads it back from
+		// there, so a pull -- which names no bead -- cannot yet know the name it would
+		// carry. Nagging it would nag the protocol's first command. A claim that names its
+		// bead is not exempt: `bd show` yields `metadata.actor` before the claim.
 		const pull = "bd -C /run/repo ready --label agent:implementer --unassigned --claim --json";
-		expect(actorNotice(only(pull), RUN_REPO)).toBeUndefined();
+		expect(actorNotice(only(pull))).toBeUndefined();
+		expect(actorNotice(only("bd -C /run/repo update orc-1 --claim"))).toContain("WARN bd identity");
+	});
+
+	test("names the subcommand and both variables it wants", () => {
+		const notice = actorNotice(only("bd -C /run/repo close orc-1")) ?? "";
+
+		expect(notice).toContain("bd close");
+		expect(notice).toContain("BEADS_ACTOR");
+		expect(notice).toContain("BD_ACTOR");
+	});
+
+	test.each([
+		// Writes the deleted condition's ten-name list omitted, so it judged none of them.
+		// The list itself was the defect: it drifts every time bd grows a verb, so an
+		// unrecognised subcommand now counts as a write and what bd permits under
+		// `BD_READONLY=1` is the exemption instead.
+		["assign", "bd assign orc-7 someone"],
+		["delete", "bd delete orc-7"],
+		["reopen", "bd reopen orc-7"],
+		["note", "bd note orc-7 'a note'"],
+		["tag", "bd tag orc-7 blocked"],
+		["link", "bd link orc-7 orc-8"],
+		["priority", "bd priority orc-7 1"],
+		["promote", "bd promote orc-wisp-1"],
+		["an unrecognised subcommand", "bd frobnicate orc-7"],
+		// A group that reads by default still carries writing actions, and those outrank
+		// the exemption: `bd comments` prints, `bd comments add` writes.
+		["gate create", "bd gate create g-1"],
+		["kv set", "bd kv set k v"],
+	])("fires on %s", (_label, command) => {
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
+	});
+
+	test.each([
+		// Reads, by what bd itself allows under `BD_READONLY=1`.
+		["a queue read", "bd ready --json"],
+		["prime", "bd prime"],
+		["gate list", "bd gate list"],
+		["dep tree", "bd dep tree orc-7"],
+		["label list", "bd label list orc-7"],
+		["kv get", "bd kv get somekey"],
+		// Store administration has no bead to attribute: `bd init` creates the store,
+		// `bd dolt push` moves commits under the caller's git identity. Each was flagged
+		// by an earlier revision of this check and cleared by scoring it against the corpus.
+		["init", "bd init --quiet"],
+		["setup", "bd setup codex --check"],
+		["bootstrap", "bd bootstrap"],
+		["dolt push", "bd dolt push"],
+		["help", "bd help close"],
+		["codex-hook", "bd codex-hook SessionStart"],
+		// The tokeniser expands no redirections, so this presents `2>&1` where a
+		// subcommand would be. The command prints help.
+		["a redirection where a subcommand would be", "bd 2>&1 | head -20"],
+	])("leaves %s alone", (_label, command) => {
+		expect(actorNotice(only(command))).toBeUndefined();
+	});
+
+	test("accepts an identity set through the bash call's own env", () => {
+		// `env` on the tool call reaches every command in it, so attribution set there is
+		// as real as an inline assignment -- and it is the tool's documented way of
+		// setting a variable, so nagging it would nag a compliant call.
+		expect(actorNotice(only("bd close orc-1"), { BEADS_ACTOR: "impl" })).toBeUndefined();
+		expect(actorNotice(only("bd close orc-1"), { BD_ACTOR: "impl" })).toBeUndefined();
+	});
+
+	test.each([
+		["an empty value", { BEADS_ACTOR: "" }],
+		["a value that is not a string", { BEADS_ACTOR: 7 }],
+		["an unrelated variable", { FOO: "impl" }],
+		["no env at all", undefined],
+		// The parameter arrives unvalidated, so a caller that passes text where a map
+		// belongs must read as no identity rather than throw inside a gate.
+		["text where a map belongs", "BEADS_ACTOR=impl"],
+	])("still fires on %s", (_label, env) => {
+		expect(actorNotice(only("bd close orc-1"), env)).toContain("WARN bd identity");
 	});
 });
 
@@ -146,7 +229,7 @@ describe("the comment-verb notice", () => {
 		'bd -C /run/repo comment orc-1 "the REVIEW is done"',
 		'bd -C /run/repo comment orc-1 "REVIEWED the branch"',
 	])("fires on %s", command => {
-		expect(commentVerbNotice(only(command), RUN_REPO)).toContain("WARN comment verb");
+		expect(commentVerbNotice(only(command))).toContain("WARN comment verb");
 	});
 
 	test.each([
@@ -168,7 +251,7 @@ describe("the comment-verb notice", () => {
 		'bd -C /run/repo comment orc-1 "> - **REPORTED**: orc-1 pushed"',
 		'bd -C /run/repo comment orc-1 "   BLOCKED   kind:design"',
 	])("stays quiet on %s", command => {
-		expect(commentVerbNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(commentVerbNotice(only(command))).toBeUndefined();
 	});
 
 	test("reads the documented long form the same way", () => {
@@ -176,8 +259,8 @@ describe("the comment-verb notice", () => {
 		// alias walks past is decoration.
 		const bad = 'bd -C /run/repo comments add orc-1 "finished the thing"';
 		const good = 'bd -C /run/repo comments add orc-1 "REPORTED finished the thing"';
-		expect(commentVerbNotice(only(bad), RUN_REPO)).toContain("WARN comment verb");
-		expect(commentVerbNotice(only(good), RUN_REPO)).toBeUndefined();
+		expect(commentVerbNotice(only(bad))).toContain("WARN comment verb");
+		expect(commentVerbNotice(only(good))).toBeUndefined();
 	});
 
 	test.each([
@@ -191,11 +274,46 @@ describe("the comment-verb notice", () => {
 		// No body on the line at all.
 		["a bare id", "bd -C /run/repo comment orc-1"],
 	])("declines to judge %s", (_label, command) => {
-		expect(commentVerbNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(commentVerbNotice(only(command))).toBeUndefined();
+	});
+
+	test.each([
+		// Verbatim corpus shapes. bd 1.1.2 takes the body positionally on both spellings,
+		// so the body is the token straight after the bead id -- and a flag or a
+		// redirection there means the body is not on this line. A first-token-after-the-id
+		// read is what tells `bd comment list <id>`, a read, from a comment on it.
+		["a read whose next token is a redirection", "bd comment list orc-chaos-c3-05k.1 2>&1 | sed -n 1,30p"],
+		["-f, the short file flag", "bd comments add orc-1 -f /tmp/body.txt"],
+		// bd has no such flags, so the command fails at bd rather than here -- but the
+		// flag still holds the position a body would.
+		["flags bd does not have", 'bd comment orc-1 --type REPORTED --message "delivered"'],
+		["--stdin ahead of a heredoc", "bd comment orc-1 --stdin <<EOF"],
+		// A backticked run is a substitution the shell resolves before bd sees it, so it
+		// names no verb yet. `commentVerb` strips a leading tick as markdown, which is why
+		// the whole-body shape is what excuses this and `` `REVIEW` approved `` is judged.
+		["a backticked body", 'bd comment orc-1 "`summarise`"'],
+	])("declines to judge %s", (_label, command) => {
+		expect(commentVerbNotice(only(command))).toBeUndefined();
+	});
+
+	test.each([
+		// A bulleted body is a body, so the flag test is a flag shape and not a leading
+		// `-`: `commentVerb` normalises the bullet and the verb underneath it is judged.
+		["a bulleted non-verb", 'bd -C /run/repo comment orc-1 "- REVIEWED the branch"'],
+		// An expansion later in a readable body does not excuse the word it opens with.
+		["narration carrying an expansion", 'bd -C /run/repo comment orc-1 "Wired $X into $Y"'],
+		// The long form is what every real violation in the corpus used, and the deleted
+		// condition required `comment` immediately after `bd`, so it caught none of them.
+		["a corpus violation opening with NEW", 'bd comments add chezmoi-6nu "NEW plugin landed"'],
+		["a corpus violation opening with ADOPT", 'bd comments add chezmoi-gk3 "ADOPT both"'],
+		["a corpus violation opening with Resolved:", 'bd comments add chezmoi-42o "Resolved: the role takes the other branch"'],
+		["a corpus violation opening with DESIGN", 'bd comments add chezmoi-lpp "DESIGN RATIONALE: standalone plugin"'],
+	])("fires on %s", (_label, command) => {
+		expect(commentVerbNotice(only(command))).toContain("WARN comment verb");
 	});
 
 	test("fires on an empty body, which names no verb either", () => {
-		expect(commentVerbNotice(only('bd -C /run/repo comment orc-1 ""'), RUN_REPO)).toContain("WARN comment verb");
+		expect(commentVerbNotice(only('bd -C /run/repo comment orc-1 ""'))).toContain("WARN comment verb");
 	});
 
 	test.each([
@@ -204,6 +322,18 @@ describe("the comment-verb notice", () => {
 		["a grep", "grep -n 'bd comment' src/bd.ts"],
 		["a sentence", 'echo "run bd comment orc-1 with a REVIEW verb"'],
 		["a heredoc line", "printf '%s' 'bd comment orc-1 finished it'"],
+		// Recovered verbatim from local transcripts, where the deleted conditions flagged
+		// every one of them: a quoted `|` or `;` supplied the separator they matched on,
+		// and six of the nineteen hits were scripts *writing this rule set*, whose own
+		// condition text carried the `bd comment` the pattern was looking for.
+		[
+			"an alternation inside a grep",
+			`cd /tmp/psc-verify && echo "=== beads run record in recipes:"; grep -rl 'orchestration/audit\\|bd create\\|beads' recipes/ --include='*.yml' 2>/dev/null | head -8`,
+		],
+		["a regex table in source", `const conds = { gateclose: [/\\bbd\\s+close\\b[^\\n]*gate/i] };`],
+		["a case list in source", `const cases = { yes: ["bd close bd-x --reason done", "cd /repo && bd close bd-a"] };`],
+		["a heredoc writing a pattern", `cd /tmp && cat > rx.mjs <<'EOF'\nconst specid = /\\bbd\\s+create\\b/;\nEOF`],
+		["an alternation passed to rg", `rg 'bd update|bd close' docs/`],
 	])("sees no invocation in %s, so nothing is judged", (_label, command) => {
 		expect(bdInvocations(command)).toEqual([]);
 	});
@@ -225,7 +355,7 @@ describe("the bug-route notice", () => {
 		// `--parent --silent` names no parent.
 		'bd -C /run/repo create "x" --type bug --parent --metadata role=implementer --silent',
 	])("fires on %s", command => {
-		expect(bugRouteNotice(only(command), RUN_REPO)).toContain("WARN bug bead");
+		expect(bugRouteNotice(only(command))).toContain("WARN bug bead");
 	});
 
 	test.each([
@@ -243,7 +373,7 @@ describe("the bug-route notice", () => {
 		// A route riding a second repeat of a repeatable flag.
 		'bd -C /run/repo create "x" --type bug --parent orc-1 --labels kind:incidental --labels agent:reviewer --silent',
 	])("stays quiet on %s", command => {
-		expect(bugRouteNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(bugRouteNotice(only(command))).toBeUndefined();
 	});
 
 	test.each([
@@ -254,25 +384,25 @@ describe("the bug-route notice", () => {
 		// Not a create at all.
 		"bd -C /run/repo update orc-1 --status closed",
 	])("does not judge %s", command => {
-		expect(bugRouteNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(bugRouteNotice(only(command))).toBeUndefined();
 	});
 
 	test("declines to judge a payload held in a file", () => {
 		// `--metadata @route.json` puts the route in a file this check does not open, and
 		// guessing there would nag a bead that is routed.
 		const command = 'bd -C /run/repo create "x" --type bug --metadata @route.json --silent';
-		expect(bugRouteNotice(only(command), RUN_REPO)).toBeUndefined();
+		expect(bugRouteNotice(only(command))).toBeUndefined();
 	});
 
 	test("treats an unparseable payload as no route", () => {
 		// `bd` rejects it too, so the notice names a defect the agent was about to hit
 		// anyway rather than inventing one.
 		const command = 'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata \'{"role":\' --silent';
-		expect(bugRouteNotice(only(command), RUN_REPO)).toContain("WARN bug bead");
+		expect(bugRouteNotice(only(command))).toContain("WARN bug bead");
 	});
 
 	test("names both missing flags when both are missing", () => {
-		const notice = bugRouteNotice(only('bd -C /run/repo create "x" --type bug --silent'), RUN_REPO);
+		const notice = bugRouteNotice(only('bd -C /run/repo create "x" --type bug --silent'));
 		expect(notice).toContain("--parent <epic>");
 		expect(notice).toContain('--metadata \'{"role":"<role>"}\'');
 	});

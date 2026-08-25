@@ -37,10 +37,16 @@ import { commentVerb } from "../bd";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
 import { readActiveRun } from "../run-state";
-import { type BdInvocation, bdInvocations } from "../shell";
+import { type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
 
-/** One finding on one parsed invocation: what to say, or `undefined` for silence. */
-export type BdCheck = (invocation: BdInvocation, runRepo: string | undefined) => string | undefined;
+/**
+ * One finding on one parsed invocation: what to say, or `undefined` for silence.
+ *
+ * `env` is the `bash` call's own `env` parameter, unvalidated as the tool delivers it. It
+ * reaches every command in the call, so a check that reads inline assignments has to read
+ * it too or it nags the tool's documented way of setting a variable.
+ */
+export type BdCheck = (invocation: BdInvocation, env?: unknown) => string | undefined;
 
 export const BD_NOTICE_MESSAGE = "com.srobroek.omp-orchestrate.bd-notice";
 
@@ -119,22 +125,170 @@ function operation(invocation: BdInvocation): BdOperation {
 }
 
 
-/** Subcommands that write a bead, verbatim from the deleted rule's condition. */
-const MUTATING_SUBCOMMANDS: Record<string, true> = {
-	create: true,
-	update: true,
+/**
+ * Subcommands that exited 0 under `BD_READONLY=1`, so bd itself does not count them as
+ * writes. `context` is included on its help text alone: it cannot reach the read-only
+ * check from a scratch database, refusing first with `cannot resolve repo context`.
+ */
+const READ_SUBCOMMANDS: Record<string, true> = {
+	blocked: true,
+	children: true,
+	comments: true,
+	context: true,
+	count: true,
+	doctor: true,
+	export: true,
+	graph: true,
+	history: true,
+	info: true,
+	lint: true,
+	list: true,
+	memories: true,
+	ping: true,
+	preflight: true,
+	prime: true,
+	query: true,
+	ready: true,
+	recall: true,
+	search: true,
+	show: true,
+	stale: true,
+	status: true,
+	statuses: true,
+	types: true,
+	version: true,
+	where: true,
+};
+
+/**
+ * Subcommands that administer the workspace or the database rather than authoring a
+ * bead. They are exempt because attribution has nothing to attach to: `bd init` creates
+ * the store, `bd dolt push` moves commits under the caller's git identity, and `bd setup`
+ * writes editor integration files. Naming an actor on them would nag setup steps in the
+ * name of an audit trail they never touch.
+ *
+ * Found by scoring this classification against 4,673 recorded commands: an earlier
+ * revision flagged `bd init`, `bd setup`, `bd bootstrap`, `bd dolt`, and `bd help`.
+ */
+const ADMIN_SUBCOMMANDS: Record<string, true> = {
+	admin: true,
+	backup: true,
+	bootstrap: true,
+	"codex-hook": true,
+	compact: true,
+	completion: true,
+	config: true,
+	dolt: true,
+	flatten: true,
+	gc: true,
+	help: true,
+	hooks: true,
+	human: true,
+	init: true,
+	migrate: true,
+	onboard: true,
+	prune: true,
+	purge: true,
+	quickstart: true,
+	"recompute-blocked": true,
+	"rename-prefix": true,
+	restore: true,
+	setup: true,
+	sql: true,
+	upgrade: true,
+	vc: true,
+	worktree: true,
+};
+
+/**
+ * A real subcommand is a lowercase word. The tokeniser expands no redirections, so
+ * `bd 2>&1 | head` presents `2>&1` as its first positional -- that command prints help,
+ * and reading the artefact as an unrecognised write would nag it.
+ */
+const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * Read actions of the grouped subcommands, matched on the token after the group:
+ * `gate list`, `dep tree`, `kv get`, `label list`, `epic list`, `swarm status`.
+ */
+const READ_ACTIONS: Record<string, true> = {
+	get: true,
+	list: true,
+	show: true,
+	status: true,
+	tree: true,
+};
+
+/**
+ * Write actions of the grouped subcommands. These outrank the exemption table, because a
+ * group can read by default and still carry a writing action: `comments` alone prints an
+ * issue's comments and exits 0 under `BD_READONLY=1`, while `comments add` refuses.
+ * `gate create`, `dep add`, `kv set`, and `label add` were each confirmed to refuse the
+ * same way.
+ */
+const WRITE_ACTIONS: Record<string, true> = {
+	add: true,
+	append: true,
+	claim: true,
 	close: true,
-	comment: true,
-	dep: true,
-	label: true,
-	gate: true,
-	"merge-slot": true,
-	"set-state": true,
-	audit: true,
+	create: true,
+	delete: true,
+	edit: true,
+	release: true,
+	remove: true,
+	resolve: true,
+	rm: true,
+	set: true,
+	update: true,
 };
 
 /** The identity carriers, either of which attributes the write. */
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
+
+/**
+ * Whether this invocation writes to the bead store.
+ *
+ * Unrecognised is a write, because the alternative is a list of writing subcommands that
+ * drifts every time bd grows one: the deleted rule's condition named ten, and `bd assign`,
+ * `bd reopen`, `bd tag`, `bd link`, and `bd promote` all walked past it. What bd itself
+ * refuses under `BD_READONLY=1` is the exemption table instead, so the classification
+ * tracks the tool rather than a copy of it.
+ *
+ * `bd ready --claim` is the one write deliberately exempt. Dispatch writes `metadata.actor`
+ * onto the bead and every agent body reads it back from there (`src/supervision.ts`), so a
+ * queue pull -- which names no bead -- precedes the identity it would have to carry.
+ * Nagging it would nag the protocol's first command. A claim that names its bead is not
+ * exempt: `bd show` yields `metadata.actor` before the claim.
+ */
+function writesBeads(invocation: BdInvocation): boolean {
+	if (invocation.hasClaim) return invocation.subcommand !== "ready";
+
+	const { subcommand } = invocation;
+	// A bare `bd`, or a first positional that is really a redirection: both print help.
+	if (!SUBCOMMAND.test(subcommand)) return false;
+	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;
+
+	const action = invocation.positionals[0] ?? "";
+	if (WRITE_ACTIONS[action] === true) return true;
+	if (READ_ACTIONS[action] === true) return false;
+	return READ_SUBCOMMANDS[subcommand] !== true;
+}
+
+/**
+ * Whether the `bash` call's own `env` names an actor.
+ *
+ * `env` reaches every command in the call, so attribution set there satisfies the
+ * contract as fully as an inline assignment. Without this the notice would nag the tool's
+ * own documented way of setting a variable.
+ */
+function envCarriesActor(env: unknown): boolean {
+	if (env === null || typeof env !== "object") return false;
+	const record = env as Record<string, unknown>;
+	return ACTOR_VARS.some(variable => {
+		const value = record[variable];
+		return typeof value === "string" && value.length > 0;
+	});
+}
 
 /**
  * Notice: a mutation that records no actor.
@@ -148,21 +302,99 @@ const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
  * worktree gate, so a flag-only identity would leave that gate blind.
  *
  * An assignment with an empty value is no identity. The regex silently agreed by
- * accident — it required `\w+=\S+` and so never matched `BEADS_ACTOR= bd ...` at all.
+ * accident -- it required `\w+=\S+` and so never matched `BEADS_ACTOR= bd ...` at all.
  */
-export const actorNotice: BdCheck = invocation => {
-	const { name } = operation(invocation);
-	if (MUTATING_SUBCOMMANDS[name] !== true) return undefined;
+export const actorNotice: BdCheck = (invocation, env) => {
+	if (!writesBeads(invocation)) return undefined;
 	if (ACTOR_VARS.some(variable => (invocation.assignments.get(variable) ?? "").length > 0)) return undefined;
+	if (envCarriesActor(env)) return undefined;
+
+	const { name } = operation(invocation);
+	const written = invocation.hasClaim ? `${name} --claim` : name;
 	return (
-		`WARN bd identity: 'bd ${name}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` +
+		`WARN bd identity: 'bd ${written}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` +
 		`attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: ` +
 		`'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd ${name} ...'.`
 	);
 };
 
-/** Flags that carry the comment body off the command line, where no check can read it. */
-const OFFLINE_BODY_FLAGS: Record<string, true> = { "--file": true, "--stdin": true };
+/**
+ * A token the tokeniser produced that a shell would not hand `bd` as a body.
+ *
+ * Redirections are the case that matters: `src/shell.ts` expands none of them, so
+ * `bd comment list <id> 2>&1 | sed ...` presents `2>` where a body would sit. Reading that
+ * as a body would nag a command that never carried one.
+ */
+const REDIRECTION = /^\d*(?:>>?|<)/;
+
+/**
+ * A token in the body position that is really a flag, so the body is elsewhere:
+ * `--file`, `--stdin`, `-f`, `--json`.
+ *
+ * A flag shape rather than a leading `-`, because `commentVerb` normalises markdown and
+ * `- REVIEW approved` is a body this check must still read. A flag carries no whitespace;
+ * a bulleted body does.
+ */
+const BODY_FLAG = /^--?[A-Za-z]\S*$/;
+
+/**
+ * An unexpanded expansion, matched against the first token alone. `bd comment <id>
+ * "$SUMMARY"` names no verb until a shell runs, but a body whose *later* words carry a `$`
+ * still opens with a word this check can read -- so testing the whole body would excuse
+ * `"Wired $X into $Y"`, which is exactly the narration being named.
+ */
+const EXPANSION = /[$`]/;
+
+/**
+ * A body that is nothing but a backticked run: `bd comment <id> "`summarise`"`, which a
+ * shell expands before bd sees it.
+ *
+ * Tested on the raw body rather than on the verb, because `commentVerb` normalises a
+ * leading tick as markdown decoration -- deliberately, so `` `REVIEW` approved `` is
+ * judged. A code span used that way carries text after the closing tick; a substitution is
+ * the whole body, and that is the difference this draws.
+ */
+const SUBSTITUTION = /^`[^`]*`$/;
+
+/** The comment body this invocation carries, with the bead id it is written on. */
+interface CommentBody {
+	id: string;
+	text: string;
+}
+
+/**
+ * The comment body on this command line, or `undefined` when it is not on it at all.
+ *
+ * bd 1.1.2 has no `-m`/`--body`/`--message` on either spelling: `bd comment <id> [text...]`
+ * and `bd comments add [id] [text]` take the body positionally, and otherwise from
+ * `--file`/`-f`/`--stdin`. So the body is the token immediately after the bead id -- and a
+ * flag in that position means the body is elsewhere, which covers the file and stdin forms
+ * without naming them, and covers `bd comment list <id>` too: a read whose next token is a
+ * redirection carries no body at all.
+ *
+ * Adjacency is recovered by consuming `positionals` in order while walking `rest`, the way
+ * `src/gates/one-claim.ts` recovers it: a token `parseBdInvocation` did not count as an
+ * operand is a token this walk does not match.
+ */
+function commentBody(invocation: BdInvocation): CommentBody | undefined {
+	const operands = invocation.positionals;
+	let next = 0;
+
+	for (let index = 0; index < invocation.rest.length; index++) {
+		const token = invocation.rest[index] as string;
+		if (next >= operands.length || token !== operands[next]) continue;
+		next += 1;
+		if (!BEAD_ID.test(token)) continue;
+
+		// The very next token, not the next operand: a flag here means `--file`, `--stdin`,
+		// or `--json` took the position a body would have held.
+		const text = invocation.rest[index + 1];
+		if (text === undefined || BODY_FLAG.test(text) || REDIRECTION.test(text)) return undefined;
+		return { id: token, text };
+	}
+
+	return undefined;
+}
 
 /**
  * Notice: a comment whose first token is not a protocol verb.
@@ -176,22 +408,18 @@ const OFFLINE_BODY_FLAGS: Record<string, true> = { "--file": true, "--stdin": tr
  * worker at exit, long after the comment landed.
  */
 export const commentVerbNotice: BdCheck = invocation => {
-	const { name, operands } = operation(invocation);
-	if (name !== "comment") return undefined;
-	// `--file` and `--stdin` read the body elsewhere (verified: `bd comment --help`), so
-	// there is no first token on this line to judge.
-	if (invocation.rest.some(token => OFFLINE_BODY_FLAGS[splitFlag(token).flag] === true)) return undefined;
-	const text = operands[1];
-	if (text === undefined) return undefined;
+	if (operation(invocation).name !== "comment") return undefined;
+	const body = commentBody(invocation);
+	if (body === undefined || SUBSTITUTION.test(body.text.trim())) return undefined;
 
-	const verb = commentVerb(text);
+	const verb = commentVerb(body.text);
 	if (DECLARED_VERBS[verb] === true) return undefined;
 	// A body the shell has yet to assemble names no verb until it runs, and `src/shell.ts`
 	// expands nothing by design. Nagging what cannot be read would nag correct work.
-	if (verb.includes("$")) return undefined;
+	if (EXPANSION.test(verb)) return undefined;
 
 	return (
-		`WARN comment verb: 'bd comment ${operands[0] ?? ""}' leads with '${verb}', which no protocol verb ` +
+		`WARN comment verb: 'bd comment ${body.id}' leads with '${verb}', which no protocol verb ` +
 		`matches, so supervision reads your contract as unsatisfied and bounces you at exit over something ` +
 		`this comment never showed you. Rewrite it now, leading with one of: ${VERB_LIST}. Case is free and ` +
 		`decoration is normalised, but the first whitespace token is the whole signal, so 'NO WORK' parses ` +
@@ -284,15 +512,16 @@ export const bugRouteNotice: BdCheck = invocation => {
 const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice];
 
 /**
- * Refuse a `bd` call this run cannot see; warn about one it cannot attribute, cannot read,
- * or cannot route.
+ * Warn about a `bd` call this run cannot attribute, cannot read, or cannot route.
  *
  * Parses before reading the marker, because most `bash` calls name no `bd` at all and a
- * file read for each of those buys nothing. The marker then gates all four checks: outside
- * a run this returns `undefined` before any of them is consulted.
+ * file read for each of those buys nothing. The marker then gates all three checks:
+ * outside a run this returns `undefined` before any of them is consulted.
  *
- * The refusal is decided across every invocation before any notice is collected. A notice
- * about a command that will not run is noise.
+ * The return value is always `undefined`: nothing here refuses, so the notices leave
+ * through `pi.sendMessage` and the command runs. It stays in the refusal position in
+ * `src/index.ts` so a check that later has to refuse cannot land after G5 recorded a
+ * claim.
  *
  * `deliverAs: "steer"` is chosen from the handler's timing, not from tidiness. This runs
  * mid-turn, before the tool result exists, so the session is streaming and
@@ -323,11 +552,10 @@ export async function gateBdDiscipline(
 	const run = await readActiveRun(ctx.cwd).catch(() => null);
 	if (run === null) return undefined;
 
-
 	const notices: string[] = [];
 	for (const invocation of invocations) {
 		for (const notice of NOTICES) {
-			const text = notice(invocation, run.repo_root);
+			const text = notice(invocation, input.env);
 			// Deduped: a chain of three unattributed mutations says it once.
 			if (text !== undefined && !notices.includes(text)) notices.push(text);
 		}

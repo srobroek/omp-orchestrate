@@ -8,10 +8,12 @@
 # Local gate, deliberately not in CI: it needs an installed `omp`, which the CI
 # runners do not have. Run it after touching any rule frontmatter.
 #
-# Four bd rules used to live here -- the -C pin, the actor prefix, the comment verb and
-# the bug-bead route. They are `src/gates/bd.ts` now, because a regex cannot see whether a
-# run is active and so nagged every session that mentioned `bd`. Their corpus moved to
-# `test/gate-bd.test.ts`, which runs in CI. Do not re-add them here.
+# Five bd rules used to live here -- the -C pin, the actor prefix, the comment verb, the
+# bug-bead route and the one-claim count. They are tool_call gates now, because a regex
+# cannot see whether a run is active and so nagged every session that mentioned `bd`. The
+# pin is retired outright: this project runs a per-project Dolt server. Their corpus moved
+# to `test/gate-bd.test.ts` and `test/one-claim.test.ts`, which run in CI. Do not re-add
+# them here.
 set -u
 cd "$(dirname "$0")/.." 2>/dev/null || cd ~/personal/dev/omp-orchestrate || exit 2
 
@@ -40,10 +42,6 @@ check orc-ready-ephemeral.md   miss tool bash 'bd ready --parent orc-1 --label a
 
 check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
 check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
-
-check orc-one-claim.md         fire tool bash 'bd update orc-1 orc-2 --claim'
-check orc-one-claim.md         fire tool bash "sh -c 'bd update orc-1 orc-2 --claim'"
-check orc-one-claim.md         miss tool bash 'bd update orc-1 --claim'
 
 check orc-spawn-isolated.md    fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
 check orc-spawn-isolated.md    miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'

@@ -263,6 +263,20 @@ export interface BdInvocation {
 	hasClaim: boolean;
 }
 
+/**
+ * A bead id, as one parsed token: a lowercase word, then one or more hyphen-separated
+ * groups.
+ *
+ * Wider than the pattern `src/bd.ts` uses to sieve ids out of a dependency record, which
+ * forbids a hyphen in the suffix and so rejects `orc-chaos-c3-05k` -- a real id, since a
+ * configured issue prefix may itself contain one. Exported because two gates need the
+ * same answer: G6 reads the token after an id as a comment body, G7 counts the ids one
+ * claim names, and a second copy of this would let them disagree about what an id is.
+ *
+ * Matched against a single token the tokeniser produced, never against command text.
+ */
+export const BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+
 
 /**
  * Drop the trailing `)`/`}` a subshell or group close glues onto the last token.

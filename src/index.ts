@@ -13,7 +13,8 @@ import { dispatchContract } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { gateExitContract } from "./gates/exit";
-import { gateBeadWriteFree } from "./gates/readonly";
+import { gateOneClaim } from "./gates/one-claim";
+import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { sessionRole } from "./identity";
@@ -65,12 +66,16 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (ownership) return ownership;
 
 				// G6 before G5: it is a parse plus one marker read where G5 shells out to
-				// `bd show` and `bd list`, and a call refused for its pin must not first be
-				// recorded as a claim -- G2 would then trust a claim that never happened. It
-				// takes `pi` because three of its four findings are notices rather than
-				// refusals, and a notice leaves through `sendMessage`, not the return value.
+				// `bd show` and `bd list`. It takes `pi` because its findings are notices
+				// rather than refusals, and a notice leaves through `sendMessage` rather than
+				// through the return value.
 				const discipline = await gateBdDiscipline(pi, ctx, input);
 				if (discipline) return discipline;
+
+				// Also before G5: a refused multi-bead claim must not be recorded, or G2
+				// would hold the session to two trees it was never allowed to claim.
+				const exclusivity = gateOneClaim(ctx, input);
+				if (exclusivity) return exclusivity;
 
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;
@@ -83,8 +88,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (scope) return scope;
 			}
 
-			// Last, and only for `bash`: a revision rather than a refusal.
-			if (event.toolName === "bash") return gateBeadWriteFree(pi, ctx, input);
+			// Last, and only for `bash`: a revision rather than a refusal, built through the
+			// one shared builder so a second environment gate can contribute to the same
+			// result without a handler returning two of them.
+			if (event.toolName === "bash") return reviseBashEnv(input, { ...beadWriteFreeEnv(pi, ctx) });
 
 			return undefined;
 		} catch (error) {

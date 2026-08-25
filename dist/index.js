@@ -1402,6 +1402,7 @@ function basename(p) {
   const cut = p.lastIndexOf("/");
   return cut === -1 ? p : p.slice(cut + 1);
 }
+var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
 function stripGroupClose(token) {
   let end = token.length;
   for (;; ) {
@@ -1571,43 +1572,156 @@ function operation(invocation) {
   }
   return { name: invocation.subcommand, operands: invocation.positionals };
 }
-var MUTATING_SUBCOMMANDS = {
-  create: true,
-  update: true,
+var READ_SUBCOMMANDS = {
+  blocked: true,
+  children: true,
+  comments: true,
+  context: true,
+  count: true,
+  doctor: true,
+  export: true,
+  graph: true,
+  history: true,
+  info: true,
+  lint: true,
+  list: true,
+  memories: true,
+  ping: true,
+  preflight: true,
+  prime: true,
+  query: true,
+  ready: true,
+  recall: true,
+  search: true,
+  show: true,
+  stale: true,
+  status: true,
+  statuses: true,
+  types: true,
+  version: true,
+  where: true
+};
+var ADMIN_SUBCOMMANDS = {
+  admin: true,
+  backup: true,
+  bootstrap: true,
+  "codex-hook": true,
+  compact: true,
+  completion: true,
+  config: true,
+  dolt: true,
+  flatten: true,
+  gc: true,
+  help: true,
+  hooks: true,
+  human: true,
+  init: true,
+  migrate: true,
+  onboard: true,
+  prune: true,
+  purge: true,
+  quickstart: true,
+  "recompute-blocked": true,
+  "rename-prefix": true,
+  restore: true,
+  setup: true,
+  sql: true,
+  upgrade: true,
+  vc: true,
+  worktree: true
+};
+var SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+var READ_ACTIONS = {
+  get: true,
+  list: true,
+  show: true,
+  status: true,
+  tree: true
+};
+var WRITE_ACTIONS = {
+  add: true,
+  append: true,
+  claim: true,
   close: true,
-  comment: true,
-  dep: true,
-  label: true,
-  gate: true,
-  "merge-slot": true,
-  "set-state": true,
-  audit: true
+  create: true,
+  delete: true,
+  edit: true,
+  release: true,
+  remove: true,
+  resolve: true,
+  rm: true,
+  set: true,
+  update: true
 };
 var ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"];
-var actorNotice = (invocation) => {
-  const { name } = operation(invocation);
-  if (MUTATING_SUBCOMMANDS[name] !== true)
+function writesBeads(invocation) {
+  if (invocation.hasClaim)
+    return invocation.subcommand !== "ready";
+  const { subcommand } = invocation;
+  if (!SUBCOMMAND.test(subcommand))
+    return false;
+  if (ADMIN_SUBCOMMANDS[subcommand] === true)
+    return false;
+  const action = invocation.positionals[0] ?? "";
+  if (WRITE_ACTIONS[action] === true)
+    return true;
+  if (READ_ACTIONS[action] === true)
+    return false;
+  return READ_SUBCOMMANDS[subcommand] !== true;
+}
+function envCarriesActor(env) {
+  if (env === null || typeof env !== "object")
+    return false;
+  const record = env;
+  return ACTOR_VARS.some((variable) => {
+    const value = record[variable];
+    return typeof value === "string" && value.length > 0;
+  });
+}
+var actorNotice = (invocation, env) => {
+  if (!writesBeads(invocation))
     return;
   if (ACTOR_VARS.some((variable) => (invocation.assignments.get(variable) ?? "").length > 0))
     return;
-  return `WARN bd identity: 'bd ${name}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` + `attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: ` + `'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd ${name} ...'.`;
+  if (envCarriesActor(env))
+    return;
+  const { name } = operation(invocation);
+  const written = invocation.hasClaim ? `${name} --claim` : name;
+  return `WARN bd identity: 'bd ${written}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` + `attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: ` + `'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd ${name} ...'.`;
 };
-var OFFLINE_BODY_FLAGS = { "--file": true, "--stdin": true };
+var REDIRECTION = /^\d*(?:>>?|<)/;
+var BODY_FLAG = /^--?[A-Za-z]\S*$/;
+var EXPANSION = /[$`]/;
+var SUBSTITUTION = /^`[^`]*`$/;
+function commentBody(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  for (let index = 0;index < invocation.rest.length; index++) {
+    const token = invocation.rest[index];
+    if (next >= operands.length || token !== operands[next])
+      continue;
+    next += 1;
+    if (!BEAD_ID.test(token))
+      continue;
+    const text = invocation.rest[index + 1];
+    if (text === undefined || BODY_FLAG.test(text) || REDIRECTION.test(text))
+      return;
+    return { id: token, text };
+  }
+  return;
+}
 var commentVerbNotice = (invocation) => {
-  const { name, operands } = operation(invocation);
-  if (name !== "comment")
+  if (operation(invocation).name !== "comment")
     return;
-  if (invocation.rest.some((token) => OFFLINE_BODY_FLAGS[splitFlag(token).flag] === true))
+  const body = commentBody(invocation);
+  if (body === undefined || SUBSTITUTION.test(body.text.trim()))
     return;
-  const text = operands[1];
-  if (text === undefined)
-    return;
-  const verb = commentVerb(text);
+  const verb = commentVerb(body.text);
   if (DECLARED_VERBS[verb] === true)
     return;
-  if (verb.includes("$"))
+  if (EXPANSION.test(verb))
     return;
-  return `WARN comment verb: 'bd comment ${operands[0] ?? ""}' leads with '${verb}', which no protocol verb ` + `matches, so supervision reads your contract as unsatisfied and bounces you at exit over something ` + `this comment never showed you. Rewrite it now, leading with one of: ${VERB_LIST}. Case is free and ` + `decoration is normalised, but the first whitespace token is the whole signal, so 'NO WORK' parses ` + `as 'NO' and the underscored NO_WORK is the verb.`;
+  return `WARN comment verb: 'bd comment ${body.id}' leads with '${verb}', which no protocol verb ` + `matches, so supervision reads your contract as unsatisfied and bounces you at exit over something ` + `this comment never showed you. Rewrite it now, leading with one of: ${VERB_LIST}. Case is free and ` + `decoration is normalised, but the first whitespace token is the whole signal, so 'NO WORK' parses ` + `as 'NO' and the underscored NO_WORK is the verb.`;
 };
 var TYPE_FLAGS = { "--type": true, "-t": true };
 var PARENT_FLAGS = { "--parent": true };
@@ -1674,7 +1788,7 @@ async function gateBdDiscipline(pi, ctx, input) {
   const notices = [];
   for (const invocation of invocations) {
     for (const notice of NOTICES) {
-      const text = notice(invocation, run.repo_root);
+      const text = notice(invocation, input.env);
       if (text !== undefined && !notices.includes(text))
         notices.push(text);
     }
@@ -1990,16 +2104,64 @@ async function gateClaimEligibility(ctx, input) {
   return;
 }
 
+// src/gates/one-claim.ts
+function claimedBeadIds(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  let run = [];
+  let longest = [];
+  for (const token of invocation.rest) {
+    if (next < operands.length && token === operands[next]) {
+      next += 1;
+      if (BEAD_ID.test(token) && !run.includes(token))
+        run.push(token);
+      continue;
+    }
+    if (run.length > longest.length)
+      longest = run;
+    run = [];
+  }
+  return run.length > longest.length ? run : longest;
+}
+function gateOneClaim(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  for (const invocation of bdInvocations(command)) {
+    if (!invocation.hasClaim)
+      continue;
+    if (invocation.subcommand === "ready")
+      continue;
+    const beadIds = claimedBeadIds(invocation);
+    if (beadIds.length < 2)
+      continue;
+    return {
+      block: true,
+      reason: `'bd ${invocation.subcommand} --claim' names ${beadIds.length} beads (${beadIds.join(", ")}); one activation owns at most one bead. Claim '${beadIds[0]}', finish or release it, then claim the next \u2014 parallel work belongs to parallel agents, not parallel claims.`
+    };
+  }
+  return;
+}
+
 // src/gates/readonly.ts
 var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
-function gateBeadWriteFree(pi, ctx, input) {
-  if (!isBeadWriteFree(pi, ctx))
+function beadWriteFreeEnv(pi, ctx) {
+  return isBeadWriteFree(pi, ctx) ? { BD_READONLY: "1" } : undefined;
+}
+function reviseBashEnv(input, additions) {
+  const existing = input.env;
+  const env = existing !== null && typeof existing === "object" ? { ...existing } : {};
+  let changed = false;
+  for (const [key, value] of Object.entries(additions)) {
+    if (env[key] === value)
+      continue;
+    env[key] = value;
+    changed = true;
+  }
+  if (!changed)
     return;
-  const existingEnv = input.env;
-  const env = existingEnv !== null && typeof existingEnv === "object" ? { ...existingEnv } : {};
-  if (env.BD_READONLY === "1")
-    return;
-  env.BD_READONLY = "1";
   const revised = {};
   for (const key of BASH_PARAMS) {
     if (key in input)
@@ -4031,7 +4193,7 @@ async function sweep(pi) {
     }
   }
 }
-var MUTATING_SUBCOMMANDS2 = {
+var MUTATING_SUBCOMMANDS = {
   update: true,
   close: true,
   create: true,
@@ -4043,7 +4205,7 @@ var MUTATING_SUBCOMMANDS2 = {
 };
 function bdMutation(command) {
   for (const invocation of bdInvocations(command)) {
-    if (MUTATING_SUBCOMMANDS2[invocation.subcommand] === true)
+    if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true)
       return invocation.subcommand;
   }
   return;
@@ -4485,6 +4647,9 @@ function ompOrchestrate(pi) {
         const discipline = await gateBdDiscipline(pi, ctx, input);
         if (discipline)
           return discipline;
+        const exclusivity = gateOneClaim(ctx, input);
+        if (exclusivity)
+          return exclusivity;
         const eligibility = await gateClaimEligibility(ctx, input);
         if (eligibility)
           return eligibility;
@@ -4495,7 +4660,7 @@ function ompOrchestrate(pi) {
           return scope;
       }
       if (event.toolName === "bash")
-        return gateBeadWriteFree(pi, ctx, input);
+        return reviseBashEnv(input, { ...beadWriteFreeEnv(pi, ctx) });
       return;
     } catch (error) {
       pi.logger.error("orchestrate gate failed open", {

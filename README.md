@@ -47,8 +47,9 @@ A run reports either of these as a `WARN settings` notice on its epic.
 
 ## Gates
 
-The extension registers one `tool_call` handler covering five rules. Each one fails closed. A bug in the
-handler degrades to fail-open instead of blocking every tool.
+The extension registers one `tool_call` handler covering seven checks. Six fail closed. G6 refuses
+nothing: it delivers notices. A bug in the handler degrades to fail-open rather than blocking every
+tool.
 
 | Gate | Tool | Refuses |
 | --- | --- | --- |
@@ -57,11 +58,18 @@ handler degrades to fail-open instead of blocking every tool.
 | G3 | `bash` | `git worktree` and `gh pr checkout`, which bypass Worktrunk |
 | G4 | `yield` | exiting before the claimed bead's role contract is met. Also a role-marked worker that claimed nothing, whose exit reaches no bead and no branch. That second refusal fires once, so a revived worker is never trapped |
 | G5 | `bash` | claiming a bead that routes to another role |
+| G6 | `bash` | nothing: inside a run it warns about a `bd` write carrying no actor, a comment leading with no protocol verb, and a bug bead no queue can reach |
+| G7 | `bash` | a claim naming two or more beads, because one activation owns one bead |
 
 ## Rules
 
-Eight TTSR rules in `rules/` catch protocol slips in tool arguments. They fire before a command
+Four TTSR rules in `rules/` catch protocol slips in tool arguments. They fire before a command
 runs. Each one is advisory or tool-only, never a security boundary.
+
+Five bd rules used to sit beside them. Four are G6 and G7 now: a regex over a command string cannot
+tell whether a run is active, so it nagged every session that mentioned `bd`. The fifth demanded a
+`-C` database pin, and this repository retired it. A per-project Dolt server resolves the database
+by host and port, and that survives a copied checkout.
 
 The host's regex engine evaluates these conditions, so a pattern Python accepts proves nothing.
 After editing a rule, run `sh scripts/validate-rules.sh`. It asserts one firing case and one
