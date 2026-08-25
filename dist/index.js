@@ -1658,7 +1658,7 @@ async function bindRun(cwd, runId) {
   }
   await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
   resetReadBudget();
-  await ensurePatrolWisp(runId, cwd);
+  await ensurePatrolWisp(runId, cwd).catch(() => {});
 }
 function registerRunCommands(pi) {
   pi.registerCommand("orchestrate-run", {
@@ -1679,7 +1679,7 @@ function registerRunCommands(pi) {
       const runId = args.trim();
       try {
         await bindRun(ctx.sessionManager.getCwd(), runId);
-        ctx.ui.notify(`orchestrate run bound to ${runId}; patrol armed`, "info");
+        ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

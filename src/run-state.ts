@@ -157,13 +157,18 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
 	}
 	await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
 	// Binding is its own dispatch, so it owns its read budget. `bd.ts` caps reads per
-	// dispatch and only the `tool_call` handler resets the counter; a slash command
-	// arriving after twelve gated reads in the same turn would otherwise find the
-	// budget spent, and `bdList` returns without spawning when it is -- so the patrol
-	// existence check silently reports "none linked" and arming is skipped. Failing
-	// open there costs a reconciliation sweep, which is exactly what the patrol is.
+	// dispatch and only the `tool_call` handler resets the counter, so a slash command
+	// arriving after twelve gated reads in the same turn would find the budget spent.
+	// `bdList` returns without spawning when it is, so the patrol existence check
+	// reports "none linked" and a second patrol is armed beside the live one.
 	resetReadBudget();
-	await ensurePatrolWisp(runId, cwd);
+	// Arming must not fail the bind, which this function's contract already promises:
+	// the marker is written by now, so a caller told the bind failed may retry or
+	// abandon a run that is in fact bound. An unarmed patrol costs one reconciliation
+	// sweep; a caller misled about the marker costs the run. The internals already
+	// fail open on a missing or failing `bd`, so reaching this catch means something
+	// unexpected threw -- which is exactly when the marker matters most.
+	await ensurePatrolWisp(runId, cwd).catch(() => {});
 }
 
 /**
@@ -213,7 +218,9 @@ export function registerRunCommands(pi: ExtensionAPI): void {
 			try {
 				// `bindRun` arms the S2 patrol wisp; this handler only reports.
 				await bindRun(ctx.sessionManager.getCwd(), runId);
-				ctx.ui.notify(`orchestrate run bound to ${runId}; patrol armed`, "info");
+				// Not "patrol armed": arming fails open, so the bind succeeding does not
+				// prove a patrol exists. `/orchestrate-status` reports the run's wisps.
+				ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
