@@ -10,6 +10,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
 import { dispatchContract } from "./contract";
+import { gateActorAttribution } from "./gates/actor";
 import { gateClaimEligibility } from "./gates/claim";
 import { gateExitContract } from "./gates/exit";
 import { gateBeadWriteFree } from "./gates/readonly";
@@ -62,6 +63,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 			if (event.toolName === "bash") {
 				const ownership = gateWorktrunkOwnership(input);
 				if (ownership) return ownership;
+
+				// Before G5: an unattributed claim must not be recorded as this
+				// session's, and the check is a parse with no lookups.
+				const attribution = gateActorAttribution(ctx, input);
+				if (attribution) return attribution;
 
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;

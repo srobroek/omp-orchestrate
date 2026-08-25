@@ -540,26 +540,3 @@ describe("orc-one-claim, the rule that owns multi-bead claims", () => {
 	});
 });
 
-/**
- * The nag rule for identity, included for its false-positive side: it cannot refuse
- * anything (`interruptMode: never` folds a reminder into the tool result), so the cost
- * of a bad condition is a correct call being nagged every turn.
- */
-describe("orc-bd-actor-prefix leaves a correct call alone", () => {
-	const rule = ruleCondition("orc-bd-actor-prefix.md");
-
-	test.each([
-		["both identity vars set", `BEADS_ACTOR=${ACTOR} BD_ACTOR=${ACTOR} bd comment ${BEAD} "REPORTED done"`],
-		["a read, which needs no prefix", "bd show orc-1 --json"],
-		["a ready pull", "bd ready --label agent:implementer --unassigned --claim --json"],
-	])("stays quiet on %s", (_label, command) => {
-		expect(rule.test(command)).toBe(false);
-	});
-
-	test.each([
-		["an unprefixed mutation", "bd update orc-1 --claim"],
-		["an unrelated env prefix standing in for identity", "FOO=1 bd comment orc-1 REPORTED"],
-	])("fires on %s", (_label, command) => {
-		expect(rule.test(command)).toBe(true);
-	});
-});

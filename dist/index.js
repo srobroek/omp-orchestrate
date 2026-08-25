@@ -201,17 +201,6 @@ function dispatchContract(repoRoot) {
   return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
 }
 
-// src/claim-state.ts
-var observed;
-function recordClaim(observation) {
-  if (observation.actor.length === 0 || observation.beadIds.length === 0)
-    return;
-  observed = observation;
-}
-function observedClaim() {
-  return observed;
-}
-
 // src/identity.ts
 var ORC_ROLES = {
   architect: true,
@@ -242,132 +231,6 @@ function roleFromLabels(labels) {
       return candidate;
   }
   return;
-}
-
-// src/scope.ts
-function compile(pattern) {
-  const steps = [];
-  for (let index = 0;index < pattern.length; index++) {
-    const char = pattern[index];
-    if (char === "*") {
-      if (steps[steps.length - 1]?.kind !== "star")
-        steps.push({ kind: "star" });
-      continue;
-    }
-    if (char === "?") {
-      steps.push({ kind: "any" });
-      continue;
-    }
-    if (char !== "[") {
-      steps.push({ kind: "literal", char });
-      continue;
-    }
-    const close = pattern.indexOf("]", index + 1);
-    if (close === -1) {
-      steps.push({ kind: "literal", char });
-      continue;
-    }
-    const group = pattern.slice(index + 1, close);
-    index = close;
-    const body = group.startsWith("!") ? `^${group.slice(1)}` : group;
-    try {
-      steps.push({ kind: "class", member: new RegExp(`^[${body}]$`, "s") });
-    } catch {
-      return null;
-    }
-  }
-  return steps;
-}
-function matchSteps(text, steps) {
-  let at = 0;
-  let step = 0;
-  let lastStar = -1;
-  let resume = 0;
-  while (at < text.length) {
-    const current = steps[step];
-    if (current?.kind === "star") {
-      lastStar = step;
-      step += 1;
-      resume = at;
-      continue;
-    }
-    const char = text[at];
-    const hit = current !== undefined && (current.kind === "any" || (current.kind === "literal" ? current.char === char : current.member.test(char)));
-    if (hit) {
-      step += 1;
-      at += 1;
-      continue;
-    }
-    if (lastStar === -1)
-      return false;
-    step = lastStar + 1;
-    resume += 1;
-    at = resume;
-  }
-  while (steps[step]?.kind === "star")
-    step += 1;
-  return step === steps.length;
-}
-var MAX_GLOB_LENGTH = 1024;
-function fnmatch(text, pattern) {
-  if (text.length > MAX_GLOB_LENGTH || pattern.length > MAX_GLOB_LENGTH)
-    return true;
-  const steps = compile(pattern);
-  if (steps === null)
-    return true;
-  return matchSteps(text, steps);
-}
-function deepWildcard(glob) {
-  const cut = glob.lastIndexOf("/");
-  return (cut === -1 ? "" : glob.slice(0, cut)).includes("*");
-}
-function literalPrefix(glob) {
-  const star = glob.indexOf("*");
-  const head = star === -1 ? glob : glob.slice(0, star);
-  return head.replace(/\/+$/, "");
-}
-function scopesOverlap(a, b) {
-  for (const globA of a) {
-    const prefixA = literalPrefix(globA);
-    for (const globB of b) {
-      const prefixB = literalPrefix(globB);
-      if (prefixA.length === 0 || prefixB.length === 0)
-        return true;
-      if (prefixA.startsWith(`${prefixB}/`) || prefixB.startsWith(`${prefixA}/`))
-        return true;
-      if (prefixA === prefixB) {
-        if (!globA.includes("*") || !globB.includes("*"))
-          return true;
-        if (deepWildcard(globA) || deepWildcard(globB))
-          return true;
-        if (fnmatch(globA, globB) || fnmatch(globB, globA))
-          return true;
-        continue;
-      }
-      if (fnmatch(prefixA, globB) || fnmatch(prefixB, globA))
-        return true;
-      if (prefixA.startsWith(prefixB) && deepWildcard(globB) || prefixB.startsWith(prefixA) && deepWildcard(globA)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-function scopeOf(metadata) {
-  const raw = metadata?.scope;
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed))
-        return parsed.filter((entry) => typeof entry === "string");
-    } catch {
-      return [raw];
-    }
-    return [raw];
-  }
-  if (Array.isArray(raw))
-    return raw.filter((entry) => typeof entry === "string");
-  return [];
 }
 
 // src/shell.ts
@@ -645,6 +508,269 @@ function invokesCommand(command, argv) {
       return true;
   }
   return false;
+}
+
+// src/gates/actor.ts
+var READ_SUBCOMMANDS = {
+  blocked: true,
+  children: true,
+  comments: true,
+  context: true,
+  count: true,
+  doctor: true,
+  export: true,
+  graph: true,
+  history: true,
+  info: true,
+  lint: true,
+  list: true,
+  memories: true,
+  ping: true,
+  preflight: true,
+  prime: true,
+  query: true,
+  ready: true,
+  recall: true,
+  search: true,
+  show: true,
+  stale: true,
+  status: true,
+  statuses: true,
+  types: true,
+  version: true,
+  where: true
+};
+var ADMIN_SUBCOMMANDS = {
+  admin: true,
+  backup: true,
+  bootstrap: true,
+  "codex-hook": true,
+  compact: true,
+  completion: true,
+  config: true,
+  dolt: true,
+  flatten: true,
+  gc: true,
+  help: true,
+  hooks: true,
+  human: true,
+  init: true,
+  migrate: true,
+  onboard: true,
+  prune: true,
+  purge: true,
+  quickstart: true,
+  "recompute-blocked": true,
+  "rename-prefix": true,
+  restore: true,
+  setup: true,
+  sql: true,
+  upgrade: true,
+  vc: true,
+  worktree: true
+};
+var SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+var READ_ACTIONS = {
+  get: true,
+  list: true,
+  show: true,
+  status: true,
+  tree: true
+};
+var WRITE_ACTIONS = {
+  add: true,
+  append: true,
+  claim: true,
+  close: true,
+  create: true,
+  delete: true,
+  edit: true,
+  release: true,
+  remove: true,
+  resolve: true,
+  rm: true,
+  set: true,
+  update: true
+};
+var ACTOR_KEYS = ["BEADS_ACTOR", "BD_ACTOR"];
+function writesBeads(invocation) {
+  if (invocation.hasClaim)
+    return invocation.subcommand !== "ready";
+  const subcommand = invocation.subcommand;
+  if (!SUBCOMMAND.test(subcommand))
+    return false;
+  if (ADMIN_SUBCOMMANDS[subcommand] === true)
+    return false;
+  const action = invocation.positionals[0] ?? "";
+  if (WRITE_ACTIONS[action] === true)
+    return true;
+  if (READ_ACTIONS[action] === true)
+    return false;
+  return READ_SUBCOMMANDS[subcommand] !== true;
+}
+function envCarriesActor(env) {
+  if (env === null || typeof env !== "object")
+    return false;
+  const record = env;
+  return ACTOR_KEYS.some((key) => typeof record[key] === "string" && record[key].length > 0);
+}
+function gateActorAttribution(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  if (envCarriesActor(input.env))
+    return;
+  for (const invocation of bdInvocations(command)) {
+    if (!writesBeads(invocation))
+      continue;
+    if (ACTOR_KEYS.some((key) => (invocation.assignments.get(key) ?? "").length > 0))
+      continue;
+    const written = invocation.hasClaim ? `${invocation.subcommand} --claim` : invocation.subcommand;
+    return {
+      block: true,
+      reason: `'bd ${written}' writes beads under no identity; prefix it with BEADS_ACTOR=<metadata.actor> BD_ACTOR=<metadata.actor> so the audit trail names the acting role`
+    };
+  }
+  return;
+}
+
+// src/claim-state.ts
+var observed;
+function recordClaim(observation) {
+  if (observation.actor.length === 0 || observation.beadIds.length === 0)
+    return;
+  observed = observation;
+}
+function observedClaim() {
+  return observed;
+}
+
+// src/scope.ts
+function compile(pattern) {
+  const steps = [];
+  for (let index = 0;index < pattern.length; index++) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (steps[steps.length - 1]?.kind !== "star")
+        steps.push({ kind: "star" });
+      continue;
+    }
+    if (char === "?") {
+      steps.push({ kind: "any" });
+      continue;
+    }
+    if (char !== "[") {
+      steps.push({ kind: "literal", char });
+      continue;
+    }
+    const close = pattern.indexOf("]", index + 1);
+    if (close === -1) {
+      steps.push({ kind: "literal", char });
+      continue;
+    }
+    const group = pattern.slice(index + 1, close);
+    index = close;
+    const body = group.startsWith("!") ? `^${group.slice(1)}` : group;
+    try {
+      steps.push({ kind: "class", member: new RegExp(`^[${body}]$`, "s") });
+    } catch {
+      return null;
+    }
+  }
+  return steps;
+}
+function matchSteps(text, steps) {
+  let at = 0;
+  let step = 0;
+  let lastStar = -1;
+  let resume = 0;
+  while (at < text.length) {
+    const current = steps[step];
+    if (current?.kind === "star") {
+      lastStar = step;
+      step += 1;
+      resume = at;
+      continue;
+    }
+    const char = text[at];
+    const hit = current !== undefined && (current.kind === "any" || (current.kind === "literal" ? current.char === char : current.member.test(char)));
+    if (hit) {
+      step += 1;
+      at += 1;
+      continue;
+    }
+    if (lastStar === -1)
+      return false;
+    step = lastStar + 1;
+    resume += 1;
+    at = resume;
+  }
+  while (steps[step]?.kind === "star")
+    step += 1;
+  return step === steps.length;
+}
+var MAX_GLOB_LENGTH = 1024;
+function fnmatch(text, pattern) {
+  if (text.length > MAX_GLOB_LENGTH || pattern.length > MAX_GLOB_LENGTH)
+    return true;
+  const steps = compile(pattern);
+  if (steps === null)
+    return true;
+  return matchSteps(text, steps);
+}
+function deepWildcard(glob) {
+  const cut = glob.lastIndexOf("/");
+  return (cut === -1 ? "" : glob.slice(0, cut)).includes("*");
+}
+function literalPrefix(glob) {
+  const star = glob.indexOf("*");
+  const head = star === -1 ? glob : glob.slice(0, star);
+  return head.replace(/\/+$/, "");
+}
+function scopesOverlap(a, b) {
+  for (const globA of a) {
+    const prefixA = literalPrefix(globA);
+    for (const globB of b) {
+      const prefixB = literalPrefix(globB);
+      if (prefixA.length === 0 || prefixB.length === 0)
+        return true;
+      if (prefixA.startsWith(`${prefixB}/`) || prefixB.startsWith(`${prefixA}/`))
+        return true;
+      if (prefixA === prefixB) {
+        if (!globA.includes("*") || !globB.includes("*"))
+          return true;
+        if (deepWildcard(globA) || deepWildcard(globB))
+          return true;
+        if (fnmatch(globA, globB) || fnmatch(globB, globA))
+          return true;
+        continue;
+      }
+      if (fnmatch(prefixA, globB) || fnmatch(prefixB, globA))
+        return true;
+      if (prefixA.startsWith(prefixB) && deepWildcard(globB) || prefixB.startsWith(prefixA) && deepWildcard(globA)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function scopeOf(metadata) {
+  const raw = metadata?.scope;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed))
+        return parsed.filter((entry) => typeof entry === "string");
+    } catch {
+      return [raw];
+    }
+    return [raw];
+  }
+  if (Array.isArray(raw))
+    return raw.filter((entry) => typeof entry === "string");
+  return [];
 }
 
 // src/gates/claim.ts
@@ -3894,6 +4020,9 @@ function ompOrchestrate(pi) {
         const ownership = gateWorktrunkOwnership(input);
         if (ownership)
           return ownership;
+        const attribution = gateActorAttribution(ctx, input);
+        if (attribution)
+          return attribution;
         const eligibility = await gateClaimEligibility(ctx, input);
         if (eligibility)
           return eligibility;
