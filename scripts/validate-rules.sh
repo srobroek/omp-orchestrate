@@ -39,6 +39,16 @@ check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrato
 check orc-bd-actor-prefix.md   fire tool bash 'bd update orc-1 --claim'
 check orc-bd-actor-prefix.md   miss tool bash 'BEADS_ACTOR=impl BD_ACTOR=impl bd update orc-1 --claim'
 check orc-bd-actor-prefix.md   miss tool bash 'bd show orc-1 --json'
+# The blind spot that let this rule go dead: orc-bd-pin makes `-C <repo>` mandatory,
+# so in real use EVERY mutating call carries it. These cases were all unpinned, the
+# one form the pin rule forbids, so the guard never fired in practice.
+check orc-bd-actor-prefix.md   fire tool bash 'bd -C /repo update orc-1 --claim'
+check orc-bd-actor-prefix.md   fire tool bash 'bd -C=/repo close orc-1'
+check orc-bd-actor-prefix.md   fire tool bash 'bd -C/repo comment orc-1 "REPORTED done"'
+check orc-bd-actor-prefix.md   fire tool bash 'bd --directory /repo dep add orc-1 orc-2'
+check orc-bd-actor-prefix.md   miss tool bash 'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /repo update orc-1 --claim'
+check orc-bd-actor-prefix.md   miss tool bash 'bd -C /repo ready --label agent:implementer --unassigned --claim --json'
+check orc-bd-actor-prefix.md   miss tool bash 'bd -C /repo swarm validate orc-1 --json'
 
 check orc-one-claim.md         fire tool bash 'bd update orc-1 orc-2 --claim'
 check orc-one-claim.md         fire tool bash "sh -c 'bd update orc-1 orc-2 --claim'"
