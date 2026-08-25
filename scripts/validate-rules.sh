@@ -36,10 +36,6 @@ check orc-ready-ephemeral.md   miss tool bash 'bd ready --parent orc-1 --label a
 check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
 check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
 
-check orc-one-claim.md         fire tool bash 'bd update orc-1 orc-2 --claim'
-check orc-one-claim.md         fire tool bash "sh -c 'bd update orc-1 orc-2 --claim'"
-check orc-one-claim.md         miss tool bash 'bd update orc-1 --claim'
-
 # orc-bd-pin: an unpinned bd call reads and writes the copy inside an isolated
 # workspace. Every spelling of the pin must suppress it, or the reminder becomes
 # noise the moment an agent complies.

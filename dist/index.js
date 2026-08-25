@@ -1301,6 +1301,48 @@ async function gateExitContract(ctx, input) {
   };
 }
 
+// src/gates/one-claim.ts
+var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+function claimedBeadIds(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  let run = [];
+  let longest = [];
+  for (const token of invocation.rest) {
+    if (next < operands.length && token === operands[next]) {
+      next += 1;
+      if (BEAD_ID.test(token) && !run.includes(token))
+        run.push(token);
+      continue;
+    }
+    if (run.length > longest.length)
+      longest = run;
+    run = [];
+  }
+  return run.length > longest.length ? run : longest;
+}
+function gateOneClaim(ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  if (orcRole(ctx) === undefined)
+    return;
+  for (const invocation of bdInvocations(command)) {
+    if (!invocation.hasClaim)
+      continue;
+    if (invocation.subcommand === "ready")
+      continue;
+    const beadIds = claimedBeadIds(invocation);
+    if (beadIds.length < 2)
+      continue;
+    return {
+      block: true,
+      reason: `'bd ${invocation.subcommand} --claim' names ${beadIds.length} beads (${beadIds.join(", ")}); one activation owns at most one bead. Claim '${beadIds[0]}', finish or release it, then claim the next \u2014 parallel work belongs to parallel agents, not parallel claims.`
+    };
+  }
+  return;
+}
+
 // src/gates/readonly.ts
 var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
 function gateBeadWriteFree(pi, ctx, input) {
@@ -4023,6 +4065,9 @@ function ompOrchestrate(pi) {
         const attribution = gateActorAttribution(ctx, input);
         if (attribution)
           return attribution;
+        const exclusivity = gateOneClaim(ctx, input);
+        if (exclusivity)
+          return exclusivity;
         const eligibility = await gateClaimEligibility(ctx, input);
         if (eligibility)
           return eligibility;

@@ -13,6 +13,7 @@ import { dispatchContract } from "./contract";
 import { gateActorAttribution } from "./gates/actor";
 import { gateClaimEligibility } from "./gates/claim";
 import { gateExitContract } from "./gates/exit";
+import { gateOneClaim } from "./gates/one-claim";
 import { gateBeadWriteFree } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
@@ -68,6 +69,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				// session's, and the check is a parse with no lookups.
 				const attribution = gateActorAttribution(ctx, input);
 				if (attribution) return attribution;
+
+				// Also before G5, and for the same reason: a refused multi-bead claim
+				// must not be recorded, or G2 would hold the session to two trees it
+				// was never allowed to claim.
+				const exclusivity = gateOneClaim(ctx, input);
+				if (exclusivity) return exclusivity;
 
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;
