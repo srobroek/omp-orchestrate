@@ -763,10 +763,13 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 	const mode = observed["task.isolation.mode"];
 	const isolating = typeof mode === "string" && mode !== "none";
 	if (isolating && !(await sharedBeadsDatabase(cwd))) {
+		// Remedies in the order beads documents them. Setting the env var ALONE is not
+		// one: with `metadata.json` still pinning `dolt_mode: embedded`, bd reports
+		// "using the shared server for this run" and then fails with `database not
+		// found`, because the server serves a different data directory than the
+		// embedded engine wrote to. Verified by walking into exactly that state.
 		lines.push(
-			"beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Set BEADS_DOLT_SHARED_SERVER=1 (or `dolt.shared-server: true`), or require every agent to pass `bd -C " +
-				cwd +
-				"`",
+			`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`,
 		);
 	}
 

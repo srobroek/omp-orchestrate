@@ -256,9 +256,14 @@ describe("W5 shared-database precondition", () => {
 		const notice = String(rig.messages.at(-1)?.content ?? "");
 		expect(notice).toContain("per-checkout database");
 		expect(notice).toContain("two workers can hold one bead");
-		// Names both remedies, because either one fixes it.
-		expect(notice).toContain("BEADS_DOLT_SHARED_SERVER=1");
+		// All three documented remedies, cheapest first. The env var is deliberately NOT
+		// offered alone: with `metadata.json` still pinning embedded, bd announces it is
+		// using the shared server and then fails with `database not found`, because the
+		// server serves a different data directory than the embedded engine wrote to.
 		expect(notice).toContain("bd -C");
+		expect(notice).toContain("bd init --shared-server");
+		expect(notice).toContain("bd backup restore");
+		expect(notice).not.toContain("Set BEADS_DOLT_SHARED_SERVER=1");
 	});
 
 	test("shared-server mode via the environment silences it", async () => {
