@@ -9,17 +9,16 @@ import ompOrchestrate from "../src/index";
 /**
  * The seam this file covers.
  *
- * `test/index.test.ts` proves the factory SUBSCRIBES a `tool_call` handler, and
- * `test/gate-bd.test.ts` proves `gateBdDiscipline` RETURNS the notice text. Neither
- * proves the subscribed handler reaches the gate and emits, so the wiring between two
- * covered halves was assumed. It is the same defect shape this plugin exists to catch,
- * one level up: an installed check that does nothing.
+ * `test/index.test.ts` proves the factory SUBSCRIBES a `tool_call` handler.
+ * `test/gate-bd.test.ts` proves `gateBdDiscipline` EMITS the notice through
+ * `pi.sendMessage` with `deliverAs: "steer"`, calling the gate directly. Neither proves
+ * the subscribed handler reaches the gate, so the one edge between two covered halves
+ * was assumed. That is the only thing this file adds, and it is the same defect shape
+ * the plugin exists to catch, one level up: an installed check that does nothing.
  *
- * A notice does not travel on the return value -- `ToolCallEventResult` has no advisory
- * shape -- so it leaves through `pi.sendMessage` (`src/gates/bd.ts:564`). The recording
- * stub therefore captures sends instead of exploding on them, which is why the load-time
- * stub in `index.test.ts` cannot be reused: its whole purpose is that `sendMessage`
- * throws.
+ * A notice never travels on the return value -- `ToolCallEventResult` has no advisory
+ * shape -- so the recording stub captures sends. The load-time stub in `index.test.ts`
+ * cannot be reused: its whole purpose is that `sendMessage` throws.
  */
 
 interface Sent {

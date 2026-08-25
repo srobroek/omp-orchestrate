@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -103,11 +103,7 @@ describe("activateRun", () => {
 		// Removing it from the type must not strand a run activated by an older build:
 		// the field is dropped on read rather than rejected, and re-activation stops
 		// writing it.
-		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(
-			markerPath(cwd),
-			`{"repo_root":${JSON.stringify(resolve(cwd))},"run_id":"orc-9","schema_version":1}\n`,
-		);
+		await seed(`{"repo_root":${JSON.stringify(resolve(cwd))},"run_id":"orc-9","schema_version":1}\n`);
 		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
 		expect(await activateRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
 		expect(await readFile(markerPath(cwd), "utf8")).toBe(`{"run_id":"orc-9","schema_version":1}\n`);
