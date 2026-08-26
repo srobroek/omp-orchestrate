@@ -48,5 +48,14 @@ check orc-spawn-isolated.md    miss tool task '{"agent":"orc-implementer","task"
 check orc-wait-grammar.md      fire text - 'WAIT: then CLAIM the bead'
 check orc-wait-grammar.md      miss text - 'WAITING_HUMAN on the gate'
 
+
+# Fail loud if stray probe tests sit under test/_* -- bun test collects them.
+# Recursive on purpose: bun collects nested files too, so a stray under test/sub/
+# would run while a depth-1 check called the tree clean.
+strays=$(find test -name '_*' -print 2>/dev/null)
+if [ -n "$strays" ]; then
+	printf 'FAIL stray underscore-prefixed test files:\n%s\n' "$strays"
+	fail=$((fail + 1))
+fi
 printf '\n%s\n' "$([ "$fail" -eq 0 ] && echo 'ALL HOST-ENGINE CHECKS PASS' || echo "$fail HOST-ENGINE FAILURES")"
 exit "$fail"
