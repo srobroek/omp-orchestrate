@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/srobroek/omp-orchestrate/compare/v0.1.3...v0.1.4) (2026-08-26)
+
+
+### Bug Fixes
+
+* **beads:** drop the worktree guard, because bd already resolves the primary ([#25](https://github.com/srobroek/omp-orchestrate/issues/25)) ([a8bbbfe](https://github.com/srobroek/omp-orchestrate/commit/a8bbbfec80e8834985e2e959d27fe04846850d1a))
+
 ## [0.1.3](https://github.com/srobroek/omp-orchestrate/compare/v0.1.2...v0.1.3) (2026-08-26)
 
 
