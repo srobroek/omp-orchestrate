@@ -8,12 +8,14 @@ contracts that make this safe.
 
 | | |
 | --- | --- |
-| Status | Prerelease. Not yet published to a marketplace catalog. |
+| Status | Prerelease, version 0.1.4. |
 | Requires | `bd` (Beads) and `wt` (Worktrunk) on `PATH` |
+| Install | `omp plugin marketplace add srobroek/omp-orchestrate` then `omp plugin install orchestrate@omp-orchestrate` |
 | Install for development | `omp plugin link /path/to/omp-orchestrate` |
 
-After linking, restart the session. OMP loads a new extension module only at startup, so
-`/reload-plugins` does not find it.
+After either command, restart the session. OMP loads a new extension module only at startup, so
+`/reload-plugins` does not find it. Claude Code reads the same catalog from
+`.claude-plugin/marketplace.json`.
 
 ## Agents
 

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "omp-orchestrate",
+  "owner": {
+    "name": "srobroek"
+  },
+  "metadata": {
+    "description": "Multi-agent orchestration: decompose work across subagents with isolated worktrees, independent review, safe merging, and durable run state in beads."
+  },
+  "plugins": [
+    {
+      "name": "orchestrate",
+      "description": "Decompose work across subagents with isolated worktrees, independent review, safe merging, and durable run state in beads.",
+      "source": "./",
+      "category": "development",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/srobroek/omp-orchestrate",
+      "repository": "https://github.com/srobroek/omp-orchestrate.git",
+      "version": "0.1.4"
+    }
+  ]
+}

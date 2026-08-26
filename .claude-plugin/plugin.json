@@ -1,0 +1,10 @@
+{
+  "name": "orchestrate",
+  "version": "0.1.4",
+  "description": "Multi-agent orchestration with isolated worktrees, independent review, and durable run state in beads.",
+  "author": {
+    "name": "srobroek"
+  },
+  "homepage": "https://github.com/srobroek/omp-orchestrate",
+  "license": "Apache-2.0"
+}
