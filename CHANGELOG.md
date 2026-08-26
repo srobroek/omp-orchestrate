@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/omp-orchestrate/compare/v0.2.0...v0.2.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **beads:** track config.yaml so a clone has issue-prefix ([#33](https://github.com/srobroek/omp-orchestrate/issues/33)) ([4bc55fd](https://github.com/srobroek/omp-orchestrate/commit/4bc55fdb74022d38999dca6566e1c359ba39d518))
+* **release:** let the release PR branch carry the component, so the tag cuts itself ([#38](https://github.com/srobroek/omp-orchestrate/issues/38)) ([79fc90d](https://github.com/srobroek/omp-orchestrate/commit/79fc90d7a42c492fc33b3ef5801297cd41eb41e3))
+* **shell:** only treat command-slot bd as an invocation ([#37](https://github.com/srobroek/omp-orchestrate/issues/37)) ([b091ea3](https://github.com/srobroek/omp-orchestrate/commit/b091ea304a5ae5aca50184a1245fa27dfbd5bb2d))
+* write load-oracle marker after factory registrations ([#40](https://github.com/srobroek/omp-orchestrate/issues/40)) ([969fe30](https://github.com/srobroek/omp-orchestrate/commit/969fe30893088cce08ebbd1cfedd92dbd5bb96d7))
+
 ## [0.2.0](https://github.com/srobroek/omp-orchestrate/compare/v0.1.4...v0.2.0) (2026-08-26)
 
 
