@@ -460,6 +460,41 @@ function beadRouting(bead) {
 // src/run-state.ts
 import fs from "fs/promises";
 import path2 from "path";
+
+// src/beads-mode.ts
+var INIT_TIMEOUT_MS = 120000;
+var EMBEDDED_REFUSAL = "beads is running embedded, a per-checkout database. bd will keep working and route every write into `.beads/embeddeddolt`, so an isolated worker mutates a copy and its claims, comments and closures never reach this run. A run requires a per-project Dolt server. Setting `dolt_mode` by hand does not convert it: the two modes read different directories, and the server's database would not exist. Run `bd doctor` to inspect, and see `bd backup --help` and `bd bootstrap --help` for carrying existing beads across.";
+function firstLine(text) {
+  const line = (text ?? "").split(`
+`).find((entry) => entry.trim().length > 0);
+  return line === undefined ? "no output" : line.trim();
+}
+async function ensureBeadsServer(cwd) {
+  const info = await bdRun(["info"], undefined, cwd);
+  if (info === null) {
+    return { ok: false, reason: "bd could not be run, so the run's database cannot be verified" };
+  }
+  let note;
+  if (info.code !== 0) {
+    const init = await bdRun(["init", "--init-if-missing", "--skip-hooks", "--server", "--non-interactive"], INIT_TIMEOUT_MS, cwd);
+    if (init === null)
+      return { ok: false, reason: "bd init could not be run" };
+    if (init.code !== 0)
+      return { ok: false, reason: `bd init failed: ${firstLine(init.stderr || init.stdout)}` };
+    note = "initialised beads as a per-project Dolt server";
+  }
+  const mode = await bdRun(["dolt", "show"], undefined, cwd);
+  if (mode === null || mode.code !== 0) {
+    return { ok: false, reason: "could not read the beads storage mode from `bd dolt show`" };
+  }
+  if (/^\s*Mode:\s*embedded\b/m.test(mode.stdout)) {
+    return {
+      ok: false,
+      reason: note === undefined ? EMBEDDED_REFUSAL : "bd init reported success with `--server`, but `bd dolt show` still reports embedded mode, so this bd does not honour the flag and the run would write to a per-checkout database"
+    };
+  }
+  return note === undefined ? { ok: true } : { ok: true, note };
+}
 // src/contracts/architect.json
 var architect_default = {
   agent: "architect",
@@ -1208,8 +1243,16 @@ function registerRunCommands(pi) {
   pi.registerCommand("orchestrate-run", {
     description: "Activate orchestrate run enforcement in this repository",
     handler: async (_args, ctx) => {
+      const cwd = ctx.sessionManager.getCwd();
+      const beads = await ensureBeadsServer(cwd);
+      if (!beads.ok) {
+        ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
+        return;
+      }
+      if (beads.note !== undefined)
+        ctx.ui.notify(beads.note, "info");
       try {
-        const state = await activateRun(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionId());
+        const state = await activateRun(cwd, ctx.sessionManager.getSessionId());
         ctx.ui.notify(state.run_id === PENDING ? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)" : `orchestrate run active, bound to ${state.run_id}`, "info");
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
