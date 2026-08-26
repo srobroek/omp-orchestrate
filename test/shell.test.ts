@@ -97,6 +97,33 @@ describe("bdInvocations", () => {
 	test("finds every invocation in a chain", () => {
 		expect(bdInvocations("bd show a; bd ready --claim").map(i => i.subcommand)).toEqual(["show", "ready"]);
 	});
+
+	test("a bd token inside another command's quoted operand is not an invocation", () => {
+		expect(bdInvocations("git commit -m 'bd create x'")).toEqual([]);
+	});
+
+	test("a bare bd create is one invocation", () => {
+		expect(bdInvocations("bd create x").map(i => i.subcommand)).toEqual(["create"]);
+	});
+
+	test("env assignment prefix still leaves bd in the command slot", () => {
+		const found = bdInvocations("env BEADS_ACTOR=a bd create x");
+		expect(found).toHaveLength(1);
+		expect(found[0]?.subcommand).toBe("create");
+		expect(found[0]?.assignments.get("BEADS_ACTOR")).toBe("a");
+	});
+
+	test("quoted operand bd does not count; a later command-slot bd does", () => {
+		const found = bdInvocations("git commit -m 'bd create' && bd ready");
+		expect(found).toHaveLength(1);
+		expect(found[0]?.subcommand).toBe("ready");
+	});
+
+	test("a quoted operand that spans a newline is still not an invocation", () => {
+		// Live repro: a commit -m whose body contains `bd create` after a newline
+		// used to re-tokenise the second line as its own command.
+		expect(bdInvocations('git commit -m "fix something\nbd create x || true"')).toEqual([]);
+	});
 });
 
 describe("invokesCommand", () => {
