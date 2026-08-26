@@ -62,6 +62,57 @@ When the work genuinely requires a file outside your scope, stop. Report what yo
 and why, and let the architect either widen the scope or create a bead that owns it.
 Reaching outside quietly is worse than blocking.
 
+### A defect you find but do not own
+
+Work turns up defects that were already there: in the file you are editing, in a
+sibling module, in a dependency. Naming one, calling it out of scope, and leaving no
+durable trace is not an option. Your prose dies with your session; the bead store
+outlives it. Who can fix it decides where the trace goes.
+
+**In your scope, and small.** You are already editing that file. Fix it, and name the
+fix in your `REPORTED` comment. It lands in a diff a reviewer is reading anyway.
+
+**In this repository, outside your scope.** File it as you hit it, then carry on with
+your own bead:
+
+    bd create "<the defect>" --type bug --parent <epic> \
+      --labels agent:<fixing-role>,kind:incidental \
+      --deps discovered-from:<your-bead> \
+      --metadata '{"scope":["<globs the defect lives in, not yours>"]}' --silent
+
+Then one comment on your own bead, so your node reads complete to whoever opens it
+next:
+
+    NOTE <new-bug-id> <the defect, in one line>
+
+Each flag changes an observable outcome:
+
+- `--parent <epic>` makes the bug claimable. `bd ready` does not filter `bug` out, so a
+  labelled bug reaches the ordinary pull.
+- Exactly one `agent:` label, because only the first recognised one routes the bead. A
+  second queues it for a puller the claim gate then refuses.
+- `kind:incidental` keeps found work legible beside planned work under
+  `bd list --type bug`.
+- `scope` names the defect's files, not yours, so its fixer gets a territory check and a
+  sibling gets a disjointness check.
+
+No assignee, ever, and least of all an architect. An assigned bead leaves every
+`--unassigned` queue and is reachable only through `bd list --assignee`, so naming the
+actor you wanted is what hides the bug from them. Do not block your own bead on the
+bug, and do not open an epic for it.
+
+**Upstream, so not fixable here.** A defect in vendored code, a third-party package,
+or the dependency tree. A bug bead against this repository is unactionable, because
+nobody in this run can fix it.
+
+Escalate to the human instead: an `ASK` wisp and a human gate, carrying two options:
+
+- report it upstream,
+- or carry a local patch here.
+
+You do not pick between those. That choice turns on maintenance burden and fork
+policy, which the user owns.
+
 ## The bead is a brief, not a specification
 
 Its description was written before the code was read. Verify every `file:line` it
