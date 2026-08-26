@@ -179,4 +179,43 @@ exit 0`);
 		expect(result.ok).toBe(false);
 		expect(result.ok === false && result.reason).toContain("bd could not be run");
 	});
+
+	test("a linked worktree with no database refuses instead of initialising", async () => {
+		// A real linked worktree, because the guard asks git rather than inspecting paths.
+		//
+		// Built under $HOME, not os.tmpdir(). A worktree under /tmp or /private/tmp is
+		// invisible inside the container dgit runs git in -- the bind mount succeeds and
+		// yields an empty directory -- so this repository forbids creating one there.
+		const home = process.env.HOME ?? os.homedir();
+		const root = await fs.mkdtemp(path.join(home, ".orc-wt-test-"));
+		try {
+			const primary = path.join(root, "primary");
+			await fs.mkdir(primary, { recursive: true });
+			const git = (args: string[], cwd: string) => Bun.spawnSync(["git", ...args], { cwd });
+			git(["init", "-q", "-b", "main"], primary);
+			git(["config", "user.email", "probe@test.local"], primary);
+			git(["config", "user.name", "Probe"], primary);
+			await fs.writeFile(path.join(primary, "seed"), "seed\n");
+			git(["add", "seed"], primary);
+			git(["commit", "-q", "--no-gpg-sign", "-m", "seed"], primary);
+			const linked = path.join(root, "linked");
+			git(["worktree", "add", "-q", linked, "-b", "side"], primary);
+
+			// bd reports no database, which in a standalone repository authorises an init.
+			await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1" in
+  info) echo "Error: no beads database found" >&2; exit 1 ;;
+esac
+exit 0`);
+
+			const result = await ensureBeadsServer(linked);
+			expect(result.ok).toBe(false);
+			expect(result.ok === false && result.reason).toContain(".worktreeinclude");
+			// The point: init must NOT run here. A worktree without a database is a missing
+			// copy, and initialising mints a second empty one on its own port.
+			expect(await argv()).toEqual(["info"]);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
 });

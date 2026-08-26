@@ -1,0 +1,11 @@
+# Ignored paths worktrunk copies into a new worktree.
+#
+# .beads/ is the load-bearing entry. The beads database is a per-project Dolt server, and
+# bd resolves it by host and port from .beads/dolt-server.port. That file is gitignored, so
+# a worktree receives it from nothing unless it is named here. Without it bd reports "no
+# beads database found", and a run would mint a second empty database on its own port --
+# measured: all four live worktrees of this repository held no .beads/ at all.
+#
+# Copying the port file makes a worktree reach the SAME server as the primary checkout,
+# which is the property that lets an isolated worker's claims and closures reach the run.
+.beads/
