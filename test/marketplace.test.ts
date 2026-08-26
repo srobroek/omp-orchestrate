@@ -88,4 +88,13 @@ describe("the marketplace catalog", () => {
 		expect(pkg.omp?.extensions).toEqual(["./src/index.ts"]);
 		expect(fs.existsSync(path.join(ROOT, "src/index.ts"))).toBe(true);
 	});
+
+	test("the README declares no version, because nothing bumps it there", () => {
+		// Four files declare a version and release-please owns every one. A fifth in the README
+		// would be owned by nobody: it read `version 0.1.4` until this test existed, and the next
+		// release would have made it wrong while every gate stayed green. The install reports the
+		// resolved version, so the README does not need to.
+		const readme = read("README.md");
+		expect(readme).not.toMatch(/\d+\.\d+\.\d+/);
+	});
 });

@@ -8,7 +8,7 @@ contracts that make this safe.
 
 | | |
 | --- | --- |
-| Status | Prerelease, version 0.1.4. |
+| Status | Prerelease. The install reports the version it resolved. |
 | Requires | `bd` (Beads) and `wt` (Worktrunk) on `PATH` |
 | Install | `omp plugin marketplace add srobroek/omp-orchestrate` then `omp plugin install orchestrate@omp-orchestrate` |
 | Install for development | `omp plugin link /path/to/omp-orchestrate` |
