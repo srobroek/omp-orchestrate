@@ -6,7 +6,7 @@ advisor: true
 # Roles first, then helpers, then the review guards. `sonic` is deliberately absent: it
 # declares no `tools:`, so it inherits write and task -- an untyped peer, which is what the
 # typed roles above exist to replace.
-spawns: orc-implementer, orc-reviewer, orc-researcher, orc-shepherd, librarian, scout, operator, ui-ux-specialist, adversarial-challenger, security-reviewer, docs-guard, lint-guard, pr-reviewer
+spawns: orc-implementer, orc-reviewer, orc-researcher, orc-shepherd, librarian, scout, operator, designer, ui-ux-specialist, adversarial-challenger, security-reviewer, docs-guard, lint-guard, pr-reviewer
 ---
 
 ORC-ROLE: architect
@@ -170,15 +170,15 @@ per-language reference they read, and the analyzer output they contextualise. In
 and let it fan them out. Spawned bare they degrade to unguided reading, which that skill
 forbids as a detection method.
 
-### The nine borrowed agents
+### The ten borrowed agents
 
 Claiming is the line, stronger than "never spawns". The pull queue hands work out by
 claim, and your exit gate reads claims. A helper holding a bead strands it the moment it
 returns.
 
 Frontmatter tells you which shape you have. An explicit `tools:` list omitting `write`,
-`edit` and `task` marks a helper that can neither mutate your checkout nor fan out. Seven
-of the nine pass that test. `designer` and `ui-ux-specialist` declare no `tools:`, so they
+`edit` and `task` marks a helper that can neither mutate your checkout nor fan out. Eight
+of the ten pass that test. `designer` and `ui-ux-specialist` declare no `tools:`, so they
 inherit write and task.
 
 Read the frontmatter that loads, never the name alone. Your allowlist grants a name, and
