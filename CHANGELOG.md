@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0](https://github.com/srobroek/omp-orchestrate/compare/v0.1.4...v0.2.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **beads:** go back to embedded, and pin one path instead of running a server ([#27](https://github.com/srobroek/omp-orchestrate/issues/27))
+
+### Features
+
+* **beads:** the run owns the dolt server, and a slow bd stops blocking every call ([#26](https://github.com/srobroek/omp-orchestrate/issues/26)) ([6d33880](https://github.com/srobroek/omp-orchestrate/commit/6d33880ae9b8d4729102aa34d814e163fb668103))
+* **marketplace:** publish a catalog so this repo installs from its own remote ([#29](https://github.com/srobroek/omp-orchestrate/issues/29)) ([c8aee4c](https://github.com/srobroek/omp-orchestrate/commit/c8aee4c2cb71fdb3f46990ac8ecef0350d5fc502))
+
+
+### Bug Fixes
+
+* **docs:** stop the README owning a version nothing bumps ([#30](https://github.com/srobroek/omp-orchestrate/issues/30)) ([a1e585e](https://github.com/srobroek/omp-orchestrate/commit/a1e585e71b821a77215dd43122c3fae9b235b3a8))
+
+
+### Code Refactoring
+
+* **beads:** go back to embedded, and pin one path instead of running a server ([#27](https://github.com/srobroek/omp-orchestrate/issues/27)) ([60fb879](https://github.com/srobroek/omp-orchestrate/commit/60fb87986dd0a2f8f34e9ac114731bb653760ee0))
+
 ## [0.1.4](https://github.com/srobroek/omp-orchestrate/compare/v0.1.3...v0.1.4) (2026-08-26)
 
 
