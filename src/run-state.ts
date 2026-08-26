@@ -25,6 +25,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { ensureBeadsServer } from "./beads-mode";
 import { resetReadBudget } from "./bd";
 import { ensurePatrolWisp } from "./supervision";
 
@@ -191,8 +192,18 @@ export function registerRunCommands(pi: ExtensionAPI): void {
 	pi.registerCommand("orchestrate-run", {
 		description: "Activate orchestrate run enforcement in this repository",
 		handler: async (_args, ctx) => {
+			const cwd = ctx.sessionManager.getCwd();
+			// Refusing here is the point. Activation arms enforcement for every agent the
+			// run spawns, and an embedded database would let each of them succeed against
+			// a copy nobody reads, so a run that cannot reach one database must not start.
+			const beads = await ensureBeadsServer(cwd);
+			if (!beads.ok) {
+				ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
+				return;
+			}
+			if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
 			try {
-				const state = await activateRun(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionId());
+				const state = await activateRun(cwd, ctx.sessionManager.getSessionId());
 				ctx.ui.notify(
 					state.run_id === PENDING
 						? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)"
