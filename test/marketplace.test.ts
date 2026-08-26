@@ -109,4 +109,38 @@ describe("the marketplace catalog", () => {
 		expect(status).toBeDefined();
 		expect(status).not.toMatch(/\d+\.\d+\.\d+/);
 	});
+
+	test("the release PR branch carries the component release-please demands", () => {
+		// The measured trap, and the reason v0.1.1 through v0.2.0 were every one cut by hand.
+		//
+		// release-please only tags a merged release PR when the PR's head branch resolves to the
+		// same component the strategy reports. In `buildRelease` (strategies/base.ts) it compares
+		// `BranchName.parse(headBranchName).component` against `getBranchComponent()`, and on a
+		// mismatch it logs `PR component: undefined does not match configured component: X` and
+		// returns no release. The PR still merges, the workflow still reports success, and the
+		// version silently never ships.
+		//
+		// `getBranchComponent()` here can never be empty: it is this `component` key, or failing
+		// that the scope-stripped package.json name. So the head branch MUST carry a component.
+		// It only does when release-please builds a per-package PR. Leave `separate-pull-requests`
+		// false or absent -- false is the DEFAULT, so deleting the key reintroduces the bug -- and
+		// the Merge plugin overwrites the branch with a componentless `release-please--branches--
+		// main`, the comparison fails, and nothing tags.
+		const config = JSON.parse(read("release-please-config.json"));
+		const pkgConfig = config.packages["."];
+		const branchComponent =
+			pkgConfig.component ?? JSON.parse(read("package.json")).name.replace(/^@[\w-]+\//, "");
+		expect(branchComponent).not.toBe("");
+		expect(config["separate-pull-requests"]).toBe(true);
+	});
+
+	test("no group title pattern survives, because nothing groups", () => {
+		// `group-pull-request-title-pattern` only ever retitles the Merge plugin's combined PR.
+		// With one package and per-package PRs there is nothing to combine, so the key is dead
+		// config that release-please answers with `pullRequestTitlePattern miss the part of
+		// '${scope}'`. Its presence means someone re-enabled grouping, which is the bug above.
+		// The default per-package title already carries the version: `chore(main): release 0.2.0`.
+		const config = JSON.parse(read("release-please-config.json"));
+		expect(config["group-pull-request-title-pattern"]).toBeUndefined();
+	});
 });
