@@ -47,7 +47,9 @@ esac
 exit 0`);
 
 		expect(await ensureBeadsServer(dir)).toEqual({ ok: true });
-		expect(await argv()).toEqual(["info", "dolt show"]);
+		// `dolt status` is asked last, and only to catch a server that is answering while no pid
+		// file names it. A silent stub reports neither, so nothing is reconciled.
+		expect(await argv()).toEqual(["info", "dolt show", "dolt status"]);
 	});
 
 	test("an embedded database refuses the run and is not converted", async () => {
@@ -226,9 +228,74 @@ exit 0`);
 			expect(result.ok).toBe(true);
 			expect(result.ok === true && result.note).toBe("initialised beads as a server-backed database");
 			// The init runs, with the flags that make it safe, and nothing consults git.
-			expect(await argv()).toEqual(["info", "init --init-if-missing --skip-hooks --server --non-interactive", "dolt show"]);
+			expect(await argv()).toEqual([
+				"info",
+				"init --init-if-missing --skip-hooks --server --non-interactive",
+				"dolt show",
+				"dolt status",
+			]);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	test("a database whose auto-start is disabled is started rather than reported broken", async () => {
+		// `dolt.auto-start: false` is what stops an incidental read from minting a server, so
+		// starting one becomes this function's job. The refusal text is bd's own, verbatim from a
+		// scratch project.
+		await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1 $2" in
+  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
+  "dolt start") : > "${path.join(dir, "started")}"; exit 0 ;;
+esac
+case "$1" in
+  info)
+    if [ -f "${path.join(dir, "started")}" ]; then exit 0; fi
+    echo "Dolt server auto-start is disabled (dolt.auto-start: false)." >&2
+    echo "Start the server manually:" >&2
+    exit 1 ;;
+esac
+exit 0`);
+
+		const result = await ensureBeadsServer(dir);
+		expect(result.ok).toBe(true);
+		expect(result.ok === true && result.note).toContain("started the run's dolt server");
+		// The start is followed by a second `info`, so success is measured rather than assumed
+		// from the start's own exit code.
+		expect(await argv()).toEqual(["info", "dolt start", "info", "dolt show", "dolt status"]);
+	});
+
+	test("an answering but untracked server is reconciled instead of left to spawn rivals", async () => {
+		// The measured state: the server was alive on 63916 and `.beads/dolt-server.pid` was
+		// gone, so `bd dolt status` said "not running" while `bd list` returned every bead. Left
+		// alone, every later call auto-starts a rival that fails on the store's exclusive lock.
+		await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1 $2" in
+  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
+  "dolt status")
+    if [ -f "${path.join(dir, "fixed")}" ]; then echo "Dolt server: running"; else echo "Dolt server: not running"; fi
+    exit 0 ;;
+  "dolt killall") : > "${path.join(dir, "fixed")}"; exit 0 ;;
+esac
+exit 0`);
+
+		const result = await ensureBeadsServer(dir);
+		expect(result.ok).toBe(true);
+		expect(result.ok === true && result.note).toContain("untracked dolt server");
+		// bd's own verbs, in the order its help defines: killall drops what the pid file does not
+		// name, then start produces a tracked server.
+		expect(await argv()).toEqual(["info", "dolt show", "dolt status", "dolt killall", "dolt start"]);
+	});
+
+	test("a tracked server is left alone", async () => {
+		await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1 $2" in
+  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
+  "dolt status") echo "Dolt server: running"; exit 0 ;;
+esac
+exit 0`);
+
+		expect(await ensureBeadsServer(dir)).toEqual({ ok: true });
+		expect(await argv()).toEqual(["info", "dolt show", "dolt status"]);
 	});
 });

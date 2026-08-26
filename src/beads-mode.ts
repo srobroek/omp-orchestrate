@@ -60,6 +60,28 @@ const SERVER_MODES: readonly string[] = ["per-project", "shared server"];
  */
 const NO_DATABASE = /no beads database found/i;
 
+/**
+ * bd's refusal when `dolt.auto-start: false` is set, verbatim from a scratch project:
+ * `Dolt server auto-start is disabled (dolt.auto-start: false). Start the server manually:
+ * bd dolt start`.
+ *
+ * That setting is what stops an incidental read from minting a server, which makes starting
+ * one this function's job rather than a side effect of whoever called bd first.
+ */
+const AUTOSTART_DISABLED = /auto-start is disabled/i;
+
+/**
+ * `bd dolt status` when no pid file names a live server.
+ *
+ * It is not the same question as "can the database be reached". Measured: with the server
+ * alive on 63916 and `.beads/dolt-server.pid` missing, this reported `not running` while
+ * `bd list` returned every bead, and writing the pid back flipped it to `running`.
+ */
+const SERVER_NOT_RUNNING = /Dolt server:\s*not running/i;
+
+/** Starting a server waits on dolt booting, which is slower than a read. */
+const START_TIMEOUT_MS = 60_000;
+
 function firstLine(text: string | undefined): string {
 	const line = (text ?? "").split("\n").find(entry => entry.trim().length > 0);
 	return line === undefined ? "no output" : line.trim();
@@ -87,29 +109,51 @@ export async function ensureBeadsServer(cwd: string): Promise<BeadsReadiness> {
 	// an argument rather than a measurement of the database.
 	let note: string | undefined;
 	if (info.code !== 0) {
-		// Only bd's own "no database" diagnostic authorises an init. Any other failure is a
-		// database that exists and will not answer -- corrupt, unreachable, permission
-		// denied -- and initialising over it would report a fresh start for a broken run.
-		if (!NO_DATABASE.test(`${info.stderr}\n${info.stdout}`)) {
+		const diagnostic = `${info.stderr}\n${info.stdout}`;
+		if (AUTOSTART_DISABLED.test(diagnostic)) {
+			// The database is asleep rather than absent, and bd names the remedy in its own
+			// refusal. Running it here is the point of disabling auto-start: one deliberate
+			// server per run, started by the run, instead of one per call that finds none.
+			const start = await bdRun(["dolt", "start"], START_TIMEOUT_MS, cwd);
+			if (start === null || start.code !== 0) {
+				return {
+					ok: false,
+					reason: `beads has auto-start disabled and \`bd dolt start\` failed: ${start === null ? "bd could not be run" : firstLine(start.stderr || start.stdout)}`,
+				};
+			}
+			const retry = await bdRun(["info"], undefined, cwd);
+			if (retry === null || retry.code !== 0) {
+				return {
+					ok: false,
+					reason: `\`bd dolt start\` reported success and \`bd info\` still failed: ${retry === null ? "bd could not be run" : firstLine(retry.stderr || retry.stdout)}`,
+				};
+			}
+			note = "started the run's dolt server, which auto-start is deliberately not allowed to do";
+		} else if (NO_DATABASE.test(diagnostic)) {
+			// No worktree branch here. An earlier version refused in a linked worktree, on the
+			// belief that an absent `.beads/` meant a copy had failed to arrive and initialising
+			// would mint a second database. That belief came from listing files rather than from
+			// running `bd`. Measured since, in five linked worktrees of this repository holding no
+			// `.beads/` at all: `bd where` reported the PRIMARY checkout's database and `bd list`
+			// returned all nine of its beads. bd follows the worktree to its common git dir by
+			// itself, so the branch could never fire for the case it was written for, and the
+			// `.worktreeinclude` copy it recommended only added Dolt storage a worktree must not
+			// serve from. See `test/beads-mode.test.ts` for the real-bd regression test.
+			const init = await bdRun(
+				["init", "--init-if-missing", "--skip-hooks", "--server", "--non-interactive"],
+				INIT_TIMEOUT_MS,
+				cwd,
+			);
+			if (init === null) return { ok: false, reason: "bd init could not be run" };
+			if (init.code !== 0)
+				return { ok: false, reason: `bd init failed: ${firstLine(init.stderr || init.stdout)}` };
+			note = "initialised beads as a server-backed database";
+		} else {
+			// Only bd's own "no database" diagnostic authorises an init. Any other failure is a
+			// database that exists and will not answer -- corrupt, unreachable, permission
+			// denied -- and initialising over it would report a fresh start for a broken run.
 			return { ok: false, reason: `bd info failed: ${firstLine(info.stderr || info.stdout)}` };
 		}
-		// No worktree branch here. An earlier version refused in a linked worktree, on the
-		// belief that an absent `.beads/` meant a copy had failed to arrive and initialising
-		// would mint a second database. That belief came from listing files rather than from
-		// running `bd`. Measured since, in five linked worktrees of this repository holding no
-		// `.beads/` at all: `bd where` reported the PRIMARY checkout's database and `bd list`
-		// returned all nine of its beads. bd follows the worktree to its common git dir by
-		// itself, so the branch could never fire for the case it was written for, and the
-		// `.worktreeinclude` copy it recommended only added Dolt storage a worktree must not
-		// serve from. See `test/beads-mode.test.ts` for the real-bd regression test.
-		const init = await bdRun(
-			["init", "--init-if-missing", "--skip-hooks", "--server", "--non-interactive"],
-			INIT_TIMEOUT_MS,
-			cwd,
-		);
-		if (init === null) return { ok: false, reason: "bd init could not be run" };
-		if (init.code !== 0) return { ok: false, reason: `bd init failed: ${firstLine(init.stderr || init.stdout)}` };
-		note = "initialised beads as a server-backed database";
 	}
 
 	const mode = await bdRun(["dolt", "show"], undefined, cwd);
@@ -136,5 +180,32 @@ export async function ensureBeadsServer(cwd: string): Promise<BeadsReadiness> {
 				: `beads reports storage mode "${reported}", which is not a server-backed mode this run recognises (${SERVER_MODES.join(", ")}). A run needs a database a copied checkout cannot fork.`,
 		};
 	}
+
+	// A server can be running and untracked at the same time, and that state is what leaks
+	// servers. bd answers "is one running?" from `.beads/dolt-server.pid`, so with the pid file
+	// gone every later call auto-starts a rival, each of which fails on the store's exclusive
+	// lock -- nine consecutive refusals in `dolt-server.log` on the host this was found on,
+	// which by then carried 28 orphaned `dolt sql-server` processes.
+	//
+	// `bd info` has already answered above, so a server is demonstrably reachable; a `not
+	// running` here therefore means untracked rather than absent. Reconciled with bd's own
+	// verbs instead of by writing its state files: `bd dolt killall` is defined as killing
+	// servers on this project's data directory that the canonical pid file does not name, and
+	// other projects' servers are preserved.
+	const status = await bdRun(["dolt", "status"], undefined, cwd);
+	if (status !== null && status.code === 0 && SERVER_NOT_RUNNING.test(status.stdout)) {
+		const killed = await bdRun(["dolt", "killall"], START_TIMEOUT_MS, cwd);
+		const restarted = await bdRun(["dolt", "start"], START_TIMEOUT_MS, cwd);
+		if (killed === null || restarted === null || restarted.code !== 0) {
+			return {
+				ok: false,
+				reason:
+					"a dolt server is answering but no pid file names it, so bd will keep auto-starting rivals that fail on the store's lock. `bd dolt killall` followed by `bd dolt start` did not repair it here; run both by hand",
+			};
+		}
+		const reconciled = "reconciled an untracked dolt server, which bd would otherwise keep spawning rivals against";
+		note = note === undefined ? reconciled : `${note}, and ${reconciled}`;
+	}
+
 	return note === undefined ? { ok: true } : { ok: true, note };
 }
