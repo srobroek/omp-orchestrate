@@ -22,8 +22,9 @@ TAG=$2
 CLONE=/tmp/orc-$TAG-clone
 PROJ=/tmp/orc-$TAG-proj
 MARKER=/tmp/orc-$TAG-marker
+HANDLER=/tmp/orc-$TAG-handler
 
-rm -rf "$CLONE" "$PROJ" "$MARKER"
+rm -rf "$CLONE" "$PROJ" "$MARKER" "$HANDLER"
 git clone -q --branch "$BRANCH" --single-branch "$HOME/personal/dev/omp-orchestrate" "$CLONE"
 
 printf 'branch=%-28s dist=%-4s entry=%s\n' \
@@ -32,17 +33,24 @@ printf 'branch=%-28s dist=%-4s entry=%s\n' \
 	"$(python3 -c "import json;print(json.load(open('$CLONE/package.json'))['omp']['extensions'][0])")"
 
 # Instrument the factory in the clone only. The parent repository is never touched.
-python3 - "$CLONE" "$MARKER" <<'PY'
+python3 - "$CLONE" "$MARKER" "$HANDLER" <<'PY'
 import pathlib, re, sys
-clone, marker = sys.argv[1], sys.argv[2]
+clone, marker, handler = sys.argv[1], sys.argv[2], sys.argv[3]
 src = pathlib.Path(clone) / "src" / "index.ts"
 text = src.read_text()
 m = re.search(r"^export default function [A-Za-z_]+\([^)]*\)[^\{]*\{", text, re.M)
 if not m:
     raise SystemExit("could not find the default factory in src/index.ts")
-inject = f'\n\trequire("node:fs").writeFileSync({marker!r}, "invoked");'
-src.write_text(text[: m.end()] + inject + text[m.end() :])
-print("instrumented:", src)
+text = text[: m.end()] + f'\n\trequire("node:fs").writeFileSync({marker!r}, "invoked");' + text[m.end() :]
+
+# Second marker inside a registered handler, before its first guard, so dispatch is
+# proved rather than inferred from registration.
+h = re.search(r'pi\.on\("session_start",[^\{]*\{', text)
+if not h:
+    raise SystemExit("could not find the session_start registration")
+text = text[: h.end()] + f'\n\t\trequire("node:fs").writeFileSync({handler!r}, "dispatched");' + text[h.end() :]
+src.write_text(text)
+print("instrumented factory and session_start handler")
 PY
 
 # The entry OMP loads must be the instrumented one. On main that is the bundle, so it is
@@ -66,10 +74,14 @@ echo "link resolves: $(omp plugin list 2>/dev/null | grep -c 'omp-orchestrate' |
 
 SHELL=/bin/sh omp -p "reply DONE" >/dev/null 2>&1 || true
 
-if [ -f "$MARKER" ]; then
-	echo "PASS [$TAG]: OMP invoked the factory in $(python3 -c "import json;print(json.load(open('$CLONE/package.json'))['omp']['extensions'][0])")"
-	rm -rf "$CLONE" "$PROJ" "$MARKER"
+ENTRY=$(python3 -c "import json;print(json.load(open('$CLONE/package.json'))['omp']['extensions'][0])")
+printf 'factory invoked:  %s\n' "$([ -f "$MARKER" ] && echo yes || echo NO)"
+printf 'handler dispatch: %s\n' "$([ -f "$HANDLER" ] && echo yes || echo NO)"
+
+if [ -f "$MARKER" ] && [ -f "$HANDLER" ]; then
+	echo "PASS [$TAG]: OMP loaded $ENTRY and dispatched a registered handler"
+	rm -rf "$CLONE" "$PROJ" "$MARKER" "$HANDLER"
 	exit 0
 fi
-echo "FAIL [$TAG]: the factory never ran, so OMP did not load that entry"
+echo "FAIL [$TAG]: $ENTRY did not load, or registered without dispatching"
 exit 1
