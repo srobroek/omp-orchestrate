@@ -9,6 +9,16 @@
 # Scope, stated because it limits what may depend on these: they fire only for work done
 # through `wt`. A plain `git commit` bypasses them, so treat the sync as a convenience that
 # usually runs, never as an invariant. Anything that must hold belongs in a gate.
+#
+# Sync authority: the repository owner asked for the Dolt database itself to travel through
+# git, and `.beads/config.yaml` already carries the remote as
+# `sync.remote: git+https://github.com/srobroek/omp-orchestrate.git`, registered with Dolt
+# as `origin`. Recorded here because `bd dolt push` needs authority that is visible rather
+# than assumed.
+#
+# Why an explicit push is required at all: `git push` does NOT carry `refs/dolt/data`. The
+# branch and the database are separate refspaces, which is why the remote held no dolt refs
+# despite every branch in this repository having been pushed.
 
 [post-start]
 # A new worktree inherits `.beads/` through .worktreeinclude, including a port file that may
