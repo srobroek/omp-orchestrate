@@ -477,18 +477,40 @@ function gate(command: unknown, cwd: string = inRun): Promise<Outcome> {
 
 const SILENT: Outcome = { block: undefined, notices: [] };
 
-/** One command per check, each a defect the corresponding rule existed to catch. */
-const THREE_DEFECTS: [string, string][] = [
-	["an unattributed mutation", "bd -C /run/repo update orc-1 --claim"],
+/**
+ * One command per check, each a defect the corresponding rule existed to catch, with the
+ * prefix its notice leads with. The prefix travels in the table because the run gate owes
+ * two things per row -- that the finding survives inside a run, and that it arrives as a
+ * notice rather than as a refusal -- and a row cannot assert the second without naming the
+ * first.
+ */
+const THREE_DEFECTS: [string, string, string][] = [
+	["an unattributed mutation", "bd -C /run/repo update orc-1 --claim", "WARN bd identity"],
 	[
 		"a comment leading with a non-verb",
 		'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo comment orc-1 "finished it"',
+		"WARN comment verb",
 	],
 	[
 		"an unrouted bug bead",
 		'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo create "x" --type bug --silent',
+		"WARN bug bead",
 	],
 ];
+
+/**
+ * The line the live report tripped on 2026-08-25: a plain `bd create` in a session that was
+ * orchestrating nothing. Three rules matched it and one blocked it outright. It is not a
+ * fourth check -- it is the reported command, kept whole because the pair of cases below is
+ * the regression itself: nothing at all outside a run, one notice and no refusal inside.
+ */
+const PLAIN_CREATE = 'bd create "x"';
+
+/** What `PLAIN_CREATE` produces inside a run, verbatim as measured 2026-08-26. */
+const PLAIN_CREATE_NOTICE =
+	"WARN bd identity: 'bd create' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands " +
+	"attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: " +
+	"'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd create ...'.";
 
 /**
  * The defect the conversion exists to fix, and the case no rule condition could express.
@@ -502,6 +524,10 @@ describe("G6 outside a run", () => {
 		expect(await gate(command, outsideRun)).toEqual(SILENT);
 	});
 
+	test("is silent on the plain bd create the report named", async () => {
+		expect(await gate(PLAIN_CREATE, outsideRun)).toEqual(SILENT);
+	});
+
 	test("is silent when the marker cannot be read at all", async () => {
 		// `.catch(() => null)`: an unreadable marker is not a run. A cwd that does not
 		// exist is the cheapest shape of that, and an isolated worker's cwd can vanish.
@@ -510,9 +536,27 @@ describe("G6 outside a run", () => {
 });
 
 describe("G6 inside a run", () => {
-	test.each(THREE_DEFECTS)("speaks on %s", async (_label, command) => {
+	test.each(THREE_DEFECTS)("notifies, and refuses nothing, on %s", async (_label, command, prefix) => {
 		const outcome = await gate(command);
-		expect(outcome.block !== undefined || outcome.notices.length > 0).toBe(true);
+		// Pinned as two facts rather than as `block !== undefined || notices.length > 0`:
+		// that disjunction also passed a gate that REFUSED, which is exactly the harm the
+		// retired pin rule did to a correct command. None of the three blocks.
+		expect(outcome.block).toBeUndefined();
+		expect(outcome.notices.filter(line => line.startsWith(prefix))).toHaveLength(1);
+	});
+
+	test("says exactly one thing, and refuses nothing, on that same plain bd create", async () => {
+		expect(await gate(PLAIN_CREATE)).toEqual({ block: undefined, notices: [PLAIN_CREATE_NOTICE] });
+	});
+
+	test("reads a bare-id marker as a run, as early activations wrote it", async () => {
+		// `readActiveRun` hands back a non-JSON body as the run id, so the discriminator has
+		// to count that shape as a run as well. With no row driving the gate at it the
+		// fixture pinned nothing, and a marker an early activation wrote could go unjudged.
+		expect(await gate(PLAIN_CREATE, legacyMarker)).toEqual({
+			block: undefined,
+			notices: [PLAIN_CREATE_NOTICE],
+		});
 	});
 
 	test("judges each invocation of a chain on its own", async () => {
