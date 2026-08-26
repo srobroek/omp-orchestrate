@@ -31,9 +31,10 @@ const GROUPING: Record<string, true> = { ")": true, "}": true };
  * `shlex.shlex(line, posix=True, punctuation_chars=";&|")` with
  * `whitespace_split = True` and `commenters = ""`.
  *
- * Quotes group without being interpreted further, backslash escapes the next
- * character outside single quotes, and runs of `;&|` become standalone operator
- * tokens so the caller can split on them. `#` is NOT a comment, matching
+ * Quotes group without being interpreted further (including across a raw
+ * newline), backslash escapes the next character outside single quotes, and
+ * runs of `;&|` become standalone operator tokens so the caller can split on
+ * them. Unquoted newlines are whitespace. `#` is NOT a comment, matching
  * `commenters = ""` — a bead id or label may legitimately contain one.
  */
 function tokenize(line: string): string[] {
@@ -78,7 +79,7 @@ function tokenize(line: string): string[] {
 			continue;
 		}
 
-		if (ch === " " || ch === "\t") {
+		if (ch === " " || ch === "\t" || ch === "\n") {
 			flush();
 			continue;
 		}
@@ -109,32 +110,27 @@ function tokenize(line: string): string[] {
 /**
  * Split a command line into the segments a shell would run separately.
  *
- * `\\\n` line continuations collapse to a space first, then each line is
- * tokenised and split on tokens made purely of `;&|` — so `a && b`, `a; b`, and
- * `a | b` all yield two segments. A line that fails to tokenise is skipped.
+ * `\\\n` line continuations collapse to a space first. Tokenising then runs on
+ * the whole string so a quote can span a raw newline — `git commit -m "…\nbd
+ * create…"` is one operand of `git`, not a second command. Unquoted newlines
+ * are whitespace, same as space, and tokens of pure `;&|` still split segments.
  */
 export function splitSegments(command: string): string[][] {
 	const segments: string[][] = [];
-	const normalized = command.replaceAll("\\\n", " ");
-	const lines = normalized.split("\n");
-
-	for (const line of lines) {
-		const tokens = tokenize(line);
-		let current: string[] = [];
-		for (const token of tokens) {
-			const isOperator = token.length > 0 && [...token].every(c => OPERATOR_CHARS[c] === true);
-			if (isOperator) {
-				if (current.length > 0) {
-					segments.push(current);
-					current = [];
-				}
-				continue;
+	const tokens = tokenize(command.replaceAll("\\\n", " "));
+	let current: string[] = [];
+	for (const token of tokens) {
+		const isOperator = token.length > 0 && [...token].every(c => OPERATOR_CHARS[c] === true);
+		if (isOperator) {
+			if (current.length > 0) {
+				segments.push(current);
+				current = [];
 			}
-			current.push(token);
+			continue;
 		}
-		if (current.length > 0) segments.push(current);
+		current.push(token);
 	}
-
+	if (current.length > 0) segments.push(current);
 	return segments;
 }
 

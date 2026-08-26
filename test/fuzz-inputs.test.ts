@@ -264,23 +264,15 @@ describe("shell parsing under hostile input", () => {
 		}
 	});
 
-	test("a literal newline inside quotes ends the line, and the operand is lost with it", () => {
-		// DOCUMENTED, and a real divergence from bash: `splitSegments` collapses `\` line
-		// continuations and then tokenises each line on its own, so a quote is never
-		// carried across one. The first line's quote is unterminated, which discards its
-		// partial token, and the second line's is too, which discards the line.
-		//
-		// The result fails OPEN, which is the design: the gate sees `bd update` with no
-		// operand and no `--claim`, so it has nothing to hold against the worker. A real
-		// shell would keep the newline inside the quotes and run one command, so this is a
-		// blind spot rather than a wrong answer — the same category as `eval "$CMD"`,
-		// which the module documents as out of reach because the gates are friction, not a
-		// security boundary.
+	test("a literal newline inside quotes stays inside the operand", () => {
+		// Quotes span a raw newline: `bd update 'a\nb' --claim` is one invocation
+		// whose id contains the newline. Per-line tokenising used to discard the
+		// quoted operand and `--claim` as an unterminated second line.
 		const found = bdInvocations("bd update 'a\nb' --claim");
 		expect(found).toHaveLength(1);
 		expect(found[0]?.subcommand).toBe("update");
-		expect(found[0]?.positionals).toEqual([]);
-		expect(found[0]?.hasClaim).toBe(false);
+		expect(found[0]?.positionals).toEqual(["a\nb"]);
+		expect(found[0]?.hasClaim).toBe(true);
 	});
 
 	test("a prototype-named operand is an operand, not a flag that eats the next one", () => {
