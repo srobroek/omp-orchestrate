@@ -3,7 +3,14 @@ node_modules/
 __pycache__/
 *.pyc
 .DS_Store
-.beads/
+# Beads: track config.yaml so issue-prefix and sync.remote travel.
+# Ignore the store and every volatile path; a wrong rule commits a database.
+.beads/embeddeddolt/
+.beads/dolt/
+.beads/backup/
+.beads/*.log
+.beads/dolt-server.*
+.beads/*.db*
 dist/
 # Run state, written by readActiveRun's marker and by subagent audit logs. Per-checkout
 # and per-run, like .beads/ above: every run of this orchestrator in this repository
