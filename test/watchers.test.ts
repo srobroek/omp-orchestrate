@@ -245,30 +245,39 @@ describe("W5 shared-database precondition", () => {
 	}
 
 	afterEach(() => {
-		delete process.env.BEADS_DOLT_SHARED_SERVER;
 		delete process.env.OMP_BIN;
+		delete process.env.BEADS_DIR;
 	});
 
-	test("a repo-local database under isolation is reported even with clean settings", async () => {
-		// The default `bd init` layout: a `.beads` directory with no shared-server
-		// marker in either carrier.
+	test("isolation with no pinned path is reported", async () => {
+		// The failure this replaces a server with. bd resolves by walking up from the working
+		// directory, `.beads/` is gitignored, so a clone or worktree arrives without one and the
+		// walk continues past the checkout. Measured on this host: `$HOME/.beads` exists.
 		await stubOmp("worktree");
 		await mkdir(join(cwd, ".beads"), { recursive: true });
+		delete process.env.BEADS_DIR;
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
 		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("per-checkout database");
-		expect(notice).toContain("two workers can hold one bead");
-		// The pin is no longer offered as a remedy: this project requires a per-project
-		// Dolt server, and `-C` buys nothing under one. The env var is deliberately NOT
-		// offered alone either: with `metadata.json` still pinning embedded, bd announces
-		// it is using the shared server and then fails with `database not found`.
-		expect(notice).toContain("per-project Dolt server");
-		expect(notice).toContain("bd init --server");
-		expect(notice).toContain("bd backup restore");
+		expect(notice).toContain("BEADS_DIR is unset");
+		expect(notice).toContain("/orchestrate-run");
+		// The old remedies are gone with the server they served.
+		expect(notice).not.toContain("bd init --server");
+		expect(notice).not.toContain("per-project Dolt server");
 		expect(notice).not.toContain("bd -C");
-		expect(notice).not.toContain("Set BEADS_DOLT_SHARED_SERVER=1");
+	});
+
+	test("a pinned path silences it", async () => {
+		// `/orchestrate-run` sets this, and every child inherits it, so the run's database is
+		// the one an isolated worker reaches.
+		await stubOmp("worktree");
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		process.env.BEADS_DIR = join(cwd, ".beads");
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR is unset");
 	});
 
 	test("a repository with no beads database says nothing", async () => {
@@ -279,7 +288,7 @@ describe("W5 shared-database precondition", () => {
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR is unset");
 	});
 
 	/**
@@ -335,89 +344,6 @@ describe("W5 shared-database precondition", () => {
 		expect([...DECLARED_MODEL_ROLES]).toEqual(declaredSurface.modelRoles.roles);
 	});
 
-	test("the flat dotted key bd actually writes silences it", async () => {
-		// Verbatim from a scratch `bd init --shared-server`: a flat `dolt.shared-server`
-		// key, not the nested block a reader might assume.
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(join(cwd, ".beads", "config.yaml"), "dolt.shared-server: true\n");
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
-	});
-
-	test("server mode declared only in metadata.json silences it", async () => {
-		// `bd init --server` sets the metadata field without the config key, and a
-		// client that resolves a host and port cannot be redirected by a file copy.
-		// Reading only config.yaml would nag a correctly configured project forever.
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(
-			join(cwd, ".beads", "metadata.json"),
-			JSON.stringify({ backend: "dolt", dolt_mode: "server", dolt_database: "proj" }),
-		);
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
-	});
-
-	test("metadata pinning embedded still reports", async () => {
-		// The default `bd init` layout, which is exactly the case that loses claims.
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(
-			join(cwd, ".beads", "metadata.json"),
-			JSON.stringify({ backend: "dolt", dolt_mode: "embedded", dolt_database: "proj" }),
-		);
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(String(rig.messages.at(-1)?.content ?? "")).toContain("per-checkout database");
-	});
-
-	test("a malformed metadata file proves nothing and still reports", async () => {
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(join(cwd, ".beads", "metadata.json"), "{ not json");
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(String(rig.messages.at(-1)?.content ?? "")).toContain("per-checkout database");
-	});
-
-	test("shared-server mode via the environment silences it", async () => {
-		await stubOmp("worktree");
-		process.env.BEADS_DOLT_SHARED_SERVER = "1";
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
-	});
-
-	test("shared-server mode declared in the beads config silences it", async () => {
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(join(cwd, ".beads", "config.yaml"), "dolt:\n  shared-server: true\n");
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("per-checkout database");
-	});
-
-	test("the commented-out default does not read as enabled", async () => {
-		// `bd init` ships every key commented; treating that as configured would hide
-		// the failure on exactly the layout that has it.
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(join(cwd, ".beads", "config.yaml"), "# dolt:\n#   shared-server: true\n");
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(String(rig.messages.at(-1)?.content ?? "")).toContain("per-checkout database");
-	});
-
 	test("an unreadable isolation mode warns about nothing", async () => {
 		// `omp` absent: nothing is known, so nothing is claimed. Reading a missing key
 		// as "isolating" would warn about a split database on a run with no isolation.
@@ -435,7 +361,7 @@ describe("W5 shared-database precondition", () => {
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
 		// A run without isolation shares one checkout, so it shares one database.
-		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("per-checkout database");
+		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("BEADS_DIR is unset");
 	});
 });
 

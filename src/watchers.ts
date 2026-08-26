@@ -733,50 +733,6 @@ async function readSetting(key: string, cwd: string): Promise<unknown> {
 let settingsChecked = false;
 
 /**
- * Whether every agent in this run will read and write one beads database.
- *
- * This is the precondition the whole coordination model rests on, and it is not a
- * setting anyone thinks to check. Isolation gives each child a filesystem copy of
- * the repository, `bd` discovers its database by walking up from the working
- * directory, so an isolated worker mutates the copy inside its own clone. Verified
- * directly: a bead created in a copied checkout is invisible in the original. The
- * run then loses every claim, comment, and status a worker wrote, and -- worse --
- * claims stop excluding each other, because two workers can hold the same bead in
- * two databases.
- *
- * Any server mode makes the database one thing, because the client then resolves a
- * host and port rather than a path, which a filesystem copy cannot change. Both
- * carriers are read, verified by running `bd init --shared-server` in a scratch
- * repository and inspecting what it wrote: it persists `dolt.shared-server: true` in
- * `config.yaml` AND `dolt_mode: "server"` in `metadata.json`. Reading only the
- * config key would nag a project configured with plain `bd init --server`, which
- * sets the metadata field alone and is equally immune to isolation.
- *
- * There is no per-agent remedy left. `bd -C <run repo>` was the old one, and it is gone
- * with the pin: under a per-project server the path is not what resolves the database.
- */
-async function sharedBeadsDatabase(cwd: string): Promise<boolean> {
-	if (process.env.BEADS_DOLT_SHARED_SERVER === "1") return true;
-
-	// `bd` writes this as a flat dotted key (`dolt.shared-server: true`), while a
-	// hand-written file may nest it under `dolt:`. Matching the leaf covers both, and
-	// excluding `#` keeps the commented defaults `bd init` ships from reading as set.
-	const config = await fs.readFile(path.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
-	if (/^[^#\n]*\bshared-server:\s*true/m.test(config)) return true;
-
-	const metadata = await fs.readFile(path.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
-	try {
-		const parsed: unknown = JSON.parse(metadata);
-		if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
-			return parsed.dolt_mode === "server";
-		}
-	} catch {
-		// A malformed or absent metadata file proves nothing either way.
-	}
-	return false;
-}
-
-/**
  * The value each project-ownable requirement should carry in `<run repo>/.omp/config.yml`.
  *
  * Only settings whose correct value is the same for every machine belong here. The
@@ -895,17 +851,18 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 		.stat(path.join(cwd, ".beads"))
 		.then(entry => entry.isDirectory())
 		.catch(() => false);
-	if (tracked && isolating && !(await sharedBeadsDatabase(cwd))) {
-		// The prerequisite is a per-project Dolt server: bd then resolves the database by
-		// host and port from `.beads/dolt-server.port`, which travels with a copied
-		// checkout, so every isolated agent reaches the run's database. No setting can
-		// repair an embedded project -- server mode reads a different data directory, so
-		// conversion is a migration. Setting the env var ALONE is not a fix: with
-		// `metadata.json` still pinning `dolt_mode: embedded`, bd reports "using the
-		// shared server for this run" then fails with `database not found`. Verified by
-		// walking into exactly that state.
+	// Under an embedded database the precondition is a pinned PATH, not a server. bd resolves
+	// by walking up from the working directory, `.beads/` is gitignored, so a clone or worktree
+	// arrives without one and the walk continues past the checkout. Measured on this host:
+	// `$HOME/.beads` exists, so the walk can end in a personal database that no run reads.
+	//
+	// An earlier version of this line demanded a per-project Dolt server instead. That server
+	// cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
+	// rather than from the port, so a removed pid file made every later call start a rival --
+	// nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
+	if (tracked && isolating && (process.env.BEADS_DIR ?? "") === "") {
 		lines.push(
-			`beads is running embedded, a per-checkout database, and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. This project requires a per-project Dolt server. On a NEW project: \`bd init --server\`. On THIS project, migrate: \`bd backup init <path>\`, \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`,
+			"isolation is on and BEADS_DIR is unset, so an isolated worker resolves its own beads database rather than this run's. bd walks up from the working directory and `.beads/` is gitignored, so a clone or worktree arrives without one and the walk can end in a personal database. `/orchestrate-run` pins the run's path for this session and every child it spawns",
 		);
 	}
 

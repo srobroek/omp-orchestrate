@@ -2,18 +2,19 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ensureBeadsServer } from "../src/beads-mode";
+import { ensureBeadsPath } from "../src/beads-mode";
 
 /**
  * Every branch is driven through a stub `bd` on `BD_BIN`, the same seam `bdRun` reads.
  *
- * The stub records its argv, because the flags are the contract: `--server` selects the
- * mode this plugin requires, `--skip-hooks` avoids repointing `core.hooksPath` and
- * copying ~349MB of hooks that are broken on arm64, and `--init-if-missing` is what makes
- * calling init on an unreadable database safe rather than a way to create a second one.
+ * The stub records its argv, because the call is the contract: exactly one `bd where` and
+ * nothing else. An earlier version of this module policed storage modes and initialised
+ * databases, and its cost was a server per project plus 28 orphaned `dolt sql-server`
+ * processes on the host. Embedded mode needs a path, not a lifecycle.
  */
 let dir: string;
 let previousBin: string | undefined;
+let previousBeadsDir: string | undefined;
 
 async function stub(script: string): Promise<void> {
 	const bin = path.join(dir, "bd-stub");
@@ -28,274 +29,96 @@ async function argv(): Promise<string[]> {
 }
 
 beforeEach(async () => {
-	dir = await fs.mkdtemp(path.join(os.tmpdir(), "orc-beads-"));
+	// Built under $HOME rather than os.tmpdir(): the resolution guard compares the answer
+	// against the working directory, and macOS reports /tmp as /private/tmp, which would make
+	// a correct answer look like it landed outside the checkout.
+	dir = await fs.mkdtemp(path.join(process.env.HOME ?? os.homedir(), ".orc-beads-"));
 	previousBin = process.env.BD_BIN;
+	// This module assigns BEADS_DIR deliberately, so it is saved and restored rather than left
+	// to leak into every later test in the process.
+	previousBeadsDir = process.env.BEADS_DIR;
+	delete process.env.BEADS_DIR;
 });
 
 afterEach(async () => {
 	if (previousBin === undefined) delete process.env.BD_BIN;
 	else process.env.BD_BIN = previousBin;
+	if (previousBeadsDir === undefined) delete process.env.BEADS_DIR;
+	else process.env.BEADS_DIR = previousBeadsDir;
 	await fs.rm(dir, { recursive: true, force: true });
 });
 
-describe("ensureBeadsServer", () => {
-	test("a server-mode database passes with nothing to report", async () => {
+describe("ensureBeadsPath", () => {
+	test("a resolved database is pinned in the environment", async () => {
 		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
-esac
+echo "${path.join("$PWD", ".beads")}"
+echo "  database: ${path.join("$PWD", ".beads", "embeddeddolt")}"
 exit 0`);
 
-		expect(await ensureBeadsServer(dir)).toEqual({ ok: true });
-		// `dolt status` is asked last, and only to catch a server that is answering while no pid
-		// file names it. A silent stub reports neither, so nothing is reconciled.
-		expect(await argv()).toEqual(["info", "dolt show", "dolt status"]);
+		const result = await ensureBeadsPath(dir);
+		expect(result.ok).toBe(true);
+		// The assignment is the product: src/bd.ts spawns with { ...process.env } and subagents
+		// inherit it, so one assignment reaches every later bd call and every child.
+		expect(process.env.BEADS_DIR).toBe(path.join(dir, ".beads"));
+		// One question, once. No init, no mode probe, no server lifecycle.
+		expect(await argv()).toEqual(["where"]);
 	});
 
-	test("an embedded database refuses the run and is not converted", async () => {
+	test("an inherited BEADS_DIR is left exactly as it arrived", async () => {
+		// The run resolved it; re-resolving inside an isolated checkout would replace a correct
+		// value with a local one, which is the whole failure this module exists to prevent.
+		process.env.BEADS_DIR = "/run/owned/.beads";
 		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     embedded (in-process Dolt engine)"; exit 0 ;;
-esac
+echo "/somewhere/else/.beads"
 exit 0`);
 
-		const result = await ensureBeadsServer(dir);
+		expect(await ensureBeadsPath(dir)).toEqual({ ok: true });
+		expect(process.env.BEADS_DIR).toBe("/run/owned/.beads");
+		// bd is not consulted at all, so an inherited answer costs nothing.
+		expect(await argv()).toEqual([]);
+	});
+
+	test("a database resolved outside the checkout is refused, not adopted", async () => {
+		// Measured on this host: $HOME/.beads exists. bd walks up from the working directory and
+		// `.beads/` is gitignored, so a clone or worktree arrives without one and the walk can
+		// end in a personal database that no run reads. Adopting it would be silent.
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "${path.join(process.env.HOME ?? os.homedir(), ".beads")}"
+exit 0`);
+
+		const result = await ensureBeadsPath(dir);
 		expect(result.ok).toBe(false);
-		expect(result.ok === false && result.reason).toContain("embeddeddolt");
-		// The refusal must not attempt a conversion: a measured flag flip leaves bd unable
-		// to open the database at all, so only `info` and `dolt show` may be called.
-		expect(await argv()).toEqual(["info", "dolt show"]);
+		expect(result.ok === false && result.reason).toContain("outside this checkout");
+		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
-	test("an absent database is initialised, and the result is verified not assumed", async () => {
+	test("a relative answer is refused rather than joined to a guess", async () => {
 		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
-esac
-case "$1" in
-  info) echo "Error: no beads database found" >&2; exit 1 ;;
-  init) exit 0 ;;
-esac
+echo ".beads"
 exit 0`);
 
-		expect(await ensureBeadsServer(dir)).toEqual({
-			ok: true,
-			note: "initialised beads as a server-backed database",
-		});
-		const calls = await argv();
-		expect(calls[0]).toBe("info");
-		expect(calls[1]).toBe("init --init-if-missing --skip-hooks --server --non-interactive");
-		// The third call is the point: success is reported from the mode, not the flag.
-		expect(calls[2]).toBe("dolt show");
-	});
-
-	test("a shared server is accepted: a copy cannot fork a host and port", async () => {
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     shared server"; exit 0 ;;
-esac
-exit 0`);
-
-		expect(await ensureBeadsServer(dir)).toEqual({ ok: true });
-	});
-
-	test("an unrecognised mode refuses and quotes what bd reported", async () => {
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     warp drive"; exit 0 ;;
-esac
-exit 0`);
-
-		const result = await ensureBeadsServer(dir);
+		const result = await ensureBeadsPath(dir);
 		expect(result.ok).toBe(false);
-		// Matching allowed modes rather than excluding embedded is what makes this refuse.
-		expect(result.ok === false && result.reason).toContain('"warp drive"');
-		expect(result.ok === false && result.reason).not.toContain("embeddeddolt");
+		expect(result.ok === false && result.reason).toContain("not an absolute path");
+		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
-	test("a bd info failure that is not the missing-database diagnostic never initialises", async () => {
+	test("bd's own failure is reported rather than worked around", async () => {
 		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1" in
-  info) echo "Error: dial tcp 127.0.0.1:3308: connect: connection refused" >&2; exit 1 ;;
-esac
-exit 0`);
+echo "Error: no beads database found" >&2
+exit 1`);
 
-		const result = await ensureBeadsServer(dir);
+		const result = await ensureBeadsPath(dir);
 		expect(result.ok).toBe(false);
-		expect(result.ok === false && result.reason).toBe(
-			"bd info failed: Error: dial tcp 127.0.0.1:3308: connect: connection refused",
-		);
-		// The point: a database that exists and will not answer must not be initialised over.
-		expect(await argv()).toEqual(["info"]);
-	});
-
-	test("init succeeding while the mode stays embedded refuses and blames the flag", async () => {
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     embedded (in-process Dolt engine)"; exit 0 ;;
-esac
-case "$1" in
-  info) echo "Error: no beads database found" >&2; exit 1 ;;
-  init) exit 0 ;;
-esac
-exit 0`);
-
-		const result = await ensureBeadsServer(dir);
-		expect(result.ok).toBe(false);
-		// Names the tooling, not a data migration: there is no data to migrate here.
-		expect(result.ok === false && result.reason).toContain("does not honour the flag");
-		expect(result.ok === false && result.reason).not.toContain("bd doctor");
-	});
-
-	test("a failing init refuses the run and reports bd's first line", async () => {
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1" in
-  info) echo "Error: no beads database found" >&2; exit 1 ;;
-  init) echo "Error: prefix collides with an existing database" >&2; exit 3 ;;
-esac
-exit 0`);
-
-		const result = await ensureBeadsServer(dir);
-		expect(result.ok).toBe(false);
-		expect(result.ok === false && result.reason).toBe(
-			"bd init failed: Error: prefix collides with an existing database",
-		);
-	});
-
-	test("an unreadable mode refuses rather than assuming a server", async () => {
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") exit 4 ;;
-esac
-exit 0`);
-
-		const result = await ensureBeadsServer(dir);
-		expect(result.ok).toBe(false);
-		expect(result.ok === false && result.reason).toContain("bd dolt show");
+		expect(result.ok === false && result.reason).toContain("no beads database found");
+		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
 	test("a missing bd refuses rather than proceeding unverified", async () => {
 		process.env.BD_BIN = path.join(dir, "definitely-not-a-binary");
 
-		const result = await ensureBeadsServer(dir);
+		const result = await ensureBeadsPath(dir);
 		expect(result.ok).toBe(false);
 		expect(result.ok === false && result.reason).toContain("bd could not be run");
-	});
-
-	test("a linked worktree with no database initialises like any other fresh project", async () => {
-		// This pins a REMOVAL. An earlier version refused here, believing an absent `.beads/`
-		// in a worktree meant a failed copy. Measured against real bd in five linked worktrees
-		// of this repository, all holding no `.beads/`: `bd where` reported the primary
-		// checkout's database and `bd list` returned all nine of its beads, so bd follows the
-		// worktree to its common git dir unaided and the refusal could never fire for the case
-		// it described. `scripts/probe-worktree-resolution.sh` enforces that invariant against
-		// real bd; this test only proves no worktree-specific branch survives here.
-		//
-		// A real linked worktree, because the removed guard asked git rather than inspecting
-		// paths. Built under $HOME, not os.tmpdir(): a worktree under /tmp or /private/tmp is
-		// invisible inside the container dgit runs git in -- the bind mount succeeds and yields
-		// an empty directory -- so this repository forbids creating one there.
-		const home = process.env.HOME ?? os.homedir();
-		const root = await fs.mkdtemp(path.join(home, ".orc-wt-test-"));
-		try {
-			const primary = path.join(root, "primary");
-			await fs.mkdir(primary, { recursive: true });
-			const git = (args: string[], cwd: string) => Bun.spawnSync(["git", ...args], { cwd });
-			git(["init", "-q", "-b", "main"], primary);
-			git(["config", "user.email", "probe@test.local"], primary);
-			git(["config", "user.name", "Probe"], primary);
-			await fs.writeFile(path.join(primary, "seed"), "seed\n");
-			git(["add", "seed"], primary);
-			git(["commit", "-q", "--no-gpg-sign", "-m", "seed"], primary);
-			const linked = path.join(root, "linked");
-			git(["worktree", "add", "-q", linked, "-b", "side"], primary);
-
-			// First read reports no database; the init that follows makes one, and the mode
-			// probe then confirms it, exactly as in a standalone repository.
-			await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
-esac
-case "$1" in
-  info)
-    if [ -f "${path.join(dir, "made")}" ]; then exit 0; fi
-    echo "Error: no beads database found" >&2; exit 1 ;;
-  init) : > "${path.join(dir, "made")}"; exit 0 ;;
-esac
-exit 0`);
-
-			const result = await ensureBeadsServer(linked);
-			expect(result.ok).toBe(true);
-			expect(result.ok === true && result.note).toBe("initialised beads as a server-backed database");
-			// The init runs, with the flags that make it safe, and nothing consults git.
-			expect(await argv()).toEqual([
-				"info",
-				"init --init-if-missing --skip-hooks --server --non-interactive",
-				"dolt show",
-				"dolt status",
-			]);
-		} finally {
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
-
-	test("a database whose auto-start is disabled is started rather than reported broken", async () => {
-		// `dolt.auto-start: false` is what stops an incidental read from minting a server, so
-		// starting one becomes this function's job. The refusal text is bd's own, verbatim from a
-		// scratch project.
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
-  "dolt start") : > "${path.join(dir, "started")}"; exit 0 ;;
-esac
-case "$1" in
-  info)
-    if [ -f "${path.join(dir, "started")}" ]; then exit 0; fi
-    echo "Dolt server auto-start is disabled (dolt.auto-start: false)." >&2
-    echo "Start the server manually:" >&2
-    exit 1 ;;
-esac
-exit 0`);
-
-		const result = await ensureBeadsServer(dir);
-		expect(result.ok).toBe(true);
-		expect(result.ok === true && result.note).toContain("started the run's dolt server");
-		// The start is followed by a second `info`, so success is measured rather than assumed
-		// from the start's own exit code.
-		expect(await argv()).toEqual(["info", "dolt start", "info", "dolt show", "dolt status"]);
-	});
-
-	test("an answering but untracked server is reconciled instead of left to spawn rivals", async () => {
-		// The measured state: the server was alive on 63916 and `.beads/dolt-server.pid` was
-		// gone, so `bd dolt status` said "not running" while `bd list` returned every bead. Left
-		// alone, every later call auto-starts a rival that fails on the store's exclusive lock.
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
-  "dolt status")
-    if [ -f "${path.join(dir, "fixed")}" ]; then echo "Dolt server: running"; else echo "Dolt server: not running"; fi
-    exit 0 ;;
-  "dolt killall") : > "${path.join(dir, "fixed")}"; exit 0 ;;
-esac
-exit 0`);
-
-		const result = await ensureBeadsServer(dir);
-		expect(result.ok).toBe(true);
-		expect(result.ok === true && result.note).toContain("untracked dolt server");
-		// bd's own verbs, in the order its help defines: killall drops what the pid file does not
-		// name, then start produces a tracked server.
-		expect(await argv()).toEqual(["info", "dolt show", "dolt status", "dolt killall", "dolt start"]);
-	});
-
-	test("a tracked server is left alone", async () => {
-		await stub(`echo "$@" >> "$ARGV_LOG"
-case "$1 $2" in
-  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
-  "dolt status") echo "Dolt server: running"; exit 0 ;;
-esac
-exit 0`);
-
-		expect(await ensureBeadsServer(dir)).toEqual({ ok: true });
-		expect(await argv()).toEqual(["info", "dolt show", "dolt status"]);
 	});
 });

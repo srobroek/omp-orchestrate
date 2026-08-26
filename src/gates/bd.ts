@@ -13,9 +13,9 @@
  * channel.
  *
  * A pin check (`-C <run repo>` required on every call) existed here and was removed:
- * this project runs a per-project Dolt server, where bd resolves the database by host
- * and port from `.beads/dolt-server.port`, which travels with a copied checkout. The
- * embedded walk-up-from-cwd hazard the check guarded against does not exist under a
+ * the run pins BEADS_DIR instead, which every child inherits, so bd reads the run's
+ * database without a per-call flag. The walk-up-from-cwd hazard the check guarded against
+ * is closed at the environment rather than at each call site. It does not exist under a
  * server, so the block refused correct commands while citing a mechanism that did not
  * apply. `-C` remains legal and harmless; it is simply not demanded.
  *

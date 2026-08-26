@@ -26,10 +26,11 @@ describe("dispatch contract parity", () => {
 });
 
 /**
- * The pin mandate is gone: this project runs a per-project Dolt server, so bd resolves
- * the run's database by host and port from `.beads/dolt-server.port`, which travels with
- * a copied checkout. The contract must say the mechanism that holds, and must not demand
- * a flag nothing enforces.
+ * The pin mandate stays gone, and the mechanism that replaced it changed. An earlier version
+ * required a per-project Dolt server, so bd resolved by host and port and no path was needed.
+ * The database is embedded again, so the path is exactly what is needed, and the run pins
+ * `BEADS_DIR` once for every child. The contract must say the mechanism that holds, and must
+ * not demand a flag nothing enforces.
  */
 describe("the database resolution", () => {
 	test("the canonical pull does not demand a pin", () => {
@@ -37,10 +38,13 @@ describe("the database resolution", () => {
 		expect(DISPATCH_CONTRACT).toContain("bd ready --parent <epic>");
 	});
 
-	test("the contract states the server mechanism, not the embedded one", () => {
-		expect(DISPATCH_CONTRACT).toContain("per-project Dolt server");
-		expect(DISPATCH_CONTRACT).toContain(".beads/dolt-server.port");
-		// The embedded walk-up story is the claim that was false here.
-		expect(DISPATCH_CONTRACT).not.toContain("walking up from the working directory");
+	test("the contract names BEADS_DIR as what reaches the run's database", () => {
+		expect(DISPATCH_CONTRACT).toContain("BEADS_DIR");
+		// The walk-up hazard is why the pin exists, so a worker is told the reason rather than
+		// just the rule.
+		expect(DISPATCH_CONTRACT).toContain("walking up from the working directory");
+		// The server is gone: its state files must not be cited to workers as a mechanism.
+		expect(DISPATCH_CONTRACT).not.toContain("dolt-server.port");
+		expect(DISPATCH_CONTRACT).not.toContain("per-project Dolt server");
 	});
 });

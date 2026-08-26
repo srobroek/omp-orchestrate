@@ -314,7 +314,7 @@ clear the worktree binding, and prune the tree.
 
 ### Push the database, not just the branch
 
-The beads database is a per-project Dolt server, and `git push` does **not** carry
+The beads database lives in the repository and `git push` does **not** carry
 `refs/dolt/data`. The branch and the database are separate refspaces, so pushing a branch
 leaves the database where it was. `bd dolt push` is what moves it: the remote is already
 registered as `origin`, pointing at this repository over `git+https`.
@@ -332,32 +332,32 @@ Push at three points, each where run state must outlive this machine:
 yours. Do not confuse this with `bd backup`, which writes a Dolt-native backup on a timer
 and reaches no remote.
 
-### The server is started once, by the run
+### One database, named by BEADS_DIR
 
-`.beads/config.yaml` carries `dolt.auto-start: false`, so no incidental `bd` call can mint a
-server. The setting is deliberate. bd answers "is a server running?" from
-`.beads/dolt-server.pid` rather than from the port. So any tool that removes that file makes
-every later call start a rival. Measured on this host: nine consecutive
-`database is locked by another dolt process` refusals in `.beads/dolt-server.log`, and 28
-orphaned `dolt sql-server` processes across projects.
+The database is embedded: bd opens it in process, with no server, no port file, and no pid
+file. `/orchestrate-run` resolves the run's `.beads` and pins `BEADS_DIR` in the environment,
+and every agent you spawn inherits it. That is the whole mechanism.
 
-`src/beads-mode.ts` handles it at run activation. It starts the server when bd reports
-auto-start disabled, and reconciles the harder case: a server that answers while no pid file
-names it, using `bd dolt killall` then `bd dolt start`. That leaves the servers of other projects alone, which
-`killall` states as its own contract.
+It exists because bd resolves its database by walking up from the working directory, and
+`.gitignore` covers `.beads/`. So a clone and a worktree both arrive without one, and the walk
+continues past the checkout. `$HOME/.beads` exists on this machine, so an unpinned worker can
+write a run's beads into a personal database that nobody reads.
 
 What this leaves you:
 
-- `bd dolt start` if a session reports the database asleep. One server per project is right, and a
-  second is the failure this setting exists to prevent.
-- `bd dolt status` to see whether bd knows about the server. `running` plus a PID is healthy.
-  `not running` while reads work means untracked, and activation repairs it.
-- Never hand-write `.beads/dolt-server.pid`. It is bd's state, and `killall` plus `start` is
-  the sanctioned repair.
+- Never unset `BEADS_DIR` for a worker, and never hand one a different path. A write that
+  lands elsewhere is invisible to the run, and no error says so.
+- A worker reporting an empty queue inside an isolated checkout is the symptom. Check its
+  `BEADS_DIR` before you re-pour anything.
+- `bd where` names the database bd actually resolved. That is the question to ask, rather than
+  which directory the worker stands in.
 
-`.gitignore` covers `.beads/`, so this setting stays in this checkout. A fresh clone takes
-bd's default of auto-start on, and its first run inherits the leak until someone writes the
-file again.
+An earlier design required a per-project Dolt server for this. It cost a lifecycle nobody
+owned: bd decides whether a server runs from `.beads/dolt-server.pid` rather than from the
+port, so a removed pid file made every later call start a rival. That produced nine
+consecutive lock refusals in one log and 28 orphaned `dolt sql-server` processes on this
+machine, and a container could not reach a loopback-bound server at all. Embedded plus a
+pinned path gives the same guarantee and spawns nothing.
 
 ## Output
 
