@@ -264,6 +264,48 @@ export interface BdInvocation {
 }
 
 /**
+ * A bead id, as one parsed token: a lowercase word, then one or more hyphen-separated
+ * groups.
+ *
+ * Wider than the pattern `src/bd.ts` uses to sieve ids out of a dependency record, which
+ * forbids a hyphen in the suffix and so rejects `orc-chaos-c3-05k` -- a real id, since a
+ * configured issue prefix may itself contain one. Exported because two gates need the
+ * same answer: G6 reads the token after an id as a comment body, G7 counts the ids one
+ * claim names, and a second copy of this would let them disagree about what an id is.
+ *
+ * Matched against a single token the tokeniser produced, never against command text.
+ */
+export const BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+
+
+/**
+ * Drop the trailing `)`/`}` a subshell or group close glues onto the last token.
+ *
+ * Balance-counted rather than trimmed, because a trimmed `--metadata '{"role":"x"}'`
+ * arrives as `{"role":"x"}` and a blind strip would corrupt it into unparseable JSON --
+ * turning a readable route into an unreadable one. Only an UNBALANCED closer is shell
+ * punctuation; a matched pair belongs to the value.
+ */
+function stripGroupClose(token: string): string {
+	let end = token.length;
+	for (;;) {
+		const last = token[end - 1];
+		if (last !== ")" && last !== "}") break;
+		const open = last === ")" ? "(" : "{";
+		const body = token.slice(0, end);
+		let depth = 0;
+		for (const char of body) {
+			if (char === open) depth += 1;
+			else if (char === last) depth -= 1;
+		}
+		// depth < 0 means this closer has no opener inside the token: shell grouping.
+		if (depth >= 0) break;
+		end -= 1;
+	}
+	return token.slice(0, end);
+}
+
+/**
  * Parse one segment as a `bd` invocation, or return null when it is not one.
  *
  * Consumes leading `KEY=VALUE` assignments, an optional `env [-flags] KEY=VALUE...`
@@ -298,10 +340,25 @@ export function parseBdInvocation(segment: string[]): BdInvocation | null {
 
 	index = skipTransparentPrefix(segment, index);
 
-	const head = segment[index];
-	if (head === undefined || basename(head) !== "bd") return null;
+	// A subshell or group opener glued to the command leaves `(bd` as one token, because the
+	// tokeniser promotes only `;&|` to standalone operators. Stripping it here keeps
+	// `(bd update x --claim)` visible: it is a plausible thing to write, and a gate that
+	// misses it is a bypass rather than a rough edge.
+	const head = segment[index]?.replace(/^[({]+/, "");
+	if (head === undefined || head.length === 0 || basename(head) !== "bd") return null;
 
-	const rest = segment.slice(index + 1);
+	// Balance-aware, because the same glued close that hides `(bd` also lands on the LAST
+	// token: in `(bd -C /r update orc-1 --claim)` the tail is `--claim)`, so an exact-token
+	// `--claim` test reads false and the claim gate skips a real claim.
+	//
+	// A token that BECAME empty was pure grouping punctuation and was never an operand. One
+	// that arrived empty is an empty argument -- `bd comment orc-1 ""` -- and the verb notice
+	// fires on it, so dropping that would silence a real finding.
+	const rest = segment
+		.slice(index + 1)
+		.map(token => ({ token, stripped: stripGroupClose(token) }))
+		.filter(({ token, stripped }) => stripped.length > 0 || token.length === 0)
+		.map(({ stripped }) => stripped);
 
 	// Positionals, skipping flags and the values of flags that take one. The
 	// first positional is the subcommand; the remainder are ids. Grouping

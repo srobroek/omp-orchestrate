@@ -1,7 +1,7 @@
 {
   "agent": "researcher",
   "tier": "T1",
-  "_comment": "Research nodes produce durable evidence and hand off. Escalation wisps promote one ADVICE or BLOCKED summary to the linked node.",
+  "_comment": "Research nodes produce durable evidence and hand off. Escalation wisps promote one ADVICE or BLOCKED summary to the linked node. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. `bd create` stays exempt, so a routable bug bead can still be filed. The `handoff` check therefore stays on the `agent:reviewer` LABEL: a signal the researcher writes, not a route.",
   "completion": [
     {
       "check": "output_ref",

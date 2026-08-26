@@ -1,4 +1,4 @@
-# Lifecycle: states, dispatch, review, supervision, ambiguity, cleanup
+# Lifecycle: states, dispatch, wakes, review, supervision, ambiguity, cleanup
 
 Agent lifetime and bead state share one vocabulary, tracked on the bead:
 `bd set-state <bead> state=<name> --reason "<why>"` plus bead status per the mapping table in
@@ -29,12 +29,12 @@ never stored as a bead state.
 
 | Transition | Trigger |
 |---|---|
-| `pending → ready` | `bd ready --parent <epic> --label agent:<role> --unassigned` reports the bead, no gate is open, and its routing envelope is complete |
+| `pending → ready` | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` reports the bead, no gate is open, and its routing envelope is complete |
 | `ready → working` | a worker pulls it: `bd ready … --claim` returns the bead, atomically and first-wins, and the worker adopts what it was given |
 | `working → reported` | the worker delivers the evidence its `execution_kind` requires, adds the next role's label, clears its assignee, and comments `REPORTED`. Its commits are already captured on `omp/task/<id>` |
 | `reported → in_review` | the architect integrates the captured branch, then creates every review-wisp shell before any reviewer starts |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with `ADVICE` |
-| `changes_requested → working` | the bead returns to its queue with the union of FIX items attached; the next puller applies them |
+| `changes_requested → working` | the bead returns to its queue with every `REVIEW verdict=changes` item attached; the next puller applies them |
 | `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead; the shepherd claims it, proves CI and the bot round, serializes on the merge slot, merges, stamps, releases, closes |
 | `approved → dismissed` | non-git evidence only: the architect records the accepted evidence, sets `state=dismissed`, and closes |
 | `waiting_human` | an agent raised `ASK`. The question is recorded on the bead and the bead is held. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
@@ -68,15 +68,43 @@ commit, a placeholder branch, or a fake merge requirement.
 | Task-scoped | implementer, reviewer, researcher | claim one bead or wisp, report there, release, exit. Respawn reads the bead, its comments, and its linked wisps |
 | Untracked | helper | lives only inside the architect's blocking await; its outcome is promoted to a comment before its trace wisp can be compacted |
 
-An isolated worker parks without a reviver when it finishes, so nothing wakes it: a
-replacement pulls the bead instead. A non-isolated architect parks after
-`task.agentIdleTtlMs` and *is* revived by a `hub` send, which is why a bounce writes bead
-state first and only then rings the doorbell.
+An isolated worker gets no wake when it finishes: nobody sends to it, and a replacement pulls
+the bead instead. A non-isolated architect parks after `task.agentIdleTtlMs` and *is* revived
+by a `hub` send.
 
 A `BOUNCE` comment invalidates that attempt. Repair the durable envelope -- the bead's
 scope, evidence requirement, or dependency -- and let a fresh worker pull it. Never continue
 the bounced session, never hand it the contract data it failed to produce, and never accept
 its later evidence.
+
+## Wakes and messages
+
+An agent performs every wake. The extension has no IRC API (`src/watchers.ts:553-555`), so
+its own live half is one notice in the lead's transcript. No code rings a doorbell for you.
+If no agent sends, nobody wakes.
+
+State lands on the bead or the wisp first. The send only saves a round trip. `hub` writes
+your message into the recipient's transcript, never onto the work. A replacement claiming
+that bead reads the bead, its comments, and its wisps, never its predecessor's transcript. A
+wake carrying the only copy of a decision is a data-loss bug. Promote it, then ring.
+
+A bounce shows the order. The shepherd creates the fix bead unassigned and routed, parks the
+merge bead behind it, and comments both dispositions. It wakes the `metadata.origin_actor`
+architect last, and that send carries no content. Every step before it already holds the
+whole truth.
+
+Siblings address each other directly. A researcher answers the implementer that asked. A
+worker filing a cross-epic bug wakes the architect that owns the code. Neither message
+travels through the parent that spawned the sender, and a relay hop only adds one more place
+to lose the answer.
+
+`hub` is a tool taking an `op`, never a shell command. `op: "list"` reads the roster, and
+`op: "send"` delivers. Every role here holds `bash`, so prose that reads like a command line
+invites a command that does not exist.
+
+The roster lists live peers and omits only the caller. An agent cannot find its own handle
+there: it reads that off the `Your id is <name>` line its parent injects at spawn. An
+implementer stamping `origin_actor` on a wisp it raises is writing that handle.
 
 ## Resume after compaction or crash
 
@@ -100,8 +128,8 @@ its later evidence.
    `references/queue-watcher.md`.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
-replacement pulls the same bead atomically. Waking a parked architect with `hub` is a
-doorbell for state that is already durable, never a way to carry content.
+replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
+in `Wakes and messages` above.
 
 ## Supervision
 
@@ -176,9 +204,9 @@ bd update <bead> --assignee "" --status open
 bd set-state <bead> state=pending --reason "dead claim verified; redispatch"
 ```
 
-5. Restore one compatible `agent:<role>` label and leave the bead unassigned. The next
-   worker claims it atomically and inherits every preserved anchor, including
-   `recovered_branch`.
+5. Restore one compatible `role=<role>` key -- the architect that owns the epic, or the lead,
+   never a worker -- and leave the bead unassigned. The next worker claims it atomically and
+   inherits every preserved anchor, including `recovered_branch`.
 
 If holder death is uncertain, keep the assignment and record a revisit trigger. That safe
 default is what stops two workers from mutating one scope. A contested claim runs
@@ -223,7 +251,7 @@ autonomous default. It enters `waiting_human` with one exact question and its im
 The holding actor adds this comment to the affected bead:
 
 ```text
-WAITING_HUMAN
+ASK <bead>
 owner: <actor responsible for resumption>
 scope: <bead and affected resource>
 question: <one exact choice the human must make>
@@ -295,25 +323,37 @@ trivial, and otherwise files one bug bead. Filing is a record, not self-dispatch
 keeps its own scope, its own evidence, and its own bead.
 
 Such a bead enters the run routed, or it does not enter it at all. Every queue pulls with
-`--parent <epic>` plus one `agent:<role>` label. An unparented or unlabelled bug bead is
+`--parent <epic>` plus `--metadata-field role=<role>`. An unparented or unrouted bug bead is
 invisible to all of them, and it lands in the stranded query, which fails close-out.
 
 | Field | Value |
 |---|---|
-| parent | the epic the filing worker sits under, so that epic's queues and every `bd list --parent <epic>` close-out scan see it |
-| route | exactly one `agent:<role>` label, the role that would do the fix -- `agent:implementer` for a code defect, never `agent:architect` |
+| parent | the epic whose nodes own the broken files, which is not automatically your own. Its queues and every `bd list --parent <epic>` close-out scan then see the bead |
+| route | exactly one `role=<role>` key, the role that would do the fix -- `role=implementer` for a code defect, never `role=architect`. `bd create` carries routing freely for every role, so filing routed needs no architect |
 | assignee | empty, so the next worker claims it atomically through `bd ready … --claim`. Every queue here is an `--unassigned` pull, so an assigned bug leaves `bd ready` and shows only under `bd list --assignee` |
 | provenance | `discovered-from` its finder, plus the label `kind:incidental` |
 
 Merge beads are the one deliberate unparented exception, and a bug bead never copies it.
 `discovered-from` does not gate `bd ready`, so that link costs the bead no readiness.
 
-Route it to the role that would fix it, never to `agent:architect`:
+An epic carries no `scope` key of its own, so match the defect's paths against the `scope`
+globs of the beads under each epic (`bd list --parent <epic> --json`):
+
+- **Exactly one epic matches.** Parent it there and ping that epic's architect. That is the
+  fast path, and it needs no question -- the match is the answer.
+- **No epic matches, or several do.** File it under your own epic, and let its architect
+  reparent with one `bd update <bug> --parent <their-epic>`. An ambiguous match
+  is not worth a round trip, and your own epic is always a legitimate home.
+
+Never hold a bug bead unparented and unrouted while you work out which epic owns it. Parent
+it somewhere with a fix role, then refine.
+
+Route it to the role that would fix it, never to `role=architect`:
 
 - the parent link is how the owning architect sees it. Its own sweeps, `bd list --parent
   <epic>`, and every close-out scan already carry the bead, so a triage label adds no
   visibility.
-- `agent:architect` is the queue that hands an architect an epic to own, and a bug bead is not
+- `role=architect` is the queue that hands an architect an epic to own, and a bug bead is not
   an epic.
 - fix-role routing degrades safely. An implementer pulls and fixes the bug even when no
   architect triages it, while a bug parked in the architect queue drains on nobody's contract.
@@ -327,40 +367,57 @@ could hold that marker:
 
 | Carrier | Verdict |
 |---|---|
-| label `kind:incidental` | chosen. `kind:` is an established namespace, and labels are multi-value, so the marker rides the `--labels` flag the route already needs. It reads back with `bd list --parent <epic> --label kind:incidental` |
+| label `kind:incidental` | chosen. `kind:` is an established namespace, the marker is a classification nothing claims on, and it reads back with `bd list --parent <epic> --label kind:incidental` |
 | `metadata.incidental` | rejected. Single-value, one more key to register in the metadata contract, and read with jq instead of a label filter |
 
 The bead carries no `orc-node` label either. It is nobody's DAG node until an architect adopts
 it and adds one.
 
 ```
-bd -C <run repo> create "<what is broken>" --type bug --parent <epic> \
-  --labels agent:implementer,kind:incidental \
+bd create "<what is broken>" --type bug --parent <owning-epic> \
+  --labels kind:incidental \
   --deps discovered-from:<your-bead> \
-  --metadata '{"scope":["<glob>"],"execution_kind":"git","origin":"<your-bead>"}' --silent
+  --metadata '{"role":"implementer","scope":["<glob>"],"execution_kind":"git","origin_bead":"<your-bead>"}' --silent
 ```
 
 Then comment `NOTE` with the new id on your own bead, and record `orc.note`. The history then
 shows how a bead the architect never decomposed arrived under its epic.
 
-The wake is optional, content-free, and last:
+The wake is content-free and last:
 
-- write the bead, comment on it, then at most ring a doorbell.
+- write the bead, comment on it, then ring the doorbell -- in that order.
+- ping the architect of the epic you parented under. That is the one actor whose queues now
+  carry the bead. `metadata.actor` on that epic names the handle, and `hub` `op: "list"`
+  confirms it is live.
 - the bead is complete without the message, so a failed send changes nothing. Never retry it,
   and never block on it.
 - the message carries no instructions and no description of the bug. The bead is the brief.
 - it buys triage while the run is live rather than at close-out, plus the revival of an
   architect parked past `task.agentIdleTtlMs`. One saved round trip, nothing more.
 
-A worker sends nothing. Its own exit is the doorbell: the child terminal event resumes the
-architect, which then reads the reporting bead, its `NOTE`, and the `discovered-from` link. The
-wake belongs to the lead, or to an architect handing a bug to a sibling architect. Both already
-hold the peer id, and neither is about to exit.
+When you parented under your own epic, send nothing: your exit is already the doorbell. The
+child terminal event resumes your architect, which then reads the reporting bead, its `NOTE`,
+and the `discovered-from` link. A sibling architect gets no such event, which is exactly why
+a cross-epic filing pings and a same-epic filing does not.
 
-| Metadata key | Why a worker cannot address the wake with it |
-|---|---|
-| `origin` | not an agent id at all. It holds an actor handle on a run epic or a helper bead, and a bead id on a merge bead or a bounced fix. This bug bead stamps the finder's bead |
-| `actor` | the agent id, stamped by dispatch and readable with `bd show <epic> --json`. It goes stale the moment the lead replaces an architect, and no worker can check the roster for liveness |
+`origin` carried incompatible meanings under one key and is split into three value-named keys.
+This is the contract for all of them, and none of them addresses the wake.
+
+| Key | Value | Use |
+|---|---|---|
+| `origin_actor` | an actor handle, `BEADS_ACTOR` form | the peer a bounce or a report wakes over `hub`. Never resolvable by `bd show`, never a dependency edge. Stamped on a run epic, a dispatched node, a helper wisp |
+| `origin_bead` | a bead id | the bead a bounce or a report comments on: the merge bead behind a fix, the feature behind a merge bead, the finder's bead behind an incidental bug |
+| `run_epic` | a run epic's bead id | run membership, which is why it left the `origin_*` family. Provenance only, never a routing target. Stamped on an architect domain epic |
+| `origin` | legacy: any of the three | pre-split beads only. A reader tries the successor key first, then this one. Nothing writes it again |
+
+This bug bead stamps `origin_bead`, the finder's bead -- a comment target, not an addressable
+peer. The wake resolves the other way: read `metadata.actor` off the epic you parented under
+(`bd show <epic> --json`), then confirm that handle with `hub` `op: "list"`.
+
+Every worker can read that roster. It lists live peers and omits only the caller, so you can
+check an architect's liveness but never your own name. The handle goes stale the moment the
+lead replaces an architect, so the roster check is what makes the ping worth attempting. A
+stale handle costs nothing, because the bead is already complete.
 
 An open incidental bug bead never blocks close-out. It is open, unassigned, and ungated, which
 makes it ready. A ready bead is never stranded, never `in_progress`, and never `blocked`. Those

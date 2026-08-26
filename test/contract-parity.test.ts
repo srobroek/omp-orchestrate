@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
-import { COMMENT_VERBS, DISPATCH_CONTRACT, dispatchContract, PROTOCOL_VERBS } from "../src/contract";
+import { DISPATCH_CONTRACT } from "../src/contract";
 
 const REFERENCE = "skills/orchestrate/references/dispatch-contract.md";
 
@@ -26,54 +26,21 @@ describe("dispatch contract parity", () => {
 });
 
 /**
- * G8 refuses a comment body whose first word is not in `COMMENT_VERBS`, and the worker
- * learns which words those are from the injected contract. If the two drift, a worker
- * follows the text it was given and is refused for it — so the table's protocol half is
- * asserted against the text that teaches it.
+ * The pin mandate is gone: this project runs a per-project Dolt server, so bd resolves
+ * the run's database by host and port from `.beads/dolt-server.port`, which travels with
+ * a copied checkout. The contract must say the mechanism that holds, and must not demand
+ * a flag nothing enforces.
  */
-describe("comment verb parity", () => {
-	test("the contract names all 11 protocol verbs, and the gate admits each", () => {
-		const line = /Verbs \(11\): ([\s\S]*?)\. One verb/.exec(DISPATCH_CONTRACT)?.[1] ?? "";
-		const named = line.split(/\s+/).filter(word => word.length > 0);
-
-		expect(named).toEqual([...PROTOCOL_VERBS]);
-		for (const verb of named) expect(COMMENT_VERBS[verb]).toBe(true);
+describe("the database resolution", () => {
+	test("the canonical pull does not demand a pin", () => {
+		expect(DISPATCH_CONTRACT).not.toContain("bd -C");
+		expect(DISPATCH_CONTRACT).toContain("bd ready --parent <epic>");
 	});
 
-	test("every verb the gate admits is uppercase, as commentVerb produces", () => {
-		// `commentVerb` uppercases the body's first token before the lookup, so a
-		// lower-case entry here would be unreachable.
-		for (const verb of Object.keys(COMMENT_VERBS)) expect(verb).toBe(verb.toUpperCase());
-	});
-});
-
-/**
- * The pin is what keeps an isolated worker's claims real. Isolation hands the child a
- * copy of the checkout and `bd` resolves its database from the working directory, so
- * an unpinned call mutates the copy: the claim never becomes visible and two workers
- * can hold one bead. Verified directly -- a bead created in a copied checkout is
- * invisible in the original.
- */
-describe("the database pin", () => {
-	test("the canonical text instructs the worker to pin every call", () => {
-		expect(DISPATCH_CONTRACT).toContain("bd -C <run repo>");
-		// The claim example itself must carry it, not just the prose.
-		expect(DISPATCH_CONTRACT).toContain("bd -C <run repo> ready --parent <epic>");
-	});
-
-	test("a known repository is substituted everywhere the placeholder appears", () => {
-		const rendered = dispatchContract("/repos/run-7");
-		expect(rendered).toContain("bd -C /repos/run-7 ready --parent <epic>");
-		expect(rendered).not.toContain("<run repo>");
-	});
-
-	test("an unknown repository leaves the instruction visible", () => {
-		// A marker written before `repo_root` existed, or a run armed by
-		// ORCHESTRATE_RUN with no marker. Dropping the instruction would silently
-		// return the worker to a private database.
-		for (const missing of [undefined, ""]) {
-			expect(dispatchContract(missing)).toBe(DISPATCH_CONTRACT);
-			expect(dispatchContract(missing)).toContain("bd -C <run repo>");
-		}
+	test("the contract states the server mechanism, not the embedded one", () => {
+		expect(DISPATCH_CONTRACT).toContain("per-project Dolt server");
+		expect(DISPATCH_CONTRACT).toContain(".beads/dolt-server.port");
+		// The embedded walk-up story is the claim that was false here.
+		expect(DISPATCH_CONTRACT).not.toContain("walking up from the working directory");
 	});
 });

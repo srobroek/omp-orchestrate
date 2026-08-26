@@ -26,7 +26,7 @@ import implementer from "../src/contracts/implementer.json";
 import researcher from "../src/contracts/researcher.json";
 import reviewer from "../src/contracts/reviewer.json";
 import shepherd from "../src/contracts/shepherd.json";
-import { orcRole, roleFromLabels } from "../src/identity";
+import { beadRouting, orcRole } from "../src/identity";
 import {
 	type BotReviewState,
 	type BotReviewVerdict,
@@ -629,8 +629,9 @@ describe("G4 a role name cannot buy a contract-free exit", () => {
 	// so the fix is an own-property test and these are samples of it.
 	const INHERITED = ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"];
 
-	test.each(INHERITED)("a bead labelled agent:%s names no role", name => {
-		expect(roleFromLabels([`agent:${name}`])).toBeUndefined();
+	test.each(INHERITED)("a bead routed to %s by either carrier names no role", name => {
+		expect(beadRouting({ labels: [`agent:${name}`] })).toBeUndefined();
+		expect(beadRouting({ metadata: { role: name } })).toBeUndefined();
 	});
 
 	test.each(INHERITED)("a session declaring ORC-ROLE: %s holds no role", name => {
@@ -639,13 +640,19 @@ describe("G4 a role name cannot buy a contract-free exit", () => {
 
 	const REAL_ROLES = ["architect", "implementer", "reviewer", "researcher", "shepherd"] as const;
 
-	test("the five real roles still resolve, from either carrier", () => {
+	test("the five real roles still resolve, from every carrier", () => {
 		for (const role of REAL_ROLES) {
-			expect(roleFromLabels([`agent:${role}`])).toBe(role);
+			expect(beadRouting({ metadata: { role } })?.role).toBe(role);
+			expect(beadRouting({ labels: [`agent:${role}`] })?.role).toBe(role);
 			expect(orcRole(roleCtx(role))).toBe(role);
 		}
 		// An inherited name is SKIPPED, not fatal: a real routing label after it still wins.
-		expect(roleFromLabels(["agent:constructor", "agent:implementer"])).toBe("implementer");
+		expect(beadRouting({ labels: ["agent:constructor", "agent:implementer"] })?.role).toBe("implementer");
+		// And an inherited name on the authoritative carrier falls through to the label,
+		// rather than stranding a bead that still carries its legacy route.
+		expect(beadRouting({ labels: ["agent:implementer"], metadata: { role: "constructor" } })?.role).toBe(
+			"implementer",
+		);
 	});
 
 	test.each(INHERITED)("a bead labelled agent:%s is evaluated against the generic contract", async name => {

@@ -7,6 +7,13 @@
 #
 # Local gate, deliberately not in CI: it needs an installed `omp`, which the CI
 # runners do not have. Run it after touching any rule frontmatter.
+#
+# Five bd rules used to live here -- the -C pin, the actor prefix, the comment verb, the
+# bug-bead route and the one-claim count. They are tool_call gates now, because a regex
+# cannot see whether a run is active and so nagged every session that mentioned `bd`. The
+# pin is retired outright: this project runs a per-project Dolt server. Their corpus moved
+# to `test/gate-bd.test.ts` and `test/one-claim.test.ts`, which run in CI. Do not re-add
+# them here.
 set -u
 cd "$(dirname "$0")/.." 2>/dev/null || cd ~/personal/dev/omp-orchestrate || exit 2
 
@@ -35,15 +42,6 @@ check orc-ready-ephemeral.md   miss tool bash 'bd ready --parent orc-1 --label a
 
 check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
 check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
-
-# A bug bead with no parent or no route is unpullable: no queue filter can reach it.
-check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --silent'
-check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --parent orc-1 --silent'
-check orc-bug-bead-routing.md  fire tool bash 'bd create "x" --type bug --labels agent:implementer --silent'
-check orc-bug-bead-routing.md  miss tool bash 'bd -C /repo create "x" --type bug --parent orc-1 --labels agent:implementer,kind:incidental --silent'
-# Ordinary node and epic creation must stay silent.
-check orc-bug-bead-routing.md  miss tool bash 'bd create "an epic" --type epic --silent'
-check orc-bug-bead-routing.md  miss tool bash 'bd create "a task" --type task --labels agent:implementer --silent'
 
 check orc-spawn-isolated.md    fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
 check orc-spawn-isolated.md    miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'

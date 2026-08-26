@@ -1,7 +1,7 @@
 {
   "agent": "reviewer",
   "tier": "T1",
-  "_comment": "Claims a review wisp and writes the REVIEW verdict on its linked node. Approval closes the wisp; changes release it open for the next round.",
+  "_comment": "Claims a review wisp and writes the REVIEW verdict on its linked node. Approval closes the wisp; changes release it open for the next round. It claims the WISP, never the node, so a handed-off node never has to enter this role's queue. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. `bd create` stays exempt, so a routable bug bead can still be filed.",
   "completion": [
     { "check": "verdict", "require": "linked.comment.verb in [REVIEW, BLOCKED]" }
   ],

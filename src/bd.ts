@@ -241,10 +241,31 @@ export function metadataString(bead: BdBead | null, key: string): string | undef
 }
 
 /**
- * The leading verb of a comment: first whitespace-delimited token, uppercased,
- * with a trailing colon stripped. Mirrors `rules-eval.py`'s comment-verb parse.
+ * The leading verb of a comment, normalised so an honest comment in ordinary
+ * markdown parses.
+ *
+ * Four steps, in order. One: strip a leading run of whitespace and of bullet,
+ * blockquote, emphasis, tick and strikethrough characters. Two: take the first
+ * whitespace-delimited token. Three: strip trailing emphasis, ticks and sentence
+ * punctuation. Four: uppercase. So `**REVIEW**`, `- REVIEW`, `REVIEW,` and `> review`
+ * all yield `REVIEW`.
+ *
+ * Step one cannot cross a word, because every verb and every word starts outside that
+ * run. The first token therefore stays the whole signal: `the REVIEW is done` yields
+ * `THE`, never `REVIEW`. That is what lets supervision tell an absent verb from a
+ * malformed one instead of harvesting verbs out of prose.
+ *
+ * `NO WORK` yields `NO`, deliberately. Reading two tokens would make this the only
+ * verb assembled from two, and `src/gates/exit.ts` already gates a claimless exit on
+ * the literal `NO_WORK`, so leniency here would only move the divergence. The writer
+ * is told instead: `commentVerbNotice` (`src/gates/bd.ts`) nags exactly the forms this
+ * function rejects, and nothing else. Guard and parser share one normalisation.
+ *
+ * Diverges from `rules-eval.py`, which took the raw first token minus one trailing
+ * colon. That parse read `**REVIEW**` as a non-verb and failed the contract in
+ * silence, and the Python is no longer in this repository to mirror.
  */
 export function commentVerb(text: string): string {
-	const first = text.trim().split(/\s+/, 1)[0] ?? "";
-	return first.replace(/:$/, "").toUpperCase();
+	const token = /^[\s\-*+>`_~]*(\S*)/.exec(text)?.[1] ?? "";
+	return token.replace(/[*_`~:,.;!?]+$/, "").toUpperCase();
 }

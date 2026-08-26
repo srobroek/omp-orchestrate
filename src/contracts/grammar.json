@@ -1,0 +1,145 @@
+{
+  "_comment": "The protocol verb set, and the source of truth for it. src/gates/bd.ts ENFORCES this set, by calling `commentVerb` and comparing against these entries -- one implementation, so the guard and the parser cannot disagree. skills/orchestrate/references/message-grammar.md restates it for humans and is written by hand; test/grammar-parity.test.ts fails when the gate's set or that reference diverges from this file, in either direction, so edit here first and let the test name what else must move. A verb is what `commentVerb` in src/bd.ts yields: strip a leading run of bullet, blockquote, emphasis, tick and strikethrough markers, take the first whitespace token, strip trailing emphasis, ticks and sentence punctuation, uppercase. Case and ordinary markdown are therefore free; only the first token counts, and a multi-word verb needs its underscore. Nothing else in a comment is protocol. A non-verb is warned, not refused, and only inside an active run. Adding a verb here without a writer and a source is how a vocabulary rots: an entry sourced `inferred` is a judgement call recorded as one, not a constraint the code enforces.",
+  "_vocabulary": {
+    "writers": {
+      "*": "every claiming role, backed by a clause present in all six role contracts (generic.json included)",
+      "unlisted": "generic.json's `agent: *` fallback: any claimant with no per-role contract",
+      "architect|implementer|researcher|reviewer|shepherd": "that role only",
+      "extension": "this plugin's own code, not an agent. Named by `source.where`"
+    },
+    "source": {
+      "contract": "migrated exactly from the named role-contract predicate. Machine-enforced on yield",
+      "code": "the named src file writes or parses this verb. Machine-observable, not contract-enforced",
+      "inferred": "no contract or code constrains the writer. `where` cites the prose the narrowest defensible set was read from -- a reviewer may disagree with the set without disagreeing with the verb"
+    },
+    "terminal": "true when writing the verb ends the attempt it describes: the writer yields, or its claim is released. A non-terminal verb annotates work that continues"
+  },
+  "verbs": [
+    {
+      "verb": "REPORTED",
+      "meaning": "Evidence delivered, next role's label added, assignee cleared -- the node's exit contract is met.",
+      "writers": ["architect", "implementer", "researcher", "unlisted"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "architect.json, implementer.json, researcher.json, generic.json: completion.reported" }
+    },
+    {
+      "verb": "BLOCKED",
+      "meaning": "Work cannot proceed. Written on an escalation wisp linked to the node, never stored as a bead state.",
+      "writers": ["*"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "all six: escape.require. Also reviewer.json completion.verdict, researcher.json completion.answer, shepherd.json completion.disposition" }
+    },
+    {
+      "verb": "FAILED",
+      "meaning": "Unrecoverable failure. A valid exit paired with status blocked, never a faked success.",
+      "writers": ["*"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "all six: escape.require" }
+    },
+    {
+      "verb": "REVIEW",
+      "meaning": "One reviewer's verdict, written on the node its review wisp links to.",
+      "writers": ["reviewer"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "reviewer.json: completion.verdict" }
+    },
+    {
+      "verb": "ADVICE",
+      "meaning": "A researcher's durable answer to an escalation wisp, promoted to the linked node.",
+      "writers": ["researcher"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "researcher.json: completion.answer" }
+    },
+    {
+      "verb": "LANDED",
+      "meaning": "The merge bead's branch is merged and metadata.merge_sha is stamped.",
+      "writers": ["shepherd"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "shepherd.json: completion.disposition" }
+    },
+    {
+      "verb": "BOUNCED",
+      "meaning": "The merge attempt is refused back to its origin as a fix bead.",
+      "writers": ["shepherd"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "shepherd.json: completion.disposition" }
+    },
+    {
+      "verb": "CONFLICT",
+      "meaning": "The branch does not merge into its base. The node returns to working for a rebase; the shepherd never resolves it.",
+      "writers": ["shepherd"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "shepherd.json: completion.disposition" }
+    },
+    {
+      "verb": "IDLE",
+      "meaning": "Nothing was landable this transaction. The merge slot is released and the waiter queue outlives the exit.",
+      "writers": ["shepherd"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "shepherd.json: completion.disposition" }
+    },
+    {
+      "verb": "NO_WORK",
+      "meaning": "The role's queue is empty. Yield rather than widen the filter or invent work.",
+      "writers": ["*"],
+      "terminal": true,
+      "source": { "kind": "code", "where": "src/gates/exit.ts:230 -- the unclaimed-exit gate matches this literal to allow a claimless exit" }
+    },
+    {
+      "verb": "ASK",
+      "meaning": "A product-intent question only a human can settle. Pairs with a human gate on the held bead.",
+      "writers": ["*"],
+      "terminal": true,
+      "source": { "kind": "inferred", "where": "src/contract.ts DISPATCH_CONTRACT, Blocked clause -- injected into every worker, so narrowing below `*` is indefensible; references/lifecycle.md waiting_human row" }
+    },
+    {
+      "verb": "NOTE",
+      "meaning": "A durable observation with no protocol consequence, such as the id of a bead discovered mid-run.",
+      "writers": ["*"],
+      "terminal": false,
+      "source": { "kind": "inferred", "where": "references/lifecycle.md:343 (discovered bead); references/beads-store.md:273 lists note as a material verb for any acting agent" }
+    },
+    {
+      "verb": "LOCAL_DECISION",
+      "meaning": "A reversible bead-local default, provisional or accepted, carrying an objective revisit trigger.",
+      "writers": ["architect", "implementer"],
+      "terminal": false,
+      "source": { "kind": "inferred", "where": "agents/orc-architect.md:121; references/beads-store.md:44 comment contract; references/lifecycle.md:267. Narrowed to the two roles that apply implementation defaults -- a reviewer writes verdicts, a researcher writes ADVICE, a shepherd may not judge merits" }
+    },
+    {
+      "verb": "BOUNCE",
+      "meaning": "The exit contract force-allowed after the bounce budget. This attempt is invalidated; repair the envelope, never continue the session.",
+      "writers": ["extension"],
+      "terminal": true,
+      "source": { "kind": "code", "where": "src/gates/exit.ts:327" }
+    },
+    {
+      "verb": "RECLAIM",
+      "meaning": "A stranded claim was released and its bead reopened, with any surviving branch stamped.",
+      "writers": ["extension"],
+      "terminal": true,
+      "source": { "kind": "code", "where": "src/supervision.ts:201, src/supervision.ts:213" }
+    },
+    {
+      "verb": "STALL",
+      "meaning": "A claimed child went silent past its threshold. No kill -- the spawner decides.",
+      "writers": ["extension"],
+      "terminal": false,
+      "source": { "kind": "code", "where": "src/watchers.ts:206" }
+    },
+    {
+      "verb": "WARN",
+      "meaning": "A degraded preflight or a settings deviation the run should see but not stop for.",
+      "writers": ["extension"],
+      "terminal": false,
+      "source": { "kind": "code", "where": "src/watchers.ts:506, src/watchers.ts:822" }
+    },
+    {
+      "verb": "GOAL",
+      "meaning": "The run objective and its status, stamped on every epic each time it changes.",
+      "writers": ["extension"],
+      "terminal": false,
+      "source": { "kind": "code", "where": "src/watchers.ts:568" }
+    }
+  ]
+}

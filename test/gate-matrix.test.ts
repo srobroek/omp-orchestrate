@@ -28,7 +28,6 @@ import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
 import { gateOneClaim } from "../src/gates/one-claim";
-import { runPinEnv } from "../src/gates/pin";
 import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
 
@@ -103,9 +102,8 @@ const WORKER = api(["bash", "edit", "write", "read", "yield"]);
  * G1's revision, because a handler returns a single result and a refusal must win over
  * a revision of an input that will not run.
  *
- * G6 is the one refusal left out: every claim below carries `BEADS_ACTOR`, so it would
- * pass every row here, and `test/actor.test.ts` drives it against the corpus shapes it
- * exists for.
+ * G6 is the one check left out: it raises notices rather than refusals, so it changes no
+ * row here, and `test/gate-bd.test.ts` drives it against the corpus shapes it exists for.
  *
  * G2 is handed the tool name and the input, because its containment check is on the path
  * an `edit` or `write` names and not only on the cwd the session sits in.
@@ -127,9 +125,9 @@ async function gateChain(
 		const scope = await gateWorktreeScope(ctx, toolName, input);
 		if (scope) return scope;
 	}
-	// Mirrors `index.ts`: both environment gates contribute to one revision.
+	// Mirrors `index.ts`: the environment gate contributes to one revision.
 	if (toolName === "bash") {
-		return reviseBashEnv(input, { ...beadWriteFreeEnv(WORKER, ctx), ...(await runPinEnv(ctx, input)) });
+		return reviseBashEnv(input, { ...beadWriteFreeEnv(WORKER, ctx) });
 	}
 	return undefined;
 }
@@ -498,4 +496,3 @@ describe("G1 refuses nothing", () => {
 		expect(result?.input?.env).toEqual({ BD_READONLY: "1" });
 	});
 });
-

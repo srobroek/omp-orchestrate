@@ -15,7 +15,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdComments, bdLinked, bdRun, bdShow, commentVerb, metadataString } from "../bd";
 import { observedClaim } from "../claim-state";
-import { orcRole, roleFromLabels } from "../identity";
+import { beadRouting, orcRole } from "../identity";
 
 import architect from "../contracts/architect.json";
 import generic from "../contracts/generic.json";
@@ -53,6 +53,25 @@ const CONTRACTS: Record<string, Contract> = {
  *
  * A role must not be faulted for a key its dispatcher wrote. Mirrors
  * `ORCHESTRATOR_ANCHORS` in `rules-eval.py`.
+ *
+ * Matched by key name, not by meaning, so the `origin` split needs all three successors
+ * listed here. Legacy `origin` stays: beads stamped before the split still carry it.
+ *
+ * The general rule this list encodes, stated once here because it decides what may go on
+ * a `deny_metadata` list at all: the loop below is a PRESENCE test, and it reads presence
+ * as authorship. The key is on the claimed bead, therefore the claimant wrote it. That
+ * inference is sound only for outcome fields no dispatcher stamps -- `merge_sha`, `pr`,
+ * `push`, `output_ref`. For any key the dispatcher must stamp, presence is the normal
+ * case and a denial would fault every worker on every bead, so the key belongs here
+ * instead of on a denial list.
+ *
+ * `role` is the sharpest case and is deliberately on NEITHER list. It routes the bead, so
+ * the dispatcher must stamp it, which rules out a presence test; and the exit is the
+ * wrong moment anyway, because a bead a worker re-pointed has already been claimed and
+ * worked by whoever the new route named. Routing authority is enforced by G5 at the write
+ * seam, where the actor comes from the prompt marker rather than from a field on the bead
+ * under judgement. Adding `role` to a `deny_metadata` list would not harden anything; it
+ * would bounce every worker.
  */
 const ORCHESTRATOR_ANCHORS: Record<string, true> = {
 	actor: true,
@@ -67,6 +86,9 @@ const ORCHESTRATOR_ANCHORS: Record<string, true> = {
 	execution_task_kind: true,
 	lease_token: true,
 	origin: true,
+	origin_actor: true,
+	origin_bead: true,
+	run_epic: true,
 	runtime_context: true,
 	runtime_handle: true,
 	scope: true,
@@ -188,6 +210,16 @@ export function resetUnclaimedReminder(): void {
 }
 
 /**
+ * Evidence that a claimless exit lost a claim race rather than found an empty queue.
+ *
+ * A database-level failure signature, not a verb. The pull contract has the loser of a
+ * simultaneous claim quote the Dolt error it received. It names these three tokens as
+ * the match (`src/contract.ts`). A worker asserting `BLOCKED` states its own conclusion.
+ * Only the quoted error shows it ran the pull at all, so a bare verb stays refused.
+ */
+const CONTENTION_EVIDENCE = /error\s*1213|40001|serialization failure/i;
+
+/**
  * Refuse one exit from a role-marked worker that never claimed anything.
  *
  * Found by an adversarial run: a worker briefed that "there are no beads, invent
@@ -196,8 +228,10 @@ export function resetUnclaimedReminder(): void {
  * name one -- so the run recorded a healthy child and lost the work. The contract
  * evaluator could not see it, because every check it owns hangs off a claimed bead.
  *
- * The protocol already defines both legal exits, so this only insists the worker take
- * one of them: claim work, or report `NO_WORK`.
+ * The protocol already defines every legal exit, so this only insists on one of them.
+ * Claim work, report `NO_WORK` on an empty queue, or quote the claim error that beat
+ * you. The third matters: `NO_WORK` for a lost race abandons ready work and files a
+ * false empty queue.
  */
 async function gateUnclaimedExit(
 	ctx: ExtensionContext,
@@ -207,14 +241,18 @@ async function gateUnclaimedExit(
 	if (orcRole(ctx) === undefined) return undefined;
 	if (unclaimedReminded) return undefined;
 
+	const payload = input === undefined ? "" : JSON.stringify(input);
 	// `NO_WORK` is the declared empty-queue exit, wherever the payload carries it.
-	if (input !== undefined && JSON.stringify(input).includes("NO_WORK")) return undefined;
+	if (payload.includes("NO_WORK")) return undefined;
+	// Contention is the other claimless exit the protocol defines, and the quoted error
+	// is what separates it from an invented one.
+	if (CONTENTION_EVIDENCE.test(payload)) return undefined;
 
 	unclaimedReminded = true;
 	return {
 		block: true,
 		reason:
-			"You are exiting without ever claiming a bead. Work is pulled, not invented: run your role's `bd ready ... --claim` and deliver the bead you get, or report NO_WORK and yield. Uncommitted work under no claim reaches no branch and no bead.",
+			"You are exiting without ever claiming a bead. Work is pulled, not invented: run your role's `bd ready ... --claim` and deliver the bead you get. Two exits need no claim, and the pull result decides which. Empty result -- report NO_WORK. Claim error naming Error 1213, 40001, or serialization failure -- retry the identical pull, at most three times. Then quote that error here. Never report NO_WORK for a race you lost: the queue was not empty. Uncommitted work under no claim reaches no branch and no bead.",
 	};
 }
 
@@ -236,14 +274,17 @@ export async function gateExitContract(
 	const bead = await bdShow(beadId);
 	if (bead === null) return undefined;
 
-	const role = orcRole(ctx) ?? roleFromLabels(bead.labels) ?? "generic";
-	// `Object.hasOwn`, not a plain index: `role` is agent-reachable text -- a worker can
-	// write `bd label add <bead> agent:<name>` -- and `CONTRACTS` is an object literal, so
-	// an inherited key ("constructor", "toString") resolved to a truthy prototype member.
-	// The `?? CONTRACTS.generic` fallback never fired, `contract.completion ?? []` read as
-	// an empty check list, and the exit passed with its contract wholly unevaluated.
-	// `orcRole`/`roleFromLabels` now reject those names upstream; this keeps the property
-	// true here on its own, because the fallback is what makes a claim always judged.
+	const routing = beadRouting(bead);
+	const role = orcRole(ctx) ?? routing?.role ?? "generic";
+	// `Object.hasOwn`, not a plain index: `CONTRACTS` is an object literal, so an inherited
+	// key ("constructor", "toString") resolved to a truthy prototype member. The
+	// `?? CONTRACTS.generic` fallback never fired, `contract.completion ?? []` read as an
+	// empty check list, and the exit passed with its contract wholly unevaluated.
+	//
+	// Both producers of `role` now return a closed union, so no prototype name can reach
+	// here: `orcRole` filters the prompt marker, and `beadRouting` resolves through two
+	// own-property tables. The guard stays because the fallback is what makes a claim
+	// always judged, and that must hold on this line alone.
 	const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
 	if (contract === undefined) return undefined;
 
@@ -321,6 +362,15 @@ export async function gateExitContract(
 
 	return {
 		block: true,
-		reason: JSON.stringify({ bead: beadId, agent: role, attempt: attempts, failed_checks: failures }),
+		reason: JSON.stringify({
+			bead: beadId,
+			agent: role,
+			attempt: attempts,
+			// Which carrier routed the bead, and only when it was the legacy one. A worker
+			// reads this verdict, so a bead still routed by label says so where the failure
+			// is already being read, rather than in a log nobody opens.
+			...(routing?.from === "legacy-label" ? { routing: routing.spelling } : {}),
+			failed_checks: failures,
+		}),
 	};
 }

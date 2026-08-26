@@ -8,7 +8,7 @@ description = "the agent:integrator merge bead; the shepherd claims this and not
 
 [vars.node_bead]
 required = true
-description = "the work bead whose branch is landing; supplies the origin actor and worktree"
+description = "the work bead whose branch is landing; supplies `origin_actor` and `worktree`"
 
 [vars.repo]
 required = true

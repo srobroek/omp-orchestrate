@@ -34,17 +34,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { orcRole } from "../identity";
 import type { BdInvocation } from "../shell";
-import { bdInvocations } from "../shell";
-
-/**
- * A bead id: a lowercase word, then one or more hyphen-separated groups.
- *
- * Wider than the pattern `src/bd.ts` uses to sieve ids out of a dependency record,
- * which forbids a hyphen in the suffix and therefore rejects `orc-chaos-c3-05k` —
- * real ids from the corpus, since a configured issue prefix may itself contain one.
- * Matched against a single token the tokeniser produced, never against command text.
- */
-const BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+import { BEAD_ID, bdInvocations } from "../shell";
 
 /**
  * The bead ids one claim names, taken from the longest run of adjacent operands.

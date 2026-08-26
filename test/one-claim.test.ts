@@ -167,17 +167,17 @@ describe("G7 residue, recorded rather than left to be discovered", () => {
 		expect(verdict(`ids="orc-1 orc-2"; bd update $ids --claim`)).toBeUndefined();
 	});
 
-	test("an unspaced subshell is the one shape the regex caught and the gate does not", () => {
-		// REGRESSION, reported rather than papered over. `src/shell.ts` is a faithful
-		// port of `shlex` with `punctuation_chars=";&|"`, so `(` is an ordinary word
-		// character and `(bd` basenames as `(bd` rather than `bd`. The spaced form above
-		// is refused, because `)` is already treated as grouping.
-		//
-		// Closing it means adding `(` to the tokeniser's punctuation, which every gate
-		// built on `effectiveSegments` would inherit at once — G2, G5 and G6 included.
-		// That is a change to shared parsing with its own corpus to re-measure, so it
-		// belongs in `src/shell.ts` as its own piece of work, not smuggled in here.
-		expect(verdict("(bd update orc-1 orc-2 --claim)")).toBeUndefined();
+	test("an unspaced subshell is caught, because the parser strips the glued opener", () => {
+		// This was recorded as a REGRESSION against a `shlex` port with
+		// `punctuation_chars=";&|"`, where `(` is an ordinary word character and `(bd`
+		// basenames as `(bd` rather than `bd`. `src/shell.ts` closed it inside
+		// `parseBdInvocation` rather than by widening the tokeniser: the glued `(`/`{` is
+		// stripped off the head token, and the matching closer is removed from the last one
+		// by counting balance, so `--claim)` still reads as `--claim` while a
+		// `--metadata '{"role":"x"}'` value keeps its braces.
+		expect(verdict("(bd update orc-1 orc-2 --claim)")?.block).toBe(true);
+		// The spaced form was already refused, since `)` alone was treated as grouping.
+		expect(verdict("( bd update orc-1 orc-2 --claim )")?.block).toBe(true);
 	});
 
 	test("two single-bead claims in one command line are two invocations, each legal", () => {

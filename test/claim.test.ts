@@ -118,13 +118,29 @@ describe("G5 role routing", () => {
 });
 
 describe("G5 fail-open", () => {
-	test("a bead carrying no routing label is claimable by any role", async () => {
-		// `agent:integrator` merge beads have no `agent:<orc-role>` label, and a bead
-		// routed to nobody must not be unclaimable.
-		beads["orc-9"] = bead("orc-9", { labels: ["orc-node", "agent:integrator"] });
+	test("a bead carrying no routing carrier is claimable by any role", async () => {
+		// Neither a `metadata.role` stamp nor a legacy `agent:<role>` label, so the bead
+		// routes to nobody, and a bead routed to nobody must not be unclaimable.
+		beads["orc-9"] = bead("orc-9", { labels: ["orc-node", "kind:incidental"] });
 
 		expect(
 			await gateClaimEligibility(ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update orc-9 --claim" }),
+		).toBeUndefined();
+	});
+
+	test("a legacy agent:integrator bead now routes to the shepherd", async () => {
+		// It used to route to nobody, which meant any role could claim a merge bead named
+		// by id. Resolving it is a hole closed, not fail-open behaviour lost.
+		beads["orc-9"] = bead("orc-9", { labels: ["orc-node", "agent:integrator"] });
+
+		const result = await gateClaimEligibility(ctxFor("reviewer"), {
+			command: "BEADS_ACTOR=orc-rev-1 bd update orc-9 --claim",
+		});
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("agent:integrator");
+		expect(
+			await gateClaimEligibility(ctxFor("shepherd"), { command: "BEADS_ACTOR=orc-shep-1 bd update orc-9 --claim" }),
 		).toBeUndefined();
 	});
 
@@ -301,5 +317,225 @@ describe("G5 claim observation", () => {
 		await gateClaimEligibility(ctx, { command: "BEADS_ACTOR=orc-impl-1 bd update orc-8 --claim" });
 
 		expect(observedClaim()?.beadIds).toEqual(["orc-8"]);
+	});
+});
+
+/**
+ * Routing reads `metadata.role` first and a legacy `agent:<role>` label second. The
+ * refusal quotes the carrier verbatim, so a message naming `role=implementer` and one
+ * naming `agent:implementer` are the two carriers reporting themselves.
+ */
+describe("G5 routing reads metadata", () => {
+	test("refuses a reviewer claiming a metadata-routed implementer bead", async () => {
+		beads["orc-7"] = bead("orc-7", { metadata: { role: "implementer" } });
+
+		const result = await gateClaimEligibility(ctxFor("reviewer"), {
+			command: "BEADS_ACTOR=orc-rev-1 bd -C /run/repo update orc-7 --claim",
+		});
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("role=implementer");
+		expect(observedClaim()).toBeUndefined();
+	});
+
+	test("allows the role the metadata names", async () => {
+		beads["orc-7"] = bead("orc-7", { metadata: { role: "implementer", worktree: "/tmp/wt" } });
+
+		expect(
+			await gateClaimEligibility(ctxFor("implementer"), {
+				command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim",
+			}),
+		).toBeUndefined();
+		expect(observedClaim()?.beadIds).toEqual(["orc-7"]);
+	});
+
+	test("refuses a pull against another role's metadata queue without reading a bead", async () => {
+		const result = await gateClaimEligibility(ctxFor("reviewer"), {
+			command: "bd -C /run/repo ready --metadata-field role=implementer --unassigned --claim --json",
+		});
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("role=implementer");
+		expect(shown).toEqual([]);
+	});
+
+	test("allows the canonical pull for this session's own queue", async () => {
+		expect(
+			await gateClaimEligibility(ctxFor("implementer"), {
+				command:
+					"BEADS_ACTOR=orc-impl-1 bd -C /run/repo ready --parent orc-1 --metadata-field role=implementer --unassigned --claim --json",
+			}),
+		).toBeUndefined();
+	});
+
+	test("the legacy integrator queue belongs to the shepherd", async () => {
+		// It resolved to no role before, so this pull was refused for naming a queue that
+		// could never equal the session's declared role.
+		expect(
+			await gateClaimEligibility(ctxFor("shepherd"), {
+				command: "BEADS_ACTOR=orc-shep-1 bd -C /run/repo ready --label agent:integrator --unassigned --claim --json",
+			}),
+		).toBeUndefined();
+	});
+
+	test("a merge bead is refused to a non-shepherd", async () => {
+		// `pr:merge` classifies, `role=shepherd` routes. Before the move the merge bead
+		// resolved to nobody and any role could claim it by id.
+		beads["orc-m"] = bead("orc-m", { labels: ["pr:merge"], metadata: { role: "shepherd" } });
+
+		const result = await gateClaimEligibility(ctxFor("implementer"), {
+			command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-m --claim",
+		});
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("role=shepherd");
+	});
+
+	test("a handoff label does not re-route the node it marks", async () => {
+		// The reported state of every implementer node: routing still names the owner
+		// while `agent:reviewer` signals that review is owed. A label-first resolver
+		// refused the owner its own bead.
+		beads["orc-7"] = bead("orc-7", {
+			labels: ["orc-node", "agent:reviewer"],
+			metadata: { role: "implementer", worktree: "/tmp/wt" },
+		});
+
+		expect(
+			await gateClaimEligibility(ctxFor("implementer"), {
+				command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim",
+			}),
+		).toBeUndefined();
+	});
+});
+
+/**
+ * Routing authority, enforced where the write happens rather than at the exit.
+ *
+ * `deny_metadata` cannot carry this: it is a presence test on the claimed bead, and
+ * routing metadata is present on every routed bead. So the authority is a table in the
+ * gate, and these are the tests that keep it honest.
+ */
+describe("G5 routing authority", () => {
+	const REPOINT = "bd -C /run/repo update orc-7 --set-metadata role=reviewer";
+
+	test.each(["implementer", "researcher", "reviewer", "shepherd"])(
+		"%s may not re-point a route",
+		async role => {
+			const result = await gateClaimEligibility(ctxFor(role), { command: REPOINT });
+
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toContain("metadata.role");
+			expect(result?.reason).toContain(role);
+		},
+	);
+
+	test("the architect may, because it routes the epic it decomposed", async () => {
+		expect(await gateClaimEligibility(ctxFor("architect"), { command: REPOINT })).toBeUndefined();
+	});
+
+	test("a session declaring no role is not checked", async () => {
+		// The lead routes the whole DAG, and a contract-free helper is already behind
+		// BD_READONLY=1, so it cannot write a bead at all.
+		expect(await gateClaimEligibility(ctxFor(), { command: REPOINT })).toBeUndefined();
+	});
+
+	test("clearing a route counts as re-pointing it", async () => {
+		// A bead with no route reaches no queue, which strands it as surely as a wrong one.
+		const result = await gateClaimEligibility(ctxFor("implementer"), {
+			command: "bd -C /run/repo update orc-7 --unset-metadata role",
+		});
+
+		expect(result?.block).toBe(true);
+	});
+
+	test("filing new work routed is allowed", async () => {
+		// An unrouted bug bead reaches no queue and then fails close-out as stranded, and
+		// a bead that does not exist yet has no route to steal.
+		expect(
+			await gateClaimEligibility(ctxFor("implementer"), {
+				command: `bd -C /run/repo create "flaky retry path" --type bug --metadata '{"role":"implementer"}'`,
+			}),
+		).toBeUndefined();
+	});
+
+	test("a refused re-point records no claim", async () => {
+		// The denial runs before the claim walk, so a blocked command cannot leave the
+		// worktree gate keyed on a bead this session never took.
+		beads["orc-7"] = bead("orc-7", { metadata: { role: "implementer" } });
+
+		const result = await gateClaimEligibility(ctxFor("implementer"), {
+			command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim --set-metadata role=reviewer",
+		});
+
+		expect(result?.block).toBe(true);
+		expect(observedClaim()).toBeUndefined();
+	});
+});
+
+/**
+ * The matcher corpus.
+ *
+ * Command-text matching has failed twice in this repo: two nag rules were dead because
+ * they matched a bare `bd <verb>` and never the pinned `bd -C <repo> <verb>` spelling
+ * every call actually uses, and a verb guard fired on a `grep` that merely quoted the
+ * text. Both failures are invisible without a corpus, so the counts are asserted rather
+ * than assured.
+ */
+const PINS = ["", "-C /run/repo ", "--directory /run/repo ", "--directory=/run/repo "];
+
+/** Every spelling that writes or clears `metadata.role`. */
+const ROUTING_WRITES = [
+	"--set-metadata role=reviewer",
+	"--set-metadata=role=reviewer",
+	"--unset-metadata role",
+	"--metadata role=reviewer",
+	"--metadata=role=reviewer",
+	`--metadata '{"role":"reviewer"}'`,
+	`--metadata '{"role": "reviewer"}'`,
+];
+
+/** Metadata writes naming any other key. The `role` prefix is the trap. */
+const OTHER_KEY_WRITES = [
+	"--metadata role_hint=reviewer",
+	"--metadata payroll=42",
+	`--metadata '{"role_hint":"reviewer"}'`,
+	`--metadata '{"payroll":"42"}'`,
+	"--set-metadata role_hint=reviewer",
+	"--unset-metadata role_hint",
+];
+
+const MUST_FIRE = PINS.flatMap(pin => ROUTING_WRITES.map(write => `bd ${pin}update orc-7 ${write}`));
+
+const MUST_STAY_QUIET = [
+	// Creation is exempt at every pin and every spelling.
+	...PINS.flatMap(pin => ROUTING_WRITES.map(write => `bd ${pin}create "a new bug" --type bug ${write}`)),
+	...PINS.flatMap(pin => OTHER_KEY_WRITES.map(write => `bd ${pin}update orc-7 ${write}`)),
+	// `--metadata-field` filters a query and writes nothing.
+	...PINS.map(pin => `bd ${pin}ready --metadata-field role=implementer --unassigned --json`),
+	...PINS.map(pin => `bd ${pin}show orc-7 --json`),
+	// Text, not a command: the program is grep.
+	`grep -n 'set-metadata role' src/gates/claim.ts`,
+	`bd -C /run/repo comment orc-7 "REPORTED do not run bd update x --set-metadata role=reviewer"`,
+];
+
+describe("G5 routing-write matcher corpus", () => {
+	test("every routing-write spelling fires, at every pin", async () => {
+		const missed: string[] = [];
+		for (const command of MUST_FIRE) {
+			const result = await gateClaimEligibility(ctxFor("implementer"), { command });
+			if (result?.block !== true) missed.push(command);
+		}
+
+		expect({ total: MUST_FIRE.length, missed }).toEqual({ total: 28, missed: [] });
+	});
+
+	test("nothing else fires", async () => {
+		const leaked: string[] = [];
+		for (const command of MUST_STAY_QUIET) {
+			const result = await gateClaimEligibility(ctxFor("implementer"), { command });
+			if (result !== undefined) leaked.push(command);
+		}
+
+		expect({ total: MUST_STAY_QUIET.length, leaked }).toEqual({ total: 62, leaked: [] });
 	});
 });

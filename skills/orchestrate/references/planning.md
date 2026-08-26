@@ -17,7 +17,7 @@ conclusions.
 - **A framework is already in play (SpecKit or similar):** adopt it, never re-pour it. A
   poured molecule is already a dependency-aware DAG, and its implement-step children are the
   worker units. Detect it by `spec_id` plus `metadata.spec_dir`, then add the `orc-node`
-  label, one `agent:<role>` routing label, and `scope` metadata to the existing step beads.
+  label, one `role=<role>` routing key, and `scope` metadata to the existing step beads.
   Phase steps route by their `skill_hints`. Reconcile each step against the code as it is
   now, and report drift rather than implementing around it. Questions the spec raises become
   `ASK` wisps. `speckit-verify` and `speckit-sync` keep their own agents, and `specs/*/tasks.md`
@@ -38,8 +38,9 @@ understood, and agents update state live. It is not a static authored graph.
 1. Split the work into tasks small enough for one worker. Give every task a disjoint `scope`:
    tracked-file globs for git work, or canonical artifact and resource prefixes for non-git
    work. Serialize overlapping scopes with a dependency.
-2. One bead per task under its feature: `bd create "<title>" --parent <feature> --labels
-   orc-node,agent:<role> --metadata '{<routing envelope>}' --silent`.
+2. One bead per task under its feature: `bd create "<title>" --parent
+   <feature> --labels orc-node --metadata '{"role":"<role>", <rest of the envelope>}'
+   --silent`.
 3. Encode dependencies with `bd dep add <dependent> <dependency>`; the dependency must close
    before the dependent becomes ready. `bd dep cycles` must stay clean, and `bd` rejects a
    cycle-creating edge at add time.
@@ -50,8 +51,9 @@ understood, and agents update state live. It is not a static authored graph.
    deliberately unparented, and `work → merge bead` is the required edge direction. The same
    warning naming anything else is a real finding. Validation needs no swarm marker, so it
    runs on a bare epic.
-5. Drive execution off the ready front: `bd ready --parent <epic> --label agent:<role>
-   --unassigned --claim --json`, run by the worker, not by you.
+5. Drive execution off the ready front: `bd ready --parent <epic>
+   --metadata-field role=<role> --unassigned --claim --json`, run by the worker, not by
+   you.
 
 `bd swarm status <epic>` is a coarse progress view. It omits external blockers, gates, and
 deferral, so it never proves a run is healthy. Create a `bd swarm` marker only when durable
@@ -67,9 +69,14 @@ Write the route before dispatch, so recovery never has to infer it from prose.
 | `scope` metadata | owned tracked-file globs, or canonical non-git resource prefixes. Never empty |
 | `execution_task_kind` metadata | stable routing kind: `code`, `docs`, `research`, `review`, `operations` |
 | `execution_kind` metadata | `git`, `artifact`, `comment`, or `external`: which completion proof the exit contract demands |
-| `origin` metadata | the actor a bounce routes back to |
-| `agent:<role>` label | the pull queue this bead sits in. Every ready query filters on it |
+| `origin_actor` metadata | the actor handle a bounce routes back to |
+| `role` metadata | the pull queue this bead sits in. Every ready query filters on it |
 | `orc-node` label | run-DAG membership |
+
+`origin` carried three unrelated values and is split. `origin_actor` holds an actor handle.
+`origin_bead` holds a bead id -- the merge bead behind a fix, the feature behind a merge.
+`run_epic` holds the run epic a bead was poured under, which is membership and never a
+route. A reader still accepts a legacy `origin`, and nothing writes it again.
 
 `execution_kind=git` means tracked files change, even when the task is documentation or
 configuration: it requires a commit and a `push` stamp, and it lands through a merge bead.
@@ -78,21 +85,23 @@ empty commit.
 
 ## Dispatch ready work
 
-Dispatch is a pull, and the queue label is the whole route. There is no activation message.
+Dispatch is a pull, and the `role` key is the whole route. There is no activation message.
 
-**Queue (the default).** Leave the bead unassigned with one `agent:<role>` label. A worker
+**Queue (the default).** Leave the bead unassigned with one `role=<role>` key. A worker
 claims the first ready bead in its queue atomically:
 
 ```
-bd ready --parent <epic> --label agent:<role> \
+bd ready --parent <epic> --metadata-field role=<role> \
   --metadata-field execution_task_kind=<kind> \
   --metadata-field execution_kind=<evidence> --unassigned --sort priority \
   --claim --json
 ```
 
-The worker accepts the bead `--claim` returns. It never lists candidates and cherry-picks
-one, and after a lost race the empty result changes no bead. One activation owns at most one
-bead and cannot claim another until the first is terminal.
+The worker accepts the bead `--claim` returns; it never lists candidates and cherry-picks
+one. A lost race surfaces as a claim error naming a serialization conflict, never as an
+empty result, and the loser retries the identical pull -- `references/dispatch-contract.md`
+holds the signatures and the retry budget. One activation owns at most one bead and cannot
+claim another until the first is terminal.
 
 **Directed (the exception).** A bead with an assignee is invisible to every `--unassigned`
 pull, so it goes only to that actor and must be spawned deliberately. Confirm its
@@ -102,9 +111,12 @@ rerouted. Automatic correction may update evidence-backed envelope fields only. 
 changes an assignee: that needs an explicit release or a recovery under the contracts in
 `references/lifecycle.md`.
 
-While a bead stays unassigned, its `agent:<role>` label may be added, removed, or changed. A
-routing envelope the worker cannot satisfy is a routing defect: the worker does no task work,
-records the mismatch, and reports `BLOCKED kind:design` so the envelope can be repaired.
+While a bead stays unassigned, the architect that owns the epic may stamp, change, or drop
+its `role` key (`--set-metadata role=<role>`, `--unset-metadata role`). No other role may:
+the write seam refuses a routing rewrite from anyone else, while `bd create` stays exempt so
+filed work can arrive routed. A routing envelope the worker cannot satisfy is a routing
+defect: the worker does no task work, records the mismatch, and reports `BLOCKED kind:design`
+so the envelope can be repaired.
 
 Spawn a wave only against observed ready work. An idle worker with nothing to claim is not
 parallelism -- it reports `NO_WORK` and exits, and the spawn was wasted.

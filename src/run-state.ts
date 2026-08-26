@@ -31,18 +31,17 @@ import { ensurePatrolWisp } from "./supervision";
 /**
  * The marker's on-disk shape.
  *
- * `repo_root` is the run repository's absolute path, and it is what makes the
- * marker useful to an isolated worker. Isolation hands a child a filesystem copy of
- * the checkout, so the child's own cwd is the clone and every relative path it
- * resolves -- including the beads database `bd` discovers by walking up -- belongs
- * to that copy. The copied marker still names the original, which is the only way a
- * worker can aim its `bd` calls at the run's database rather than its private one.
+ * A `repo_root` field was written here and read by nothing after the `bd -C` pin was
+ * retired. Its rationale was the embedded database `bd` finds by walking up from the
+ * cwd, which this project does not use: a per-project Dolt server resolves by host and
+ * port from `.beads/dolt-server.port`, and that file travels with a copied checkout, so
+ * an isolated worker reaches the run's database with no path from us. `asActiveRun`
+ * keeps only the fields below, so a marker written by an older version still reads.
  */
 export interface ActiveRun {
 	schema_version: 1;
 	run_id: string;
 	session_id?: string;
-	repo_root?: string;
 }
 
 /** Run id written before the run epic exists. Bindable; never treated as bound. */
@@ -99,10 +98,9 @@ function asActiveRun(value: unknown): ActiveRun | null {
 	const record = value as Record<string, unknown>;
 	const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
 	const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
-	const repoRoot = typeof record.repo_root === "string" && record.repo_root.length > 0 ? record.repo_root : undefined;
+	// An unknown key is dropped rather than carried: see the note on ActiveRun.
 	const state: ActiveRun = { schema_version: 1, run_id: runId };
 	if (sessionId !== undefined) state.session_id = sessionId;
-	if (repoRoot !== undefined) state.repo_root = repoRoot;
 	return state;
 }
 
@@ -131,9 +129,6 @@ export async function activateRun(cwd: string, sessionId?: string): Promise<Acti
 	const session = sessionId ?? existing?.session_id;
 	const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
 	if (session !== undefined) state.session_id = session;
-	// Resolved here, where the path is the real checkout: a worker reads this out of
-	// its own copy of the marker and can no longer tell the two apart.
-	state.repo_root = path.resolve(cwd);
 	await writeMarker(markerPath(cwd), state);
 	return state;
 }

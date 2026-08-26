@@ -9,13 +9,11 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
-import { dispatchContract } from "./contract";
-import { gateActorAttribution } from "./gates/actor";
+import { DISPATCH_CONTRACT } from "./contract";
+import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
-import { gateCommentVerb } from "./gates/comment-verb";
 import { gateExitContract } from "./gates/exit";
 import { gateOneClaim } from "./gates/one-claim";
-import { runPinEnv } from "./gates/pin";
 import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
@@ -67,24 +65,20 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				const ownership = gateWorktrunkOwnership(input);
 				if (ownership) return ownership;
 
-				// Before G5: an unattributed claim must not be recorded as this
-				// session's, and the check is a parse with no lookups.
-				const attribution = gateActorAttribution(ctx, input);
-				if (attribution) return attribution;
+				// G6 before G5: it is a parse plus one marker read where G5 shells out to
+				// `bd show` and `bd list`. It takes `pi` because its findings are notices
+				// rather than refusals, and a notice leaves through `sendMessage` rather than
+				// through the return value.
+				const discipline = await gateBdDiscipline(pi, ctx, input);
+				if (discipline) return discipline;
 
-				// Also before G5, and for the same reason: a refused multi-bead claim
-				// must not be recorded, or G2 would hold the session to two trees it
-				// was never allowed to claim.
+				// Also before G5: a refused multi-bead claim must not be recorded, or G2
+				// would hold the session to two trees it was never allowed to claim.
 				const exclusivity = gateOneClaim(ctx, input);
 				if (exclusivity) return exclusivity;
 
 				const eligibility = await gateClaimEligibility(ctx, input);
 				if (eligibility) return eligibility;
-
-				// Independent of the claim chain: a comment names no bead to claim, and
-				// the check is one more parse of a command already tokenised above.
-				const verb = gateCommentVerb(ctx, input);
-				if (verb) return verb;
 			}
 
 			if (GATED_WRITE_TOOLS[event.toolName] === true) {
@@ -94,15 +88,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 				if (scope) return scope;
 			}
 
-			// Last, and only for `bash`: a revision rather than a refusal. Both
-			// environment gates contribute to one result, because a contract-free
-			// helper working in an isolated workspace needs each of them.
-			if (event.toolName === "bash") {
-				return reviseBashEnv(input, {
-					...beadWriteFreeEnv(pi, ctx),
-					...(await runPinEnv(ctx, input)),
-				});
-			}
+			// Last, and only for `bash`: a revision rather than a refusal, built through the
+			// one shared builder so a second environment gate can contribute to the same
+			// result without a handler returning two of them.
+			if (event.toolName === "bash") return reviseBashEnv(input, { ...beadWriteFreeEnv(pi, ctx) });
 
 			return undefined;
 		} catch (error) {
@@ -121,18 +110,23 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	 * (`session/messages.ts:654`), and the contract must read as authority rather
 	 * than as something the model said to itself.
 	 *
-	 * The repository comes from the marker rather than `ctx.cwd`, because in an
-	 * isolated worker those differ: the cwd is the clone, and the marker -- copied in
-	 * with the rest of the checkout -- still names the original. That path is what
-	 * makes the contract's `bd -C` pin resolvable.
+	 * The marker is read for one reason only: it is the run gate. Its `repo_root` used to
+	 * be substituted into the contract for a `bd -C` pin, and both are gone -- under a
+	 * per-project Dolt server bd resolves the database by host and port, so a worker needs
+	 * no path from us.
 	 */
 	pi.on("session_start", async (_event, ctx) => {
 		if (sessionRole(pi) === "lead") return;
 		const marker = await readActiveRun(ctx.cwd).catch(() => null);
+		// No run, no contract. Measured without this guard: a plain subagent spawned in
+		// this repository received the protocol, obeyed it over its own brief, pulled an
+		// empty queue for a role that does not exist, and yielded NO_WORK -- the injected
+		// text outranked the task it was actually given.
+		if (marker === null) return;
 		pi.sendMessage(
 			{
 				customType: "com.srobroek.omp-orchestrate.contract",
-				content: dispatchContract(marker?.repo_root),
+				content: DISPATCH_CONTRACT,
 				display: false,
 				attribution: "user",
 			},
@@ -163,12 +157,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("orchestrate-roster", {
-		description: "Pull-queue depth for each routing label",
+		description: "Pull-queue depth for each role",
 		handler: async (_args, ctx) => {
 			resetReadBudget();
 			const lines: string[] = [];
 			for (const role of ["architect", "implementer", "reviewer", "researcher", "shepherd"]) {
-				const ready = await bdList(["ready", "--label", `agent:${role}`, "--unassigned", "--json"]);
+				const ready = await bdList(["ready", "--metadata-field", `role=${role}`, "--unassigned", "--json"]);
 				lines.push(`${role}: ${ready.length} ready`);
 			}
 			ctx.ui.notify(lines.join("\n"), "info");

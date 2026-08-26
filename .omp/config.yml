@@ -1,0 +1,4 @@
+task:
+  isolation:
+    merge: branch
+    apply: false

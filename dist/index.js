@@ -143,8 +143,8 @@ function metadataString(bead, key) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 function commentVerb(text) {
-  const first = text.trim().split(/\s+/, 1)[0] ?? "";
-  return first.replace(/:$/, "").toUpperCase();
+  const token = /^[\s\-*+>`_~]*(\S*)/.exec(text)?.[1] ?? "";
+  return token.replace(/[*_`~:,.;!?]+$/, "").toUpperCase();
 }
 
 // src/contract.ts
@@ -153,16 +153,37 @@ var DISPATCH_CONTRACT = `ORCHESTRATION PROTOCOL \u2014 active run. Follow exactl
 Work is pulled, not handed to you. Your first act is to claim the next bead matching
 your domain:
 
-    bd -C <run repo> ready --parent <epic> --label agent:<your-role> --unassigned --claim --json
+    bd ready --parent <epic> --metadata-field role=<your-role> --unassigned --claim --json
 
-An empty result means there is no work for you: report NO_WORK and yield immediately.
-Never invent work, and never claim a bead routed to another role \u2014 that is refused.
+Three outcomes, not two. Read the result before you decide.
 
-Aim every bd call at the run's database with -C <run repo>. Isolation gave you a copy of
-the checkout, and bd finds its database by walking up from the working directory, so an
-unpinned call writes to your private copy: your claim never becomes visible, another
-worker can take the same bead, and your comments never reach the run. A pinned claim is
-atomic across processes \u2014 the loser sees an empty queue and must not retry the same bead.
+Empty result -- there is no work for you: report NO_WORK and yield immediately. Never
+invent work, and never claim a bead routed to another role, which is refused.
+
+Claim error naming a serialization or transaction conflict -- contention, not absence:
+
+    {"error":"dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with ..."}
+
+Match on Error 1213, 40001, or serialization failure. Prose alone misses it. The loser of
+a simultaneous claim receives that error and nothing else, even when a second unclaimed
+bead still matches its filter. Retry the identical pull, at most three times, waiting 2s,
+then 5s, then 10s. A retry cannot double-claim: the claim is mutually exclusive, and
+measured contention never assigned one bead twice. Yielding NO_WORK here is wrong. It
+abandons ready work and reports an empty queue that is not empty. If all three retries
+lose, leave a BLOCKED comment quoting the error, and quote it in your yield payload too.
+The exit gate discriminates on the error signature, not on the verb. It admits a
+claimless exit carrying Error 1213, 40001, or serialization failure, and refuses a bare
+BLOCKED without saying which half was missing. That check is a floor, not a proof: it
+cannot tell your real error from this example copied out of the contract. It widens
+nothing, because NO_WORK is admitted on a bare token with no evidence at all.
+
+Any other error -- report it verbatim and stop. Never invent a retry for an error you
+cannot name.
+
+The run's beads database is a per-project Dolt server, resolved by host and port from
+.beads/dolt-server.port, which travels with a copied checkout -- so your calls reach the
+run's database from an isolated workspace without any flag. A claim is atomic across
+processes: two workers never hold one bead, which is why the retry above is safe.
 
 The bead is your brief, not your instructions. Read its description, metadata,
 comments, and linked wisps before acting. Verify any file:line it cites against the
@@ -176,58 +197,194 @@ tree your claimed bead names is refused.
 Evidence. Every factual claim carries a file:line, a command result, a bead id, or the
 literal word untested. Cite prior facts by reference; never paste them into a message.
 
-Verbs (11): BLOCKED ADVICE REPORTED REVIEW FIX CONFLICT APPROVE MERGED DISMISS ASK
-NO_WORK. One verb plus a resource id per message. Mirror every material outcome to the
-affected bead as a comment, under the acting identity. Set BEADS_ACTOR and BD_ACTOR to
-metadata.actor on every mutating bd process.
+Verbs you may write (13): REPORTED BLOCKED FAILED REVIEW ADVICE LANDED BOUNCED CONFLICT
+IDLE NO_WORK ASK NOTE LOCAL_DECISION. One verb plus a resource id per message. The full
+set of 18 lives in src/contracts/grammar.json, which leads every copy. The other five are
+the extension's voice, never yours. Your role contract narrows this list further.
+
+GOTCHA: decoration is normalised for you. Bold, bulleted, blockquoted, backticked and
+comma-tailed verbs all parse, and case is free. One trap survives: the first whitespace
+token is the whole signal, so NO WORK parses as NO and the rulebook flags it. Spell a
+multi-word verb with its underscore, then write the prose.
+
+Mirror every material outcome to the affected bead as a comment, under the acting
+identity. Set BEADS_ACTOR and BD_ACTOR to metadata.actor on every mutating bd process.
 
 Exit. Your role contract is checked when you yield, and an incomplete exit is refused
 with the unmet checks named. Satisfy it before yielding: deliver the evidence your
-bead's execution_kind requires, hand off with the next role's label, clear your
-assignee, and leave a REPORTED comment. A genuine failure is a valid exit \u2014 set status
-blocked and leave a FAILED or BLOCKED comment rather than faking success.
+bead's execution_kind requires, add the next role's handoff label, clear your assignee,
+and leave a REPORTED comment. A genuine failure is a valid exit -- set status blocked
+and leave a FAILED or BLOCKED comment rather than faking success.
+
+Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role carries
+it, the architect that decomposed the epic writes it, and no other role may rewrite it.
 
 Blocked. Design or debug uncertainty creates an escalation wisp linked to your bead,
 carrying a BLOCKED comment. Product intent creates an ASK wisp and a human gate. Never
 wait live on a peer: record what you need, yield, and let the run wake you.
 
-Spawning. Only an architect spawns, and only contract-free helpers that edit files in
-its own checkout and report back. A helper never claims a bead, never commits, and
-never manages worktrees. Every other role spawns nothing.
+Spawning. An architect spawns roles that claim beads, and contract-free helpers that
+edit files in its own checkout and report back. No other role spawns either of those. A
+helper never claims a bead, never commits, and never manages worktrees. Claiming is the
+line that matters: the queue and the exit gate both depend on it.
+
+One exception for every other role. Read it off the agent's own frontmatter: an explicit
+tools: list that omits write, edit and task cannot mutate your checkout and cannot spawn
+further. Librarian is the case in point. Spawn one for an external-library fact. Its
+structured result carries the answer back, so it needs no wisp. This needs
+task.maxRecursionDepth 3.
+
+Two cautions. Several such agents hold bash, librarian included, so prose confines their
+writes rather than the tool list: librarian's body limits them to /tmp/librarian-*. And
+an agent declaring no tools: list at all inherits write and task, which is why sonic is
+never a helper.
 `;
-var PROTOCOL_VERBS = [
-  "BLOCKED",
-  "ADVICE",
-  "REPORTED",
-  "REVIEW",
-  "FIX",
-  "CONFLICT",
-  "APPROVE",
-  "MERGED",
-  "DISMISS",
-  "ASK",
-  "NO_WORK"
-];
-var COMMENT_VERBS = {
-  ...Object.fromEntries(PROTOCOL_VERBS.map((verb) => [verb, true])),
-  FAILED: true,
-  LANDED: true,
-  BOUNCED: true,
-  IDLE: true,
-  RECLAIM: true,
-  STALL: true,
-  WARN: true,
-  GOAL: true,
-  BOUNCE: true,
-  NOTE: true,
-  WAITING_HUMAN: true,
-  LOCAL_DECISION: true
+// src/contracts/grammar.json
+var grammar_default = {
+  _comment: "The protocol verb set, and the source of truth for it. src/gates/bd.ts ENFORCES this set, by calling `commentVerb` and comparing against these entries -- one implementation, so the guard and the parser cannot disagree. skills/orchestrate/references/message-grammar.md restates it for humans and is written by hand; test/grammar-parity.test.ts fails when the gate's set or that reference diverges from this file, in either direction, so edit here first and let the test name what else must move. A verb is what `commentVerb` in src/bd.ts yields: strip a leading run of bullet, blockquote, emphasis, tick and strikethrough markers, take the first whitespace token, strip trailing emphasis, ticks and sentence punctuation, uppercase. Case and ordinary markdown are therefore free; only the first token counts, and a multi-word verb needs its underscore. Nothing else in a comment is protocol. A non-verb is warned, not refused, and only inside an active run. Adding a verb here without a writer and a source is how a vocabulary rots: an entry sourced `inferred` is a judgement call recorded as one, not a constraint the code enforces.",
+  _vocabulary: {
+    writers: {
+      "*": "every claiming role, backed by a clause present in all six role contracts (generic.json included)",
+      unlisted: "generic.json's `agent: *` fallback: any claimant with no per-role contract",
+      "architect|implementer|researcher|reviewer|shepherd": "that role only",
+      extension: "this plugin's own code, not an agent. Named by `source.where`"
+    },
+    source: {
+      contract: "migrated exactly from the named role-contract predicate. Machine-enforced on yield",
+      code: "the named src file writes or parses this verb. Machine-observable, not contract-enforced",
+      inferred: "no contract or code constrains the writer. `where` cites the prose the narrowest defensible set was read from -- a reviewer may disagree with the set without disagreeing with the verb"
+    },
+    terminal: "true when writing the verb ends the attempt it describes: the writer yields, or its claim is released. A non-terminal verb annotates work that continues"
+  },
+  verbs: [
+    {
+      verb: "REPORTED",
+      meaning: "Evidence delivered, next role's label added, assignee cleared -- the node's exit contract is met.",
+      writers: ["architect", "implementer", "researcher", "unlisted"],
+      terminal: true,
+      source: { kind: "contract", where: "architect.json, implementer.json, researcher.json, generic.json: completion.reported" }
+    },
+    {
+      verb: "BLOCKED",
+      meaning: "Work cannot proceed. Written on an escalation wisp linked to the node, never stored as a bead state.",
+      writers: ["*"],
+      terminal: true,
+      source: { kind: "contract", where: "all six: escape.require. Also reviewer.json completion.verdict, researcher.json completion.answer, shepherd.json completion.disposition" }
+    },
+    {
+      verb: "FAILED",
+      meaning: "Unrecoverable failure. A valid exit paired with status blocked, never a faked success.",
+      writers: ["*"],
+      terminal: true,
+      source: { kind: "contract", where: "all six: escape.require" }
+    },
+    {
+      verb: "REVIEW",
+      meaning: "One reviewer's verdict, written on the node its review wisp links to.",
+      writers: ["reviewer"],
+      terminal: true,
+      source: { kind: "contract", where: "reviewer.json: completion.verdict" }
+    },
+    {
+      verb: "ADVICE",
+      meaning: "A researcher's durable answer to an escalation wisp, promoted to the linked node.",
+      writers: ["researcher"],
+      terminal: true,
+      source: { kind: "contract", where: "researcher.json: completion.answer" }
+    },
+    {
+      verb: "LANDED",
+      meaning: "The merge bead's branch is merged and metadata.merge_sha is stamped.",
+      writers: ["shepherd"],
+      terminal: true,
+      source: { kind: "contract", where: "shepherd.json: completion.disposition" }
+    },
+    {
+      verb: "BOUNCED",
+      meaning: "The merge attempt is refused back to its origin as a fix bead.",
+      writers: ["shepherd"],
+      terminal: true,
+      source: { kind: "contract", where: "shepherd.json: completion.disposition" }
+    },
+    {
+      verb: "CONFLICT",
+      meaning: "The branch does not merge into its base. The node returns to working for a rebase; the shepherd never resolves it.",
+      writers: ["shepherd"],
+      terminal: true,
+      source: { kind: "contract", where: "shepherd.json: completion.disposition" }
+    },
+    {
+      verb: "IDLE",
+      meaning: "Nothing was landable this transaction. The merge slot is released and the waiter queue outlives the exit.",
+      writers: ["shepherd"],
+      terminal: true,
+      source: { kind: "contract", where: "shepherd.json: completion.disposition" }
+    },
+    {
+      verb: "NO_WORK",
+      meaning: "The role's queue is empty. Yield rather than widen the filter or invent work.",
+      writers: ["*"],
+      terminal: true,
+      source: { kind: "code", where: "src/gates/exit.ts:230 -- the unclaimed-exit gate matches this literal to allow a claimless exit" }
+    },
+    {
+      verb: "ASK",
+      meaning: "A product-intent question only a human can settle. Pairs with a human gate on the held bead.",
+      writers: ["*"],
+      terminal: true,
+      source: { kind: "inferred", where: "src/contract.ts DISPATCH_CONTRACT, Blocked clause -- injected into every worker, so narrowing below `*` is indefensible; references/lifecycle.md waiting_human row" }
+    },
+    {
+      verb: "NOTE",
+      meaning: "A durable observation with no protocol consequence, such as the id of a bead discovered mid-run.",
+      writers: ["*"],
+      terminal: false,
+      source: { kind: "inferred", where: "references/lifecycle.md:343 (discovered bead); references/beads-store.md:273 lists note as a material verb for any acting agent" }
+    },
+    {
+      verb: "LOCAL_DECISION",
+      meaning: "A reversible bead-local default, provisional or accepted, carrying an objective revisit trigger.",
+      writers: ["architect", "implementer"],
+      terminal: false,
+      source: { kind: "inferred", where: "agents/orc-architect.md:121; references/beads-store.md:44 comment contract; references/lifecycle.md:267. Narrowed to the two roles that apply implementation defaults -- a reviewer writes verdicts, a researcher writes ADVICE, a shepherd may not judge merits" }
+    },
+    {
+      verb: "BOUNCE",
+      meaning: "The exit contract force-allowed after the bounce budget. This attempt is invalidated; repair the envelope, never continue the session.",
+      writers: ["extension"],
+      terminal: true,
+      source: { kind: "code", where: "src/gates/exit.ts:327" }
+    },
+    {
+      verb: "RECLAIM",
+      meaning: "A stranded claim was released and its bead reopened, with any surviving branch stamped.",
+      writers: ["extension"],
+      terminal: true,
+      source: { kind: "code", where: "src/supervision.ts:201, src/supervision.ts:213" }
+    },
+    {
+      verb: "STALL",
+      meaning: "A claimed child went silent past its threshold. No kill -- the spawner decides.",
+      writers: ["extension"],
+      terminal: false,
+      source: { kind: "code", where: "src/watchers.ts:206" }
+    },
+    {
+      verb: "WARN",
+      meaning: "A degraded preflight or a settings deviation the run should see but not stop for.",
+      writers: ["extension"],
+      terminal: false,
+      source: { kind: "code", where: "src/watchers.ts:506, src/watchers.ts:822" }
+    },
+    {
+      verb: "GOAL",
+      meaning: "The run objective and its status, stamped on every epic each time it changes.",
+      writers: ["extension"],
+      terminal: false,
+      source: { kind: "code", where: "src/watchers.ts:568" }
+    }
+  ]
 };
-function dispatchContract(repoRoot) {
-  if (repoRoot === undefined || repoRoot.length === 0)
-    return DISPATCH_CONTRACT;
-  return DISPATCH_CONTRACT.replaceAll("<run repo>", repoRoot);
-}
 
 // src/identity.ts
 var ORC_ROLES = {
@@ -250,15 +407,828 @@ function orcRole(ctx) {
 function isBeadWriteFree(pi, ctx) {
   return sessionRole(pi) === "worker" && orcRole(ctx) === undefined;
 }
-function roleFromLabels(labels) {
-  for (const label of labels ?? []) {
-    if (!label.startsWith("agent:"))
-      continue;
-    const candidate = label.slice("agent:".length);
-    if (ORC_ROLES[candidate] === true)
-      return candidate;
+var ROUTING_KEY = "role";
+var LEGACY_ROLE_LABEL = "agent:";
+var LEGACY_LABEL_ROLES = {
+  architect: "architect",
+  implementer: "implementer",
+  reviewer: "reviewer",
+  researcher: "researcher",
+  shepherd: "shepherd",
+  integrator: "shepherd"
+};
+function legacyRoleFromLabel(label) {
+  if (!label.startsWith(LEGACY_ROLE_LABEL))
+    return;
+  const suffix = label.slice(LEGACY_ROLE_LABEL.length);
+  return Object.hasOwn(LEGACY_LABEL_ROLES, suffix) ? LEGACY_LABEL_ROLES[suffix] : undefined;
+}
+function routingValue(metadata) {
+  let record;
+  if (typeof metadata === "string") {
+    try {
+      const parsed = JSON.parse(metadata);
+      if (parsed === null || typeof parsed !== "object")
+        return;
+      record = parsed;
+    } catch {
+      return;
+    }
+  } else if (metadata === undefined || metadata === null) {
+    return;
+  } else {
+    record = metadata;
+  }
+  if (!Object.hasOwn(record, ROUTING_KEY))
+    return;
+  const value = record[ROUTING_KEY];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+function beadRouting(bead) {
+  const declared = routingValue(bead?.metadata);
+  if (declared !== undefined && ORC_ROLES[declared] === true) {
+    return { role: declared, from: "metadata", spelling: `${ROUTING_KEY}=${declared}` };
+  }
+  for (const label of bead?.labels ?? []) {
+    const role = legacyRoleFromLabel(label);
+    if (role !== undefined)
+      return { role, from: "legacy-label", spelling: label };
   }
   return;
+}
+
+// src/run-state.ts
+import fs from "fs/promises";
+import path2 from "path";
+// src/contracts/architect.json
+var architect_default = {
+  agent: "architect",
+  tier: "T1",
+  _comment: "Single source of truth for the SubagentStop evaluator AND the generated 'Your bead contract' block in the agent definition (compile-time). Do not hand-edit the generated block. Lifecycle phases (reported/in_review/approved/...) are NOT bd statuses; they derive from status + labels + gates + review-wisp closure. A specialist never CLOSES its own node, so `closed` is the forbidden built-in status. ROUTING: the architect is the one role that MAY write metadata.role, because it decomposes its epic and routes each node. deny_metadata cannot express that, being a presence test on the claimed bead rather than an authorship test. G5 grants it at the write seam (ROUTING_WRITERS in src/gates/claim.ts). The `handoff` check stays on the `agent:reviewer` LABEL, which is a ready-for-review signal and routes nothing now that metadata.role is authoritative.",
+  completion: [
+    {
+      check: "branch",
+      require: "metadata.branch",
+      when: "git"
+    },
+    {
+      check: "push",
+      require: "metadata.push",
+      when: "git"
+    },
+    {
+      check: "output_ref",
+      require: "metadata.output_ref",
+      when: "artifact"
+    },
+    {
+      check: "artifact_path",
+      require: "artifact.output_ref contained",
+      when: "artifact"
+    },
+    {
+      check: "handoff",
+      require: "label ~ ^agent:reviewer$",
+      when: "git"
+    },
+    {
+      check: "unclaimed",
+      require: "assignee cleared",
+      when: "git"
+    },
+    {
+      check: "reported",
+      require: "comment.verb in [REPORTED]"
+    }
+  ],
+  authority: {
+    deny_states: [
+      "closed"
+    ],
+    deny_metadata: [
+      "merge_sha",
+      "pr"
+    ]
+  },
+  escape: {
+    state: "blocked",
+    require: "comment.verb in [FAILED, BLOCKED]"
+  },
+  pause: [
+    "open-escalation-wisp-linked-to-node"
+  ],
+  bounce: {
+    max_attempts: 3
+  }
+};
+// src/contracts/generic.json
+var generic_default = {
+  agent: "*",
+  tier: "generic-fallback",
+  _comment: "Applied by the matcher-less SubagentStop hook to ANY agent that holds a claim but has no per-agent rules file (unlisted/ad-hoc agents, T3 conditional binding). Minimal contract: report before stopping, never close a node you didn't own, failure is a valid exit. This is the claim<->contract net for the whole fleet. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. An unlisted role reaches this file and is therefore denied routing writes, which is the fail-closed direction.",
+  completion: [
+    { check: "reported", require: "comment.verb in [REPORTED]" }
+  ],
+  authority: {
+    deny_states: ["closed"],
+    deny_metadata: ["merge_sha", "pr"]
+  },
+  escape: {
+    state: "blocked",
+    require: "comment.verb in [FAILED, BLOCKED]"
+  },
+  bounce: { max_attempts: 3 }
+};
+// src/contracts/implementer.json
+var implementer_default = {
+  agent: "implementer",
+  tier: "T1",
+  _comment: "Derived from architect.json: the same writer exit contract for a single node. Git evidence under apply=false is the captured branch plus the final commit sha (`metadata.branch`, `metadata.head_sha`) \u2014 the implementer never pushes; the architect integrates and pushes. Keeps `pause` so a worker waiting on an open escalation wisp is not bounced for the delay. It does NOT own decomposition, so it never creates feature beads; that is prose in the agent body, not a contract predicate. Like the architect it may never CLOSE its own node, and never writes merge_sha or pr \u2014 those belong to the shepherd. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. `bd create` stays exempt, so a routable bug bead can still be filed. The `handoff` check therefore stays on the `agent:reviewer` LABEL: a signal the implementer writes, not a route.",
+  completion: [
+    {
+      check: "branch",
+      require: "metadata.branch",
+      when: "git"
+    },
+    {
+      check: "delivery",
+      require: "metadata.head_sha",
+      when: "git"
+    },
+    {
+      check: "output_ref",
+      require: "metadata.output_ref",
+      when: "artifact"
+    },
+    {
+      check: "artifact_path",
+      require: "artifact.output_ref contained",
+      when: "artifact"
+    },
+    {
+      check: "handoff",
+      require: "label ~ ^agent:reviewer$",
+      when: "git"
+    },
+    {
+      check: "unclaimed",
+      require: "assignee cleared",
+      when: "git"
+    },
+    {
+      check: "reported",
+      require: "comment.verb in [REPORTED]"
+    }
+  ],
+  authority: {
+    deny_states: [
+      "closed"
+    ],
+    deny_metadata: [
+      "merge_sha",
+      "pr"
+    ]
+  },
+  escape: {
+    state: "blocked",
+    require: "comment.verb in [FAILED, BLOCKED]"
+  },
+  pause: [
+    "open-escalation-wisp-linked-to-node"
+  ],
+  bounce: {
+    max_attempts: 3
+  }
+};
+// src/contracts/researcher.json
+var researcher_default = {
+  agent: "researcher",
+  tier: "T1",
+  _comment: "Research nodes produce durable evidence and hand off. Escalation wisps promote one ADVICE or BLOCKED summary to the linked node. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. `bd create` stays exempt, so a routable bug bead can still be filed. The `handoff` check therefore stays on the `agent:reviewer` LABEL: a signal the researcher writes, not a route.",
+  completion: [
+    {
+      check: "output_ref",
+      require: "metadata.output_ref",
+      when: [
+        "artifact",
+        "comment"
+      ]
+    },
+    {
+      check: "artifact_path",
+      require: "artifact.output_ref contained",
+      when: "artifact"
+    },
+    {
+      check: "handoff",
+      require: "label ~ ^agent:reviewer$",
+      when: [
+        "artifact",
+        "comment"
+      ]
+    },
+    {
+      check: "unclaimed",
+      require: "assignee cleared",
+      when: [
+        "artifact",
+        "comment"
+      ]
+    },
+    {
+      check: "reported",
+      require: "comment.verb in [REPORTED]",
+      when: [
+        "artifact",
+        "comment"
+      ]
+    },
+    {
+      check: "answer",
+      require: "linked.comment.verb in [ADVICE, BLOCKED]",
+      when: "escalation"
+    }
+  ],
+  authority: {
+    deny_states: [
+      "merged",
+      "approved"
+    ],
+    deny_metadata: [
+      "push",
+      "merge_sha",
+      "pr"
+    ]
+  },
+  escape: {
+    state: "blocked",
+    require: "comment.verb in [FAILED, BLOCKED]"
+  },
+  bounce: {
+    max_attempts: 3
+  }
+};
+// src/contracts/reviewer.json
+var reviewer_default = {
+  agent: "reviewer",
+  tier: "T1",
+  _comment: "Claims a review wisp and writes the REVIEW verdict on its linked node. Approval closes the wisp; changes release it open for the next round. It claims the WISP, never the node, so a handed-off node never has to enter this role's queue. ROUTING: metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. `bd create` stays exempt, so a routable bug bead can still be filed.",
+  completion: [
+    { check: "verdict", require: "linked.comment.verb in [REVIEW, BLOCKED]" }
+  ],
+  authority: {
+    deny_states: ["merged"],
+    deny_metadata: ["push", "merge_sha", "pr"]
+  },
+  escape: {
+    state: "blocked",
+    require: "comment.verb in [FAILED, BLOCKED]"
+  },
+  bounce: { max_attempts: 3 }
+};
+// src/contracts/shepherd.json
+var shepherd_default = {
+  agent: "shepherd",
+  tier: "T2",
+  _comment: "In-run merge shepherd (distinct from the standalone pr-shepherd daemon). Per-transaction authority: claims one merge bead, lands or bounces, releases. It legitimately writes merge_sha/pr and closes merge beads. deny_states blocks review verdicts. deny_metadata omits branch/base_sha because those are pre-existing merge-bead anchors and the evaluator cannot attribute field authorship. The bounce-route check (a bounced fix must carry metadata.stage=fix and metadata.origin_bead) and the landed check (metadata.merge_sha when merged) are NOT here: both are conditional on which disposition was written, and the predicate grammar has no verb-conditional form. Until it does, shepherd.md prose owns them. CONFLICT is a disposition, not a failure. This role detects the unmergeable branch (orc_conflict_probe guards every integration) and is forbidden from resolving one, so the conflict is reported rather than fixed. references/lifecycle.md routes it to `working (rebase)`, which is neither a land nor a fix bounce, and escape is reserved for status=blocked. Without it a conflicted transaction had to mislabel itself BOUNCED to satisfy this check. ROUTING: a merge bead carries the `pr:merge` LABEL for classification plus metadata.role=shepherd for routing; the dead `agent:integrator` suffix routed to no role at all. metadata.role is deliberately absent from deny_metadata. That list is a presence test read as authorship, sound only for outcome fields no dispatcher stamps. Routing must be stamped or the bead reaches no queue, so a denial here would fault every worker on every bead. G5 enforces it at the write seam instead, where only the architect may re-point a route. A BOUNCED disposition reopens the existing bead, whose route is already stamped, so this role needs no routing write.",
+  completion: [
+    { check: "disposition", require: "comment.verb in [LANDED, BOUNCED, CONFLICT, IDLE, BLOCKED]" }
+  ],
+  authority: {
+    deny_states: [
+      "approved",
+      "changes_requested",
+      "reported"
+    ],
+    deny_metadata: [
+      "output_ref"
+    ]
+  },
+  escape: {
+    state: "blocked",
+    require: "comment.verb in [FAILED, BLOCKED]"
+  },
+  bounce: {
+    max_attempts: 3
+  }
+};
+
+// src/gates/exit.ts
+import path from "path";
+
+// src/claim-state.ts
+var observed;
+function recordClaim(observation) {
+  if (observation.actor.length === 0 || observation.beadIds.length === 0)
+    return;
+  observed = observation;
+}
+function observedClaim() {
+  return observed;
+}
+
+// src/gates/exit.ts
+var CONTRACTS = {
+  architect: architect_default,
+  implementer: implementer_default,
+  researcher: researcher_default,
+  reviewer: reviewer_default,
+  shepherd: shepherd_default,
+  generic: generic_default
+};
+var ORCHESTRATOR_ANCHORS = {
+  actor: true,
+  artifacts_dir: true,
+  base_ref: true,
+  base_sha: true,
+  branch: true,
+  complexity_tier: true,
+  execution_agent: true,
+  execution_dispatch: true,
+  execution_kind: true,
+  execution_task_kind: true,
+  lease_token: true,
+  origin: true,
+  origin_actor: true,
+  origin_bead: true,
+  run_epic: true,
+  runtime_context: true,
+  runtime_handle: true,
+  scope: true,
+  worktree: true
+};
+function resourceKind(bead) {
+  const declared = metadataString(bead, "execution_kind");
+  if (declared !== undefined)
+    return declared;
+  if (metadataString(bead, "worktree") !== undefined)
+    return "git";
+  if (metadataString(bead, "artifacts_dir") !== undefined)
+    return "artifact";
+  return;
+}
+function applies(check, kind) {
+  if (check.when === undefined)
+    return true;
+  const wanted = Array.isArray(check.when) ? check.when : [check.when];
+  return kind !== undefined && wanted.includes(kind);
+}
+function satisfies(predicate, evidence) {
+  const { bead, verbs, linkedVerbs } = evidence;
+  const trimmed = predicate.trim();
+  const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
+  if (metadataKey?.[1] !== undefined)
+    return metadataString(bead, metadataKey[1]) !== undefined;
+  if (trimmed === "assignee cleared") {
+    return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
+  }
+  if (trimmed === "artifact.output_ref contained") {
+    const output = metadataString(bead, "output_ref");
+    const artifacts = metadataString(bead, "artifacts_dir");
+    if (output === undefined || artifacts === undefined)
+      return false;
+    if (!path.isAbsolute(output) || !path.isAbsolute(artifacts))
+      return false;
+    const inside = output.startsWith(`${artifacts}${path.sep}`);
+    const worktree = metadataString(bead, "worktree");
+    const underWorktree = worktree !== undefined && output.startsWith(`${worktree}${path.sep}`);
+    return inside && output !== artifacts && !underWorktree;
+  }
+  const labelMatch = /^label\s*~\s*(.+)$/.exec(trimmed);
+  if (labelMatch?.[1] !== undefined) {
+    let pattern;
+    try {
+      pattern = new RegExp(labelMatch[1].replace(/^["']|["']$/g, ""));
+    } catch {
+      return false;
+    }
+    return (bead.labels ?? []).some((label) => pattern.test(label));
+  }
+  const verbMatch = /^(linked\.)?comment\.verb\s+in\s*\[([^\]]*)\]$/.exec(trimmed);
+  if (verbMatch !== null) {
+    const wanted = (verbMatch[2] ?? "").split(",").map((entry) => entry.trim().toUpperCase()).filter((entry) => entry.length > 0);
+    const pool = verbMatch[1] === undefined ? verbs : linkedVerbs;
+    return pool.some((verb) => wanted.includes(verb));
+  }
+  return true;
+}
+async function collectEvidence(bead) {
+  const verbs = (await bdComments(bead.id)).map((comment) => commentVerb(comment.text));
+  const linkedVerbs = [];
+  for (const type of ["relates-to", "replies-to"]) {
+    for (const linkedId of await bdLinked(bead.id, type)) {
+      for (const comment of await bdComments(linkedId)) {
+        linkedVerbs.push(commentVerb(comment.text));
+      }
+    }
+  }
+  return { bead, verbs, linkedVerbs };
+}
+var unclaimedReminded = false;
+var CONTENTION_EVIDENCE = /error\s*1213|40001|serialization failure/i;
+async function gateUnclaimedExit(ctx, input) {
+  if (orcRole(ctx) === undefined)
+    return;
+  if (unclaimedReminded)
+    return;
+  const payload = input === undefined ? "" : JSON.stringify(input);
+  if (payload.includes("NO_WORK"))
+    return;
+  if (CONTENTION_EVIDENCE.test(payload))
+    return;
+  unclaimedReminded = true;
+  return {
+    block: true,
+    reason: "You are exiting without ever claiming a bead. Work is pulled, not invented: run your role's `bd ready ... --claim` and deliver the bead you get. Two exits need no claim, and the pull result decides which. Empty result -- report NO_WORK. Claim error naming Error 1213, 40001, or serialization failure -- retry the identical pull, at most three times. Then quote that error here. Never report NO_WORK for a race you lost: the queue was not empty. Uncommitted work under no claim reaches no branch and no bead."
+  };
+}
+async function gateExitContract(ctx, input) {
+  const claim = observedClaim();
+  const beadId = claim?.beadIds[0];
+  if (beadId === undefined)
+    return await gateUnclaimedExit(ctx, input);
+  const bead = await bdShow(beadId);
+  if (bead === null)
+    return;
+  const routing = beadRouting(bead);
+  const role = orcRole(ctx) ?? routing?.role ?? "generic";
+  const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
+  if (contract === undefined)
+    return;
+  const evidence = await collectEvidence(bead);
+  const status = (bead.status ?? "").toLowerCase();
+  if (contract.escape?.state !== undefined && status === contract.escape.state) {
+    if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence)) {
+      return;
+    }
+  }
+  const kind = resourceKind(bead);
+  const failures = [];
+  for (const check of contract.completion ?? []) {
+    if (!applies(check, kind))
+      continue;
+    if (!satisfies(check.require, evidence)) {
+      failures.push({ check: check.check, detail: `unsatisfied: ${check.require}` });
+    }
+  }
+  const stateLabels = (bead.labels ?? []).filter((label) => label.startsWith("state:")).map((label) => label.slice("state:".length).toLowerCase());
+  for (const denied of contract.authority?.deny_states ?? []) {
+    if (status === denied || stateLabels.includes(denied)) {
+      failures.push({ check: "state-authority", detail: `status=${denied} set by a role forbidden to set it` });
+    }
+  }
+  for (const denied of contract.authority?.deny_metadata ?? []) {
+    if (ORCHESTRATOR_ANCHORS[denied] === true)
+      continue;
+    if (metadataString(bead, denied) !== undefined) {
+      failures.push({
+        check: "metadata-authority",
+        detail: `metadata.${denied} is set and this role may not own it; unset it or escalate`
+      });
+    }
+  }
+  if (failures.length === 0)
+    return;
+  const attempts = Number(metadataString(bead, "stop_attempts") ?? "0") + 1;
+  const maxAttempts = contract.bounce?.max_attempts ?? 3;
+  if (attempts >= maxAttempts) {
+    await bdRun(["comment", beadId, `BOUNCE agent=${role} attempt=${attempts}`]);
+    if (status === "closed")
+      await bdRun(["reopen", beadId, "--reason", "contract bounce"]);
+    await bdRun([
+      "update",
+      beadId,
+      "--assignee",
+      "",
+      "--status",
+      "open",
+      "--metadata",
+      JSON.stringify({ stop_attempts: 0, review_round: 0 })
+    ]);
+    return;
+  }
+  await bdRun(["update", beadId, "--metadata", JSON.stringify({ stop_attempts: attempts })]);
+  return {
+    block: true,
+    reason: JSON.stringify({
+      bead: beadId,
+      agent: role,
+      attempt: attempts,
+      ...routing?.from === "legacy-label" ? { routing: routing.spelling } : {},
+      failed_checks: failures
+    })
+  };
+}
+
+// src/supervision.ts
+var TERMINAL = { aborted: true, completed: true, failed: true };
+var TIMEOUT_MS = 15000;
+var spawnExec = async (argv, cwd) => {
+  const [bin, ...args] = argv;
+  if (bin === undefined)
+    return null;
+  try {
+    const proc = Bun.spawn([bin, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => proc.kill(), TIMEOUT_MS);
+    try {
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited
+      ]);
+      return { code, stdout, stderr };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+};
+function lines(stdout) {
+  const out = [];
+  for (const raw of stdout.split(`
+`)) {
+    const line = raw.trim();
+    if (line !== "")
+      out.push(line);
+  }
+  return out;
+}
+async function reapChild(child, options) {
+  const outcome = { child: child.id, reaped: [] };
+  if (TERMINAL[child.status] !== true)
+    return outcome;
+  resetReadBudget();
+  const candidates = await candidateBeads(child);
+  if (candidates.length === 0)
+    return outcome;
+  const branch = await capturedBranch(child.id, options);
+  if (branch !== undefined)
+    outcome.branch = branch;
+  for (const bead of candidates) {
+    outcome.reaped.push(await reapBead(bead, child, branch));
+  }
+  return outcome;
+}
+async function candidateBeads(child) {
+  const claimed = await bdList(["list", "--assignee", child.id, "--status", "in_progress", "--json"]);
+  if (claimed.length > 0)
+    return claimed;
+  if (child.status !== "completed")
+    return [];
+  const stamped = await bdList([
+    "list",
+    "--metadata-field",
+    `actor=${child.id}`,
+    "--status",
+    "open,in_progress",
+    "--json"
+  ]);
+  const mine = [];
+  for (const bead of stamped) {
+    const assignee = typeof bead.assignee === "string" ? bead.assignee : "";
+    if (assignee === "" || assignee === child.id)
+      mine.push(bead);
+  }
+  return mine;
+}
+async function reapBead(bead, child, branch) {
+  if (child.status !== "completed") {
+    const evidence = branch === undefined ? "no captured branch, nothing to recover" : `commits preserved on ${branch}`;
+    await reclaim(bead, `RECLAIM child ${child.id} died (${child.status}); ${evidence}`, branch);
+    return { bead: bead.id, case: branch === undefined ? "died-without-work" : "died-with-work", failures: [] };
+  }
+  const failures = await contractFailures(bead);
+  const claimHeld = typeof bead.assignee === "string" && bead.assignee !== "";
+  if (failures.length === 0 && !claimHeld) {
+    await stampBranch(bead, branch);
+    return { bead: bead.id, case: "clean", failures: [] };
+  }
+  const why = failures.length > 0 ? failures.join(", ") : "claim still held";
+  const routing = beadRouting(bead);
+  const carrier = routing?.from === "legacy-label" ? ` (contract from legacy ${routing.spelling}; stamp metadata.role)` : "";
+  await reclaim(bead, `RECLAIM child ${child.id} exited without completing: ${why}${carrier}`, branch);
+  return { bead: bead.id, case: "incomplete", failures };
+}
+async function reclaim(bead, reason, branch) {
+  await bdRun(["comment", bead.id, reason]);
+  const argv = ["update", bead.id, "--assignee", "", "--status", "open"];
+  if (branch !== undefined)
+    argv.push("--set-metadata", `recovered_branch=${branch}`);
+  await bdRun(argv);
+}
+async function stampBranch(bead, branch) {
+  if (branch === undefined)
+    return;
+  if (metadataString(bead, "branch") !== undefined)
+    return;
+  await bdRun(["update", bead.id, "--set-metadata", `branch=${branch}`]);
+}
+async function capturedBranch(id, options) {
+  const exec = options.exec ?? spawnExec;
+  const wanted = `omp/task/${id}`;
+  const result = await exec(["git", "branch", "--list", `${wanted}*`], options.cwd);
+  if (result === null || result.code !== 0)
+    return;
+  for (const line of lines(result.stdout)) {
+    if (line.replace(/^[*+]\s*/, "") === wanted)
+      return wanted;
+  }
+  return;
+}
+var CONTRACTS2 = {
+  architect: architect_default,
+  implementer: implementer_default,
+  researcher: researcher_default,
+  reviewer: reviewer_default,
+  shepherd: shepherd_default,
+  generic: generic_default
+};
+async function contractFailures(bead) {
+  const role = beadRouting(bead)?.role ?? "generic";
+  const contract = Object.hasOwn(CONTRACTS2, role) ? CONTRACTS2[role] ?? generic_default : generic_default;
+  const evidence = await collectEvidence2(bead);
+  const status = (bead.status ?? "").toLowerCase();
+  if (contract.escape?.state === status) {
+    if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence))
+      return [];
+  }
+  const kind = resourceKind(bead);
+  const failures = [];
+  for (const check of contract.completion ?? []) {
+    if (applies(check, kind) && !satisfies(check.require, evidence))
+      failures.push(check.check);
+  }
+  return failures;
+}
+async function collectEvidence2(bead) {
+  const verbs = (await bdComments(bead.id)).map((comment) => commentVerb(comment.text));
+  const linkedVerbs = [];
+  for (const type of ["relates-to", "replies-to"]) {
+    for (const linkedId of await bdLinked(bead.id, type)) {
+      for (const comment of await bdComments(linkedId))
+        linkedVerbs.push(commentVerb(comment.text));
+    }
+  }
+  return { bead, verbs, linkedVerbs };
+}
+async function ensurePatrolWisp(epicId, cwd) {
+  const linked = await bdList(["dep", "list", epicId, "--direction=up", "--type", "relates-to", "--json"], undefined, cwd);
+  for (const bead of linked) {
+    const wispType = typeof bead.wisp_type === "string" ? bead.wisp_type : "";
+    if (wispType === "patrol" && (bead.status ?? "").toLowerCase() !== "closed")
+      return;
+  }
+  await bdRun([
+    "create",
+    `patrol: ${epicId} claim reconciliation`,
+    "--ephemeral",
+    "--wisp-type",
+    "patrol",
+    "--deps",
+    `relates-to:${epicId}`,
+    "--silent"
+  ], undefined, cwd);
+}
+function registerSupervision(pi) {
+  let subscribed = false;
+  pi.on("session_start", (_event, ctx) => {
+    if (subscribed)
+      return;
+    subscribed = true;
+    pi.events.on("task:subagent:lifecycle", (data) => handleLifecycle(pi, data, ctx.cwd));
+  });
+}
+async function handleLifecycle(pi, data, cwd) {
+  const child = asLifecycle(data);
+  if (child === null)
+    return;
+  try {
+    const outcome = await reapChild(child, { cwd });
+    for (const reaped of outcome.reaped) {
+      pi.logger.info("orchestrate reaper", {
+        child: child.id,
+        bead: reaped.bead,
+        case: reaped.case,
+        branch: outcome.branch,
+        failures: reaped.failures
+      });
+    }
+  } catch (error) {
+    pi.logger.error("orchestrate reaper failed open", {
+      child: child.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+function asLifecycle(data) {
+  if (data === null || typeof data !== "object")
+    return null;
+  if (!("id" in data) || typeof data.id !== "string" || data.id.length === 0)
+    return null;
+  if (!("status" in data) || typeof data.status !== "string")
+    return null;
+  return { id: data.id, status: data.status };
+}
+
+// src/run-state.ts
+var PENDING = "pending";
+var RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+function markerPath(cwd) {
+  const configured = process.env.ORCHESTRATE_MARKER_FILE;
+  if (configured !== undefined && configured.length > 0)
+    return path2.resolve(cwd, configured);
+  return path2.join(cwd, ".orchestration", ".active-run");
+}
+async function readActiveRun(cwd) {
+  let raw;
+  try {
+    raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
+  } catch {
+    return null;
+  }
+  if (raw.length === 0)
+    return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { schema_version: 1, run_id: raw };
+  }
+  return asActiveRun(parsed);
+}
+function asActiveRun(value) {
+  if (typeof value === "string")
+    return value.length > 0 ? { schema_version: 1, run_id: value } : null;
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return null;
+  const record = value;
+  const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
+  const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
+  const state = { schema_version: 1, run_id: runId };
+  if (sessionId !== undefined)
+    state.session_id = sessionId;
+  return state;
+}
+async function writeMarker(target, state) {
+  await fs.mkdir(path2.dirname(target), { recursive: true });
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    await fs.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}
+`, "utf8");
+    await fs.rename(temporary, target);
+  } catch (error) {
+    await fs.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+async function activateRun(cwd, sessionId) {
+  const existing = await readActiveRun(cwd);
+  const session = sessionId ?? existing?.session_id;
+  const state = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
+  if (session !== undefined)
+    state.session_id = session;
+  await writeMarker(markerPath(cwd), state);
+  return state;
+}
+async function bindRun(cwd, runId) {
+  if (!RUN_ID_RE.test(runId))
+    throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
+  const existing = await readActiveRun(cwd);
+  if (existing === null)
+    throw new Error("no active-run marker to bind; run /orchestrate-run first");
+  if (existing.run_id !== PENDING && existing.run_id !== runId) {
+    throw new Error(`active-run marker is already bound to ${existing.run_id}`);
+  }
+  await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
+  resetReadBudget();
+  await ensurePatrolWisp(runId, cwd).catch(() => {});
+}
+function registerRunCommands(pi) {
+  pi.registerCommand("orchestrate-run", {
+    description: "Activate orchestrate run enforcement in this repository",
+    handler: async (_args, ctx) => {
+      try {
+        const state = await activateRun(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionId());
+        ctx.ui.notify(state.run_id === PENDING ? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)" : `orchestrate run active, bound to ${state.run_id}`, "info");
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
+      }
+    }
+  });
+  pi.registerCommand("orchestrate-bind", {
+    description: "Bind the active orchestrate run to a run epic id",
+    handler: async (args, ctx) => {
+      const runId = args.trim();
+      try {
+        await bindRun(ctx.sessionManager.getCwd(), runId);
+        ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    }
+  });
 }
 
 // src/shell.ts
@@ -332,9 +1302,9 @@ function tokenize(line) {
 function splitSegments(command) {
   const segments = [];
   const normalized = command.replaceAll("\\\n", " ");
-  const lines = normalized.split(`
+  const lines2 = normalized.split(`
 `);
-  for (const line of lines) {
+  for (const line of lines2) {
     const tokens = tokenize(line);
     let current = [];
     for (const token of tokens) {
@@ -423,6 +1393,28 @@ function basename(p) {
   const cut = p.lastIndexOf("/");
   return cut === -1 ? p : p.slice(cut + 1);
 }
+var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
+function stripGroupClose(token) {
+  let end = token.length;
+  for (;; ) {
+    const last = token[end - 1];
+    if (last !== ")" && last !== "}")
+      break;
+    const open = last === ")" ? "(" : "{";
+    const body = token.slice(0, end);
+    let depth = 0;
+    for (const char of body) {
+      if (char === open)
+        depth += 1;
+      else if (char === last)
+        depth -= 1;
+    }
+    if (depth >= 0)
+      break;
+    end -= 1;
+  }
+  return token.slice(0, end);
+}
 function parseBdInvocation(segment) {
   const assignments = new Map;
   let index = 0;
@@ -445,10 +1437,10 @@ function parseBdInvocation(segment) {
     }
   }
   index = skipTransparentPrefix(segment, index);
-  const head = segment[index];
-  if (head === undefined || basename(head) !== "bd")
+  const head = segment[index]?.replace(/^[({]+/, "");
+  if (head === undefined || head.length === 0 || basename(head) !== "bd")
     return null;
-  const rest = segment.slice(index + 1);
+  const rest = segment.slice(index + 1).map((token) => ({ token, stripped: stripGroupClose(token) })).filter(({ token, stripped }) => stripped.length > 0 || token.length === 0).map(({ stripped }) => stripped);
   const positionals = [];
   let skip = false;
   for (const token of rest) {
@@ -538,7 +1530,39 @@ function invokesCommand(command, argv) {
   return false;
 }
 
-// src/gates/actor.ts
+// src/gates/bd.ts
+var BD_NOTICE_MESSAGE = "com.srobroek.omp-orchestrate.bd-notice";
+var DECLARED_VERBS = Object.fromEntries(grammar_default.verbs.map((entry) => [entry.verb, true]));
+var VERB_LIST = grammar_default.verbs.map((entry) => entry.verb).join(" ");
+function splitFlag(token) {
+  if (!token.startsWith("-"))
+    return { flag: token };
+  const cut = token.indexOf("=");
+  if (cut === -1)
+    return { flag: token };
+  return { flag: token.slice(0, cut), inline: token.slice(cut + 1) };
+}
+function flagOperands(rest, names) {
+  const found = [];
+  for (let index = 0;index < rest.length; index++) {
+    const { flag, inline } = splitFlag(rest[index]);
+    if (names[flag] !== true)
+      continue;
+    const value = inline ?? rest[index + 1];
+    if (typeof value !== "string" || value.length === 0)
+      continue;
+    if (inline === undefined && value.startsWith("-"))
+      continue;
+    found.push({ flag, value });
+  }
+  return found;
+}
+function operation(invocation) {
+  if (invocation.subcommand === "comments" && invocation.positionals[0] === "add") {
+    return { name: "comment", operands: invocation.positionals.slice(1) };
+  }
+  return { name: invocation.subcommand, operands: invocation.positionals };
+}
 var READ_SUBCOMMANDS = {
   blocked: true,
   children: true,
@@ -620,11 +1644,11 @@ var WRITE_ACTIONS = {
   set: true,
   update: true
 };
-var ACTOR_KEYS = ["BEADS_ACTOR", "BD_ACTOR"];
+var ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"];
 function writesBeads(invocation) {
   if (invocation.hasClaim)
     return invocation.subcommand !== "ready";
-  const subcommand = invocation.subcommand;
+  const { subcommand } = invocation;
   if (!SUBCOMMAND.test(subcommand))
     return false;
   if (ADMIN_SUBCOMMANDS[subcommand] === true)
@@ -640,39 +1664,136 @@ function envCarriesActor(env) {
   if (env === null || typeof env !== "object")
     return false;
   const record = env;
-  return ACTOR_KEYS.some((key) => typeof record[key] === "string" && record[key].length > 0);
+  return ACTOR_VARS.some((variable) => {
+    const value = record[variable];
+    return typeof value === "string" && value.length > 0;
+  });
 }
-function gateActorAttribution(ctx, input) {
-  const command = input.command;
-  if (typeof command !== "string" || command.length === 0)
+var actorNotice = (invocation, env) => {
+  if (!writesBeads(invocation))
     return;
-  if (orcRole(ctx) === undefined)
+  if (ACTOR_VARS.some((variable) => (invocation.assignments.get(variable) ?? "").length > 0))
     return;
-  if (envCarriesActor(input.env))
+  if (envCarriesActor(env))
     return;
-  for (const invocation of bdInvocations(command)) {
-    if (!writesBeads(invocation))
+  const { name } = operation(invocation);
+  const written = invocation.hasClaim ? `${name} --claim` : name;
+  return `WARN bd identity: 'bd ${written}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` + `attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: ` + `'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd ${name} ...'.`;
+};
+var REDIRECTION = /^\d*(?:>>?|<)/;
+var BODY_FLAG = /^--?[A-Za-z]\S*$/;
+var EXPANSION = /[$`]/;
+var SUBSTITUTION = /^`[^`]*`$/;
+function commentBody(invocation) {
+  const operands = invocation.positionals;
+  let next = 0;
+  for (let index = 0;index < invocation.rest.length; index++) {
+    const token = invocation.rest[index];
+    if (next >= operands.length || token !== operands[next])
       continue;
-    if (ACTOR_KEYS.some((key) => (invocation.assignments.get(key) ?? "").length > 0))
+    next += 1;
+    if (!BEAD_ID.test(token))
       continue;
-    const written = invocation.hasClaim ? `${invocation.subcommand} --claim` : invocation.subcommand;
-    return {
-      block: true,
-      reason: `'bd ${written}' writes beads under no identity; prefix it with BEADS_ACTOR=<metadata.actor> BD_ACTOR=<metadata.actor> so the audit trail names the acting role`
-    };
+    const text = invocation.rest[index + 1];
+    if (text === undefined || BODY_FLAG.test(text) || REDIRECTION.test(text))
+      return;
+    return { id: token, text };
   }
   return;
 }
-
-// src/claim-state.ts
-var observed;
-function recordClaim(observation) {
-  if (observation.actor.length === 0 || observation.beadIds.length === 0)
+var commentVerbNotice = (invocation) => {
+  if (operation(invocation).name !== "comment")
     return;
-  observed = observation;
+  const body = commentBody(invocation);
+  if (body === undefined || SUBSTITUTION.test(body.text.trim()))
+    return;
+  const verb = commentVerb(body.text);
+  if (DECLARED_VERBS[verb] === true)
+    return;
+  if (EXPANSION.test(verb))
+    return;
+  return `WARN comment verb: 'bd comment ${body.id}' leads with '${verb}', which no protocol verb ` + `matches, so supervision reads your contract as unsatisfied and bounces you at exit over something ` + `this comment never showed you. Rewrite it now, leading with one of: ${VERB_LIST}. Case is free and ` + `decoration is normalised, but the first whitespace token is the whole signal, so 'NO WORK' parses ` + `as 'NO' and the underscored NO_WORK is the verb.`;
+};
+var TYPE_FLAGS = { "--type": true, "-t": true };
+var PARENT_FLAGS = { "--parent": true };
+var METADATA_FLAGS = { "--metadata": true, "--set-metadata": true };
+var LABEL_FLAGS = { "--labels": true, "-l": true };
+function jsonCarriesRole(value) {
+  if (!value.trimStart().startsWith("{"))
+    return false;
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed === null || typeof parsed !== "object" || !Object.hasOwn(parsed, ROUTING_KEY))
+      return false;
+    const role = parsed[ROUTING_KEY];
+    return typeof role === "string" && role.length > 0;
+  } catch {
+    return false;
+  }
 }
-function observedClaim() {
-  return observed;
+function routesToRole(rest) {
+  for (const { value } of flagOperands(rest, METADATA_FLAGS)) {
+    if (value.startsWith("@"))
+      return;
+    const cut = value.indexOf("=");
+    if (cut !== -1 && value.slice(0, cut) === ROUTING_KEY && value.length > cut + 1)
+      return true;
+    if (jsonCarriesRole(value))
+      return true;
+  }
+  for (const { value } of flagOperands(rest, LABEL_FLAGS)) {
+    if (value.split(",").some((label) => legacyRoleFromLabel(label.trim()) !== undefined))
+      return true;
+  }
+  return false;
+}
+var bugRouteNotice = (invocation) => {
+  if (operation(invocation).name !== "create")
+    return;
+  const type = flagOperands(invocation.rest, TYPE_FLAGS)[0];
+  if (type?.value !== "bug")
+    return;
+  const parented = flagOperands(invocation.rest, PARENT_FLAGS).length > 0;
+  const routed = routesToRole(invocation.rest);
+  if (routed === undefined)
+    return;
+  if (parented && routed)
+    return;
+  const missing = [
+    parented ? undefined : "--parent <epic>",
+    routed ? undefined : `--metadata '{"${ROUTING_KEY}":"<role>"}'`
+  ].filter((flag) => flag !== undefined);
+  return `WARN bug bead: '${type.flag} ${type.value}' with no ${missing.join(" and no ")}, so the bead lands ` + `where no queue can reach it -- 'bd ready --parent <epic> --metadata-field ${ROUTING_KEY}=<role> ` + `--unassigned' is how a worker finds it, and the close-out gate faults it as stranded on a later ` + `session rather than on yours. Add ${missing.join(" and ")}: the epic you work under, and the role ` + `that would fix it, with the assignee left empty.`;
+};
+var NOTICES = [actorNotice, commentVerbNotice, bugRouteNotice];
+async function gateBdDiscipline(pi, ctx, input) {
+  const command = input.command;
+  if (typeof command !== "string" || command.length === 0)
+    return;
+  const invocations = bdInvocations(command);
+  if (invocations.length === 0)
+    return;
+  const run = await readActiveRun(ctx.cwd).catch(() => null);
+  if (run === null)
+    return;
+  const notices = [];
+  for (const invocation of invocations) {
+    for (const notice of NOTICES) {
+      const text = notice(invocation, input.env);
+      if (text !== undefined && !notices.includes(text))
+        notices.push(text);
+    }
+  }
+  if (notices.length > 0) {
+    pi.sendMessage({
+      customType: BD_NOTICE_MESSAGE,
+      content: notices.join(`
+`),
+      display: true,
+      attribution: "user"
+    }, { deliverAs: "steer" });
+  }
+  return;
 }
 
 // src/scope.ts
@@ -802,18 +1923,90 @@ function scopeOf(metadata) {
 }
 
 // src/gates/claim.ts
-function readyLabelRoles(rest) {
-  const roles = [];
+function splitFlag2(token) {
+  if (!token.startsWith("-"))
+    return { flag: token };
+  const cut = token.indexOf("=");
+  if (cut === -1)
+    return { flag: token };
+  return { flag: token.slice(0, cut), inline: token.slice(cut + 1) };
+}
+var QUEUE_METADATA_FLAGS = { "--metadata-field": true };
+var QUEUE_LABEL_FLAGS = { "--label": true, "-l": true, "--label-any": true };
+function readyQueueRoles(rest) {
+  const filters = [];
   for (let index = 0;index < rest.length; index++) {
-    const token = rest[index];
-    if (token !== "--label" && token !== "-l" && token !== "--label-any")
+    const { flag, inline } = splitFlag2(rest[index]);
+    const value = inline ?? rest[index + 1];
+    if (typeof value !== "string")
       continue;
-    const value = rest[index + 1];
-    if (typeof value === "string" && value.startsWith("agent:")) {
-      roles.push(value.slice("agent:".length));
+    if (QUEUE_METADATA_FLAGS[flag] === true) {
+      const cut = value.indexOf("=");
+      if (cut === -1 || value.slice(0, cut) !== ROUTING_KEY)
+        continue;
+      filters.push({ role: value.slice(cut + 1), spelling: value });
+      continue;
+    }
+    if (QUEUE_LABEL_FLAGS[flag] === true) {
+      const role = legacyRoleFromLabel(value);
+      if (role !== undefined)
+        filters.push({ role, spelling: value });
     }
   }
-  return roles;
+  return filters;
+}
+var ROUTING_WRITERS = { architect: true };
+var METADATA_WRITE_FLAGS = {
+  "--metadata": true,
+  "--set-metadata": true,
+  "--unset-metadata": true
+};
+var ROUTING_WRITE_EXEMPT = { create: true };
+function jsonCarriesRouting(value) {
+  if (!value.trimStart().startsWith("{"))
+    return false;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed !== null && typeof parsed === "object" && Object.hasOwn(parsed, ROUTING_KEY);
+  } catch {
+    return false;
+  }
+}
+function routingMetadataWrite(invocation) {
+  if (ROUTING_WRITE_EXEMPT[invocation.subcommand] === true)
+    return;
+  for (let index = 0;index < invocation.rest.length; index++) {
+    const { flag, inline } = splitFlag2(invocation.rest[index]);
+    if (METADATA_WRITE_FLAGS[flag] !== true)
+      continue;
+    const value = inline ?? invocation.rest[index + 1];
+    if (typeof value !== "string")
+      continue;
+    if (flag === "--unset-metadata") {
+      if (value.split(",").some((key) => key.trim() === ROUTING_KEY))
+        return `${flag} ${ROUTING_KEY}`;
+      continue;
+    }
+    const cut = value.indexOf("=");
+    if (cut !== -1 && value.slice(0, cut) === ROUTING_KEY)
+      return `${flag} ${value}`;
+    if (jsonCarriesRouting(value))
+      return `${flag} ${value}`;
+  }
+  return;
+}
+function routingWriteDenial(invocation, sessionRoleName) {
+  if (sessionRoleName === undefined)
+    return;
+  if (ROUTING_WRITERS[sessionRoleName] === true)
+    return;
+  const written = routingMetadataWrite(invocation);
+  if (written === undefined)
+    return;
+  return {
+    block: true,
+    reason: `'${written}' rewrites metadata.${ROUTING_KEY}, which is what routes the bead, and ${sessionRoleName} ` + `may not re-point work. Routing is assigned by the architect that decomposed the epic. Hand off with ` + `the next role's agent: label instead -- that is a signal, not a route -- and if the bead is genuinely ` + `misrouted, say so on an escalation wisp rather than re-routing it yourself. Filing new work routed is ` + `allowed: bd create carries ${ROUTING_KEY} freely.`
+  };
 }
 function metadataRecord(bead) {
   const raw = bead?.metadata;
@@ -856,19 +2049,26 @@ async function gateClaimEligibility(ctx, input) {
   const command = input.command;
   if (typeof command !== "string" || command.length === 0)
     return;
-  const claims = bdInvocations(command).filter((invocation) => invocation.hasClaim);
-  if (claims.length === 0)
+  const invocations = bdInvocations(command);
+  if (invocations.length === 0)
     return;
   const sessionRoleName = orcRole(ctx);
+  for (const invocation of invocations) {
+    const denial = routingWriteDenial(invocation, sessionRoleName);
+    if (denial)
+      return denial;
+  }
+  const claims = invocations.filter((invocation) => invocation.hasClaim);
+  if (claims.length === 0)
+    return;
   for (const claim of claims) {
     const actor = claim.assignments.get("BEADS_ACTOR") ?? claim.assignments.get("BD_ACTOR") ?? "";
     if (claim.subcommand === "ready") {
-      const queueRoles = readyLabelRoles(claim.rest);
-      for (const queueRole of queueRoles) {
-        if (sessionRoleName !== undefined && queueRole !== sessionRoleName) {
+      for (const filter of readyQueueRoles(claim.rest)) {
+        if (sessionRoleName !== undefined && filter.role !== sessionRoleName) {
           return {
             block: true,
-            reason: `queue 'agent:${queueRole}' does not match this session's role '${sessionRoleName}'; pull from your own queue`
+            reason: `queue '${filter.spelling}' does not match this session's role '${sessionRoleName}'; pull from your own queue`
           };
         }
       }
@@ -878,11 +2078,11 @@ async function gateClaimEligibility(ctx, input) {
     }
     for (const beadId of claim.positionals) {
       const bead = await bdShow(beadId);
-      const beadRole = roleFromLabels(bead?.labels);
-      if (beadRole !== undefined && sessionRoleName !== undefined && beadRole !== sessionRoleName) {
+      const routing = beadRouting(bead);
+      if (routing !== undefined && sessionRoleName !== undefined && routing.role !== sessionRoleName) {
         return {
           block: true,
-          reason: `bead '${beadId}' is routed to agent:${beadRole}; this session is ${sessionRoleName} and may not claim it`
+          reason: `bead '${beadId}' is routed to ${routing.spelling}; this session is ${sessionRoleName} and may not claim it`
         };
       }
       const conflict = await scopeConflict(bead);
@@ -895,489 +2095,7 @@ async function gateClaimEligibility(ctx, input) {
   return;
 }
 
-// src/gates/comment-verb.ts
-var BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
-var REDIRECTION = /^\d*(?:>>?|<)/;
-var EXPANSION = /[$`]/;
-function commentBody(invocation) {
-  const operands = invocation.positionals;
-  let next = 0;
-  for (let index = 0;index < invocation.rest.length; index++) {
-    const token = invocation.rest[index];
-    if (next >= operands.length || token !== operands[next])
-      continue;
-    next += 1;
-    if (!BEAD_ID.test(token))
-      continue;
-    const body = invocation.rest[index + 1];
-    if (body === undefined || body.startsWith("-"))
-      return;
-    if (REDIRECTION.test(body))
-      return;
-    return body;
-  }
-  return;
-}
-function gateCommentVerb(ctx, input) {
-  const command = input.command;
-  if (typeof command !== "string" || command.length === 0)
-    return;
-  if (orcRole(ctx) === undefined)
-    return;
-  for (const invocation of bdInvocations(command)) {
-    const grouped = invocation.subcommand === "comments" && invocation.positionals[0] === "add";
-    if (invocation.subcommand !== "comment" && !grouped)
-      continue;
-    const body = commentBody(invocation);
-    if (body === undefined)
-      continue;
-    const verb = commentVerb(body);
-    if (EXPANSION.test(verb) || COMMENT_VERBS[verb] === true)
-      continue;
-    return {
-      block: true,
-      reason: `this comment opens with '${verb}', which is not a protocol verb; lead with one so the bead history reads without narration \u2014 the 11-verb set, a disposition (LANDED, BOUNCED, IDLE, FAILED), or a supervision verb. Free prose belongs after the verb, not instead of it.`
-    };
-  }
-  return;
-}
-
-// src/gates/exit.ts
-import path from "path";
-// src/contracts/architect.json
-var architect_default = {
-  agent: "architect",
-  tier: "T1",
-  _comment: "Single source of truth for the SubagentStop evaluator AND the generated 'Your bead contract' block in the agent definition (compile-time). Do not hand-edit the generated block. Lifecycle phases (reported/in_review/approved/...) are NOT bd statuses; they derive from status + labels + gates + review-wisp closure. A specialist never CLOSES its own node, so `closed` is the forbidden built-in status.",
-  completion: [
-    {
-      check: "branch",
-      require: "metadata.branch",
-      when: "git"
-    },
-    {
-      check: "push",
-      require: "metadata.push",
-      when: "git"
-    },
-    {
-      check: "output_ref",
-      require: "metadata.output_ref",
-      when: "artifact"
-    },
-    {
-      check: "artifact_path",
-      require: "artifact.output_ref contained",
-      when: "artifact"
-    },
-    {
-      check: "handoff",
-      require: "label ~ ^agent:reviewer$",
-      when: "git"
-    },
-    {
-      check: "unclaimed",
-      require: "assignee cleared",
-      when: "git"
-    },
-    {
-      check: "reported",
-      require: "comment.verb in [REPORTED]"
-    }
-  ],
-  authority: {
-    deny_states: [
-      "closed"
-    ],
-    deny_metadata: [
-      "merge_sha",
-      "pr"
-    ]
-  },
-  escape: {
-    state: "blocked",
-    require: "comment.verb in [FAILED, BLOCKED]"
-  },
-  pause: [
-    "open-escalation-wisp-linked-to-node"
-  ],
-  bounce: {
-    max_attempts: 3
-  }
-};
-// src/contracts/generic.json
-var generic_default = {
-  agent: "*",
-  tier: "generic-fallback",
-  _comment: "Applied by the matcher-less SubagentStop hook to ANY agent that holds a claim but has no per-agent rules file (unlisted/ad-hoc agents, T3 conditional binding). Minimal contract: report before stopping, never close a node you didn't own, failure is a valid exit. This is the claim<->contract net for the whole fleet.",
-  completion: [
-    { check: "reported", require: "comment.verb in [REPORTED]" }
-  ],
-  authority: {
-    deny_states: ["closed"],
-    deny_metadata: ["merge_sha", "pr"]
-  },
-  escape: {
-    state: "blocked",
-    require: "comment.verb in [FAILED, BLOCKED]"
-  },
-  bounce: { max_attempts: 3 }
-};
-// src/contracts/implementer.json
-var implementer_default = {
-  agent: "implementer",
-  tier: "T1",
-  _comment: "Derived from architect.json: the same writer exit contract for a single node. Git evidence under apply=false is the captured branch plus the final commit sha (`metadata.branch`, `metadata.head_sha`) \u2014 the implementer never pushes; the architect integrates and pushes. Keeps `pause` so a worker waiting on an open escalation wisp is not bounced for the delay. It does NOT own decomposition, so it never creates feature beads; that is prose in the agent body, not a contract predicate. Like the architect it may never CLOSE its own node, and never writes merge_sha or pr \u2014 those belong to the shepherd.",
-  completion: [
-    {
-      check: "branch",
-      require: "metadata.branch",
-      when: "git"
-    },
-    {
-      check: "delivery",
-      require: "metadata.head_sha",
-      when: "git"
-    },
-    {
-      check: "output_ref",
-      require: "metadata.output_ref",
-      when: "artifact"
-    },
-    {
-      check: "artifact_path",
-      require: "artifact.output_ref contained",
-      when: "artifact"
-    },
-    {
-      check: "handoff",
-      require: "label ~ ^agent:reviewer$",
-      when: "git"
-    },
-    {
-      check: "unclaimed",
-      require: "assignee cleared",
-      when: "git"
-    },
-    {
-      check: "reported",
-      require: "comment.verb in [REPORTED]"
-    }
-  ],
-  authority: {
-    deny_states: [
-      "closed"
-    ],
-    deny_metadata: [
-      "merge_sha",
-      "pr"
-    ]
-  },
-  escape: {
-    state: "blocked",
-    require: "comment.verb in [FAILED, BLOCKED]"
-  },
-  pause: [
-    "open-escalation-wisp-linked-to-node"
-  ],
-  bounce: {
-    max_attempts: 3
-  }
-};
-// src/contracts/researcher.json
-var researcher_default = {
-  agent: "researcher",
-  tier: "T1",
-  _comment: "Research nodes produce durable evidence and hand off. Escalation wisps promote one ADVICE or BLOCKED summary to the linked node.",
-  completion: [
-    {
-      check: "output_ref",
-      require: "metadata.output_ref",
-      when: [
-        "artifact",
-        "comment"
-      ]
-    },
-    {
-      check: "artifact_path",
-      require: "artifact.output_ref contained",
-      when: "artifact"
-    },
-    {
-      check: "handoff",
-      require: "label ~ ^agent:reviewer$",
-      when: [
-        "artifact",
-        "comment"
-      ]
-    },
-    {
-      check: "unclaimed",
-      require: "assignee cleared",
-      when: [
-        "artifact",
-        "comment"
-      ]
-    },
-    {
-      check: "reported",
-      require: "comment.verb in [REPORTED]",
-      when: [
-        "artifact",
-        "comment"
-      ]
-    },
-    {
-      check: "answer",
-      require: "linked.comment.verb in [ADVICE, BLOCKED]",
-      when: "escalation"
-    }
-  ],
-  authority: {
-    deny_states: [
-      "merged",
-      "approved"
-    ],
-    deny_metadata: [
-      "push",
-      "merge_sha",
-      "pr"
-    ]
-  },
-  escape: {
-    state: "blocked",
-    require: "comment.verb in [FAILED, BLOCKED]"
-  },
-  bounce: {
-    max_attempts: 3
-  }
-};
-// src/contracts/reviewer.json
-var reviewer_default = {
-  agent: "reviewer",
-  tier: "T1",
-  _comment: "Claims a review wisp and writes the REVIEW verdict on its linked node. Approval closes the wisp; changes release it open for the next round.",
-  completion: [
-    { check: "verdict", require: "linked.comment.verb in [REVIEW, BLOCKED]" }
-  ],
-  authority: {
-    deny_states: ["merged"],
-    deny_metadata: ["push", "merge_sha", "pr"]
-  },
-  escape: {
-    state: "blocked",
-    require: "comment.verb in [FAILED, BLOCKED]"
-  },
-  bounce: { max_attempts: 3 }
-};
-// src/contracts/shepherd.json
-var shepherd_default = {
-  agent: "shepherd",
-  tier: "T2",
-  _comment: "In-run merge shepherd (distinct from the standalone pr-shepherd daemon). Per-transaction authority: claims one merge bead, lands or bounces, releases. It legitimately writes merge_sha/pr and closes merge beads. deny_states blocks review verdicts. deny_metadata omits branch/base_sha because those are pre-existing merge-bead anchors and the evaluator cannot attribute field authorship. The bounce-route check (a bounced fix must carry metadata.stage=fix and metadata.origin) and the landed check (metadata.merge_sha when merged) are NOT here: both are conditional on which disposition was written, and the predicate grammar has no verb-conditional form. Until it does, shepherd.md prose owns them.",
-  completion: [
-    { check: "disposition", require: "comment.verb in [LANDED, BOUNCED, IDLE, BLOCKED]" }
-  ],
-  authority: {
-    deny_states: [
-      "approved",
-      "changes_requested",
-      "reported"
-    ],
-    deny_metadata: [
-      "output_ref"
-    ]
-  },
-  escape: {
-    state: "blocked",
-    require: "comment.verb in [FAILED, BLOCKED]"
-  },
-  bounce: {
-    max_attempts: 3
-  }
-};
-
-// src/gates/exit.ts
-var CONTRACTS = {
-  architect: architect_default,
-  implementer: implementer_default,
-  researcher: researcher_default,
-  reviewer: reviewer_default,
-  shepherd: shepherd_default,
-  generic: generic_default
-};
-var ORCHESTRATOR_ANCHORS = {
-  actor: true,
-  artifacts_dir: true,
-  base_ref: true,
-  base_sha: true,
-  branch: true,
-  complexity_tier: true,
-  execution_agent: true,
-  execution_dispatch: true,
-  execution_kind: true,
-  execution_task_kind: true,
-  lease_token: true,
-  origin: true,
-  runtime_context: true,
-  runtime_handle: true,
-  scope: true,
-  worktree: true
-};
-function resourceKind(bead) {
-  const declared = metadataString(bead, "execution_kind");
-  if (declared !== undefined)
-    return declared;
-  if (metadataString(bead, "worktree") !== undefined)
-    return "git";
-  if (metadataString(bead, "artifacts_dir") !== undefined)
-    return "artifact";
-  return;
-}
-function applies(check, kind) {
-  if (check.when === undefined)
-    return true;
-  const wanted = Array.isArray(check.when) ? check.when : [check.when];
-  return kind !== undefined && wanted.includes(kind);
-}
-function satisfies(predicate, evidence) {
-  const { bead, verbs, linkedVerbs } = evidence;
-  const trimmed = predicate.trim();
-  const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
-  if (metadataKey?.[1] !== undefined)
-    return metadataString(bead, metadataKey[1]) !== undefined;
-  if (trimmed === "assignee cleared") {
-    return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
-  }
-  if (trimmed === "artifact.output_ref contained") {
-    const output = metadataString(bead, "output_ref");
-    const artifacts = metadataString(bead, "artifacts_dir");
-    if (output === undefined || artifacts === undefined)
-      return false;
-    if (!path.isAbsolute(output) || !path.isAbsolute(artifacts))
-      return false;
-    const inside = output.startsWith(`${artifacts}${path.sep}`);
-    const worktree = metadataString(bead, "worktree");
-    const underWorktree = worktree !== undefined && output.startsWith(`${worktree}${path.sep}`);
-    return inside && output !== artifacts && !underWorktree;
-  }
-  const labelMatch = /^label\s*~\s*(.+)$/.exec(trimmed);
-  if (labelMatch?.[1] !== undefined) {
-    let pattern;
-    try {
-      pattern = new RegExp(labelMatch[1].replace(/^["']|["']$/g, ""));
-    } catch {
-      return false;
-    }
-    return (bead.labels ?? []).some((label) => pattern.test(label));
-  }
-  const verbMatch = /^(linked\.)?comment\.verb\s+in\s*\[([^\]]*)\]$/.exec(trimmed);
-  if (verbMatch !== null) {
-    const wanted = (verbMatch[2] ?? "").split(",").map((entry) => entry.trim().toUpperCase()).filter((entry) => entry.length > 0);
-    const pool = verbMatch[1] === undefined ? verbs : linkedVerbs;
-    return pool.some((verb) => wanted.includes(verb));
-  }
-  return true;
-}
-async function collectEvidence(bead) {
-  const verbs = (await bdComments(bead.id)).map((comment) => commentVerb(comment.text));
-  const linkedVerbs = [];
-  for (const type of ["relates-to", "replies-to"]) {
-    for (const linkedId of await bdLinked(bead.id, type)) {
-      for (const comment of await bdComments(linkedId)) {
-        linkedVerbs.push(commentVerb(comment.text));
-      }
-    }
-  }
-  return { bead, verbs, linkedVerbs };
-}
-var unclaimedReminded = false;
-async function gateUnclaimedExit(ctx, input) {
-  if (orcRole(ctx) === undefined)
-    return;
-  if (unclaimedReminded)
-    return;
-  if (input !== undefined && JSON.stringify(input).includes("NO_WORK"))
-    return;
-  unclaimedReminded = true;
-  return {
-    block: true,
-    reason: "You are exiting without ever claiming a bead. Work is pulled, not invented: run your role's `bd ready ... --claim` and deliver the bead you get, or report NO_WORK and yield. Uncommitted work under no claim reaches no branch and no bead."
-  };
-}
-async function gateExitContract(ctx, input) {
-  const claim = observedClaim();
-  const beadId = claim?.beadIds[0];
-  if (beadId === undefined)
-    return await gateUnclaimedExit(ctx, input);
-  const bead = await bdShow(beadId);
-  if (bead === null)
-    return;
-  const role = orcRole(ctx) ?? roleFromLabels(bead.labels) ?? "generic";
-  const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
-  if (contract === undefined)
-    return;
-  const evidence = await collectEvidence(bead);
-  const status = (bead.status ?? "").toLowerCase();
-  if (contract.escape?.state !== undefined && status === contract.escape.state) {
-    if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence)) {
-      return;
-    }
-  }
-  const kind = resourceKind(bead);
-  const failures = [];
-  for (const check of contract.completion ?? []) {
-    if (!applies(check, kind))
-      continue;
-    if (!satisfies(check.require, evidence)) {
-      failures.push({ check: check.check, detail: `unsatisfied: ${check.require}` });
-    }
-  }
-  const stateLabels = (bead.labels ?? []).filter((label) => label.startsWith("state:")).map((label) => label.slice("state:".length).toLowerCase());
-  for (const denied of contract.authority?.deny_states ?? []) {
-    if (status === denied || stateLabels.includes(denied)) {
-      failures.push({ check: "state-authority", detail: `status=${denied} set by a role forbidden to set it` });
-    }
-  }
-  for (const denied of contract.authority?.deny_metadata ?? []) {
-    if (ORCHESTRATOR_ANCHORS[denied] === true)
-      continue;
-    if (metadataString(bead, denied) !== undefined) {
-      failures.push({
-        check: "metadata-authority",
-        detail: `metadata.${denied} is set and this role may not own it; unset it or escalate`
-      });
-    }
-  }
-  if (failures.length === 0)
-    return;
-  const attempts = Number(metadataString(bead, "stop_attempts") ?? "0") + 1;
-  const maxAttempts = contract.bounce?.max_attempts ?? 3;
-  if (attempts >= maxAttempts) {
-    await bdRun(["comment", beadId, `BOUNCE agent=${role} attempt=${attempts}`]);
-    if (status === "closed")
-      await bdRun(["reopen", beadId, "--reason", "contract bounce"]);
-    await bdRun([
-      "update",
-      beadId,
-      "--assignee",
-      "",
-      "--status",
-      "open",
-      "--metadata",
-      JSON.stringify({ stop_attempts: 0, review_round: 0 })
-    ]);
-    return;
-  }
-  await bdRun(["update", beadId, "--metadata", JSON.stringify({ stop_attempts: attempts })]);
-  return {
-    block: true,
-    reason: JSON.stringify({ bead: beadId, agent: role, attempt: attempts, failed_checks: failures })
-  };
-}
-
 // src/gates/one-claim.ts
-var BEAD_ID2 = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
 function claimedBeadIds(invocation) {
   const operands = invocation.positionals;
   let next = 0;
@@ -1386,7 +2104,7 @@ function claimedBeadIds(invocation) {
   for (const token of invocation.rest) {
     if (next < operands.length && token === operands[next]) {
       next += 1;
-      if (BEAD_ID2.test(token) && !run.includes(token))
+      if (BEAD_ID.test(token) && !run.includes(token))
         run.push(token);
       continue;
     }
@@ -1418,346 +2136,6 @@ function gateOneClaim(ctx, input) {
   return;
 }
 
-// src/gates/pin.ts
-import * as path3 from "path";
-
-// src/run-state.ts
-import fs from "fs/promises";
-import path2 from "path";
-
-// src/supervision.ts
-var TERMINAL = { aborted: true, completed: true, failed: true };
-var TIMEOUT_MS = 15000;
-var spawnExec = async (argv, cwd) => {
-  const [bin, ...args] = argv;
-  if (bin === undefined)
-    return null;
-  try {
-    const proc = Bun.spawn([bin, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-    const timer = setTimeout(() => proc.kill(), TIMEOUT_MS);
-    try {
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited
-      ]);
-      return { code, stdout, stderr };
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    return null;
-  }
-};
-function lines(stdout) {
-  const out = [];
-  for (const raw of stdout.split(`
-`)) {
-    const line = raw.trim();
-    if (line !== "")
-      out.push(line);
-  }
-  return out;
-}
-async function reapChild(child, options) {
-  const outcome = { child: child.id, reaped: [] };
-  if (TERMINAL[child.status] !== true)
-    return outcome;
-  resetReadBudget();
-  const candidates = await candidateBeads(child);
-  if (candidates.length === 0)
-    return outcome;
-  const branch = await capturedBranch(child.id, options);
-  if (branch !== undefined)
-    outcome.branch = branch;
-  for (const bead of candidates) {
-    outcome.reaped.push(await reapBead(bead, child, branch));
-  }
-  return outcome;
-}
-async function candidateBeads(child) {
-  const claimed = await bdList(["list", "--assignee", child.id, "--status", "in_progress", "--json"]);
-  if (claimed.length > 0)
-    return claimed;
-  if (child.status !== "completed")
-    return [];
-  const stamped = await bdList([
-    "list",
-    "--metadata-field",
-    `actor=${child.id}`,
-    "--status",
-    "open,in_progress",
-    "--json"
-  ]);
-  const mine = [];
-  for (const bead of stamped) {
-    const assignee = typeof bead.assignee === "string" ? bead.assignee : "";
-    if (assignee === "" || assignee === child.id)
-      mine.push(bead);
-  }
-  return mine;
-}
-async function reapBead(bead, child, branch) {
-  if (child.status !== "completed") {
-    const evidence = branch === undefined ? "no captured branch, nothing to recover" : `commits preserved on ${branch}`;
-    await reclaim(bead, `RECLAIM child ${child.id} died (${child.status}); ${evidence}`, branch);
-    return { bead: bead.id, case: branch === undefined ? "died-without-work" : "died-with-work", failures: [] };
-  }
-  const failures = await contractFailures(bead);
-  const claimHeld = typeof bead.assignee === "string" && bead.assignee !== "";
-  if (failures.length === 0 && !claimHeld) {
-    await stampBranch(bead, branch);
-    return { bead: bead.id, case: "clean", failures: [] };
-  }
-  const why = failures.length > 0 ? failures.join(", ") : "claim still held";
-  await reclaim(bead, `RECLAIM child ${child.id} exited without completing: ${why}`, branch);
-  return { bead: bead.id, case: "incomplete", failures };
-}
-async function reclaim(bead, reason, branch) {
-  await bdRun(["comment", bead.id, reason]);
-  const argv = ["update", bead.id, "--assignee", "", "--status", "open"];
-  if (branch !== undefined)
-    argv.push("--set-metadata", `recovered_branch=${branch}`);
-  await bdRun(argv);
-}
-async function stampBranch(bead, branch) {
-  if (branch === undefined)
-    return;
-  if (metadataString(bead, "branch") !== undefined)
-    return;
-  await bdRun(["update", bead.id, "--set-metadata", `branch=${branch}`]);
-}
-async function capturedBranch(id, options) {
-  const exec = options.exec ?? spawnExec;
-  const wanted = `omp/task/${id}`;
-  const result = await exec(["git", "branch", "--list", `${wanted}*`], options.cwd);
-  if (result === null || result.code !== 0)
-    return;
-  for (const line of lines(result.stdout)) {
-    if (line.replace(/^[*+]\s*/, "") === wanted)
-      return wanted;
-  }
-  return;
-}
-var CONTRACTS2 = {
-  architect: architect_default,
-  implementer: implementer_default,
-  researcher: researcher_default,
-  reviewer: reviewer_default,
-  shepherd: shepherd_default,
-  generic: generic_default
-};
-async function contractFailures(bead) {
-  const role = roleFromLabels(bead.labels) ?? "generic";
-  const contract = Object.hasOwn(CONTRACTS2, role) ? CONTRACTS2[role] ?? generic_default : generic_default;
-  const evidence = await collectEvidence2(bead);
-  const status = (bead.status ?? "").toLowerCase();
-  if (contract.escape?.state === status) {
-    if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence))
-      return [];
-  }
-  const kind = resourceKind(bead);
-  const failures = [];
-  for (const check of contract.completion ?? []) {
-    if (applies(check, kind) && !satisfies(check.require, evidence))
-      failures.push(check.check);
-  }
-  return failures;
-}
-async function collectEvidence2(bead) {
-  const verbs = (await bdComments(bead.id)).map((comment) => commentVerb(comment.text));
-  const linkedVerbs = [];
-  for (const type of ["relates-to", "replies-to"]) {
-    for (const linkedId of await bdLinked(bead.id, type)) {
-      for (const comment of await bdComments(linkedId))
-        linkedVerbs.push(commentVerb(comment.text));
-    }
-  }
-  return { bead, verbs, linkedVerbs };
-}
-async function ensurePatrolWisp(epicId, cwd) {
-  const linked = await bdList(["dep", "list", epicId, "--direction=up", "--type", "relates-to", "--json"], undefined, cwd);
-  for (const bead of linked) {
-    const wispType = typeof bead.wisp_type === "string" ? bead.wisp_type : "";
-    if (wispType === "patrol" && (bead.status ?? "").toLowerCase() !== "closed")
-      return;
-  }
-  await bdRun([
-    "create",
-    `patrol: ${epicId} claim reconciliation`,
-    "--ephemeral",
-    "--wisp-type",
-    "patrol",
-    "--deps",
-    `relates-to:${epicId}`,
-    "--silent"
-  ], undefined, cwd);
-}
-function registerSupervision(pi) {
-  let subscribed = false;
-  pi.on("session_start", (_event, ctx) => {
-    if (subscribed)
-      return;
-    subscribed = true;
-    pi.events.on("task:subagent:lifecycle", (data) => handleLifecycle(pi, data, ctx.cwd));
-  });
-}
-async function handleLifecycle(pi, data, cwd) {
-  const child = asLifecycle(data);
-  if (child === null)
-    return;
-  try {
-    const outcome = await reapChild(child, { cwd });
-    for (const reaped of outcome.reaped) {
-      pi.logger.info("orchestrate reaper", {
-        child: child.id,
-        bead: reaped.bead,
-        case: reaped.case,
-        branch: outcome.branch,
-        failures: reaped.failures
-      });
-    }
-  } catch (error) {
-    pi.logger.error("orchestrate reaper failed open", {
-      child: child.id,
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
-function asLifecycle(data) {
-  if (data === null || typeof data !== "object")
-    return null;
-  if (!("id" in data) || typeof data.id !== "string" || data.id.length === 0)
-    return null;
-  if (!("status" in data) || typeof data.status !== "string")
-    return null;
-  return { id: data.id, status: data.status };
-}
-
-// src/run-state.ts
-var PENDING = "pending";
-var RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-function markerPath(cwd) {
-  const configured = process.env.ORCHESTRATE_MARKER_FILE;
-  if (configured !== undefined && configured.length > 0)
-    return path2.resolve(cwd, configured);
-  return path2.join(cwd, ".orchestration", ".active-run");
-}
-async function readActiveRun(cwd) {
-  let raw;
-  try {
-    raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
-  } catch {
-    return null;
-  }
-  if (raw.length === 0)
-    return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { schema_version: 1, run_id: raw };
-  }
-  return asActiveRun(parsed);
-}
-function asActiveRun(value) {
-  if (typeof value === "string")
-    return value.length > 0 ? { schema_version: 1, run_id: value } : null;
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    return null;
-  const record = value;
-  const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
-  const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
-  const repoRoot = typeof record.repo_root === "string" && record.repo_root.length > 0 ? record.repo_root : undefined;
-  const state = { schema_version: 1, run_id: runId };
-  if (sessionId !== undefined)
-    state.session_id = sessionId;
-  if (repoRoot !== undefined)
-    state.repo_root = repoRoot;
-  return state;
-}
-async function writeMarker(target, state) {
-  await fs.mkdir(path2.dirname(target), { recursive: true });
-  const temporary = `${target}.${process.pid}.tmp`;
-  try {
-    await fs.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}
-`, "utf8");
-    await fs.rename(temporary, target);
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
-}
-async function activateRun(cwd, sessionId) {
-  const existing = await readActiveRun(cwd);
-  const session = sessionId ?? existing?.session_id;
-  const state = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
-  if (session !== undefined)
-    state.session_id = session;
-  state.repo_root = path2.resolve(cwd);
-  await writeMarker(markerPath(cwd), state);
-  return state;
-}
-async function bindRun(cwd, runId) {
-  if (!RUN_ID_RE.test(runId))
-    throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
-  const existing = await readActiveRun(cwd);
-  if (existing === null)
-    throw new Error("no active-run marker to bind; run /orchestrate-run first");
-  if (existing.run_id !== PENDING && existing.run_id !== runId) {
-    throw new Error(`active-run marker is already bound to ${existing.run_id}`);
-  }
-  await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
-  resetReadBudget();
-  await ensurePatrolWisp(runId, cwd).catch(() => {});
-}
-function registerRunCommands(pi) {
-  pi.registerCommand("orchestrate-run", {
-    description: "Activate orchestrate run enforcement in this repository",
-    handler: async (_args, ctx) => {
-      try {
-        const state = await activateRun(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionId());
-        ctx.ui.notify(state.run_id === PENDING ? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)" : `orchestrate run active, bound to ${state.run_id}`, "info");
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
-      }
-    }
-  });
-  pi.registerCommand("orchestrate-bind", {
-    description: "Bind the active orchestrate run to a run epic id",
-    handler: async (args, ctx) => {
-      const runId = args.trim();
-      try {
-        await bindRun(ctx.sessionManager.getCwd(), runId);
-        ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    }
-  });
-}
-
-// src/gates/pin.ts
-var BEADS_SUBDIR = ".beads";
-async function runPinEnv(ctx, input) {
-  const command = input.command;
-  if (typeof command !== "string" || command.length === 0)
-    return;
-  if (bdInvocations(command).length === 0)
-    return;
-  const cwd = ctx.cwd ?? process.cwd();
-  const marker = await readActiveRun(cwd).catch(() => null);
-  const root = marker?.repo_root;
-  if (root === undefined || root.length === 0)
-    return;
-  const relative2 = path3.relative(root, cwd);
-  const inside = relative2.length === 0 || !relative2.startsWith("..") && !path3.isAbsolute(relative2);
-  if (inside)
-    return;
-  return { BEADS_DIR: path3.join(root, BEADS_SUBDIR) };
-}
-
 // src/gates/readonly.ts
 var BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"];
 function beadWriteFreeEnv(pi, ctx) {
@@ -1785,7 +2163,7 @@ function reviseBashEnv(input, additions) {
 }
 
 // src/gates/worktree.ts
-import path4 from "path";
+import path3 from "path";
 import fs2 from "fs/promises";
 var GATED_WRITE_TOOLS = { bash: true, edit: true, write: true };
 async function realpathOrUndefined(target) {
@@ -1796,33 +2174,33 @@ async function realpathOrUndefined(target) {
   }
 }
 function within(child, parent) {
-  return child === parent || child.startsWith(`${parent}${path4.sep}`);
+  return child === parent || child.startsWith(`${parent}${path3.sep}`);
 }
 function isolationBase() {
   const configured = process.env.OMP_WORKTREE_DIR;
   if (configured !== undefined && configured.length > 0)
     return configured;
-  return path4.join(process.env.HOME ?? "", ".omp", "wt");
+  return path3.join(process.env.HOME ?? "", ".omp", "wt");
 }
 var MAX_HOPS = 32;
 var URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 async function resolveTarget(cwd, declared) {
   if (declared.includes("\x00") || URI_TARGET.test(declared))
     return;
-  const absolute = path4.isAbsolute(declared);
-  const { root } = path4.parse(declared);
+  const absolute = path3.isAbsolute(declared);
+  const { root } = path3.parse(declared);
   let resolved = absolute ? root : cwd;
-  const pending = (absolute ? declared.slice(root.length) : declared).split(path4.sep).reverse();
+  const pending = (absolute ? declared.slice(root.length) : declared).split(path3.sep).reverse();
   let hops = 0;
   while (pending.length > 0) {
     const segment = pending.pop();
     if (segment.length === 0 || segment === ".")
       continue;
     if (segment === "..") {
-      resolved = path4.dirname(resolved);
+      resolved = path3.dirname(resolved);
       continue;
     }
-    const candidate = path4.join(resolved, segment);
+    const candidate = path3.join(resolved, segment);
     let link;
     try {
       link = await fs2.readlink(candidate);
@@ -1833,10 +2211,10 @@ async function resolveTarget(cwd, declared) {
     }
     if (++hops > MAX_HOPS)
       return;
-    const linkRoot = path4.parse(link).root;
+    const linkRoot = path3.parse(link).root;
     if (linkRoot.length > 0)
       resolved = linkRoot;
-    pending.push(...link.slice(linkRoot.length).split(path4.sep).reverse());
+    pending.push(...link.slice(linkRoot.length).split(path3.sep).reverse());
   }
   return resolved;
 }
@@ -1869,11 +2247,11 @@ function declaredTargets(toolName, input) {
     return hashlineTargets(input.input);
   return [];
 }
-function names(relative2, glob) {
+function names(relative, glob) {
   const trimmed = glob.replace(/^\.?\/+/, "").replace(/\/+$/, "");
   if (trimmed.length === 0)
     return true;
-  return fnmatch(relative2, trimmed) || fnmatch(relative2, `${trimmed}/*`);
+  return fnmatch(relative, trimmed) || fnmatch(relative, `${trimmed}/*`);
 }
 async function gateWorktreeScope(ctx, toolName, input) {
   const claim = observedClaim();
@@ -1922,10 +2300,10 @@ async function gateWorktreeScope(ctx, toolName, input) {
     return;
   for (const target of targets) {
     const named = scoped.some(({ worktree, globs }) => {
-      const relative2 = path4.relative(worktree, target.resolved).split(path4.sep).join("/");
-      if (relative2.length === 0)
+      const relative = path3.relative(worktree, target.resolved).split(path3.sep).join("/");
+      if (relative.length === 0)
         return true;
-      return globs.some((glob) => names(relative2, glob));
+      return globs.some((glob) => names(relative, glob));
     });
     if (named)
       continue;
@@ -2308,8 +2686,8 @@ var spawnExec2 = async (argv, opts) => {
 function prViewArgv(repo, pr) {
   return ["gh", "pr", "view", pr, "--repo", repo, "--json", "headRefOid,statusCheckRollup"];
 }
-function ghApiArgv(path5) {
-  return ["gh", "api", "--paginate", "--slurp", path5];
+function ghApiArgv(path4) {
+  return ["gh", "api", "--paginate", "--slurp", path4];
 }
 async function ghJson(argv, exec, opts) {
   const label = argv.slice(1).join(" ");
@@ -2329,8 +2707,8 @@ async function ghJson(argv, exec, opts) {
     return { ok: false, error: `gh ${label} returned unreadable JSON: ${String(error)}` };
   }
 }
-async function ghPaginatedJson(path5, exec, opts) {
-  const read = await ghJson(ghApiArgv(path5), exec, opts);
+async function ghPaginatedJson(path4, exec, opts) {
+  const read = await ghJson(ghApiArgv(path4), exec, opts);
   if (!read.ok)
     return read;
   if (!Array.isArray(read.value))
@@ -2520,9 +2898,9 @@ function parseMergeTreeOutput(stdout) {
 function intersectPaths(a, b) {
   const right = new Set(b);
   const both = new Set;
-  for (const path5 of a) {
-    if (right.has(path5))
-      both.add(path5);
+  for (const path4 of a) {
+    if (right.has(path4))
+      both.add(path4);
   }
   return [...both].sort();
 }
@@ -2678,7 +3056,7 @@ function registerConflictProbe(pi) {
 }
 
 // src/tools/resolve-queue-dispatch.ts
-import path5 from "path";
+import path4 from "path";
 var REPOSITORY_RE = /^[^/\s]+\/[^/\s]+$/;
 var HEAD_SHA_RE = /^[0-9a-fA-F]{7,64}$/;
 var REQUIRED_PULL_REQUEST_FIELDS = [
@@ -3284,7 +3662,7 @@ function registerResolveQueueDispatch(pi, read = readSnapshotFile) {
           return report(failed(1, `invalid watcher record: nodes is not JSON: ${message(error)}`));
         }
       } else if (params.nodesFile !== undefined) {
-        const file = params.cwd === undefined ? params.nodesFile : path5.resolve(params.cwd, params.nodesFile);
+        const file = params.cwd === undefined ? params.nodesFile : path4.resolve(params.cwd, params.nodesFile);
         try {
           nodes = JSON.parse(await read(file));
         } catch (error) {
@@ -3375,6 +3753,15 @@ function toNode(bead, blocked) {
   const role = metaString(bead, "role");
   if (role !== undefined)
     node.role = role;
+  const runEpic = metaString(bead, "run_epic");
+  if (runEpic !== undefined)
+    node.run_epic = runEpic;
+  const originActor = metaString(bead, "origin_actor");
+  if (originActor !== undefined)
+    node.origin_actor = originActor;
+  const originBead = metaString(bead, "origin_bead");
+  if (originBead !== undefined)
+    node.origin_bead = originBead;
   const origin = metaString(bead, "origin");
   if (origin !== undefined)
     node.origin = origin;
@@ -3538,6 +3925,12 @@ function nodeLine(node, indent) {
     bits.push(`role=${node.role}`);
   if (node.blocked)
     bits.push("blocked");
+  if (node.run_epic)
+    bits.push(`run_epic=${node.run_epic}`);
+  if (node.origin_actor)
+    bits.push(`origin_actor=${node.origin_actor}`);
+  if (node.origin_bead)
+    bits.push(`origin_bead=${node.origin_bead}`);
   if (node.origin)
     bits.push(`origin=${node.origin}`);
   const tail = bits.length > 0 ? `  [${bits.join(" ")}]` : "";
@@ -3681,13 +4074,14 @@ function registerRunStatus(pi) {
 
 // src/watchers.ts
 import fs3 from "fs/promises";
-import path6 from "path";
+import path5 from "path";
 var PROGRESS_CHANNEL = "task:subagent:progress";
 var SUBAGENT_EVENT_CHANNEL = "task:subagent:event";
 var MCP_STATUS_CHANNEL = "mcp:connection-status";
 var LSP_STARTUP_CHANNEL = "lsp:startup";
 var GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 var SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
+var DECLARED_MODEL_ROLES = ["reviewer"];
 var PENDING_RUN = "pending";
 function logFailure(pi, watcher, error) {
   pi.logger.error(`orchestrate ${watcher} failed`, {
@@ -3809,7 +4203,7 @@ function bdMutation(command) {
 }
 var configuredAuditDir;
 function auditDir(cwd) {
-  return configuredAuditDir ?? path6.join(cwd, ".orchestration", "audit");
+  return configuredAuditDir ?? path5.join(cwd, ".orchestration", "audit");
 }
 var MAX_AUDIT_STEM = 200;
 function auditFileName(child) {
@@ -3823,7 +4217,7 @@ async function appendAudit(dir, entry) {
   if (name === undefined)
     return;
   await fs3.mkdir(dir, { recursive: true });
-  await fs3.appendFile(path6.join(dir, name), `${JSON.stringify(entry)}
+  await fs3.appendFile(path5.join(dir, name), `${JSON.stringify(entry)}
 `, "utf8");
 }
 function exitCodeOf(result, isError) {
@@ -3949,7 +4343,7 @@ var relayedGoal;
 function runEpics(epics, runId) {
   if (runId === undefined)
     return [...epics];
-  return epics.filter((epic) => epic.id === runId || epic.parent === runId || metadataString(epic, "origin") === runId);
+  return epics.filter((epic) => epic.id === runId || epic.parent === runId || metadataString(epic, "run_epic") === runId || metadataString(epic, "origin") === runId);
 }
 async function relayGoal(pi, cwd, goal) {
   const key = `${goal.id}\x00${goal.status}\x00${goal.objective}`;
@@ -3994,6 +4388,12 @@ var REQUIRED_SETTINGS = [
     want: "true",
     satisfied: (value) => value === true,
     consequence: "the per-spawn effort is silently ignored, so every agent runs at the session default"
+  },
+  {
+    key: "task.maxRecursionDepth",
+    want: "3 or more",
+    satisfied: (value) => typeof value === "number" && value >= 3,
+    consequence: "a worker's helper sits at depth 3, so at the default 2 no worker can spawn librarian, scout, or operator"
   }
 ];
 function settingsDeviations(observed2) {
@@ -4041,10 +4441,10 @@ var settingsChecked = false;
 async function sharedBeadsDatabase(cwd) {
   if (process.env.BEADS_DOLT_SHARED_SERVER === "1")
     return true;
-  const config = await fs3.readFile(path6.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
+  const config = await fs3.readFile(path5.join(cwd, ".beads", "config.yaml"), "utf8").catch(() => "");
   if (/^[^#\n]*\bshared-server:\s*true/m.test(config))
     return true;
-  const metadata = await fs3.readFile(path6.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
+  const metadata = await fs3.readFile(path5.join(cwd, ".beads", "metadata.json"), "utf8").catch(() => "");
   try {
     const parsed = JSON.parse(metadata);
     if (parsed !== null && typeof parsed === "object" && "dolt_mode" in parsed) {
@@ -4052,6 +4452,64 @@ async function sharedBeadsDatabase(cwd) {
     }
   } catch {}
   return false;
+}
+var OWNABLE_VALUES = {
+  "task.isolation.mode": "auto",
+  "task.isolation.merge": "branch",
+  "task.isolation.apply": false,
+  "task.enableEffort": true,
+  "task.maxRecursionDepth": 3
+};
+function renderYaml(node, indent = "") {
+  let out = "";
+  for (const [key, value] of Object.entries(node)) {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      out += `${indent}${key}:
+${renderYaml(value, `${indent}  `)}`;
+    } else {
+      out += `${indent}${key}: ${JSON.stringify(value)}
+`;
+    }
+  }
+  return out;
+}
+async function ensureProjectSettings(cwd, keys) {
+  const ownable = keys.filter((key) => (key in OWNABLE_VALUES));
+  if (ownable.length === 0)
+    return;
+  const file = path5.join(cwd, ".omp", "config.yml");
+  let root = {};
+  const existing = await fs3.readFile(file, "utf8").catch(() => {
+    return;
+  });
+  if (existing !== undefined && existing.trim().length > 0) {
+    try {
+      const parsed = Bun.YAML.parse(existing);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+        return;
+      root = structuredClone(parsed);
+    } catch {
+      return;
+    }
+  }
+  for (const key of ownable) {
+    const segments = key.split(".");
+    let node = root;
+    for (const segment of segments.slice(0, -1)) {
+      const next = node[segment];
+      if (next === null || typeof next !== "object" || Array.isArray(next))
+        node[segment] = {};
+      node = node[segment];
+    }
+    node[segments[segments.length - 1]] = OWNABLE_VALUES[key];
+  }
+  try {
+    await fs3.mkdir(path5.dirname(file), { recursive: true });
+    await fs3.writeFile(file, renderYaml(root));
+    return file;
+  } catch {
+    return;
+  }
 }
 async function preflightSettings(pi, cwd) {
   if (settingsChecked)
@@ -4067,18 +4525,28 @@ async function preflightSettings(pi, cwd) {
   const lines3 = deviations.map((deviation) => `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
   const mode = observed2["task.isolation.mode"];
   const isolating = typeof mode === "string" && mode !== "none";
-  const tracked = await fs3.stat(path6.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
+  const tracked = await fs3.stat(path5.join(cwd, ".beads")).then((entry) => entry.isDirectory()).catch(() => false);
   if (tracked && isolating && !await sharedBeadsDatabase(cwd)) {
-    lines3.push(`beads is a per-checkout database and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. Three fixes, cheapest first: (1) require every agent to pass \`bd -C ${cwd}\`, which needs nothing installed and is what the injected contract already asks for; (2) on a NEW project, \`bd init --shared-server\` -- one dolt sql-server per machine, one database per project; (3) on THIS project, migrate with \`bd backup init <path>\` then \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`);
+    lines3.push(`beads is running embedded, a per-checkout database, and isolation is on -- an isolated worker mutates the copy inside its own clone, so its claims, comments and statuses never reach this run, and two workers can hold one bead. This project requires a per-project Dolt server. On a NEW project: \`bd init --server\`. On THIS project, migrate: \`bd backup init <path>\`, \`bd backup sync\`, re-init in server mode, then \`bd backup restore --force <path>\` -- server mode reads a different data directory, so it starts empty otherwise`);
+  }
+  const roles = await readSetting("modelRoles", cwd);
+  if (typeof roles === "object" && roles !== null) {
+    for (const role of DECLARED_MODEL_ROLES) {
+      if (Object.hasOwn(roles, role))
+        continue;
+      lines3.push(`modelRoles.${role} is not configured, so \`@${role}\` resolves to nothing and the agent naming it silently runs the session default -- add it, or accept that a critic shares the family it judges`);
+    }
   }
   if (lines3.length === 0)
     return deviations;
+  const written = await ensureProjectSettings(cwd, deviations.map((deviation) => deviation.key));
+  const tail = written === undefined ? "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable." : `The project-ownable settings above were written to ${written} (existing keys kept, comments not preserved). Restart the run to load them; the rest need your hands.`;
   pi.sendMessage({
     customType: SETTINGS_PREFLIGHT_MESSAGE,
     content: [
       "WARN settings: this run's coordination contract is not fully in force.",
       ...lines3.map((line) => `- ${line}`),
-      "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable."
+      tail
     ].join(`
 `),
     display: true
@@ -4167,30 +4635,23 @@ function ompOrchestrate(pi) {
         const ownership = gateWorktrunkOwnership(input);
         if (ownership)
           return ownership;
-        const attribution = gateActorAttribution(ctx, input);
-        if (attribution)
-          return attribution;
+        const discipline = await gateBdDiscipline(pi, ctx, input);
+        if (discipline)
+          return discipline;
         const exclusivity = gateOneClaim(ctx, input);
         if (exclusivity)
           return exclusivity;
         const eligibility = await gateClaimEligibility(ctx, input);
         if (eligibility)
           return eligibility;
-        const verb = gateCommentVerb(ctx, input);
-        if (verb)
-          return verb;
       }
       if (GATED_WRITE_TOOLS[event.toolName] === true) {
         const scope = await gateWorktreeScope(ctx, event.toolName, input);
         if (scope)
           return scope;
       }
-      if (event.toolName === "bash") {
-        return reviseBashEnv(input, {
-          ...beadWriteFreeEnv(pi, ctx),
-          ...await runPinEnv(ctx, input)
-        });
-      }
+      if (event.toolName === "bash")
+        return reviseBashEnv(input, { ...beadWriteFreeEnv(pi, ctx) });
       return;
     } catch (error) {
       pi.logger.error("orchestrate gate failed open", {
@@ -4204,9 +4665,11 @@ function ompOrchestrate(pi) {
     if (sessionRole(pi) === "lead")
       return;
     const marker = await readActiveRun(ctx.cwd).catch(() => null);
+    if (marker === null)
+      return;
     pi.sendMessage({
       customType: "com.srobroek.omp-orchestrate.contract",
-      content: dispatchContract(marker?.repo_root),
+      content: DISPATCH_CONTRACT,
       display: false,
       attribution: "user"
     }, { triggerTurn: false });
@@ -4231,12 +4694,12 @@ function ompOrchestrate(pi) {
     }
   });
   pi.registerCommand("orchestrate-roster", {
-    description: "Pull-queue depth for each routing label",
+    description: "Pull-queue depth for each role",
     handler: async (_args, ctx) => {
       resetReadBudget();
       const lines3 = [];
       for (const role of ["architect", "implementer", "reviewer", "researcher", "shepherd"]) {
-        const ready = await bdList(["ready", "--label", `agent:${role}`, "--unassigned", "--json"]);
+        const ready = await bdList(["ready", "--metadata-field", `role=${role}`, "--unassigned", "--json"]);
         lines3.push(`${role}: ${ready.length} ready`);
       }
       ctx.ui.notify(lines3.join(`

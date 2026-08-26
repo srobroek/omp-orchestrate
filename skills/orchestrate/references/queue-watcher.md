@@ -24,8 +24,9 @@ bounds outstanding readiness notifications. It is not the beads merge lock.
 | Exclusive integration lock | `bd merge-slot`, held by the acting shepherd |
 
 An exact active orchestrate bead owns its PR. Every merge bead this run creates carries
-`integration_owner=orchestrate` alongside its `pr:merge` + `agent:integrator` labels, and the
-generic shepherd refuses those. That precedence is what stops two merge actors from racing.
+`integration_owner=orchestrate` alongside its `pr:merge` label and `role=shepherd` metadata,
+and the generic shepherd refuses those. That precedence is what stops two merge actors from
+racing.
 
 ## Record identity
 
@@ -61,7 +62,7 @@ The resolver requires exactly one `state:approved` bead matching `repo`, `pr`, a
 2. Write the durable handoff on the merge bead, then wake:
 
    ```text
-   APPROVE <bead>
+   NOTE <bead>
    branch: <metadata.branch>
    base: <metadata.base_sha>
    source: release-queue-watch
@@ -91,7 +92,7 @@ confirms it against GitHub.
 
 - Approved beads and `failed`, `merged`, or `closed` transitions set `wakeShepherd=true`.
   Persist `queue_lifecycle`, `queue_lifecycle_transition`, `queue_lifecycle_head`, and
-  `queue_lifecycle_pending` atomically, then write the same `APPROVE` block with
+  `queue_lifecycle_pending` atomically, then write the same handoff block with
   `source: release-queue-watch-lifecycle` plus `transition:` and `lifecycle:` lines, and wake
   the shepherd. Stamp `queue_lifecycle_sent` after the wake; the shepherd stamps
   `queue_lifecycle_ack` only after it revalidates and records the outcome.
