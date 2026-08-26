@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/srobroek/omp-orchestrate/compare/v0.1.2...v0.1.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* **beads:** stop a worktree minting its own empty database, and sync the database ([#23](https://github.com/srobroek/omp-orchestrate/issues/23)) ([4918b88](https://github.com/srobroek/omp-orchestrate/commit/4918b88f6cfa92bf3e983ca2a1b03d503ed2a63e))
+* **release:** put the version in the release PR title so the tag can be cut ([#21](https://github.com/srobroek/omp-orchestrate/issues/21)) ([13c6b66](https://github.com/srobroek/omp-orchestrate/commit/13c6b665516a3d8d2e6bfa436b8d51878a3d8d96))
+
 ## [0.1.2](https://github.com/srobroek/omp-orchestrate/compare/v0.1.1...v0.1.2) (2026-08-26)
 
 
