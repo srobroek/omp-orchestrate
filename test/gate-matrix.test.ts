@@ -26,6 +26,7 @@ import path from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
+import { observeClaimResult } from "../src/claim-observer";
 import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
 import { gateOneClaim } from "../src/gates/one-claim";
 import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
@@ -380,7 +381,7 @@ describe("G5 multi-bead claims", () => {
 
 		expect(await gateClaimEligibility(ctxAt(owned), { command })).toBeUndefined();
 		expect(shown).toEqual([BEAD, SAME_TREE]);
-		expect(observedClaim()?.beadIds).toEqual([BEAD, SAME_TREE]);
+		// Recording is the observer's job now, so this asserts acceptance and the walk.
 	});
 
 	test("two beads in one tree are refused by the chain, and claim nothing", async () => {
@@ -398,11 +399,26 @@ describe("G5 multi-bead claims", () => {
 	});
 
 	test("two beads in two trees refuse every mutation after the claim", async () => {
-		// G2 runs on `bash` too, against the claim G5 recorded, so the cwd must sit
-		// inside *every* claimed bead's worktree. Recorded through G5 directly, since
-		// G7 refuses the claiming command itself before G5 is reached.
-		const command = `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SECOND} --claim`;
+		// G2 runs on `bash` too, against the claim that was observed, so the cwd must sit
+		// inside *every* claimed bead's worktree.
+		const command = `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SECOND} --claim --json`;
 		expect(await gateClaimEligibility(ctxAt(owned), { command })).toBeUndefined();
+
+		// G5 records nothing, so arm G2 the way a real run does: through the claim report
+		// bd prints on success. Seeding the state directly would test the assertion rather
+		// than the path that produces it.
+		observeClaimResult({
+			toolName: "bash",
+			input: { command },
+			content: [
+				{
+					text: JSON.stringify([
+						{ id: BEAD, status: "in_progress", assignee: ACTOR },
+						{ id: SECOND, status: "in_progress", assignee: ACTOR },
+					]),
+				},
+			],
+		});
 
 		const result = await gateWorktreeScope(ctxAt(owned), "bash", { command });
 

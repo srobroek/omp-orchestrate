@@ -67,7 +67,10 @@ describe("extension factory", () => {
 		expect(counts.get("session_start")).toBe(3);
 		// goal_updated: W4 relay, lead-side.
 		expect(counts.get("goal_updated")).toBe(1);
-		expect(seen.events).toHaveLength(6);
+		// tool_result: the claim observer. A queue claim names no bead, so the id it
+		// acquired exists only in the report.
+		expect(counts.get("tool_result")).toBe(1);
+		expect(seen.events).toHaveLength(7);
 	});
 
 	test("registers the four commands and four schema-visible tools", () => {
