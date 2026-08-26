@@ -89,16 +89,24 @@ describe("the marketplace catalog", () => {
 		expect(fs.existsSync(path.join(ROOT, "src/index.ts"))).toBe(true);
 	});
 
-	test("the README does not repeat this plugin's own version", () => {
-		// Four files declare it and release-please owns every one. A fifth in the README would be
-		// owned by nobody: it read `version 0.1.4` until this test existed, and the next release
-		// would have made it wrong while every gate stayed green. The install reports the resolved
-		// version, so the README does not need to.
+	test("the Status row states no version at all", () => {
+		// Four files declare a version and release-please owns every one. A fifth in the README
+		// would be owned by nobody: the row read `Prerelease, version 0.1.4` until this test
+		// existed, and the next release would have made it wrong while every gate stayed green.
 		//
-		// Scoped to OUR version rather than to any semver. A README may legitimately name a
-		// dependency's version or show one in an example, and banning the shape would fail that
-		// for no reason: what must not appear is the number release-please moves.
-		const ours = JSON.parse(read("package.json")).version;
-		expect(read("README.md")).not.toContain(ours);
+		// The SHAPE is banned here, not this plugin's current version. Comparing against
+		// package.json is blind to the case that matters: after a bump to 0.1.5 a README still
+		// reading 0.1.4 contains no current version, so such a test passes on exactly the stale
+		// state it exists to catch. Mutation-proved below against that post-bump state.
+		//
+		// Scoped to this row rather than the file, because a version elsewhere can be legitimate:
+		// the Requires row names dependencies, and an example may show one. This row describes
+		// this artifact, so a version in it is always a second home for a number that already has
+		// four.
+		const status = read("README.md")
+			.split("\n")
+			.find(line => line.startsWith("| Status |"));
+		expect(status).toBeDefined();
+		expect(status).not.toMatch(/\d+\.\d+\.\d+/);
 	});
 });
