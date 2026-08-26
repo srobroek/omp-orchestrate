@@ -112,9 +112,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 	 * than as something the model said to itself.
 	 *
 	 * The marker is read for one reason only: it is the run gate. Its `repo_root` used to
-	 * be substituted into the contract for a `bd -C` pin, and both are gone -- under a
-	 * per-project Dolt server bd resolves the database by host and port, so a worker needs
-	 * no path from us.
+	 * be substituted into the contract for a `bd -C` pin, and both are gone -- the run pins
+	 * BEADS_DIR once at activation and every child inherits it, so a worker needs no path
+	 * substituted per call.
 	 */
 	pi.on("session_start", async (_event, ctx) => {
 		if (sessionRole(pi) === "lead") return;

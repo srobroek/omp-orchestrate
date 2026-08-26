@@ -51,8 +51,8 @@ export function beadWriteFreeEnv(pi: ExtensionAPI, ctx: ExtensionContext): Recor
  *
  * A `tool_call` handler returns a single result, so gates that impose an environment
  * cannot each return their own revision. G1 is the only contributor left -- a database
- * pin gate supplied `BEADS_DIR` here until the pin was retired, since this project runs
- * a per-project Dolt server -- and this stays the seam that merges them, so the next one
+ * pin gate supplied `BEADS_DIR` here until the pin was retired, and the run now pins it
+ * once for every child -- and this stays the seam that merges them, so the next one
  * contributes additions instead of a second revision that would be dropped.
  *
  * An addition already present is dropped rather than rewritten, so a call the gates

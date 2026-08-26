@@ -150,7 +150,7 @@ Required settings. The model silently degrades without every one of them:
 | `task.isolation.merge` | `branch` | commits are captured as a branch, not replayed |
 | `task.isolation.apply` | `false` | the runtime reports "captured on branch, not merged" and leaves the architect's tree untouched. Integration stays an explicit architect act |
 | `task.enableEffort` | `true` | defaults **false** platform-wide. Without it, the per-entry `effort` is silently ignored |
-| beads storage | per-project Dolt server | `dolt_mode: server` in `.beads/metadata.json`. Under a server, bd resolves the database by host and port from `.beads/dolt-server.port`, which travels with a copied checkout, so every isolated agent reaches the run's database. Embedded mode resolves by walking up from cwd, so isolation silently splits the database |
+| beads storage | embedded, with `BEADS_DIR` pinned | bd resolves by walking up from the working directory, and `.beads/` is gitignored, so a clone or worktree arrives without one and the walk continues past the checkout. `/orchestrate-run` pins `BEADS_DIR` to the run's `.beads` and every child inherits it. Without that pin an isolated agent can write into a personal database: `$HOME/.beads` exists on this machine |
 | `task.maxRecursionDepth` | `3` | a worker's helper sits at depth 3, and at the default `2` the `lead → architect → worker` chain already fills the ladder. Necessary for the `librarian` shortcut, not sufficient: the worker agent must also declare `spawns: librarian` |
 
 Depth is `lead(0) → architect(1) → worker(2) → leaf(3)`, and it is only half the gate. An

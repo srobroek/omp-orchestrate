@@ -25,7 +25,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { ensureBeadsServer } from "./beads-mode";
+import { ensureBeadsPath } from "./beads-mode";
 import { resetReadBudget } from "./bd";
 import { ensurePatrolWisp } from "./supervision";
 
@@ -33,10 +33,10 @@ import { ensurePatrolWisp } from "./supervision";
  * The marker's on-disk shape.
  *
  * A `repo_root` field was written here and read by nothing after the `bd -C` pin was
- * retired. Its rationale was the embedded database `bd` finds by walking up from the
- * cwd, which this project does not use: a per-project Dolt server resolves by host and
- * port from `.beads/dolt-server.port`, and that file travels with a copied checkout, so
- * an isolated worker reaches the run's database with no path from us. `asActiveRun`
+ * retired. Its rationale was the embedded database `bd` finds by walking up from the cwd,
+ * and that hazard is real: it is closed once here instead of on every call, by pinning
+ * BEADS_DIR at activation. Every child inherits the environment, so an isolated worker
+ * reaches the run's database with no flag of its own. `asActiveRun`
  * keeps only the fields below, so a marker written by an older version still reads.
  */
 export interface ActiveRun {
@@ -193,10 +193,11 @@ export function registerRunCommands(pi: ExtensionAPI): void {
 		description: "Activate orchestrate run enforcement in this repository",
 		handler: async (_args, ctx) => {
 			const cwd = ctx.sessionManager.getCwd();
-			// Refusing here is the point. Activation arms enforcement for every agent the
-			// run spawns, and an embedded database would let each of them succeed against
-			// a copy nobody reads, so a run that cannot reach one database must not start.
-			const beads = await ensureBeadsServer(cwd);
+			// Refusing here is the point. Activation arms enforcement for every agent the run
+			// spawns, and bd resolves its database by walking up from the working directory, so
+			// a worker in an isolated checkout can reach a database nobody else reads. This
+			// pins one path for the run and every child that inherits its environment.
+			const beads = await ensureBeadsPath(cwd);
 			if (!beads.ok) {
 				ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
 				return;
