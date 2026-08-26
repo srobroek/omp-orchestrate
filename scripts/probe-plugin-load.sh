@@ -7,9 +7,10 @@
 # failure against a branch that worked.
 #
 # No model output, no transcript archaeology. The clone's own extension factory writes a
-# unique marker as its first statement, so the marker exists if and only if OMP resolved
-# the manifest, imported that exact file, and called its default export. A failed model
-# call cannot hide it, because factories run during session init.
+# unique marker as its last statement, so the marker exists if and only if OMP resolved
+# the manifest, imported that exact file, called its default export, and every
+# registration completed. A failed model call cannot hide it, because factories run
+# during session init. A throw mid-factory cannot leave a marker: the write is last.
 #
 # Usage: sh scripts/probe-plugin-load.sh <branch> <tag>
 #
@@ -41,7 +42,12 @@ text = src.read_text()
 m = re.search(r"^export default function [A-Za-z_]+\([^)]*\)[^\{]*\{", text, re.M)
 if not m:
     raise SystemExit("could not find the default factory in src/index.ts")
-text = text[: m.end()] + f'\n\trequire("node:fs").writeFileSync({marker!r}, "invoked");' + text[m.end() :]
+# Last statement of the factory. The factory is the last construct in src/index.ts,
+# so the file's final closing brace is the factory's closer — no brace counting.
+closer = text.rfind("}")
+if closer == -1:
+    raise SystemExit("could not find the factory closer in src/index.ts")
+text = text[:closer] + f'\trequire("node:fs").writeFileSync({marker!r}, "invoked");\n' + text[closer:]
 
 # Second marker inside a registered handler, before its first guard, so dispatch is
 # proved rather than inferred from registration.
