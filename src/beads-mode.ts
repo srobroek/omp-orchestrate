@@ -34,6 +34,30 @@ const INIT_TIMEOUT_MS = 120_000;
 const EMBEDDED_REFUSAL =
 	"beads is running embedded, a per-checkout database. bd will keep working and route every write into `.beads/embeddeddolt`, so an isolated worker mutates a copy and its claims, comments and closures never reach this run. A run requires a per-project Dolt server. Setting `dolt_mode` by hand does not convert it: the two modes read different directories, and the server's database would not exist. Run `bd doctor` to inspect, and see `bd backup --help` and `bd bootstrap --help` for carrying existing beads across.";
 
+/**
+ * The modes a run may use, matched positively so an unrecognised value refuses.
+ *
+ * Both are server-backed, which is the property that matters: `bd` resolves the database
+ * over a socket, and a filesystem copy cannot redirect a host and port. `--server` gives
+ * one server per project, and `--shared-server` one per machine on a fixed port with a
+ * per-project database name, so a copied checkout still reaches the run's data. Verified:
+ * `--shared-server` reports `Mode: shared server` on 127.0.0.1:3308 and writes
+ * `dolt_mode: "server"`.
+ *
+ * Matching what is allowed rather than excluding `embedded` is deliberate. bd already
+ * ships a third mode, and an exclusion would have admitted it silently on the one axis
+ * this gate exists to hold.
+ */
+const SERVER_MODES: readonly string[] = ["per-project", "shared server"];
+
+/**
+ * bd's own diagnostic for a workspace with no database, verbatim from `bd info` on stderr
+ * with exit 1. Only this text authorises an init: any other failure means a database that
+ * exists and does not answer, where creating one is the wrong move even though
+ * `--init-if-missing` would decline to.
+ */
+const NO_DATABASE = /no beads database found/i;
+
 function firstLine(text: string | undefined): string {
 	const line = (text ?? "").split("\n").find(entry => entry.trim().length > 0);
 	return line === undefined ? "no output" : line.trim();
@@ -61,6 +85,12 @@ export async function ensureBeadsServer(cwd: string): Promise<BeadsReadiness> {
 	// an argument rather than a measurement of the database.
 	let note: string | undefined;
 	if (info.code !== 0) {
+		// Only bd's own "no database" diagnostic authorises an init. Any other failure is a
+		// database that exists and will not answer -- corrupt, unreachable, permission
+		// denied -- and initialising over it would report a fresh start for a broken run.
+		if (!NO_DATABASE.test(`${info.stderr}\n${info.stdout}`)) {
+			return { ok: false, reason: `bd info failed: ${firstLine(info.stderr || info.stdout)}` };
+		}
 		const init = await bdRun(
 			["init", "--init-if-missing", "--skip-hooks", "--server", "--non-interactive"],
 			INIT_TIMEOUT_MS,
@@ -68,26 +98,31 @@ export async function ensureBeadsServer(cwd: string): Promise<BeadsReadiness> {
 		);
 		if (init === null) return { ok: false, reason: "bd init could not be run" };
 		if (init.code !== 0) return { ok: false, reason: `bd init failed: ${firstLine(init.stderr || init.stdout)}` };
-		note = "initialised beads as a per-project Dolt server";
+		note = "initialised beads as a server-backed database";
 	}
 
-	// `bd dolt show` is the mode's own reporter: `per-project` for a server, and
-	// `embedded (in-process Dolt engine)` otherwise. Matching the leading word keeps a
-	// future suffix from reading as server mode.
 	const mode = await bdRun(["dolt", "show"], undefined, cwd);
 	if (mode === null || mode.code !== 0) {
 		return { ok: false, reason: "could not read the beads storage mode from `bd dolt show`" };
 	}
-	if (/^\s*Mode:\s*embedded\b/m.test(mode.stdout)) {
-		// Separated from the pre-existing case on purpose: init having just succeeded with
-		// `--server` while the database reports embedded is a bd contract change, and
-		// sending someone down a data migration for a tooling bug would waste the run.
+	const reported = /^\s*Mode:\s*(.+?)\s*$/m.exec(mode.stdout)?.[1];
+	if (reported === undefined) {
+		return { ok: false, reason: "`bd dolt show` reported no Mode line, so the storage mode is unknown" };
+	}
+	if (!SERVER_MODES.includes(reported)) {
+		// An unrecognised mode refuses with the value quoted, so a bd that grows a fourth
+		// one surfaces here instead of passing as a server.
+		if (note !== undefined) {
+			return {
+				ok: false,
+				reason: `bd init reported success with \`--server\`, and \`bd dolt show\` then reported mode "${reported}", so this bd does not honour the flag and the run would write to a database it does not control`,
+			};
+		}
 		return {
 			ok: false,
-			reason:
-				note === undefined
-					? EMBEDDED_REFUSAL
-					: "bd init reported success with `--server`, but `bd dolt show` still reports embedded mode, so this bd does not honour the flag and the run would write to a per-checkout database",
+			reason: reported.startsWith("embedded")
+				? EMBEDDED_REFUSAL
+				: `beads reports storage mode "${reported}", which is not a server-backed mode this run recognises (${SERVER_MODES.join(", ")}). A run needs a database a copied checkout cannot fork.`,
 		};
 	}
 	return note === undefined ? { ok: true } : { ok: true, note };

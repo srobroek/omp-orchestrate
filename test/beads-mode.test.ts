@@ -71,14 +71,14 @@ case "$1 $2" in
   "dolt show") echo "  Mode:     per-project"; exit 0 ;;
 esac
 case "$1" in
-  info) exit 1 ;;
+  info) echo "Error: no beads database found" >&2; exit 1 ;;
   init) exit 0 ;;
 esac
 exit 0`);
 
 		expect(await ensureBeadsServer(dir)).toEqual({
 			ok: true,
-			note: "initialised beads as a per-project Dolt server",
+			note: "initialised beads as a server-backed database",
 		});
 		const calls = await argv();
 		expect(calls[0]).toBe("info");
@@ -87,13 +87,53 @@ exit 0`);
 		expect(calls[2]).toBe("dolt show");
 	});
 
+	test("a shared server is accepted: a copy cannot fork a host and port", async () => {
+		await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1 $2" in
+  "dolt show") echo "  Mode:     shared server"; exit 0 ;;
+esac
+exit 0`);
+
+		expect(await ensureBeadsServer(dir)).toEqual({ ok: true });
+	});
+
+	test("an unrecognised mode refuses and quotes what bd reported", async () => {
+		await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1 $2" in
+  "dolt show") echo "  Mode:     warp drive"; exit 0 ;;
+esac
+exit 0`);
+
+		const result = await ensureBeadsServer(dir);
+		expect(result.ok).toBe(false);
+		// Matching allowed modes rather than excluding embedded is what makes this refuse.
+		expect(result.ok === false && result.reason).toContain('"warp drive"');
+		expect(result.ok === false && result.reason).not.toContain("embeddeddolt");
+	});
+
+	test("a bd info failure that is not the missing-database diagnostic never initialises", async () => {
+		await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1" in
+  info) echo "Error: dial tcp 127.0.0.1:3308: connect: connection refused" >&2; exit 1 ;;
+esac
+exit 0`);
+
+		const result = await ensureBeadsServer(dir);
+		expect(result.ok).toBe(false);
+		expect(result.ok === false && result.reason).toBe(
+			"bd info failed: Error: dial tcp 127.0.0.1:3308: connect: connection refused",
+		);
+		// The point: a database that exists and will not answer must not be initialised over.
+		expect(await argv()).toEqual(["info"]);
+	});
+
 	test("init succeeding while the mode stays embedded refuses and blames the flag", async () => {
 		await stub(`echo "$@" >> "$ARGV_LOG"
 case "$1 $2" in
   "dolt show") echo "  Mode:     embedded (in-process Dolt engine)"; exit 0 ;;
 esac
 case "$1" in
-  info) exit 1 ;;
+  info) echo "Error: no beads database found" >&2; exit 1 ;;
   init) exit 0 ;;
 esac
 exit 0`);
@@ -108,7 +148,7 @@ exit 0`);
 	test("a failing init refuses the run and reports bd's first line", async () => {
 		await stub(`echo "$@" >> "$ARGV_LOG"
 case "$1" in
-  info) exit 1 ;;
+  info) echo "Error: no beads database found" >&2; exit 1 ;;
   init) echo "Error: prefix collides with an existing database" >&2; exit 3 ;;
 esac
 exit 0`);
