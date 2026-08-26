@@ -332,6 +332,33 @@ Push at three points, each where run state must outlive this machine:
 yours. Do not confuse this with `bd backup`, which writes a Dolt-native backup on a timer
 and reaches no remote.
 
+### The server is started once, by the run
+
+`.beads/config.yaml` carries `dolt.auto-start: false`, so no incidental `bd` call can mint a
+server. The setting is deliberate. bd answers "is a server running?" from
+`.beads/dolt-server.pid` rather than from the port. So any tool that removes that file makes
+every later call start a rival. Measured on this host: nine consecutive
+`database is locked by another dolt process` refusals in `.beads/dolt-server.log`, and 28
+orphaned `dolt sql-server` processes across projects.
+
+`src/beads-mode.ts` handles it at run activation. It starts the server when bd reports
+auto-start disabled, and reconciles the harder case: a server that answers while no pid file
+names it, using `bd dolt killall` then `bd dolt start`. That leaves the servers of other projects alone, which
+`killall` states as its own contract.
+
+What this leaves you:
+
+- `bd dolt start` if a session reports the database asleep. One server per project is right, and a
+  second is the failure this setting exists to prevent.
+- `bd dolt status` to see whether bd knows about the server. `running` plus a PID is healthy.
+  `not running` while reads work means untracked, and activation repairs it.
+- Never hand-write `.beads/dolt-server.pid`. It is bd's state, and `killall` plus `start` is
+  the sanctioned repair.
+
+`.gitignore` covers `.beads/`, so this setting stays in this checkout. A fresh clone takes
+bd's default of auto-start on, and its first run inherits the leak until someone writes the
+file again.
+
 ## Output
 
 `VERDICT: REPORTED|BLOCKED|FAILED — <reason>`, then at most 100 words. The bead carries

@@ -56,9 +56,26 @@ const READ_BUDGET = 12;
 
 let readsUsed = 0;
 
-/** Reset the per-turn read budget. Call once per `tool_call` dispatch. */
+/**
+ * Set when a `bd` call is killed for exceeding its timeout, cleared per dispatch.
+ *
+ * The read budget caps how many calls a dispatch may make; it does nothing about how long
+ * each one takes. Those are different failures, and the slow one is worse. Measured: with
+ * the server alive but `.beads/dolt-server.pid` missing, every `bd` call hung, several
+ * gates ran per `tool_call`, and the extension exceeded its 30s budget -- so EVERY bash
+ * call in the session died with `Extension .../dist/index.js timed out after 30000ms`
+ * rather than degrading. Gates already fail open when `bd` is unavailable; an unresponsive
+ * `bd` is the same answer arriving too late to be useful.
+ *
+ * One timeout is enough evidence for the rest of the dispatch: the cause is the database,
+ * not the argv, so the next call would wait the same 10s to learn the same thing.
+ */
+let timedOut = false;
+
+/** Reset the per-turn read budget and the timeout breaker. Call once per `tool_call` dispatch. */
 export function resetReadBudget(): void {
 	readsUsed = 0;
+	timedOut = false;
 }
 
 /**
@@ -75,6 +92,11 @@ export async function bdRun(
 	timeoutMs = DEFAULT_TIMEOUT_MS,
 	cwd?: string,
 ): Promise<BdResult | null> {
+	// An earlier call in this dispatch already waited out the full timeout. What is
+	// unresponsive is the database, not the argv, so this call would spend the same wait to
+	// learn the same thing -- and the caller already treats an unknown answer as permission
+	// to proceed.
+	if (timedOut) return null;
 	const bin = process.env.BD_BIN ?? "bd";
 	try {
 		const proc = Bun.spawn([bin, ...args], {
@@ -84,13 +106,22 @@ export async function bdRun(
 			stderr: "pipe",
 		});
 
-		const timer = setTimeout(() => proc.kill(), timeoutMs);
+		let killed = false;
+		const timer = setTimeout(() => {
+			killed = true;
+			timedOut = true;
+			proc.kill();
+		}, timeoutMs);
 		try {
 			const [stdout, stderr, code] = await Promise.all([
 				new Response(proc.stdout).text(),
 				new Response(proc.stderr).text(),
 				proc.exited,
 			]);
+			// A killed process still resolves, carrying whatever the kill left behind. Handing
+			// that back would let a gate read a truncated stdout or a signal's exit code as
+			// bd's answer, so a timeout reports the unknown it actually is.
+			if (killed) return null;
 			return { code, stdout, stderr };
 		} finally {
 			clearTimeout(timer);
