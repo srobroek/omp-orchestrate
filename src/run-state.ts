@@ -168,20 +168,6 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
 }
 
 /**
- * Whether this repository is under a run, ignoring liveness. `ORCHESTRATE_RUN`
- * arms the protocol without a marker, for runs driven from outside a checkout.
- */
-export async function isRunActive(cwd: string): Promise<boolean> {
-	const flag = process.env.ORCHESTRATE_RUN;
-	if (flag !== undefined && flag.length > 0) return true;
-	try {
-		return (await fs.stat(markerPath(cwd))).isFile();
-	} catch {
-		return false;
-	}
-}
-
-/**
  * The two marker commands. Registration is a function rather than import-time
  * work so the extension entry point owns the order commands appear in, and so
  * tests can import the marker functions without touching the registry.
