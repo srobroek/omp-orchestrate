@@ -89,12 +89,16 @@ describe("the marketplace catalog", () => {
 		expect(fs.existsSync(path.join(ROOT, "src/index.ts"))).toBe(true);
 	});
 
-	test("the README declares no version, because nothing bumps it there", () => {
-		// Four files declare a version and release-please owns every one. A fifth in the README
-		// would be owned by nobody: it read `version 0.1.4` until this test existed, and the next
-		// release would have made it wrong while every gate stayed green. The install reports the
-		// resolved version, so the README does not need to.
-		const readme = read("README.md");
-		expect(readme).not.toMatch(/\d+\.\d+\.\d+/);
+	test("the README does not repeat this plugin's own version", () => {
+		// Four files declare it and release-please owns every one. A fifth in the README would be
+		// owned by nobody: it read `version 0.1.4` until this test existed, and the next release
+		// would have made it wrong while every gate stayed green. The install reports the resolved
+		// version, so the README does not need to.
+		//
+		// Scoped to OUR version rather than to any semver. A README may legitimately name a
+		// dependency's version or show one in an example, and banning the shape would fail that
+		// for no reason: what must not appear is the number release-please moves.
+		const ours = JSON.parse(read("package.json")).version;
+		expect(read("README.md")).not.toContain(ours);
 	});
 });
