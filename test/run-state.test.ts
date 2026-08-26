@@ -4,19 +4,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { bdList } from "../src/bd";
-import { activateRun, bindRun, isRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
+import { activateRun, bindRun, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
 
 let cwd: string;
 
 beforeEach(async () => {
 	cwd = await mkdtemp(join(tmpdir(), "orc-run-state-"));
 	delete process.env.ORCHESTRATE_MARKER_FILE;
-	delete process.env.ORCHESTRATE_RUN;
 });
 
 afterEach(async () => {
 	delete process.env.ORCHESTRATE_MARKER_FILE;
-	delete process.env.ORCHESTRATE_RUN;
 	await rm(cwd, { recursive: true, force: true });
 });
 
@@ -205,32 +203,6 @@ describe("bindRun", () => {
 	test("refuses to retarget a legacy raw-string marker", async () => {
 		await seed("orc-legacy\n");
 		await expect(bindRun(cwd, "orc-new")).rejects.toThrow(/already bound to orc-legacy/);
-	});
-});
-
-describe("isRunActive", () => {
-	test("false in a repository with no marker", async () => {
-		expect(await isRunActive(cwd)).toBe(false);
-	});
-
-	test("true once a marker exists", async () => {
-		await activateRun(cwd);
-		expect(await isRunActive(cwd)).toBe(true);
-	});
-
-	test("ORCHESTRATE_RUN arms the protocol without a marker", async () => {
-		process.env.ORCHESTRATE_RUN = "1";
-		expect(await isRunActive(cwd)).toBe(true);
-	});
-
-	test("an empty ORCHESTRATE_RUN does not arm it", async () => {
-		process.env.ORCHESTRATE_RUN = "";
-		expect(await isRunActive(cwd)).toBe(false);
-	});
-
-	test("a directory at the marker path does not count", async () => {
-		await mkdir(join(cwd, ".orchestration", ".active-run"), { recursive: true });
-		expect(await isRunActive(cwd)).toBe(false);
 	});
 });
 
