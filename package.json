@@ -1,6 +1,6 @@
 {
 	"name": "@srobroek/omp-orchestrate",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"description": "Beads-backed multi-agent orchestration for the OMP coding agent: pull dispatch, claim contracts, worktree-per-feature, supervision, and merge gating.",
 	"license": "Apache-2.0",
 	"author": {
