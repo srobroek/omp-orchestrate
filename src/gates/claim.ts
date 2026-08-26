@@ -1,5 +1,5 @@
 /**
- * G5 — claim eligibility, and the observation point for the session's actor.
+ * G5 — claim eligibility.
  *
  * Beads enforces claim *exclusivity* — verified: two actors claiming the same queue
  * receive different beads and a third receives `[]` — but not *eligibility*. Any
@@ -12,8 +12,10 @@
  * cooperative name defeated. Here the lead simply declares no `ORC-ROLE`, so it
  * fails every eligibility check and can claim nothing.
  *
- * It doubles as the observation point for the worktree gate: every `bd ... --claim`
- * that passes is recorded, giving G2 the actor and bead it cannot otherwise resolve.
+ * It does not record the claim. Doing so from the command was wrong twice over: a
+ * queue pull names no bead, and a named claim's outcome is unknown until it runs, so a
+ * race loser recorded a bead it never held. `src/claim-observer.ts` reads the claim
+ * report instead, and the worktree gate reads that.
  */
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -276,8 +278,6 @@ export async function gateClaimEligibility(
 	if (claims.length === 0) return undefined;
 
 	for (const claim of claims) {
-		const actor = claim.assignments.get("BEADS_ACTOR") ?? claim.assignments.get("BD_ACTOR") ?? "";
-
 		// `bd ready --claim` selects by filter rather than naming a bead. When the
 		// filter already pins a role, compare against that and skip the lookup.
 		if (claim.subcommand === "ready") {
@@ -289,7 +289,8 @@ export async function gateClaimEligibility(
 					};
 				}
 			}
-			if (actor.length > 0) recordClaim({ actor, beadIds: [] });
+			// Recording moved to the result: see src/claim-observer.ts. A claim's outcome is
+			// not knowable here, and `bd ready --claim` names no bead at all.
 			continue;
 		}
 
@@ -312,7 +313,6 @@ export async function gateClaimEligibility(
 			if (conflict) return conflict;
 		}
 
-		if (actor.length > 0) recordClaim({ actor, beadIds: claim.positionals });
 	}
 
 	return undefined;

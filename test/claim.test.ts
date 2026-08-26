@@ -144,14 +144,15 @@ describe("G5 fail-open", () => {
 		).toBeUndefined();
 	});
 
-	test("an unreadable bead allows the claim and still records it", async () => {
+	test("an unreadable bead allows the claim, and records nothing", async () => {
 		expect(
 			await gateClaimEligibility(ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update ghost-1 --claim" }),
 		).toBeUndefined();
 		expect(shown).toEqual(["ghost-1"]);
-		// The worktree gate depends on this observation, so a claim the eligibility
-		// check could not evaluate is recorded anyway.
-		expect(observedClaim()).toEqual({ actor: "orc-rev-1", beadIds: ["ghost-1"] });
+		// It used to record here, reasoning that the worktree gate needed the observation
+		// even from a claim it could not evaluate. That recorded a bead the call had not
+		// yet acquired. The claim report arms G2 now, so a failing claim arms nothing.
+		expect(observedClaim()).toBeUndefined();
 	});
 
 	test("a session declaring no role is not evaluated against routing", async () => {
@@ -274,33 +275,42 @@ describe("G5 scope conflict", () => {
 	});
 });
 
-describe("G5 claim observation", () => {
-	test("records the actor and bead of a passing claim", async () => {
+/**
+ * G5 no longer records the claim, and these pin that.
+ *
+ * It used to record from the command, which was wrong in both directions: a queue pull
+ * names no bead, and a named claim's outcome is unknown before it runs, so a race loser
+ * recorded a bead it never held. Recording moved to the claim report -- see
+ * `test/claim-observer.test.ts`, which owns the positive cases.
+ *
+ * The block this replaces asserted the old behaviour, including one case that pinned a
+ * pipeline as a legitimate recording path. That was the bypass: a trailing command can
+ * make the shell exit 0 while the claim failed.
+ */
+describe("G5 records nothing", () => {
+	test("a passing named claim is allowed and not recorded", async () => {
 		beads["orc-7"] = bead("orc-7", { labels: ["agent:implementer"], metadata: { worktree: "/tmp/wt" } });
 
 		expect(
 			await gateClaimEligibility(ctxFor("implementer"), { command: "BEADS_ACTOR=orc-impl-1 bd update orc-7 --claim" }),
 		).toBeUndefined();
-		expect(observedClaim()).toEqual({ actor: "orc-impl-1", beadIds: ["orc-7"] });
-	});
-
-	test("falls back to BD_ACTOR when BEADS_ACTOR is absent", async () => {
-		expect(
-			await gateClaimEligibility(ctxFor("implementer"), { command: "BD_ACTOR=orc-impl-2 bd update orc-7 --claim" }),
-		).toBeUndefined();
-		expect(observedClaim()?.actor).toBe("orc-impl-2");
-	});
-
-	test("records nothing when the claim names no actor", async () => {
-		expect(await gateClaimEligibility(ctxFor("implementer"), { command: "bd update orc-7 --claim" })).toBeUndefined();
 		expect(observedClaim()).toBeUndefined();
 	});
 
-	test("records a claim reached through an env prefix and a pipeline", async () => {
+	test("a queue claim is allowed and not recorded", async () => {
+		expect(
+			await gateClaimEligibility(ctxFor("implementer"), {
+				command: "bd ready --metadata-field role=implementer --unassigned --claim --json",
+			}),
+		).toBeUndefined();
+		expect(observedClaim()).toBeUndefined();
+	});
+
+	test("a claim inside a pipeline is allowed and not recorded", async () => {
 		const command = "git status && env BEADS_ACTOR=orc-impl-3 bd update orc-8 --claim --json | jq .";
 
 		expect(await gateClaimEligibility(ctxFor("implementer"), { command })).toBeUndefined();
-		expect(observedClaim()).toEqual({ actor: "orc-impl-3", beadIds: ["orc-8"] });
+		expect(observedClaim()).toBeUndefined();
 	});
 
 	test("does not fire on a quoted mention of a claim", async () => {
@@ -309,14 +319,6 @@ describe("G5 claim observation", () => {
 			await gateClaimEligibility(ctxFor("reviewer"), { command: `bd comment orc-7 "never bd update x --claim"` }),
 		).toBeUndefined();
 		expect(observedClaim()).toBeUndefined();
-	});
-
-	test("a later claim replaces the bead the worktree gate keys on", async () => {
-		const ctx = ctxFor("implementer");
-		await gateClaimEligibility(ctx, { command: "BEADS_ACTOR=orc-impl-1 bd update orc-7 --claim" });
-		await gateClaimEligibility(ctx, { command: "BEADS_ACTOR=orc-impl-1 bd update orc-8 --claim" });
-
-		expect(observedClaim()?.beadIds).toEqual(["orc-8"]);
 	});
 });
 
@@ -346,7 +348,7 @@ describe("G5 routing reads metadata", () => {
 				command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim",
 			}),
 		).toBeUndefined();
-		expect(observedClaim()?.beadIds).toEqual(["orc-7"]);
+		// Recording is the observer's job now, so this asserts acceptance only.
 	});
 
 	test("refuses a pull against another role's metadata queue without reading a bead", async () => {

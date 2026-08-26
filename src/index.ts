@@ -9,6 +9,7 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdList, bdRun, resetReadBudget } from "./bd";
+import { observeClaimResult } from "./claim-observer";
 import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
@@ -132,6 +133,13 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 			},
 			{ triggerTurn: false },
 		);
+	});
+
+	// A queue claim names no bead, so its id exists only in the result. Without this the
+	// exit contract took its no-bead branch for every session that pulled work normally,
+	// and every check that hangs off the claimed bead went unevaluated.
+	pi.on("tool_result", event => {
+		observeClaimResult(event);
 	});
 
 	pi.registerCommand("orchestrate-status", {
