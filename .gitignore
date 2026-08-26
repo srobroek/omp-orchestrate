@@ -5,3 +5,7 @@ __pycache__/
 .DS_Store
 .beads/
 dist/
+# Run state, written by readActiveRun's marker and by subagent audit logs. Per-checkout
+# and per-run, like .beads/ above: every run of this orchestrator in this repository
+# creates it, so leaving it tracked makes the next `git add -A` sweep session state in.
+.orchestration/
