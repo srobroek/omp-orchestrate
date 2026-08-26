@@ -40,9 +40,11 @@ const EMBEDDED_REFUSAL =
  * Both are server-backed, which is the property that matters: `bd` resolves the database
  * over a socket, and a filesystem copy cannot redirect a host and port. `--server` gives
  * one server per project, and `--shared-server` one per machine on a fixed port with a
- * per-project database name, so a copied checkout still reaches the run's data. Verified:
- * `--shared-server` reports `Mode: shared server` on 127.0.0.1:3308 and writes
- * `dolt_mode: "server"`.
+ * per-project database name, so a copied checkout still reaches the run's data. Measured
+ * by `scripts/probe-copied-checkout.sh`: under both modes a checkout copied to a
+ * differently named directory resolved to the ORIGINAL's database and its write reached
+ * it, because bd reads `dolt_database` from the copied metadata rather than deriving it
+ * from the path. `--shared-server` reports `Mode: shared server` on 127.0.0.1:3308.
  *
  * Matching what is allowed rather than excluding `embedded` is deliberate. bd already
  * ships a third mode, and an exclusion would have admitted it silently on the one axis
