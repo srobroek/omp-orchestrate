@@ -1,0 +1,73 @@
+name: pr-body-prose
+
+# Gates human PR bodies. Release-please PRs are exempt: rewriting their
+# generated markers makes the next release run fail to parse the body
+# and merge untagged (measured on #22).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  prose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Skip generated release-please bodies
+        if: >-
+          contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+          || startsWith(github.event.pull_request.title, 'chore: release')
+        run: |
+          echo "Skipping prose gate: release-please generated body."
+          echo "Reason: label autorelease: pending or title starts with 'chore: release'."
+          echo "Rewriting that body strips markers release-please parses (measured: #22 untagged)."
+
+      - uses: actions/checkout@v4
+        if: >-
+          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+          && !startsWith(github.event.pull_request.title, 'chore: release')
+
+      - uses: astral-sh/setup-uv@v5
+        if: >-
+          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+          && !startsWith(github.event.pull_request.title, 'chore: release')
+
+      - name: Fetch PR body
+        if: >-
+          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+          && !startsWith(github.event.pull_request.title, 'chore: release')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh pr view "${{ github.event.pull_request.number }}" --json body -q .body > pr-body.md
+
+      - name: Gate PR body
+        if: >-
+          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
+          && !startsWith(github.event.pull_request.title, 'chore: release')
+        run: |
+          set +e
+          uvx slopvac pr-body.md --profile normal --format json > slopvac-pr-body.json
+          status=$?
+          set -e
+          if [ ! -s slopvac-pr-body.json ]; then
+            echo "slopvac wrote no report (exit $status)"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import sys
+          report = json.load(open("slopvac-pr-body.json"))
+          errors = report["summary"]["errors"]
+          score = report["summary"]["score"]
+          warnings = report["summary"]["warnings"]
+          print(f"slopvac score={score} errors={errors} warnings={warnings}")
+          if errors:
+              sys.exit(f"prose gate failed: {errors} error(s)")
+          print("prose gate passed: no errors (warnings do not fail the job)")
+          PY
