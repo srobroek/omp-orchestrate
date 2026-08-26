@@ -271,32 +271,6 @@ describe("W5 shared-database precondition", () => {
 		expect(notice).not.toContain("Set BEADS_DOLT_SHARED_SERVER=1");
 	});
 
-	test("a beads project that does not name .beads/ in .worktreeinclude is reported", async () => {
-		// worktrunk's copy-ignored step runs with --require-include, so it copies only what
-		// .worktreeinclude names. Without the opt-in a worktree inherits no database, and a
-		// run there mints a second empty one. Measured: all four live worktrees of this
-		// repository held no `.beads/` at all.
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain(".worktreeinclude");
-		expect(notice).toContain("second empty one");
-	});
-
-	test("naming .beads/ in .worktreeinclude silences that line", async () => {
-		await stubOmp("worktree");
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		await writeFile(join(cwd, ".worktreeinclude"), "# comment\n.beads/\n");
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).not.toContain(".worktreeinclude");
-	});
-
 	test("a repository with no beads database says nothing", async () => {
 		// Observed in the field: this warning fired in a repository that had never run
 		// `bd init`, where there are no claims to split and the advice was

@@ -1,11 +1,20 @@
 # Ignored paths worktrunk copies into a new worktree.
 #
-# .beads/ is the load-bearing entry. The beads database is a per-project Dolt server, and
-# bd resolves it by host and port from .beads/dolt-server.port. That file is gitignored, so
-# a worktree receives it from nothing unless it is named here. Without it bd reports "no
-# beads database found", and a run would mint a second empty database on its own port --
-# measured: all four live worktrees of this repository held no .beads/ at all.
+# `.beads/` is deliberately NOT named here, and adding it would be a regression.
 #
-# Copying the port file makes a worktree reach the SAME server as the primary checkout,
-# which is the property that lets an isolated worker's claims and closures reach the run.
-.beads/
+# Two measurements decide it. First, this file matches top-level entries only: `.beads/`,
+# `.beads` and `/.beads/` each resolve to `.beads (dir)` and copy the whole tree, while
+# `.beads/*`, `.beads/*.json` and `.beads/**` match nothing. So there is no way to copy the
+# connection files without also copying `.beads/dolt/`, which is 2.2MB of Dolt storage a
+# worktree must never serve from: if the port file goes stale, that store is exactly what a
+# worktree would start a second server on, holding data old enough to look real.
+#
+# Second, no copy is needed. `bd` resolves its database from `BEADS_DIR`, and from a
+# directory holding no `.beads/` at all, `BEADS_DIR=<primary>/.beads bd list` listed this
+# run's beads. So `src/beads-mode.ts` resolves the primary checkout's `.beads` through
+# `git rev-parse --git-common-dir` and points the run at it. A worktree joins the run's
+# server and holds no copy of it.
+#
+# Nothing else in this repository needs copying: `bun install` is fast and its output is
+# reproducible from the lockfile, so a cold worktree costs a install rather than a
+# divergent database.
