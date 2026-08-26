@@ -38,16 +38,22 @@ describe("the marketplace catalog", () => {
 		}
 	});
 
-	test("no version is declared in the catalog", () => {
-		// The install resolves the version from `.claude-plugin/plugin.json`, so a version here
-		// would be a second place to bump and would go stale the first time release-please runs.
+	test("every declared version agrees, across all four files", () => {
+		// `omp plugin upgrade` in its all-plugin form compares ONLY catalog entries that declare
+		// a version, so an entry without one is invisible to update detection. Declaring it costs
+		// a second place to bump, which is why the release-please wiring below is not optional:
+		// a catalog frozen at an old version reports no update and nothing fails.
+		const versions = new Set<string>();
 		for (const rel of CATALOGS) {
 			const catalog = JSON.parse(read(rel));
-			expect(catalog.metadata?.version).toBeUndefined();
 			for (const entry of catalog.plugins) {
-				expect(entry.version).toBeUndefined();
+				expect(entry.version).toMatch(/^\d+\.\d+\.\d+/);
+				versions.add(entry.version);
 			}
 		}
+		versions.add(JSON.parse(read(".claude-plugin/plugin.json")).version);
+		versions.add(JSON.parse(read("package.json")).version);
+		expect([...versions]).toHaveLength(1);
 	});
 
 	test("the plugin manifest exists and carries the version", () => {
@@ -58,10 +64,11 @@ describe("the marketplace catalog", () => {
 		expect(manifest.version).toMatch(/^\d+\.\d+\.\d+/);
 	});
 
-	test("release-please bumps the manifest, and the two versions agree", () => {
-		// One file is the version's home. `extra-files` is what keeps it in step with
-		// package.json; without that entry the catalog install would report a stale version
-		// forever, and nothing would fail.
+	test("release-please bumps every file that declares a version", () => {
+		// Three files declare it and package.json is the fourth, so three updaters keep them in
+		// step. Miss one and that copy freezes: a stale catalog version reports no update to
+		// `omp plugin upgrade`, and a stale manifest installs under the wrong version. Neither
+		// fails anything, which is why this is asserted rather than trusted.
 		const config = JSON.parse(read("release-please-config.json"));
 		const extras = config.packages["."]["extra-files"];
 		expect(extras).toContainEqual({
@@ -69,10 +76,9 @@ describe("the marketplace catalog", () => {
 			path: ".claude-plugin/plugin.json",
 			jsonpath: "$.version",
 		});
-
-		const manifest = JSON.parse(read(".claude-plugin/plugin.json"));
-		const pkg = JSON.parse(read("package.json"));
-		expect(manifest.version).toBe(pkg.version);
+		for (const rel of CATALOGS) {
+			expect(extras).toContainEqual({ type: "json", path: rel, jsonpath: "$.plugins[0].version" });
+		}
 	});
 
 	test("the entry names the extension omp actually loads", () => {

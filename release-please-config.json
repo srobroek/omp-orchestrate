@@ -16,6 +16,16 @@
           "type": "json",
           "path": ".claude-plugin/plugin.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".claude-plugin/marketplace.json",
+          "jsonpath": "$.plugins[0].version"
+        },
+        {
+          "type": "json",
+          "path": ".omp-plugin/marketplace.json",
+          "jsonpath": "$.plugins[0].version"
         }
       ]
     }
