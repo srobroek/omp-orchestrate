@@ -66,28 +66,6 @@ function firstLine(text: string | undefined): string {
 }
 
 /**
- * Whether this checkout is a linked worktree rather than the primary one.
- *
- * `git rev-parse` answers the same path for `--git-dir` and `--git-common-dir` in a primary
- * checkout, and diverging paths in a linked one. Verified in this repository's primary:
- * both answer `.git`.
- *
- * It decides what an absent database means. In a standalone repository it means a fresh
- * project, so initialising is right. In a worktree it means the copy never arrived, and
- * initialising mints a second empty database on its own port, which is the divergence this
- * whole check exists to prevent. Measured: all four live worktrees of this repository held
- * no `.beads/` at all, because it is gitignored and nothing copies it.
- */
-function inLinkedWorktree(cwd: string): boolean {
-	const dir = Bun.spawnSync(["git", "rev-parse", "--git-dir"], { cwd, stdout: "pipe", stderr: "pipe" });
-	const common = Bun.spawnSync(["git", "rev-parse", "--git-common-dir"], { cwd, stdout: "pipe", stderr: "pipe" });
-	// Not a git repository, or git unavailable: fall through to the normal path rather than
-	// inventing a worktree that cannot be confirmed.
-	if (dir.exitCode !== 0 || common.exitCode !== 0) return false;
-	return dir.stdout.toString().trim() !== common.stdout.toString().trim();
-}
-
-/**
  * Ensure the working directory holds an initialised, server-mode beads database.
  *
  * Initialising is safe to do for the caller: `--init-if-missing` no-ops against an
@@ -115,16 +93,15 @@ export async function ensureBeadsServer(cwd: string): Promise<BeadsReadiness> {
 		if (!NO_DATABASE.test(`${info.stderr}\n${info.stdout}`)) {
 			return { ok: false, reason: `bd info failed: ${firstLine(info.stderr || info.stdout)}` };
 		}
-		// A worktree with no database is a missing copy, never a fresh project. Initialising
-		// here mints a second empty database on its own port, and the run would pull an empty
-		// queue believing it had set itself up correctly.
-		if (inLinkedWorktree(cwd)) {
-			return {
-				ok: false,
-				reason:
-					"this is a linked worktree with no beads database, so the primary checkout's `.beads/` never arrived. Initialising here would mint a second empty database. Add `.beads/` to `.worktreeinclude` so worktrunk copies it, then recreate the worktree.",
-			};
-		}
+		// No worktree branch here. An earlier version refused in a linked worktree, on the
+		// belief that an absent `.beads/` meant a copy had failed to arrive and initialising
+		// would mint a second database. That belief came from listing files rather than from
+		// running `bd`. Measured since, in five linked worktrees of this repository holding no
+		// `.beads/` at all: `bd where` reported the PRIMARY checkout's database and `bd list`
+		// returned all nine of its beads. bd follows the worktree to its common git dir by
+		// itself, so the branch could never fire for the case it was written for, and the
+		// `.worktreeinclude` copy it recommended only added Dolt storage a worktree must not
+		// serve from. See `test/beads-mode.test.ts` for the real-bd regression test.
 		const init = await bdRun(
 			["init", "--init-if-missing", "--skip-hooks", "--server", "--non-interactive"],
 			INIT_TIMEOUT_MS,

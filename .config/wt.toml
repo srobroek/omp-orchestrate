@@ -20,11 +20,17 @@
 # branch and the database are separate refspaces, which is why the remote held no dolt refs
 # despite every branch in this repository having been pushed.
 
-[post-start]
-# A new worktree inherits `.beads/` through .worktreeinclude, including a port file that may
-# name a server that has since restarted on a different port. One read forces bd to resolve
-# and rewrite it, rather than leaving the stale value for the first real command to trip on.
-beads-resolve = "bd info >/dev/null 2>&1 || true"
+# No post-start hook. An earlier version refreshed a possibly-stale port file in the `.beads/`
+# a worktree inherited, and `.worktreeinclude` no longer copies `.beads/` at all: that copy
+# could not be narrowed below the whole directory, so it carried Dolt storage a worktree must
+# never serve from. `src/beads-mode.ts` joins the primary checkout's database through
+# `BEADS_DIR` instead, leaving a worktree nothing local to refresh.
+
+# Scope of the sync hooks below: they are effective in the primary checkout, which is where the
+# database lives. A worktree holds no `.beads/`, and these run in a plain shell rather than under
+# the extension, so `BEADS_DIR` is unset there and each one no-ops through its `|| true`. That is
+# the right outcome: a worktree and the primary reach one server, so there is nothing separate to
+# push from it.
 
 [post-commit]
 # Push the Dolt database to the `git+` remote already registered as `origin`, so a commit and

@@ -180,12 +180,19 @@ exit 0`);
 		expect(result.ok === false && result.reason).toContain("bd could not be run");
 	});
 
-	test("a linked worktree with no database refuses instead of initialising", async () => {
-		// A real linked worktree, because the guard asks git rather than inspecting paths.
+	test("a linked worktree with no database initialises like any other fresh project", async () => {
+		// This pins a REMOVAL. An earlier version refused here, believing an absent `.beads/`
+		// in a worktree meant a failed copy. Measured against real bd in five linked worktrees
+		// of this repository, all holding no `.beads/`: `bd where` reported the primary
+		// checkout's database and `bd list` returned all nine of its beads, so bd follows the
+		// worktree to its common git dir unaided and the refusal could never fire for the case
+		// it described. `scripts/probe-worktree-resolution.sh` enforces that invariant against
+		// real bd; this test only proves no worktree-specific branch survives here.
 		//
-		// Built under $HOME, not os.tmpdir(). A worktree under /tmp or /private/tmp is
-		// invisible inside the container dgit runs git in -- the bind mount succeeds and
-		// yields an empty directory -- so this repository forbids creating one there.
+		// A real linked worktree, because the removed guard asked git rather than inspecting
+		// paths. Built under $HOME, not os.tmpdir(): a worktree under /tmp or /private/tmp is
+		// invisible inside the container dgit runs git in -- the bind mount succeeds and yields
+		// an empty directory -- so this repository forbids creating one there.
 		const home = process.env.HOME ?? os.homedir();
 		const root = await fs.mkdtemp(path.join(home, ".orc-wt-test-"));
 		try {
@@ -201,19 +208,25 @@ exit 0`);
 			const linked = path.join(root, "linked");
 			git(["worktree", "add", "-q", linked, "-b", "side"], primary);
 
-			// bd reports no database, which in a standalone repository authorises an init.
+			// First read reports no database; the init that follows makes one, and the mode
+			// probe then confirms it, exactly as in a standalone repository.
 			await stub(`echo "$@" >> "$ARGV_LOG"
+case "$1 $2" in
+  "dolt show") echo "  Mode:     per-project"; exit 0 ;;
+esac
 case "$1" in
-  info) echo "Error: no beads database found" >&2; exit 1 ;;
+  info)
+    if [ -f "${path.join(dir, "made")}" ]; then exit 0; fi
+    echo "Error: no beads database found" >&2; exit 1 ;;
+  init) : > "${path.join(dir, "made")}"; exit 0 ;;
 esac
 exit 0`);
 
 			const result = await ensureBeadsServer(linked);
-			expect(result.ok).toBe(false);
-			expect(result.ok === false && result.reason).toContain(".worktreeinclude");
-			// The point: init must NOT run here. A worktree without a database is a missing
-			// copy, and initialising mints a second empty one on its own port.
-			expect(await argv()).toEqual(["info"]);
+			expect(result.ok).toBe(true);
+			expect(result.ok === true && result.note).toBe("initialised beads as a server-backed database");
+			// The init runs, with the flags that make it safe, and nothing consults git.
+			expect(await argv()).toEqual(["info", "init --init-if-missing --skip-hooks --server --non-interactive", "dolt show"]);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
