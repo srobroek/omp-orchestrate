@@ -312,6 +312,26 @@ it as ordinary work.
 Then tear down: commit anything outstanding in your checkout, push, report the epic,
 clear the worktree binding, and prune the tree.
 
+### Push the database, not just the branch
+
+The beads database is a per-project Dolt server, and `git push` does **not** carry
+`refs/dolt/data`. The branch and the database are separate refspaces, so pushing a branch
+leaves the database where it was. `bd dolt push` is what moves it: the remote is already
+registered as `origin`, pointing at this repository over `git+https`.
+
+Push at three points, each where run state must outlive this machine:
+
+- after pouring a molecule or creating an epic, since that graph is what every worker
+  claims from
+- at each phase boundary, once the shepherd has landed work and the queue has moved
+- before standing down, because a run whose beads never left the machine cannot be
+  recovered by anyone else
+
+`.config/wt.toml` pushes on commit as well, but only for work done through `wt`. A plain
+`git commit` bypasses it, so treat the hook as a convenience and the three points above as
+yours. Do not confuse this with `bd backup`, which writes a Dolt-native backup on a timer
+and reaches no remote.
+
 ## Output
 
 `VERDICT: REPORTED|BLOCKED|FAILED — <reason>`, then at most 100 words. The bead carries

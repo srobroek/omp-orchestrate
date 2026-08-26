@@ -909,6 +909,32 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 		);
 	}
 
+	// The same divergence, arriving through worktrees instead of through a copy. `.beads/`
+	// is gitignored, so a worktree receives it from nothing, and worktrunk's copy-ignored
+	// step runs with `--require-include`: it copies only what `.worktreeinclude` names. With
+	// that opt-in missing, `bd info` in a worktree reports no database, and a run there
+	// mints a second empty one on its own port. Measured: all four live worktrees of this
+	// repository held no `.beads/` at all.
+	//
+	// Checked as a file rather than by asking worktrunk, because the answer must hold for
+	// the NEXT worktree, which does not exist yet.
+	if (tracked) {
+		const includes = await fs
+			.readFile(path.join(cwd, ".worktreeinclude"), "utf8")
+			.then(text =>
+				text
+					.split("\n")
+					.map(line => line.trim())
+					.some(line => line === ".beads/" || line === ".beads"),
+			)
+			.catch(() => false);
+		if (!includes) {
+			lines.push(
+				"`.worktreeinclude` does not name `.beads/`, so a worktrunk worktree inherits no beads database. bd then reports no database there, and a run mints a second empty one on its own port. Add a line reading `.beads/` to `.worktreeinclude`",
+			);
+		}
+	}
+
 	// `orc-reviewer` names `@reviewer`, which is NOT one of OMP's ten built-in roles. An
 	// alias OMP cannot resolve returns undefined with NO warning and falls back to the
 	// session default, so an unconfigured consumer would silently run its reviewer on the

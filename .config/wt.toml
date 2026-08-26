@@ -1,0 +1,42 @@
+# Worktrunk hooks for this project.
+# Lifecycle reference: https://worktrunk.dev/hook/
+#
+# Beads hooks cannot be used here. `core.hooksPath` is owned by git-defender
+# (/usr/local/amazon/var/git-defender/hooks), and `bd hooks install` would repoint it,
+# disabling a security control. That is also why every `bd init` in this repository passes
+# --skip-hooks. Worktrunk runs its own hooks from this file instead, touching no git config.
+#
+# Scope, stated because it limits what may depend on these: they fire only for work done
+# through `wt`. A plain `git commit` bypasses them, so treat the sync as a convenience that
+# usually runs, never as an invariant. Anything that must hold belongs in a gate.
+#
+# Sync authority: the repository owner asked for the Dolt database itself to travel through
+# git, and `.beads/config.yaml` already carries the remote as
+# `sync.remote: git+https://github.com/srobroek/omp-orchestrate.git`, registered with Dolt
+# as `origin`. Recorded here because `bd dolt push` needs authority that is visible rather
+# than assumed.
+#
+# Why an explicit push is required at all: `git push` does NOT carry `refs/dolt/data`. The
+# branch and the database are separate refspaces, which is why the remote held no dolt refs
+# despite every branch in this repository having been pushed.
+
+[post-start]
+# A new worktree inherits `.beads/` through .worktreeinclude, including a port file that may
+# name a server that has since restarted on a different port. One read forces bd to resolve
+# and rewrite it, rather than leaving the stale value for the first real command to trip on.
+beads-resolve = "bd info >/dev/null 2>&1 || true"
+
+[post-commit]
+# Push the Dolt database to the `git+` remote already registered as `origin`, so a commit and
+# the bead state it refers to travel together. Without this the database is local-only: no
+# dolt refs existed on the remote before this file.
+beads-push = "bd dolt push || true"
+
+[post-merge]
+# Pull first, then repair. `bd recompute-blocked` exists for exactly this: beads documents it
+# as repairing stale is_blocked flags after a pull, and a stale flag hides ready work.
+beads-pull = "bd dolt pull && bd recompute-blocked || true"
+
+[post-switch]
+# A branch switch changes which beads are current, so the database follows the checkout.
+beads-pull = "bd dolt pull || true"
