@@ -26,7 +26,7 @@ jobs:
           echo "Reason: label autorelease: pending or title starts with 'chore: release'."
           echo "Rewriting that body strips markers release-please parses (measured: #22 untagged)."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: >-
           !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
           && !startsWith(github.event.pull_request.title, 'chore: release')
