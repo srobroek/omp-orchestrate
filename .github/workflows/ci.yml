@@ -42,7 +42,7 @@ jobs:
           python-version: "3.13"
 
       # uvx is not preinstalled on GitHub runners.
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.0.1
 
       # `_test_*.py` matches neither of pytest's default collection patterns, so a
       # `pytest <dir>` invocation here collects nothing and passes vacuously. The one
