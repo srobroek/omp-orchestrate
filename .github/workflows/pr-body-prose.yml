@@ -31,7 +31,7 @@ jobs:
           !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
           && !startsWith(github.event.pull_request.title, 'chore: release')
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.0.1
         if: >-
           !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
           && !startsWith(github.event.pull_request.title, 'chore: release')
