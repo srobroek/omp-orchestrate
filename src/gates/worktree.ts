@@ -18,7 +18,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { editInspect } from "@oh-my-pi/pi-natives";
 import { bdShow, metadataRecord, metadataString } from "../bd";
-import { observedClaim } from "../claim-state";
+import type { ClaimState } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
 import { scopeConflict } from "./claim";
 import { splitSegments } from "../shell";
@@ -285,12 +285,13 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
 
 /** Refuse a mutation outside the tree, or the territory, the claimed bead names. */
 export async function gateWorktreeScope(
+ claims: ClaimState,
  ctx: ExtensionContext,
  toolName: string,
  input: Record<string, unknown>,
 ): Promise<ToolCallEventResult | undefined> {
  if (!Object.hasOwn(GATED_WRITE_TOOLS, toolName)) return undefined;
- const claim = observedClaim();
+ const claim = claims.observedClaim();
  if (!claim || claim.beadIds.length === 0) return undefined;
 
  const sessionCwd = await realpathOrUndefined(ctx.cwd);

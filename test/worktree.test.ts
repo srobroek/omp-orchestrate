@@ -21,10 +21,11 @@ import { promisify } from "node:util";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
-import { forgetClaim, recordClaim } from "../src/claim-state";
+import { createClaimState } from "../src/claim-state";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "../src/gates/worktree";
 
 let beads: Record<string, BdBead>;
+let claims = createClaimState();
 
 // Restore each export without leaving a process-wide module mock for later suites.
 const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async (id: string) => beads[id] ?? null);
@@ -60,17 +61,17 @@ type Verdict = Promise<ToolCallEventResult | undefined>;
  * path, so only the cwd comparison applies.
  */
 function fromBash(cwd: string, command = "echo hi"): Verdict {
- return gateWorktreeScope(ctxAt(cwd), "bash", { command });
+ return gateWorktreeScope(claims, ctxAt(cwd), "bash", { command });
 }
 
 /** The gate as `src/index.ts` calls it for a `write` of one file. */
 function writing(target: string, cwd = owned): Verdict {
- return gateWorktreeScope(ctxAt(cwd), "write", { path: target, content: "x" });
+ return gateWorktreeScope(claims, ctxAt(cwd), "write", { path: target, content: "x" });
 }
 
 /** The gate as `src/index.ts` calls it for an `edit` patch against one file. */
 function editing(target: string, cwd = owned): Verdict {
- return gateWorktreeScope(ctxAt(cwd), "edit", { input: `[${target}#A1B2]\nPUT 1.=1:\n+x` });
+ return gateWorktreeScope(claims, ctxAt(cwd), "edit", { input: `[${target}#A1B2]\nPUT 1.=1:\n+x` });
 }
 
 beforeAll(async () => {
@@ -96,13 +97,14 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
+ claims = createClaimState();
  beads = { [BEAD]: { id: BEAD, metadata: { worktree: owned } } };
  // Disable isolated-root discovery outside the isolation-specific cases.
  process.env.OMP_WORKTREE_DIR = path.join(root, "no-such-isolation-base");
- recordClaim({ actor: "orc-impl-1", beadIds: [BEAD] });
+ claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD] });
 });
 
-afterEach(forgetClaim);
+
 
 describe("G2 gated tools", () => {
  test("gates exactly the tools that mutate the working tree", () => {
@@ -175,7 +177,7 @@ describe("G2 outside the claimed tree", () => {
 
  test("refuses when any one of several claimed beads names another tree", async () => {
   beads["orc-43"] = { id: "orc-43", metadata: { worktree: foreign } };
-  recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
+  claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   const result = await fromBash(owned);
 
@@ -268,7 +270,7 @@ describe("G2 target paths that escape the claimed tree", () => {
 
  test("refuses an edit that moves a file out of the tree", async () => {
   // `MV` is a second write target in the same patch, and escapes identically.
-  const result = await gateWorktreeScope(ctxAt(owned), "edit", {
+  const result = await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: `[${path.join(owned, "src", "api.ts")}#A1B2]\nPUT 1.=1:\n+x\nMV ${path.join(foreign, "src", "api.ts")}`,
   });
 
@@ -276,7 +278,7 @@ describe("G2 target paths that escape the claimed tree", () => {
  });
 
  test("refuses a quoted `MV` destination out of the tree", async () => {
-  const result = await gateWorktreeScope(ctxAt(owned), "edit", {
+  const result = await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: `[${path.join(owned, "src", "api.ts")}#A1B2]\nMV "${path.join(foreign, "src", "a b.ts")}"`,
   });
 
@@ -286,7 +288,7 @@ describe("G2 target paths that escape the claimed tree", () => {
  });
 
  test("refuses the escaping target among several the patch names", async () => {
-  const result = await gateWorktreeScope(ctxAt(owned), "edit", {
+  const result = await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: [
     `[${path.join(owned, "src", "api.ts")}#A1B2]`,
     "PUT 1.=1:",
@@ -398,7 +400,7 @@ describe("G2 metadata.scope territory", () => {
   // disjoint, so intersecting them would leave a worker holding two of them with
   // nowhere legal to write at all.
   beads["orc-43"] = { id: "orc-43", metadata: { worktree: owned, scope: ["src/deep/**"] } };
-  recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
+  claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   expect(await writing("src/api/handler.ts")).toBeUndefined();
   expect(await writing("src/deep/handler.ts")).toBeUndefined();
@@ -406,7 +408,7 @@ describe("G2 metadata.scope territory", () => {
 
  test("refuses a target neither claimed bead's scope names, listing both", async () => {
   beads["orc-43"] = { id: "orc-43", metadata: { worktree: owned, scope: ["src/deep/**"] } };
-  recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
+  claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   const result = await writing("src/other/handler.ts");
 
@@ -422,7 +424,7 @@ describe("G2 metadata.scope territory", () => {
   // the silence as a grant would let one scope-less bead in a claim switch the
   // comparison off entirely, so the union is over the beads that actually spoke.
   beads["orc-43"] = { id: "orc-43", metadata: { worktree: owned } };
-  recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
+  claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   expect(await writing("src/api/handler.ts")).toBeUndefined();
   expect((await writing("src/other/handler.ts"))?.block).toBe(true);
@@ -431,7 +433,7 @@ describe("G2 metadata.scope territory", () => {
 
 describe("G2 fail-open", () => {
  test("no observed claim allows the mutation", async () => {
-  forgetClaim();
+  claims = createClaimState();
   expect(await fromBash(foreign)).toBeUndefined();
   expect(await writing(path.join(foreign, "src", "api.ts"))).toBeUndefined();
  });
@@ -498,15 +500,15 @@ describe("G2 fail-open", () => {
  });
 
  test("an uninspectable edit is refused even with a forged compatibility path", async () => {
-  expect(await gateWorktreeScope(ctxAt(owned), "write", {})).toBeUndefined();
-  expect(await gateWorktreeScope(ctxAt(owned), "write", { path: 42 })).toBeUndefined();
-  expect((await gateWorktreeScope(ctxAt(owned), "edit", { input: "not a patch", path: "src/api.ts" }))?.block).toBe(true);
+  expect(await gateWorktreeScope(claims, ctxAt(owned), "write", {})).toBeUndefined();
+  expect(await gateWorktreeScope(claims, ctxAt(owned), "write", { path: 42 })).toBeUndefined();
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", { input: "not a patch", path: "src/api.ts" }))?.block).toBe(true);
  });
 
  test("an unrecognised tool name allows the mutation", async () => {
   // The gate only knows where `write` and `edit` keep their target. Anything else
   // degrades to the cwd comparison rather than probing fields by guess.
-  expect(await gateWorktreeScope(ctxAt(owned), "notepad", { path: path.join(foreign, "x.ts") })).toBeUndefined();
+  expect(await gateWorktreeScope(claims, ctxAt(owned), "notepad", { path: path.join(foreign, "x.ts") })).toBeUndefined();
  });
 });
 
@@ -543,40 +545,40 @@ describe("G2 isolated checkout containment", () => {
  });
 
  test("does not accept bash cwd as the current worker's root", async () => {
-  expect((await gateWorktreeScope(ctxAt(isolated), "bash", { cwd: owned, command: "touch x" }))?.block).toBe(true);
+  expect((await gateWorktreeScope(claims, ctxAt(isolated), "bash", { cwd: owned, command: "touch x" }))?.block).toBe(true);
  });
 });
 
 describe("G2 effective bash cwd and edit modes", () => {
  test("checks the actual bash cwd, including relative paths and the host root alias", async () => {
-  expect((await gateWorktreeScope(ctxAt(owned), "bash", { cwd: foreign, command: "touch x" }))?.block).toBe(true);
-  expect((await gateWorktreeScope(ctxAt(owned), "bash", { cwd: "../foreign", command: "touch x" }))?.block).toBe(true);
-  expect(await gateWorktreeScope(ctxAt(foreign), "bash", { cwd: owned, command: "touch x" })).toBeUndefined();
-  expect(await gateWorktreeScope(ctxAt(owned), "bash", { cwd: "/", command: "touch x" })).toBeUndefined();
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "bash", { cwd: foreign, command: "touch x" }))?.block).toBe(true);
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "bash", { cwd: "../foreign", command: "touch x" }))?.block).toBe(true);
+  expect(await gateWorktreeScope(claims, ctxAt(foreign), "bash", { cwd: owned, command: "touch x" })).toBeUndefined();
+  expect(await gateWorktreeScope(claims, ctxAt(owned), "bash", { cwd: "/", command: "touch x" })).toBeUndefined();
  });
 
  test("checks replace paths and structured patch rename destinations", async () => {
-  expect((await gateWorktreeScope(ctxAt(owned), "edit", {
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    path: path.join(foreign, "x.ts"), old_string: "old", new_string: "new",
   }))?.block).toBe(true);
-  expect((await gateWorktreeScope(ctxAt(owned), "edit", {
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    path: "src/api.ts", edits: [{ op: "update", rename: path.join(foreign, "x.ts"), diff: "-old\n+new" }],
   }))?.block).toBe(true);
  });
 
  test("checks every apply-patch file and move destination", async () => {
-  expect((await gateWorktreeScope(ctxAt(owned), "edit", {
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: `*** Begin Patch\n*** Update File: src/api.ts\n*** Move to: ${foreign}/x.ts\n@@\n-old\n+new\n*** End Patch`,
   }))?.block).toBe(true);
-  expect((await gateWorktreeScope(ctxAt(owned), "edit", {
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: `*** Begin Patch\n*** Add File: ${foreign}/x.ts\n+new\n*** End Patch`,
   }))?.block).toBe(true);
  });
 
  test("checks sloppy edit targets instead of compatibility path hints", async () => {
   const input = `<SM:EDIT path="${foreign}/x.ts">\n<SM:FIND>\nold\n</SM:FIND>\n<SM:PUT>\nnew\n</SM:PUT>\n</SM:EDIT>`;
-  expect((await gateWorktreeScope(ctxAt(owned), "edit", { input, path: "src/api.ts" }))?.block).toBe(true);
-  expect(await gateWorktreeScope(ctxAt(owned), "edit", {
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", { input, path: "src/api.ts" }))?.block).toBe(true);
+  expect(await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: input.replace(`${foreign}/x.ts`, "src/api.ts"),
   })).toBeUndefined();
  });
@@ -671,7 +673,7 @@ describe("G2 conflicting owners can reconcile without writing product files", ()
  });
 
  test("does not allow an execution-environment hook with a control command", async () => {
-  expect((await gateWorktreeScope(ctxAt(owned), "bash", {
+  expect((await gateWorktreeScope(claims, ctxAt(owned), "bash", {
    command: `bd comment ${BEAD} "NOTE conflict"`,
    env: { BEADS_ACTOR: actor, BASH_ENV: "/tmp/mutating-hook" },
   }))?.block).toBe(true);

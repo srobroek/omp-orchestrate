@@ -1,14 +1,18 @@
+import type { BdBead } from "../src/bd";
 import { describe, expect, spyOn, test } from "bun:test";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import * as actualBd from "../src/bd";
 import ompOrchestrate from "../src/index";
 
 type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
+type EventHandler = (event: unknown, ctx?: unknown) => unknown;
 
 interface Registered {
 	events: string[];
 	commands: string[];
 	tools: string[];
 	handlers: Map<string, CommandHandler>;
+	eventHandlers: Map<string, EventHandler[]>;
 	label?: string;
 }
 
@@ -17,8 +21,10 @@ interface Registered {
  * `sendMessage` at load time throws `ExtensionRuntimeNotInitializedError`, so this
  * stub makes every runtime action explode and asserts the factory never reaches one.
  */
-function recordingApi(): { pi: ExtensionAPI; seen: Registered } {
-	const seen: Registered = { events: [], commands: [], tools: [], handlers: new Map() };
+function recordingApi(mode: "load" | "worker" = "load"): { pi: ExtensionAPI; seen: Registered } {
+	const seen: Registered = {
+		events: [], commands: [], tools: [], handlers: new Map(), eventHandlers: new Map(),
+	};
 	const explode = (name: string) => () => {
 		throw new Error(`runtime action ${name} called during load`);
 	};
@@ -32,8 +38,11 @@ function recordingApi(): { pi: ExtensionAPI; seen: Registered } {
 		setLabel: (label: string) => {
 			seen.label = label;
 		},
-		on: (event: string) => {
+		on: (event: string, handler: EventHandler) => {
 			seen.events.push(event);
+			const handlers = seen.eventHandlers.get(event) ?? [];
+			handlers.push(handler);
+			seen.eventHandlers.set(event, handlers);
 		},
 		registerCommand: (name: string, definition: { handler: CommandHandler }) => {
 			seen.commands.push(name);
@@ -47,11 +56,12 @@ function recordingApi(): { pi: ExtensionAPI; seen: Registered } {
 		sendMessage: explode("sendMessage"),
 		sendUserMessage: explode("sendUserMessage"),
 		appendEntry: explode("appendEntry"),
-		getAllTools: explode("getAllTools"),
+		getAllTools: mode === "worker" ? () => [{ name: "yield" }] : explode("getAllTools"),
 		getActiveTools: explode("getActiveTools"),
 	};
 	return { pi: stub as unknown as ExtensionAPI, seen };
 }
+
 
 describe("extension factory", () => {
 	test("registers without invoking any runtime action", () => {
@@ -77,6 +87,82 @@ describe("extension factory", () => {
 		expect(seen.tools.sort()).toEqual(
 			["orc_bot_review_probe", "orc_conflict_probe", "orc_resolve_queue_dispatch", "orc_run_status"].sort(),
 		);
+	});
+	test("keeps claim and exit state private to reused factory bindings", async () => {
+		const beads = new Map<string, BdBead>([
+			["orc-parent-1", { id: "orc-parent-1", status: "in_progress", assignee: "parent" }],
+			["orc-child-1", { id: "orc-child-1", status: "in_progress", assignee: "child" }],
+			["orc-child-2", { id: "orc-child-2", status: "open", assignee: "" }],
+		]);
+		const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async id => beads.get(id) ?? null);
+		try {
+			const parent = recordingApi("worker");
+			const child = recordingApi("worker");
+			ompOrchestrate(parent.pi);
+			ompOrchestrate(child.pi);
+			const parentToolCall = parent.seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const childToolCall = child.seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const parentResult = parent.seen.eventHandlers.get("tool_result")!.at(-1)!;
+			const childResult = child.seen.eventHandlers.get("tool_result")!.at(-1)!;
+			const parentCtx = {
+				cwd: "/tmp/orc-parent",
+				getSystemPrompt: () => ["ORC-ROLE: implementer"],
+			} as unknown as ExtensionContext;
+			const childCtx = {
+				cwd: "/tmp/orc-child",
+				getSystemPrompt: () => ["ORC-ROLE: implementer"],
+			} as unknown as ExtensionContext;
+			const claimReport = (id: string, actor: string) => ({
+				toolName: "bash",
+				isError: false,
+				input: { command: "bd ready --metadata-field role=implementer --claim --json" },
+				details: {},
+				content: [{ type: "text", text: JSON.stringify([{ id, status: "in_progress", assignee: actor }]) }],
+			});
+
+			await parentResult(claimReport("orc-parent-1", "parent"));
+			expect(await childToolCall(
+				{ toolName: "bash", input: { command: "bd ready --metadata-field role=implementer --claim --json" } },
+				childCtx,
+			)).toBeUndefined();
+			expect(await parentToolCall(
+				{ toolName: "bash", input: { command: "bd update orc-parent-2 --claim" } },
+				parentCtx,
+			)).toMatchObject({ block: true, reason: expect.stringContaining("orc-parent-1") });
+
+			await childResult(claimReport("orc-child-1", "child"));
+			expect(await childToolCall(
+				{ toolName: "bash", input: { command: "bd update orc-child-1 --status open" } },
+				childCtx,
+			)).toBeUndefined();
+			beads.set("orc-child-1", { id: "orc-child-1", status: "open", assignee: "" });
+			expect(await childToolCall(
+				{ toolName: "bash", input: { command: "bd update orc-child-2 --claim" } },
+				childCtx,
+			)).toBeUndefined();
+			expect(await parentToolCall(
+				{ toolName: "bash", input: { command: "bd update orc-parent-2 --claim" } },
+				parentCtx,
+			)).toMatchObject({ block: true, reason: expect.stringContaining("orc-parent-1") });
+
+			beads.clear();
+			const unclaimedParent = recordingApi("worker");
+			const unclaimedChild = recordingApi("worker");
+			ompOrchestrate(unclaimedParent.pi);
+			ompOrchestrate(unclaimedChild.pi);
+			const unclaimedParentToolCall = unclaimedParent.seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const unclaimedChildToolCall = unclaimedChild.seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const unclaimedCtx = {
+				cwd: "/tmp/orc-unclaimed",
+				getSystemPrompt: () => ["ORC-ROLE: implementer"],
+			} as unknown as ExtensionContext;
+			const yieldEvent = { toolName: "yield", input: { result: { data: "finished" } } };
+			expect(await unclaimedParentToolCall(yieldEvent, unclaimedCtx)).toMatchObject({ block: true });
+			expect(await unclaimedParentToolCall(yieldEvent, unclaimedCtx)).toBeUndefined();
+			expect(await unclaimedChildToolCall(yieldEvent, unclaimedCtx)).toMatchObject({ block: true });
+		} finally {
+			showSpy.mockRestore();
+		}
 	});
 });
 

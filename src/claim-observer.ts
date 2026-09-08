@@ -1,4 +1,4 @@
-import { recordClaim } from "./claim-state";
+import type { ClaimState } from "./claim-state";
 import { effectiveSegments, parseBdInvocation } from "./shell";
 
 /**
@@ -182,12 +182,12 @@ function soleClaimingSegment(command: unknown): boolean {
  * Silent on anything unexpected. This runs after every bash call, so it stays cheap and
  * never throws: each guard returns before any parse that could.
  */
-export function observeClaimResult(event: ToolResultLike): void {
+export function observeClaimResult(claims: ClaimState, event: ToolResultLike): void {
  if (event.toolName !== "bash") return;
  if (!plausiblySucceeded(event)) return;
  if (!soleClaimingSegment(event.input?.command)) return;
 
  const claimed = reportedClaims(event);
  if (claimed === undefined) return;
- recordClaim(claimed);
+ claims.recordClaim(claimed);
 }

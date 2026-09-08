@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
+import { createClaimState } from "../src/claim-state";
 import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
 
 function api(toolNames: string[]): ExtensionAPI {
@@ -62,28 +62,30 @@ describe("G1 bead-write-free sandbox", () => {
 });
 
 describe("claim state", () => {
-	beforeEach(() => forgetClaim());
+	let claims = createClaimState();
+	beforeEach(() => { claims = createClaimState(); });
 
 	test("records and returns an observation", () => {
-		recordClaim({ actor: "arch-1", beadIds: ["orc-1"] });
-		expect(observedClaim()).toEqual({ actor: "arch-1", beadIds: ["orc-1"] });
+		claims.recordClaim({ actor: "arch-1", beadIds: ["orc-1"] });
+		expect(claims.observedClaim()).toEqual({ actor: "arch-1", beadIds: ["orc-1"] });
 	});
 
 	test("a later report cannot hide a previous acquisition", () => {
-		recordClaim({ actor: "w-1", beadIds: ["orc-1"] });
-		recordClaim({ actor: "w-1", beadIds: ["orc-2"] });
-		expect(observedClaim()?.beadIds).toEqual(["orc-1", "orc-2"]);
-		recordClaim({ actor: "other", beadIds: ["orc-3"] });
-		expect(observedClaim()).toEqual({ actor: "w-1", beadIds: ["orc-1", "orc-2"] });
-		forgetClaim();
-		recordClaim({ actor: "other", beadIds: ["orc-3"] });
-		expect(observedClaim()?.beadIds).toEqual(["orc-3"]);
+		claims.recordClaim({ actor: "w-1", beadIds: ["orc-1"] });
+		claims.recordClaim({ actor: "w-1", beadIds: ["orc-2"] });
+		expect(claims.observedClaim()?.beadIds).toEqual(["orc-1", "orc-2"]);
+		claims.recordClaim({ actor: "other", beadIds: ["orc-3"] });
+		expect(claims.observedClaim()).toEqual({ actor: "w-1", beadIds: ["orc-1", "orc-2"] });
+		claims.forgetClaim();
+		claims.recordClaim({ actor: "other", beadIds: ["orc-3"] });
+		expect(claims.observedClaim()?.beadIds).toEqual(["orc-3"]);
 	});
 
 	test("ignores an observation with no actor or no beads", () => {
-		recordClaim({ actor: "", beadIds: ["orc-1"] });
-		expect(observedClaim()).toBeUndefined();
-		recordClaim({ actor: "w-1", beadIds: [] });
-		expect(observedClaim()).toBeUndefined();
+		claims.recordClaim({ actor: "", beadIds: ["orc-1"] });
+		expect(claims.observedClaim()).toBeUndefined();
+		claims.recordClaim({ actor: "w-1", beadIds: [] });
+		expect(claims.observedClaim()).toBeUndefined();
 	});
+	
 });
