@@ -20,6 +20,13 @@ Never add `--parent`: merge beads are unparented. Empty ordinary pull → NO_WOR
 errors follow injected retry/stop rules. Check gate-cleared work with `bd gate check` and
 `bd ready --gated --json`; discovery is not acquisition.
 
+This ordinary pull claims only the unparented merge bead. Shepherds omit
+`--include-ephemeral`, and phase-one `bd gate create`/`bd gate discover` do not
+acquire a wisp or lease, so there is no separate ephemeral claim to release.
+Do not treat an empty ordinary assignee as proof about an unrelated wisp; if
+durable evidence names one, reconcile that wisp through its own close/release
+path under the exclusive recovery procedure.
+
 ## Five duties
 
 1. Verify approved scope, no extra commits, recorded base and matching PR body. Drift → bounce, not repair.

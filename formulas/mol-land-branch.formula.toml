@@ -146,9 +146,13 @@ labels = ["land", "phase:verify"]
 description = """
 Nothing polls this gate and no daemon closes it. The RUNNER is the shepherd's own
 patrol pass, whose first action every cycle is `bd gate check --type=gh`; phase one
-must release the claim with `bd update {{merge_bead}} --status open --assignee ""`
-after creating the gate. That call resolves the gate and lets {{merge_bead}} re-enter
-the queue; if no shepherd is patrolling {{repo}}, this molecule waits forever.
+claims only the ordinary merge bead and must release it with
+`bd update {{merge_bead}} --status open --assignee ""` after creating the gate.
+`bd gate check --type=gh` resolves the gate; reopening only releases the phase-one
+claim and lets {{merge_bead}} re-enter the queue. Gate commands do not acquire or
+release ephemeral wisp claims; recovery inventories those separately and uses each
+wisp's own close/release path under an exclusive window. If no shepherd is
+patrolling {{repo}}, this molecule waits forever.
 
 Point the gate at the actual run first: `bd gate discover` finds the run id for a
 `gh:run` gate, and the gate names no target otherwise. `bd gate check --escalate`

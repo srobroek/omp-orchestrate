@@ -264,9 +264,13 @@ source of truth.
 
 - **Architect:** replace it between waves, never mid-integration. The feature branch and the
   bead state carry the domain.
-- **Shepherd:** it is already two ephemeral phases. Restart from the merge bead after the
-  slot is released, never during a landing transaction.
-- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a recovery-needed note alone never makes work claimable.
+- **Shepherd:** it is already two ephemeral phases, but each phase claims only the ordinary
+  merge bead; gate creation/discovery and the merge slot are separate controls, not wisp
+  claims. Restart from the merge bead after the slot is released, never during a landing
+  transaction.
+- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
+  recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
+  ephemeral ownership separately and releases each through its own path.
 
 ## Human-in-the-loop and safe autonomy
 
