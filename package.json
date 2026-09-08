@@ -13,7 +13,8 @@
 		]
 	},
 	"devDependencies": {
-		"@oh-my-pi/pi-coding-agent": "^18.0.4",
+		"@oh-my-pi/pi-coding-agent": "^18.1.14",
+		"@oh-my-pi/pi-natives": "^18.1.14",
 		"@types/bun": "latest",
 		"typescript": "^5"
 	},
