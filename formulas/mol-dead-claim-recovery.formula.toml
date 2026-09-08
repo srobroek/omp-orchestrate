@@ -12,7 +12,7 @@ description = "the actor named in the bead's assignee"
 
 [vars.mode]
 default = "directed"
-description = "directed (re-assign to a named actor) or queue (return to the label pool)"
+description = "directed (wake a named replacement to pull) or queue (return to the metadata role pool)"
 
 [[steps]]
 id = "read-evidence"
@@ -25,14 +25,14 @@ Collect, do not judge. The bead's claim -- assignee plus status -- is the only
 authority on who owns this work, so start from `bd show {{bead}}`:
 
 - last comment timestamp and last status change
-- the captured branch `omp/task/{{actor}}`: `git log` on it, and
-  `git cherry <feature-branch> omp/task/{{actor}}` to see whether its commits are
-  already integrated. A dead worker never pushes, so this branch -- not a remote
-  ref -- is where its work survives
+- any actual captured branch identified by the task result or bead evidence:
+  verify its ref and head, then use `git cherry <feature-branch> <captured-branch>`
+  to inspect integration. Do not derive a branch name from the actor handle.
+  Record found, absent, or unknown; absence is not proof no work was produced
 - the checkout named in the bead's `metadata.worktree` (the architect's feature
   worktree, not a worker's), and in it `git log` and `git status --porcelain`
-- whether {{actor}}'s process still exists, and whether the `hub` roster still
-  lists it
+- whether {{actor}}'s process and delegated jobs still exist, and whether the
+  `hub` roster lists it; unknown liveness is not confirmed absence
 - the cross-check: run wt's step eval in that checkout, asking it for the
   bead var, and compare the answer to {{bead}}
 
@@ -51,9 +51,9 @@ type = "task"
 needs = ["read-evidence"]
 labels = ["recovery", "phase:diagnose"]
 description = """
-If {{actor}} still exists, send it {{bead}} and stop this molecule -- a
-running actor that pulls its own bead needs no recovery. Displacing a live
-actor loses the uncommitted work in its checkout.
+If {{actor}} still exists, contact it about {{bead}} and stop recovery; do not
+ask it to re-claim or displace it. Wait for its job outcome through the normal
+result channel. Unknown liveness blocks recovery rather than authorizing it.
 """
 
 [[steps]]
@@ -64,8 +64,9 @@ priority = 1
 needs = ["attempt-resume"]
 labels = ["recovery", "phase:decide"]
 description = """
-Present the evidence from read-evidence and the exact action intended, then
-close this gate only after the user confirms. The rules:
+Present the evidence from read-evidence and the exact action intended. Resolve
+the human gate with `bd gate resolve <gate-id>` only after user confirmation,
+then close this step. The rules:
 
 - NEVER steal a claim because a timestamp is old. Age is not evidence.
 - A claim held by an actor that is genuinely gone is recovered ON EVIDENCE
@@ -89,15 +90,26 @@ type = "task"
 needs = ["confirm-dead"]
 labels = ["recovery", "phase:repair"]
 description = """
-A dead worker's work is already preserved: its commits sit on the captured
-`omp/task/*` branch, which outlives the worker, the architect, and the process.
-Stamp it as `recovered_branch` on {{bead}} so the next claimant resumes from it,
-and never delete a branch whose `git cherry` output still shows `+`.
+Before any artifact, metadata, status, or assignee mutation, establish an
+operationally EXCLUSIVE recovery window: stop or exclude every dispatch and
+claim writer that could touch this bead, including automated supervisors.
+Keep that exclusion through preservation and claim release. Fresh reads and
+human consent alone are not race protection. If exclusion cannot be established,
+preserve the claim unchanged and report unresolved recovery.
 
-Only for a dead ARCHITECT is there a dirty tree to rescue: commit or stash the
-checkout from the bead's `metadata.worktree`, or copy its artifacts out, until
-`git status --porcelain` is empty. Never discard uncommitted work to make a
-recovery succeed, and never push on the dead actor's behalf.
+OMP 18.1.14 captures commits plus remaining working-tree delta only after a
+successful isolated child result. Failed or aborted runs skip that capture and
+may lose local work during cleanup, even if the worker committed early.
+
+Verify any surviving captured branch and its ownership before recording
+`recovered_branch` on {{bead}}. Never invent a ref or delete one whose
+`git cherry` output still shows `+`. If no branch survives, record that fact and
+the possible loss; do not report recovery as successful without evidence.
+
+Any residual isolated checkout needs backend-specific inspection; survival is
+not guaranteed. For a dead architect, inspect the checkout in metadata.worktree.
+Preserve verified residual changes or artifacts without discarding them or
+pushing on the dead actor's behalf. Recheck ownership before any mutation.
 """
 
 [[steps]]
@@ -108,39 +120,53 @@ priority = 1
 needs = ["preserve-artifacts"]
 labels = ["recovery", "phase:repair"]
 description = """
-Releasing the claim means unassigning the bead: `bd unclaim` does not exist, so
-clear the assignee and set status back to open in one `bd update`. That single
-change is what makes {{bead}} available -- nothing else holds the work.
+The reaper only records recovery observations; it cannot safely unclaim for you.
+Immediately re-read {{bead}} and recheck actor/job absence and approval before
+any mutation. If ownership, status, or evidence changed, stop and reassess.
+Beads has no compare-and-swap for this transition: retain the operationally
+EXCLUSIVE window established before preserve-artifacts, with all dispatch and
+claim writers stopped or excluded. If exclusion is lost, preserve the claim
+unchanged and report unresolved recovery.
 
-Leave `metadata.worktree` alone if the checkout is still wanted; correct it if
-read-evidence found it pointing somewhere else.
+For confirmed unfinished work, clear assignee and set status=open in one
+`bd update`; preserve reported/reviewed work for integration rather than reopening
+it blindly. Leave metadata.worktree intact unless verified evidence corrects it.
 """
 
 [[steps]]
 id = "reassign"
-title = "re-assign {{bead}} to a named actor"
+title = "wake a named replacement to pull {{bead}}"
 type = "task"
 needs = ["release-claim"]
 condition = "{{mode}} == directed"
 labels = ["recovery", "phase:repair", "route:directed"]
 description = """
-Stamp the new actor; provision its checkout via mol-arch-setup only when the new
-actor is an architect -- workers get an isolated workspace per spawn and need no
-provisioning. The new actor activates by pulling: `bd ready ... --claim` (plus
-`--include-ephemeral` on a wisp queue). Assigning a bead does not claim it.
+Leave the bead unassigned. Wake the replacement with its role and queue scope,
+not an activation command or a pre-assigned bead. Provision a checkout via
+mol-arch-setup only for an architect; isolated workers need no provisioning.
+Use the same metadata role query and parent/ephemeral rules as requeue.
+For preserved reported/reviewed work, do not wake an implementation replacement:
+route the existing evidence to its integration/review owner and skip re-claiming.
+
 """
 
 [[steps]]
 id = "requeue"
-title = "return {{bead}} to its label pool"
+title = "return {{bead}} to its metadata role pool"
 type = "task"
 needs = ["release-claim"]
 condition = "{{mode}} == queue"
 labels = ["recovery", "phase:repair", "route:queue"]
 description = """
-Confirm the `agent:` label is intact and the assignee empty, so the next actor
-pulling that queue with `bd ready --label agent:<x> --claim` takes {{bead}} on
-its own. Nothing hands it over; the pull is the activation.
+Confirm metadata.role and the empty assignee. Architect and implementer pulls use
+`bd ready --parent <owner> --metadata-field role=<role> --unassigned --claim --json`;
+reviewer and researcher pulls also require `--include-ephemeral`.
+Shepherds instead pull
+`bd ready --metadata-field role=shepherd --unassigned --claim --json`
+without a parent. Never change the role merely to make a queue find the bead.
+For preserved reported/reviewed work, retain its status and handoff; this step
+does not reopen it merely to make a ready query return it.
+
 """
 
 [[steps]]
@@ -150,7 +176,9 @@ type = "task"
 needs = ["release-claim", "reassign", "requeue"]
 labels = ["recovery", "phase:verify"]
 description = """
-`bd ready` must list {{bead}} (`--include-ephemeral` if it is a wisp), or its new
-claim-holder must hold it. A bead that is neither ready nor claimed is stranded,
-which is the state this molecule exists to end.
+For reopened work, the role-specific ready query without `--claim` must list
+{{bead}}, or its replacement must already hold it. For preserved reported work,
+verify a named integration/review owner and the durable evidence instead; being
+in_progress and unassigned is expected there. Unknown or blocked outcomes must
+be reported explicitly, not described as successful recovery.
 """

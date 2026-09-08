@@ -6,10 +6,26 @@ so a reader can audit the protocol without reading the extension.
 
 ORCHESTRATION PROTOCOL — active run. Follow exactly.
 
-Work is pulled, not handed to you. Your first act is to claim the next bead matching
-your domain:
+Ordinary work is pulled, not handed to you. Use the Claiming command in your loaded agent
+definition as the authority. Reviewer and researcher pulls include ephemeral beads
+and their parent queue; shepherd pulls omit the parent. Architect and implementer
+pull their declared parent queues. Preserve each role's metadata routing filter.
+The shepherd's sole receipt-directed exception freshly validates a durable exact
+approved-owner/head dispatch, then runs bd update <exact-owner-id> --claim --json.
+Direct in_progress resume requires the same exclusively held actor. An unassigned
+in_progress owner is not claimable: its coordinator must exclude all competing
+writers and perform the documented status-only reconciliation before acquisition.
+It preserves role, root, scope, actor and exclusive ownership gates; a receipt never
+authorizes another role's bead or reassignment. Observe the successful claim result
+and freshly resolve restored in_progress approval/head authority before acknowledgment
+or work. Without proven exclusion, preserve the owner and report BLOCKED.
 
-    bd ready --parent <epic> --metadata-field role=<your-role> --unassigned --claim --json
+Run the claiming command alone in its tool call. Do not pipe its output through jq
+or combine it with other executable commands; the unmodified result binds the claim.
+Claims must complete in the foreground: never set async:true. Required configuration
+is bash.autoBackground.enabled=false. An unavailable or incorrect setting is a known
+limitation, not proof of observation; a warning does not make claims safe. A later
+async-result does not establish the observed claim.
 
 Three outcomes, not two. Read the result before you decide.
 
@@ -68,11 +84,14 @@ multi-word verb with its underscore, then write the prose.
 Mirror every material outcome to the affected bead as a comment, under the acting
 identity. Set BEADS_ACTOR and BD_ACTOR to metadata.actor on every mutating bd process.
 
-Exit. Your role contract is checked when you yield, and an incomplete exit is refused
-with the unmet checks named. Satisfy it before yielding: deliver the evidence your
-bead's execution_kind requires, add the next role's handoff label, clear your assignee,
-and leave a REPORTED comment. A genuine failure is a valid exit -- set status blocked
-and leave a FAILED or BLOCKED comment rather than faking success.
+Exit. Follow your role's evidence and disposition contract, not another role's report
+shape. Implementers report head_sha for git before yield; their parent-side branch
+capture is verified only after successful task completion. Non-git work needs output_ref.
+Completion requires the role's handoff and release. A positively open linked
+escalation pauses a writer without releasing its claim. Unknown evidence allows an
+unevaluated exit; three failed evaluations in this activation allow exit without
+accepting work or changing owner, status or metadata. Recovery requires explicit
+reconciliation under the exclusive-window procedure, never a blind release.
 
 Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role carries
 it, the architect that decomposed the epic writes it, and no other role may rewrite it.
@@ -81,18 +100,21 @@ Blocked. Design or debug uncertainty creates an escalation wisp linked to your b
 carrying a BLOCKED comment. Product intent creates an ASK wisp and a human gate. Never
 wait live on a peer: record what you need, yield, and let the run wake you.
 
-Spawning. An architect spawns roles that claim beads, and contract-free helpers that
-edit files in its own checkout and report back. No other role spawns either of those. A
-helper never claims a bead, never commits, and never manages worktrees. Claiming is the
-line that matters: the queue and the exit gate both depend on it.
+Spawning. Only an architect spawns roles that claim beads. Helpers never claim a bead,
+commit, touch a PR or manage worktrees. Claiming is the line that matters: the queue
+and the exit gate both depend on it.
 
-One exception for every other role. Read it off the agent's own frontmatter: an explicit
-tools: list that omits write, edit and task cannot mutate your checkout and cannot spawn
-further. Librarian is the case in point. Spawn one for an external-library fact. Its
-structured result carries the answer back, so it needs no wisp. This needs
-task.maxRecursionDepth 3.
+Read the spawning agent's own allowlist. The implementer grants scout and operator;
+the reviewer grants scout. A factual scout lookup returns directly, with no bead,
+wisp or consent. For an external-library question, name the package and version,
+require installed source or official documentation, and ask for citations and excerpts
+in its optional report. Its schema has summary, files, architecture and optional report,
+not dedicated library-answer fields.
 
-Two cautions. Several such agents hold bash, librarian included, so prose confines their
-writes rather than the tool list: librarian's body limits them to /tmp/librarian-*. And
-an agent declaring no tools: list at all inherits write and task, which is why sonic is
-never a helper.
+Scout declares read, grep, glob and web_search, with no mutation or execution tools.
+Operator declares no tools: list and is write-capable. For an architect, its exact
+mechanical targets stay inside that architect's feature checkout and allowed scope.
+For an implementer, they stay inside the claimed scope and isolated checkout.
+Its prose contract and worktree confinement, not a read-only tool grant, constrain mutation.
+Worker helpers require task.maxRecursionDepth 3 as well as the explicit allowlist.
+An agent with no tools: list inherits tools; that alone never grants a spawn name.
