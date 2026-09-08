@@ -26,6 +26,14 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
+      - name: Install Vale
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v3.17.1 --repo errata-ai/vale --pattern 'vale_3.17.1_Linux_64-bit.tar.gz' --dir "$RUNNER_TEMP/vale"
+          tar -xzf "$RUNNER_TEMP/vale/vale_3.17.1_Linux_64-bit.tar.gz" -C "$RUNNER_TEMP/vale"
+          echo "$RUNNER_TEMP/vale" >> "$GITHUB_PATH"
+
       - name: Fetch PR body
         env:
           GH_TOKEN: ${{ github.token }}
