@@ -1,5 +1,5 @@
 formula = "mol-arch-setup"
-description = "static preamble the architect completes in {{repo}} before any worker claims {{owner_bead}}"
+description = "static preamble the lead completes before launching the native architect for {{owner_bead}}"
 type = "workflow"
 
 [vars.repo]
@@ -12,7 +12,7 @@ description = "branch the worktree is created on"
 
 [vars.owner_bead]
 required = true
-description = "epic or feature bead this worktree is provisioned for; the architect that claims it is its only mutator"
+description = "unassigned architect epic this root is provisioned for; the lead prepares and binds it before launching the native architect"
 
 [vars.copies_ignored]
 default = "true"
@@ -25,11 +25,16 @@ type = "task"
 priority = 1
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C {{repo}} switch --create {{branch}} --no-cd -y
+wt -C {{repo}} switch --create {{branch}} --no-cd --format=json -y
 
-Refuse to continue if the path already carries a bead var naming a different
-bead: one path serves one bead, and a second stamp makes the cross-check in
-bind-vars ambiguous for whoever adopts {{owner_bead}} later.
+Use the returned absolute `path` as <worktree> in the remaining steps; do not
+derive it from the branch name. Read its existing binding with
+`wt -C <worktree> step eval '{{ vars.bead }}' --format json` before stamping it.
+Refuse a binding naming another bead or an unresolved read; an absent binding
+is expected only for a newly created worktree.
+
+The command does not relocate the spawning session. Establish the native
+architect's session at this root before launch; see planning.md.
 """
 
 [[steps]]
@@ -39,7 +44,7 @@ type = "task"
 needs = ["create-worktree"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C <worktree> config state vars set bead={{owner_bead}}
+wt -C <worktree> config state vars set bead={{owner_bead}} --branch {{branch}}
 
 Then read it back:
 
@@ -59,14 +64,16 @@ never enter it, so nothing here is provisioned for them.
 
 [[steps]]
 id = "verify-writable"
-title = "verify the worktree is clean and writable"
+title = "verify the worktree state and writability"
 type = "task"
 needs = ["bind-vars"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-git -C <worktree> status --porcelain must print nothing, and the path must be
-writable. A dirty inherited worktree mixes someone else's work into the first
-commit made against {{owner_bead}}.
+For a fresh setup, `git -C <worktree> status --porcelain` must print nothing,
+and the path must be writable. A resumed tree may be dirty: preserve and inspect
+its existing changes and accepted delta; do not reset or clean it merely to
+make recovery look fresh. A dirty fresh setup mixes someone else's work into
+the first commit made against {{owner_bead}} and must be refused.
 """
 
 [[steps]]
@@ -106,8 +113,10 @@ needs = ["stamp-owner", "copy-ignored"]
 labels = ["arch-setup", "phase:provision"]
 description = """
 Preconditions all true: the worktree exists, its bead var reads {{owner_bead}},
-the tree is clean, ignored inputs are present, and metadata.worktree is stamped.
-Only now may work under {{owner_bead}} be pulled:
+fresh setup is clean (or resumed dirty state is preserved and inspected),
+ignored inputs are present, and metadata.worktree is stamped. The lead now launches
+the native architect with its actual session cwd at this canonical worktree. Only
+then may the architect pull work under {{owner_bead}}:
 `bd ready --parent {{owner_bead}} --metadata-field role=<role> --unassigned --claim --json`.
 Use role=implementer for implementation and role=architect for child epics;
 reviewer and researcher pulls also require `--include-ephemeral`. Shepherds

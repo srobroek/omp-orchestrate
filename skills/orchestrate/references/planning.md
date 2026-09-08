@@ -189,3 +189,31 @@ Use per-entry `effort: "lo" | "med" | "hi"` for the actual slice. Use `outputSch
 with `schemaMode: "strict"` for shape checking; it does not prove semantic acceptance.
 Collect terminal results, not job receipts, before consuming captures or resuming writes.
 MCP/LSP degradation is recorded as `WARN preflight` on the epic; it does not hold a wave.
+
+## Architect runtime entry and recovery
+
+Start the architect in the canonical Worktrunk root derived from the session before
+claiming or dispatching. Non-isolated children inherit the parent session's cwd;
+isolated children run in a runtime-created copy snapshotted from that cwd.
+`metadata.worktree` routes queue ownership and scope; it never switches cwd.
+Verify the architect session root matches before any write or dispatch.
+
+When re-entry changes the discovery root, use the supported rooted lead CLI and
+preserve the loaded native agent's role and spawn policy:
+
+```sh
+BEADS_DIR=<absolute-beads-dir> \
+ORCHESTRATE_MARKER_FILE=<absolute-marker-file> \
+omp --cwd <canonical-worktree> --config <run-overlay> --print \
+  "Lead: dispatch the loaded native orc-architect for the bound epic; preserve its role and spawn policy; collect and return the actual terminal result." </dev/null
+```
+
+Pass `--config <run-overlay>` when re-entry changes discovery root; otherwise retain
+the active run configuration. A supervised PTY is also valid for `--print`; closed
+stdin prevents a hanging process. Collect the actual result before replacement.
+Keep experiment-only isolation enablement in the run overlay. Do not silently
+override the user's project or global isolation preference.
+Recovery preserves dirty resumed trees and requires the exclusive recovery procedure
+before another writer starts. A missing Git object is a distinct setup failure:
+inspect the actual source root and object or capture evidence; cwd correction alone
+does not prove the object exists or dispatch succeeded.

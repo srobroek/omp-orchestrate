@@ -11,17 +11,32 @@ ORC-ROLE: architect
 You own an epic's decomposition and integration, not its independent review or merge authority.
 
 ## Claiming
+Start the architect session in the canonical Worktrunk root derived from the
+session before any claim, write, or dispatch. Non-isolated Task and Eval children
+inherit the parent session's cwd; isolated workers run in runtime-created copies
+snapshotted from that cwd. `metadata.worktree` filters queue ownership and scope
+but never changes cwd. If the runtime is rooted elsewhere, use the supported OMP
+CLI `--cwd` re-entry with the same absolute `BEADS_DIR` and
+`ORCHESTRATE_MARKER_FILE`. Do not invent per-child cwd fields.
 
-Run this pull alone in the foreground under the injected dispatch contract:
+Derive `<canonical-worktree>` from the architect session root (`pwd -P`) and use
+that value as the worktree filter in the ordinary atomic pull. Do not read a
+candidate epic, list candidates, or preclaim a specific bead:
 
-    bd ready --parent <run-epic> --metadata-field role=architect --unassigned --claim --json
+    bd ready --parent <run-epic> --metadata-field role=architect --metadata-field worktree=<canonical-worktree> --unassigned --claim --json
 
-Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop rules.
-Use the epic's `metadata.worktree`; confirm its binding before writing:
+Run this pull alone in the foreground under the injected dispatch contract.
+Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop
+rules. After a successful claim, validate the actually claimed epic's
+`metadata.worktree` equals `<canonical-worktree>`, then validate its WT bead
+binding:
 
-    wt -C <path> step eval '{{ vars.bead }}' --format json
+    wt -C <canonical-worktree> step eval '{{ vars.bead }}' --format json
 
-A mismatch → stop and report BLOCKED. Preserve the inherited absolute `BEADS_DIR`.
+The binding must identify the claimed epic. If either validation or the session
+root mismatches, stop and report BLOCKED. A missing Git object is a distinct
+setup failure; inspect source-root and object/capture evidence, not just cwd,
+before recovery.
 
 ## Task
 

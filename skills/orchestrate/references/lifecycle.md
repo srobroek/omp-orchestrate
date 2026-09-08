@@ -161,9 +161,13 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    binding from `/orchestrate-status`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
    the actor in `assignee`, the location in `metadata.worktree`/`branch`, and the
-   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`;
-   a recorded branch with no worktree is recovered by `wt switch <branch> --no-cd
-   --format=json`, and the bead is updated when Worktrunk returns a different path.
+   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`.
+   Recover missing paths and re-enter the architect at the canonical session root before any
+   claim or dispatch.
+   Metadata identifies ownership but never relocates a session. Preserve the same absolute
+   `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`; the supported re-entry procedure and source
+   object checks are canonical in `planning.md`.
+
 3. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
@@ -171,6 +175,9 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    Resume the landing transaction, or use its evidence-gated recovery path after proving the
    exact actor lease is dead.
 5. Drain the patrol wisp for each epic (below) before dispatching anything new.
+   Do not release a retained claim merely to re-enter the runtime. Collect any prior terminal
+   result and capture evidence first; replacement requires the same exclusive claim/dispatch/
+   branch-writer window and recovery procedure.
 6. For GitHub-backed runs, restart the release watcher with `--slots=1` and replay
    unacknowledged records first: `orc_resolve_queue_dispatch` with a `bd list --json`
    snapshot and `replayUnacknowledged`. Only a matching ack suppresses a replay. See

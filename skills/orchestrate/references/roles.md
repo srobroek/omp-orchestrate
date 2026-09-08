@@ -21,6 +21,12 @@ Escalation is per-spawn `effort`, not a second agent. There is no deep variant o
 | Shepherd | `orc-shepherd` | `@task` | ephemeral, two phases across the CI gate | PR and merge state only; no content edits | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled or exact receipt-resumed under `queue-watcher.md` |
 | Helper | `scout`, or another non-claiming child its spawner's allowlist names | its loaded definition | ephemeral, inside its spawner's await | its spawner's checkout; mutation only when explicitly scoped and granted | nothing -- architect helpers are traced by a wisp; worker factual lookups return directly |
 
+The lead prepares and binds the unassigned architect epic before launching the native
+architect. The architect must start in its canonical owned Worktrunk feature worktree
+before it claims the epic or dispatches any child. Non-isolated children inherit their
+parent session's `cwd`; isolated children run in runtime-created copies snapshotted from
+that parent-session `cwd`. The detailed session-cwd prerequisite and supported CLI re-entry
+path are in `planning.md`.
 The reviewer uses the configured `@reviewer` role. The researcher uses `@smol` and
 escalates hard cases per spawn with `effort`.
 
@@ -91,8 +97,8 @@ refused for depth. A bead-claiming role spawned by a worker stays a design error
 
 | Situation | Do this |
 |---|---|
-| The work deserves a bead, review, and a captured branch | create the task bead with `role=implementer` and dispatch a wave |
-| A bounded sweep or mechanical operation that saves substantial context/execution | optionally spawn an allowlisted helper in your checkout, trace architect helpers with a wisp, and await the terminal result before resuming writes |
+| The work deserves a bead, review, and a captured branch | create the task bead routed to `role=implementer` and dispatch a wave |
+| A bounded sweep or mechanical operation that saves substantial context/execution | optionally spawn an allowlisted helper only after the architect session is rooted in its canonical checkout; trace architect helpers with a wisp, and await the terminal result before resuming writes |
 | A design or debug question that needs judgment, not a factual lookup | route it to `role=researcher` rather than deciding it yourself |
 | A small repository or external-library fact | read it directly; use `scout` only for a substantial bounded lookup. Worker factual returns need no bead, wisp or consent; external briefs require package/version and primary-source citations |
 | A verdict on work that reported | create the review wisp with `role=reviewer`; never review what you wrote |
