@@ -40,6 +40,12 @@ if [[ -n "${AGNIX_DIFF_BASE:-}" ]]; then
 	fi
 	diff_args+=("$diff_base")
 fi
+diff_file="$(mktemp "${TMPDIR:-/tmp}/agnix-diff.XXXXXX")"
+trap 'rm -f -- "$diff_file"' EXIT
+if ! git diff "${diff_args[@]}" -- >"$diff_file"; then
+	printf 'unable to read the staged diff; refusing to skip agnix\n' >&2
+	exit 1
+fi
 while IFS= read -r -d '' status && IFS= read -r -d '' path; do
 	# Any tracked deletion can remove an input referenced by a surviving agentic file.
 	# Rescan the surviving inputs before applying path filters.
@@ -54,7 +60,9 @@ while IFS= read -r -d '' status && IFS= read -r -d '' path; do
 		continue
 	fi
 	staged_paths+=("$path")
-done < <(git diff "${diff_args[@]}" --)
+done <"$diff_file"
+rm -f -- "$diff_file"
+trap - EXIT
 
 if ((config_changed)); then
 	staged_paths=()

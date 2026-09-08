@@ -314,10 +314,12 @@ Nobody polls it and nobody holds a session open for it.
 
 Park the bead instead. Record what is awaited with `bd set-state <bead> state=waiting_gate
 --reason "<what is awaited and how to resume>"`, add `bd gate create --type=gh:run --blocks
-<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR
-merge, then continue unrelated beads from `bd ready`. When nothing else is ready and only
-external waits remain, write the run report and exit; the gate bead and the next pass own
-the wait. `bd gate check` plus `bd ready --gated` is how the cleared gate re-enters the run.
+<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR,
+then release the phase-one claim with `bd update <bead> --status open --assignee ""`. Continue
+unrelated beads from `bd ready`. When nothing else is ready and only external waits remain,
+write the run report and exit; the gate bead and the next pass own the wait. `bd gate check`
+plus `bd ready --gated` is how the cleared gate is discovered, after which ordinary
+`bd ready --claim` acquires the reopened bead.
 
 Two campaign runs violated this on their final release bead: each polled a release workflow
 and a package-executing reviewer until the stream aborted, leaving that bead `in_progress`

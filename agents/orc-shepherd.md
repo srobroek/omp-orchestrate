@@ -31,12 +31,16 @@ errors follow injected retry/stop rules. Check gate-cleared work with `bd gate c
 ## Two landing phases
 
 Before either phase, LOAD `skill://orchestrate/references/beads-store.md` → Shepherd primitives and `skill://orchestrate/references/lifecycle.md` → Completion paths / external gates.
-Phase one: duties 1–3, open or ready the draft PR, create/discover the CI gate, comment and yield without a merge slot:
+Phase one: duties 1–3, open or ready the draft PR, create/discover the CI gate, then
+release the merge bead for a fresh phase-two claim without a merge slot:
 
     bd gate create --type=gh:run --blocks <merge-bead> --await-id <run-id>
     bd gate discover
+    bd update <merge-bead> --status open --assignee ""
 
-Phase two: freshly acquire gate-cleared work through the matching claim path, inspect actual required CI/bot outcomes, and revalidate GitHub head, approval, base and dependencies before acquiring the slot and again under it.
+Phase two: freshly acquire gate-cleared work through the ordinary claim path, inspect
+actual required CI/bot outcomes, and revalidate GitHub head, approval, base and
+dependencies before acquiring the slot and again under it.
 
     bd merge-slot acquire
 

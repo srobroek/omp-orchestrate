@@ -32,12 +32,19 @@ def git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def checker(repo: Path, *, base: str | None = None) -> subprocess.CompletedProcess[str]:
+def checker(
+    repo: Path,
+    *,
+    base: str | None = None,
+    overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = FIXTURE_ENV.copy()
     if base is None:
         env.pop("AGNIX_DIFF_BASE", None)
     else:
         env["AGNIX_DIFF_BASE"] = base
+    if overrides:
+        env.update(overrides)
     return subprocess.run(
         [str(CHECKER)],
         cwd=repo,
@@ -92,6 +99,13 @@ def main() -> None:
         git(repo, "commit", "--quiet", "-m", "valid feature")
         valid_head = git(repo, "rev-parse", "HEAD")
         expect_success(checker(repo, base=base), "valid CI input")
+
+        broken_index = repo / "broken-index"
+        broken_index.write_bytes(b"not a git index")
+        expect_failure(
+            checker(repo, overrides={"GIT_INDEX_FILE": str(broken_index)}),
+            "unreadable staged diff",
+        )
 
         (repo / "SKILL.md").write_text(valid_skill.replace("# Valid", "<tool_call>"))
         git(repo, "add", "SKILL.md")
