@@ -12,6 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts" / "check-agnix-staged.sh"
+INSTALLER = ROOT / "scripts" / "install-agnix-hooks.sh"
+TRACKED_WRAPPER = ROOT / ".githooks" / "pre-commit"
 FIXTURE_ENV = {
     key: value
     for key, value in os.environ.items()
@@ -68,9 +70,107 @@ def expect_failure(result: subprocess.CompletedProcess[str], case: str) -> None:
         raise AssertionError(f"{case} unexpectedly passed")
 
 
+def write_hook(path: Path, label: str) -> None:
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'printf "%s\\n" "{label}:$1" >> "$HOOK_LOG"\n'
+    )
+    path.chmod(0o755)
+
+
+def run_installer(repo: Path) -> None:
+    result = subprocess.run(
+        [str(repo / "scripts" / "install-agnix-hooks.sh")],
+        cwd=repo,
+        env=FIXTURE_ENV,
+        text=True,
+        capture_output=True,
+    )
+    expect_success(result, "hook installation")
+
+
+def run_hook(repo: Path, hook_name: str) -> list[str]:
+    hooks_path = Path(git(repo, "config", "--path", "--get", "core.hooksPath"))
+    log = repo / "hook.log"
+    log.unlink(missing_ok=True)
+    env = FIXTURE_ENV.copy()
+    env["HOOK_LOG"] = str(log)
+    result = subprocess.run(
+        [str(hooks_path / hook_name), "sentinel"],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    expect_success(result, f"{hook_name} sentinel")
+    return log.read_text().splitlines()
+
+
+def test_hook_installation() -> None:
+    with tempfile.TemporaryDirectory(prefix="agnix-install-test-") as temporary:
+        repo = Path(temporary)
+        git(repo, "init", "--quiet")
+        scripts = repo / "scripts"
+        tracked_hooks = repo / ".githooks"
+        scripts.mkdir()
+        tracked_hooks.mkdir()
+        shutil.copy2(INSTALLER, scripts / "install-agnix-hooks.sh")
+        shutil.copy2(CHECKER, scripts / "check-agnix-staged.sh")
+        shutil.copy2(TRACKED_WRAPPER, tracked_hooks / "pre-commit")
+        (scripts / "install-agnix-hooks.sh").chmod(0o755)
+        (scripts / "check-agnix-staged.sh").chmod(0o755)
+        (tracked_hooks / "pre-commit").chmod(0o755)
+
+        first_hooks = repo / "first-hooks"
+        first_hooks.mkdir()
+        for hook_name in ("commit-msg", "pre-commit", "pre-push"):
+            write_hook(first_hooks / hook_name, f"first-{hook_name}")
+        git(repo, "config", "core.hooksPath", str(first_hooks))
+        run_installer(repo)
+
+        generated = Path(git(repo, "config", "--path", "--get", "core.hooksPath"))
+        if not (generated / "pre-commit").is_symlink():
+            raise AssertionError("generated pre-commit is not a symlink")
+        for hook_name in ("commit-msg", "pre-push"):
+            hook = generated / hook_name
+            if not hook.is_symlink() or hook.resolve() != first_hooks / hook_name:
+                raise AssertionError(f"{hook_name} was not preserved")
+        if run_hook(repo, "commit-msg") != ["first-commit-msg:sentinel"]:
+            raise AssertionError("first commit-msg hook did not survive installation")
+        if run_hook(repo, "pre-push") != ["first-pre-push:sentinel"]:
+            raise AssertionError("first pre-push hook did not survive installation")
+        if run_hook(repo, "pre-commit") != ["first-pre-commit:sentinel"]:
+            raise AssertionError("first pre-commit chain did not survive installation")
+
+        second_hooks = repo / "second-hooks"
+        second_hooks.mkdir()
+        for hook_name in ("commit-msg", "pre-commit", "pre-push"):
+            write_hook(second_hooks / hook_name, f"second-{hook_name}")
+        git(repo, "config", "--worktree", "core.hooksPath", str(second_hooks))
+        run_installer(repo)
+        previous = git(repo, "config", "--get", "agnix.previousHooksPath")
+        if previous != str(second_hooks):
+            raise AssertionError(
+                f"reinstallation did not record the new hook path: {previous!r}"
+            )
+        generated = Path(git(repo, "config", "--path", "--get", "core.hooksPath"))
+        for hook_name in ("commit-msg", "pre-push"):
+            hook = generated / hook_name
+            if not hook.is_symlink() or hook.resolve() != second_hooks / hook_name:
+                raise AssertionError(f"{hook_name} was not refreshed on reinstall")
+        if run_hook(repo, "commit-msg") != ["second-commit-msg:sentinel"]:
+            raise AssertionError("reinstalled commit-msg hook did not run")
+        if run_hook(repo, "pre-push") != ["second-pre-push:sentinel"]:
+            raise AssertionError("reinstalled pre-push hook did not run")
+        if run_hook(repo, "pre-commit") != ["second-pre-commit:sentinel"]:
+            raise AssertionError("reinstalled pre-commit chain did not run")
+
+
 def main() -> None:
     if shutil.which("agnix") is None:
         raise RuntimeError("agnix must be installed before running this regression")
+    test_hook_installation()
 
     valid_skill = (
         "---\n"
