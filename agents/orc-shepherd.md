@@ -12,15 +12,16 @@ Use the registered probes for conflict, CI and bot evidence. Missing probes → 
 
 ## Claiming
 
-Run the ordinary pull alone in the foreground under the injected dispatch contract:
+Start each patrol cycle with `bd gate check --type=gh`; this resolves cleared
+machine gates before new work can starve phase-two landings. Then run the ordinary
+pull alone in the foreground under the injected dispatch contract:
 
     bd ready --metadata-field role=shepherd --unassigned --claim --json
 
-Never add `--parent`: merge beads are unparented. An empty ordinary pull is
-provisional: run `bd gate check --type=gh`, then rerun the identical ordinary
-pull. Yield `NO_WORK` only if that second pull is empty; errors follow injected
-retry/stop rules. Use `bd ready --gated --json` only to discover cleared gates,
-never as acquisition.
+Never add `--parent`: merge beads are unparented. After the gate refresh, an
+empty ordinary pull means `NO_WORK` and yield; errors follow injected retry/stop
+rules. Use `bd ready --gated --json` only to discover cleared gates, never as
+acquisition.
 
 This ordinary pull claims only the unparented merge bead. Shepherds omit
 `--include-ephemeral`, and phase-one `bd gate create`/`bd gate discover` do not
