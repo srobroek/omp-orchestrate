@@ -103,10 +103,9 @@ Do not use type `merge-request`: it is a ready-filter alias, not a creatable typ
 Stamp `repo`, `branch`, `base_sha`, `origin_bead` and `integration_owner=orchestrate`.
 When transferring ownership for the same repository/PR, `origin_bead` names the source
 node or its explicit parent; preserve that parent in ownership snapshots. Source
-approval and receipts do not transfer. After the shepherd verifies the PR/head,
+approval does not transfer. After the shepherd verifies the PR/head,
 stamp the merge's own `pr` and `head_sha`; its own approval, `in_progress` state and
-exact head govern dispatch. LOAD `skill://orchestrate/references/queue-watcher.md`
-before receipt-directed acquisition or acknowledgment.
+exact head govern dispatch.
 
 ## Persistence classes
 
@@ -171,10 +170,6 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    Resume the landing transaction, or use its evidence-gated recovery path after proving the
    exact actor lease is dead.
 5. Drain the patrol wisp for each epic (below) before dispatching anything new.
-6. For GitHub-backed runs, restart the release watcher with `--slots=1` and replay
-   unacknowledged records first: `orc_resolve_queue_dispatch` with a `bd list --json`
-   snapshot and `replayUnacknowledged`. Only a matching ack suppresses a replay. See
-   `references/queue-watcher.md`.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
 replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
@@ -272,8 +267,6 @@ source of truth.
 - **Shepherd:** it is already two ephemeral phases. Restart from the merge bead after the
   slot is released, never during a landing transaction.
 - **Workers:** replace only after explicit exclusive-window recovery releases their claim; a recovery-needed note alone never makes work claimable.
-- **Standalone `pr-shepherd`:** repository-global recovery and queue drain only, when no run
-  shepherd owns the landing.
 
 ## Human-in-the-loop and safe autonomy
 

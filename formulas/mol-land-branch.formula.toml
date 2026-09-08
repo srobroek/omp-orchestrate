@@ -56,10 +56,9 @@ Creating shells as reviewers finish can omit a required review dimension.
 A reviewer is code-readonly, not Beads-readonly: it must claim its wisp, write
 the verdict and findings on the linked {{node_bead}}, close a completed approving
 wisp, and clear its assignee. It needs no checkout and never writes a worktree.
-Do not run it under `bd --readonly`. The shepherd ordinarily uses
+Do not run it under `bd --readonly`. The shepherd uses
 `bd ready --metadata-field role=shepherd --unassigned --claim --json` without a
-parent; exact approved-owner queue receipts use its receipt-aware named Claiming
-path instead, with every role, ownership and scope gate intact.
+parent.
 """
 
 [[steps]]
@@ -191,9 +190,9 @@ GitHub with `gh` immediately before merging, then merge with an atomic head
 guard. A head that moved between ci-green and here is a stale merge, not a
 mergeable one.
 
-Stamp `integration_owner=orchestrate` on {{merge_bead}} so the standalone
-pr-shepherd's global drain leaves it alone. Never push a commit, edit the PR
-body, resolve a conflict, or close the PR as a substitute for a bounce.
+Stamp `integration_owner=orchestrate` on {{merge_bead}} so unrelated global shepherds
+leave it alone. Never push a commit, edit the PR body, resolve a conflict, or close the
+PR as a substitute for a bounce.
 """
 
 [[steps]]

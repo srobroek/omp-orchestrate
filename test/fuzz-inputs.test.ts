@@ -5,7 +5,6 @@ import path from "node:path";
 import { fnmatch, scopeOf, scopesOverlap } from "../src/scope";
 import { type BdInvocation, bdInvocations, effectiveSegments, invokesCommand } from "../src/shell";
 import { type BotReviewState, classifyBotReviews } from "../src/tools/bot-review-probe";
-import { resolveQueueDispatch } from "../src/tools/resolve-queue-dispatch";
 import { appendAudit, auditFileName, bdMutation } from "../src/watchers";
 
 /** mulberry32: four lines, uniform enough for corpus generation, and seedable. */
@@ -470,167 +469,6 @@ describe("scope resolution under hostile metadata", () => {
  });
 });
 
-describe("resolveQueueDispatch under structurally wrong JSON", () => {
- const validPullRequest = {
-  repository: "acme/widgets",
-  number: 7,
-  title: "t",
-  headSha: "deadbeef",
-  baseRef: "main",
-  labels: ["x"],
-  priority: 2,
-  draft: false,
-  mergeable: true,
-  checks: "pass",
-  createdAt: "2026-01-01T00:00:00Z",
-  updatedAt: "2026-01-01T00:00:00Z",
-  state: "active",
-  activeSince: "2026-01-01T00:00:00Z",
- };
- const validNode = {
-  id: "orc-node-1",
-  status: "in_progress",
-  labels: ["orc-node", "state:approved"],
-  metadata: { pr: 7, repo: "acme/widgets", head_sha: "deadbeef", branch: "b", base_sha: "cafe1234" },
- };
-
- /** Values that are legal JSON and illegal for every field in this schema. */
- const WRONG: readonly unknown[] = [
-  null,
-  [],
-  [[]],
-  {},
-  { nested: {} },
-  0,
-  -1,
-  1.5,
-  Number.MAX_SAFE_INTEGER,
-  true,
-  false,
-  "",
-  "0",
-  "1_0",
-  ASTRAL,
-  CONTROLS,
-  "../../etc/passwd",
-  "a".repeat(10_000),
- ];
-
- const deepObject = ((): unknown => {
-  let node: unknown = { leaf: true };
-  for (let level = 0; level < 5_000; level++) node = { nested: node };
-  return node;
- })();
-
- function records(): unknown[] {
-  const out: unknown[] = [
-   null,
-   undefined,
-   [],
-   42,
-   "dispatch",
-   {},
-   { type: "dispatch" },
-   { type: "pr-lifecycle" },
-   { type: [] },
-   { type: {} },
-   { type: null },
-   { type: "webhook-error" },
-   { type: "webhook-error", message: "m", repository: [] },
-   { type: "reconcile-error", message: ASTRAL },
-   { type: "dispatch", pullRequest: [] },
-   { type: "dispatch", pullRequest: deepObject },
-   { type: "dispatch", pullRequest: validPullRequest },
-   deepObject,
-   JSON.parse('{"type":"dispatch","__proto__":{"pullRequest":{}}}'),
-  ];
-  // One field of an otherwise valid record replaced by something of the wrong shape.
-  for (const field of Object.keys(validPullRequest)) {
-   for (const wrong of WRONG) {
-    out.push({ type: "dispatch", pullRequest: { ...validPullRequest, [field]: wrong } });
-    out.push({
-     type: "pr-lifecycle",
-     transition: "updated",
-     source: "webhook",
-     lifecycleKey: "k",
-     deliveryId: "d",
-     webhookAction: "synchronize",
-     pullRequest: { ...validPullRequest, [field]: wrong },
-    });
-   }
-  }
-  for (const wrong of WRONG) {
-   out.push({ type: "pr-lifecycle", transition: wrong, source: "webhook", lifecycleKey: "k", pullRequest: validPullRequest });
-   out.push({ type: "pr-lifecycle", transition: "updated", source: wrong, lifecycleKey: "k", pullRequest: validPullRequest });
-   out.push({ type: "pr-lifecycle", transition: "updated", source: "webhook", lifecycleKey: wrong, pullRequest: validPullRequest });
-  }
-  return out;
- }
-
- function snapshots(): unknown[] {
-  const out: unknown[] = [
-   null,
-   undefined,
-   [],
-   {},
-   "[]",
-   42,
-   [null, 42, "x", []],
-   [validNode],
-   [validNode, validNode],
-   { schema_version: 1, data: [validNode] },
-   { schema_version: 1, data: "not an array" },
-   [deepObject],
-   JSON.parse('[{"status":"in_progress","labels":["orc-node"],"metadata":{"__proto__":{"pr":7}}}]'),
-  ];
-  for (const wrong of WRONG) {
-   out.push([{ ...validNode, labels: wrong }]);
-   out.push([{ ...validNode, metadata: wrong }]);
-   out.push([{ ...validNode, id: wrong }]);
-   out.push([{ ...validNode, metadata: { ...validNode.metadata, pr: wrong } }]);
-   out.push([{ ...validNode, metadata: { ...validNode.metadata, repo: wrong } }]);
-   out.push([{ ...validNode, metadata: { ...validNode.metadata, queue_dispatch: wrong } }]);
-  }
-  return out;
- }
-
- test("every record/snapshot pair lands on one of the four documented exit codes", () => {
-  const allRecords = records();
-  const allSnapshots = snapshots();
-  const next = seeded(0x5eed_3);
-  for (const record of allRecords) {
-   // Pair each record with a few snapshots rather than all of them: the cross
-   // product is ~90k combinations and adds no distinct failure mode.
-   for (let pick = 0; pick < 3; pick++) {
-    const nodes = allSnapshots[Math.floor(next() * allSnapshots.length)];
-    for (const replay of [false, true]) {
-     const outcome = resolveQueueDispatch(record, nodes, { replayUnacknowledged: replay });
-     const label = `${JSON.stringify(record)?.slice(0, 80)} / replay=${replay}`;
-     expect([0, 1, 2, 3], label).toContain(outcome.code);
-     expect(Array.isArray(outcome.actions), label).toBe(true);
-     if (outcome.code === 0) {
-      expect(outcome.result, label).not.toBeNull();
-      expect(outcome.error, label).toBeNull();
-     } else {
-      expect(outcome.result, label).toBeNull();
-      expect(outcome.actions, label).toEqual([]);
-      expect(typeof outcome.error, label).toBe("string");
-      expect((outcome.error as string).length, label).toBeGreaterThan(0);
-     }
-     for (const action of outcome.actions) {
-      expect(typeof action.node, label).toBe("string");
-      for (const value of Object.values(action.metadata)) expect(typeof value, label).toBe("string");
-     }
-    }
-   }
-  }
- });
-
- test("a 5000-deep object neither overflows the stack nor is mistaken for a record", () => {
-  expect(resolveQueueDispatch(deepObject, [deepObject]).code).toBe(0);
-  expect(resolveQueueDispatch({ type: "dispatch", pullRequest: deepObject }, [deepObject]).code).toBe(1);
- });
-});
 
 describe("classifyBotReviews under hostile evidence", () => {
  /** The verdict-to-exit-code map the landing contract routes on. */
@@ -721,8 +559,6 @@ describe("prototype pollution", () => {
    "scope",
    "head_sha",
    "branch",
-   "queue_dispatch",
-   "queue_dispatch_ack",
    "takesDuration",
    "declined",
   ];
@@ -730,18 +566,11 @@ describe("prototype pollution", () => {
 
   const hostile: unknown = JSON.parse(
    '{"__proto__":{"polluted":true,"pr":9,"repo":"a/b","scope":"**","head_sha":"deadbeef",' +
-   '"branch":"b","queue_dispatch":"k","queue_dispatch_ack":"k","takesDuration":true,"declined":true},' +
+   '"branch":"b","takesDuration":true,"declined":true},' +
    '"constructor":{"prototype":{"polluted":true}},"prototype":{"polluted":true},' +
    '"type":"dispatch","status":"in_progress","labels":["orc-node","state:approved"]}',
   );
-  const node: unknown = JSON.parse(
-   '{"id":"orc-1","status":"in_progress","labels":["orc-node","state:approved"],' +
-   '"metadata":{"__proto__":{"pr":9,"repo":"a/b","head_sha":"deadbeef","branch":"b","base_sha":"c0ffee11",' +
-   '"queue_dispatch":"a/b#9@deadbeef","queue_dispatch_ack":"a/b#9@deadbeef"}}}',
-  );
 
-  resolveQueueDispatch(hostile, [node]);
-  resolveQueueDispatch(hostile, [node], { replayUnacknowledged: true });
   classifyBotReviews(hostile, { head: "abc", slugs: ["coderabbitai", "__proto__"] });
   scopesOverlap(scopeOf(hostile as Record<string, unknown>), ["src/**"]);
   bdInvocations("bd update __proto__ constructor --claim");
@@ -749,10 +578,5 @@ describe("prototype pollution", () => {
 
   expect(canary.map(key => key in ({} as Record<string, unknown>))).toEqual(before);
   expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
-  // And the receipt lookup is not fooled by an inherited-looking key: a node whose
-  // only `queue_dispatch_ack` sits under `__proto__` owns no receipt at all.
-  const outcome = resolveQueueDispatch(null, [node], { replayUnacknowledged: true });
-  expect(outcome.code).toBe(0);
-  expect(outcome.actions).toEqual([]);
  });
 });

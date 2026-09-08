@@ -18,7 +18,7 @@ Escalation is per-spawn `effort`, not a second agent. There is no deep variant o
 | Implementer | `orc-implementer` | `@task` | ephemeral, one bead | an isolated copy; commits captured on `omp/task/<id>` | one task bead, pulled |
 | Reviewer | `orc-reviewer` | `@reviewer` | ephemeral, one verdict | inspects the captured branch or feature tree without editing code; dispatch determines checkout isolation | one review wisp, pulled |
 | Researcher | `orc-researcher` | `@smol` | ephemeral, one answer | reads assigned sources without editing code; dispatch determines checkout isolation | one escalation wisp or research bead, pulled |
-| Shepherd | `orc-shepherd` | `@task` | ephemeral, two phases across the CI gate | PR and merge state only; no content edits | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled or exact receipt-resumed under `queue-watcher.md` |
+| Shepherd | `orc-shepherd` | `@task` | ephemeral, two phases across the CI gate | PR and merge state only; no content edits | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
 | Helper | `scout`, or another non-claiming child its spawner's allowlist names | its loaded definition | ephemeral, inside its spawner's await | its spawner's checkout; mutation only when explicitly scoped and granted | nothing -- architect helpers are traced by a wisp; worker factual lookups return directly |
 
 The reviewer uses the configured `@reviewer` role. The researcher uses `@smol` and
@@ -62,7 +62,7 @@ Extension-registered tools and configured MCP tools can remain available outside
 No `tools:` key means inherited tools. Bash, GitHub and eval-capable tools can mutate state
 without `edit` or `write`; no-code-edit rules are behavioral contracts, not a sandbox.
 
-The shepherd explicitly requests its receipt, conflict/CI and bot-review probes plus `hub`.
+The shepherd explicitly requests its conflict/CI and bot-review probes plus `hub`.
 The extension must register those probes. Missing probes require BLOCKED, not a shell
 substitute that skips their evidence checks.
 

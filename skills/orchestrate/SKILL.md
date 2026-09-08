@@ -25,7 +25,6 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 | Review or landing | `skill://orchestrate/references/lifecycle.md` |
 | Parking or recovery | `skill://orchestrate/references/lifecycle.md` |
 | Incidental bugs or cleanup | `skill://orchestrate/references/lifecycle.md` |
-| Watcher startup or receipt handling | `skill://orchestrate/references/queue-watcher.md` |
 | Decisions across scope boundaries | `skill://orchestrate/references/decisions.md` |
 | Durable comment syntax | `skill://orchestrate/references/message-grammar.md` |
 
@@ -49,7 +48,6 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - NOT Infer authority from age or a fresh read. Unknown ownership or evidence permits neither claim release nor cleanup.
 - NOT Treat gates as isolation or atomic authorization.
 - NOT Let the lead claim beads. Workers cannot rewrite existing routing; only shepherds merge.
-- MUST Use queue-watcher's supported CLI receipt procedure. An unresolved exact owner cannot be replaced with a generic queue pull.
 - MUST Keep decisions on beads. Messages carry ids rather than relayed findings.
 
 ## Tools and status
@@ -58,7 +56,6 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 |---|---|
 | Conflict or CI evidence | `orc_conflict_probe` |
 | Bot round at the exact head | `orc_bot_review_probe`; unknown and declined are never clean |
-| Receipt routing | `orc_resolve_queue_dispatch` under the queue-watcher procedure |
 | Run status | `orc_run_status`; use its rollup, not a hand-built `bd list` summary |
 
 | Status scope | Filter |

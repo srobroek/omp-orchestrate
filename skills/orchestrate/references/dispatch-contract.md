@@ -10,15 +10,6 @@ Ordinary work is pulled, not handed to you. Use the Claiming command in your loa
 definition as the authority. Reviewer and researcher pulls include ephemeral beads
 and their parent queue; shepherd pulls omit the parent. Architect and implementer
 pull their declared parent queues. Preserve each role's metadata routing filter.
-The shepherd's sole receipt-directed exception freshly validates a durable exact
-approved-owner/head dispatch, then runs bd update <exact-owner-id> --claim --json.
-Direct in_progress resume requires the same exclusively held actor. An unassigned
-in_progress owner is not claimable: its coordinator must exclude all competing
-writers and perform the documented status-only reconciliation before acquisition.
-It preserves role, root, scope, actor and exclusive ownership gates; a receipt never
-authorizes another role's bead or reassignment. Observe the successful claim result
-and freshly resolve restored in_progress approval/head authority before acknowledgment
-or work. Without proven exclusion, preserve the owner and report BLOCKED.
 
 Run the claiming command alone in its tool call. Do not pipe its output through jq
 or combine it with other executable commands; the unmodified result binds the claim.

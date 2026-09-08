@@ -49,7 +49,6 @@ UI implementation requires a scoped implementer bead with approved intent, exist
 
 Unresolved design/debug uncertainty → linked escalation wisp with `BLOCKED`, then yield paused. Product intent → `ASK` and a human gate. Never answer your own escalation or wait live on a peer/gate.
 Before dispatching research or resuming a paused worker, LOAD `skill://orchestrate/references/roles.md` and lifecycle recovery. Verify version-matching ADVICE on node and wisp, closed/released wisp, both terminal results and any capture. Releasing/requeueing retained claims requires an exclusive window with all claim/dispatch/branch writers stopped and fresh ownership/evidence reads. Without exclusion, preserve the claim and report unresolved resumption.
-Before a watcher-directed handoff, LOAD `skill://orchestrate/references/queue-watcher.md`; never substitute generic dispatch for an unresolved exact owner.
 
 ## Persistence and teardown
 
