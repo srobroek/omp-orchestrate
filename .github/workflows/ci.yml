@@ -24,6 +24,10 @@ jobs:
           BINSTALL_DISABLE_TELEMETRY: "true"
         run: cargo binstall agnix-cli@0.52.2 --no-confirm
 
+      - name: Agnix staged-hook behavior
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/test-agnix-hook.py
+
       - name: Agentic staged check
         if: github.event_name == 'pull_request'
         env:

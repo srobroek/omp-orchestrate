@@ -32,7 +32,7 @@ is_agentic_path() {
 
 staged_paths=()
 config_changed=0
-diff_args=(--cached --name-status --no-renames --diff-filter=ACMDT)
+diff_args=(--cached --name-status --no-renames --diff-filter=ACMDT -z)
 if [[ -n "${AGNIX_DIFF_BASE:-}" ]]; then
 	if ! diff_base="$(git rev-parse --verify "${AGNIX_DIFF_BASE}^{commit}")"; then
 		printf 'AGNIX_DIFF_BASE does not resolve to a commit: %s\n' "$AGNIX_DIFF_BASE" >&2
