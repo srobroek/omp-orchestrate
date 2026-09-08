@@ -16,6 +16,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, te
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
@@ -612,6 +614,10 @@ describe("G2 conflicting owners can reconcile without writing product files", ()
   `bd show ${BEAD} --json`,
   `bd comments ${BEAD}`,
   "bd list --json",
+  `env BD_ACTOR='${actor}' b'd' comment ${BEAD} 'literal $(touch changed.ts); > \`cmd\` \\ $HOME'`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} pre" quoted "'literal'`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} ''`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} 'line one\nline two'`,
  ])("allows a standalone reconciliation operation: %s", async (command) => {
   expect(await fromBash(owned, command)).toBeUndefined();
  });
@@ -624,9 +630,46 @@ describe("G2 conflicting owners can reconcile without writing product files", ()
   `BEADS_ACTOR=${actor} bd comment orc-other "NOTE conflict"`,
   `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee "" --title hijacked`,
   `BEADS_ACTOR=${actor} bd create "unrelated work"`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} "$HOME"`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} "\`touch changed.ts\`"`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} "escaped \\"quote"`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} escaped\\ word`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} 'unterminated`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} ok\nbd list`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} *`,
+  `BEADS_ACTOR=${actor} bd comment ${BEAD} ok # comment`,
+  `sh -c 'bd list'`,
  ])("refuses side effects or authority outside reconciliation: %s", async (command) => {
   expect((await fromBash(owned, command))?.block).toBe(true);
  });
+
+ test("bounds late-forbidden control parsing in a killable subprocess", async () => {
+  const childFlag = "OMP_WORKTREE_CONTROL_ADVERSARY";
+  if (process.env[childFlag] === "1") {
+   // No command is executed: only the gate sees these adversarial strings.
+   // An unquoted run has exponentially many partitions in the former regex.
+   const prefix = `BEADS_ACTOR=${actor} bd comment ${BEAD} ${"a".repeat(32_768)}`;
+   const started = performance.now();
+   for (const suffix of ["; touch changed.ts", " > changed.ts", '"$(touch changed.ts)"']) {
+    expect((await fromBash(owned, prefix + suffix))?.block).toBe(true);
+   }
+   // Exclude child startup and fixtures. The old regex may eventually fall back
+   // instead of hanging, but still spends seconds parsing these three refusals.
+   expect(performance.now() - started).toBeLessThan(2_000);
+   return;
+  }
+  // A test timeout cannot interrupt synchronous regex backtracking. The parent
+  // stays responsive and kills the separate Bun process even on the old code.
+  const result = await promisify(execFile)(process.execPath, [
+   "test", import.meta.path, "--test-name-pattern",
+   "bounds late-forbidden control parsing in a killable subprocess",
+  ], {
+   env: { ...process.env, [childFlag]: "1" },
+   timeout: 10_000,
+   killSignal: "SIGKILL",
+  });
+  expect(result.stderr + result.stdout).toContain("1 pass");
+ }, 15_000);
 
  test("does not exempt a release after the observed owner lost the claim", async () => {
   beads[BEAD]!.assignee = "replacement";

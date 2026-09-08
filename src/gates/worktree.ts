@@ -210,8 +210,30 @@ function names(relative: string, glob: string): boolean {
  return fnmatch(relative, trimmed) || fnmatch(relative, `${trimmed}/*`);
 }
 
-const CONTROL_WORD = /(?:[A-Za-z0-9_./:=@%+,-]+|'[^']*'|"[^"$`\\]*")+/.source;
-const CONTROL_COMMAND = new RegExp(`^[ \\t]*${CONTROL_WORD}(?:[ \\t]+${CONTROL_WORD})*[ \\t]*$`);
+/**
+ * Linear recognition of the former CONTROL_COMMAND grammar. Keep quoting until
+ * eligibility is established: splitSegments intentionally discards that evidence.
+ * Single quotes are literal; double quotes may not contain $, ` or backslash.
+ * Unquoted escapes, expansions, operators and unknown punctuation stay unsupported.
+ */
+function isControlCommand(command: string): boolean {
+ let quote: "'" | '"' | undefined;
+ let started = false;
+ for (let i = 0; i < command.length; i++) {
+  const ch = command[i]!;
+  if (quote) {
+   if (ch === quote) quote = undefined;
+   else if (quote === '"' && (ch === "$" || ch === "`" || ch === "\\")) return false;
+  } else if (ch === "'" || ch === '"') {
+   quote = ch;
+   started = true;
+  } else if (ch !== " " && ch !== "\t") {
+   if (!/[A-Za-z0-9_./:=@%+,-]/.test(ch)) return false;
+   started = true;
+  }
+ }
+ return started && quote === undefined;
+}
 
 /**
  * A deliberately narrow escape from a scope conflict, not a shell safety parser.
@@ -221,7 +243,7 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  const command = input.command;
  if (typeof command !== "string") return undefined;
  // Reject expansion, redirection, operators and wrappers before discarding quoting.
- if (!CONTROL_COMMAND.test(command)) return undefined;
+ if (!isControlCommand(command)) return undefined;
  const segments = splitSegments(command);
  if (segments.length !== 1) return undefined;
  const tokens = [...segments[0]!];
