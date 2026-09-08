@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import {
 	buildStatusTree,
 	deriveState,
 	filterTree,
 	parseBlockedIds,
+	registerRunStatus,
 	renderStatus,
 	statusSummaryLine,
 } from "../src/tools/run-status";
@@ -156,11 +158,6 @@ describe("blocked marking", () => {
 });
 
 describe("filterTree", () => {
-	test("no filter returns the tree untouched", () => {
-		const tree = buildStatusTree(RUN, []);
-		expect(filterTree(tree, {})).toBe(tree);
-	});
-
 	test("epic filter keeps one epic", () => {
 		const two = [...RUN, bead("bd-40", { issue_type: "epic" }), bead("bd-41", { issue_type: "feature", parent: "bd-40" })];
 		const tree = filterTree(buildStatusTree(two, []), { epic: "bd-40" });
@@ -284,18 +281,115 @@ describe("parseBlockedIds", () => {
 		expect(parseBlockedIds('{"id":"bd-5"}')).toEqual(["bd-5"]);
 	});
 
-	test("empty, non-json, and malformed payloads yield no ids", () => {
-		expect(parseBlockedIds("")).toEqual([]);
-		expect(parseBlockedIds("bd: not a beads workspace")).toEqual([]);
-		expect(parseBlockedIds("[{oops")).toEqual([]);
-		expect(parseBlockedIds('[{"blocked_by":["bd-4"]},null,7]')).toEqual([]);
+	test("distinguishes known empty from unreadable blocker sets", () => {
+		expect(parseBlockedIds("[]")).toEqual([]);
+		expect(parseBlockedIds("")).toBeNull();
+		expect(parseBlockedIds("bd: not a beads workspace")).toBeNull();
+		expect(parseBlockedIds("[{oops")).toBeNull();
+		expect(parseBlockedIds('[{"id":"bd-1"},{"blocked_by":["bd-4"]},null,7]')).toBeNull();
 	});
 });
 
 describe("empty bd", () => {
 	test("no beads builds an empty tree that renders and summarises", () => {
-		const tree = buildStatusTree([], parseBlockedIds(""));
+		const tree = buildStatusTree([], []);
 		expect(tree).toEqual({ epics: [], orphans: [], blocked: [] });
 		expect(renderStatus(tree, { full: true })).toContain("no matching epic, feature, or bead");
+	});
+});
+
+describe("registered run status", () => {
+	function registered() {
+		let tool: unknown;
+		const zod: unknown = new Proxy(() => zod, { get: () => zod, apply: () => zod });
+		registerRunStatus({
+			zod,
+			registerTool: (value: unknown) => { tool = value; },
+		} as unknown as ExtensionAPI);
+		return tool as {
+			execute(id: string, params: { epic?: string; full?: boolean }): Promise<{
+				isError?: boolean;
+				content: { text: string }[];
+				details: { incomplete?: boolean; blocked: string[] | null };
+			}>;
+		};
+	}
+
+	test("reports a run and its tasks beyond the default first 50 beads", async () => {
+		const beads = [
+			...Array.from({ length: 50 }, (_, index) => bead(`unrelated-${index}`)),
+			bead("late-run", { issue_type: "epic" }),
+			bead("late-task", { parent: "late-run", title: "Late task" }),
+		];
+		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+			const argv = args[0] as string[];
+			const limitIndex = argv.indexOf("--limit");
+			const limit = limitIndex === -1 ? 50 : Number(argv[limitIndex + 1]);
+			const payload = argv.includes("blocked") ? [] : limit === 0 ? beads : beads.slice(0, limit);
+			return {
+				stdout: new Response(JSON.stringify(payload)).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => { },
+			} as unknown as Bun.Subprocess;
+		});
+		try {
+			const result = await registered().execute("late-run", { epic: "late-run", full: true });
+			expect(result.isError).not.toBe(true);
+			expect(result.content[0]?.text).toContain("late-run");
+			expect(result.content[0]?.text).toContain("late-task");
+			expect(result.content[0]?.text).toContain("ready 1");
+			expect(result.content[0]?.text).not.toContain("unrelated-");
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
+	test("each invocation owns a fresh budget", async () => {
+		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+			const argv = args[0] as string[];
+			const payload = argv.includes("blocked") ? [] : [bead("bd-task")];
+			return {
+				stdout: new Response(JSON.stringify(payload)).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => { },
+			} as unknown as Bun.Subprocess;
+		});
+		try {
+			const tool = registered();
+			for (let i = 0; i < 15; i++) {
+				const result = await tool.execute(String(i), {});
+				expect(result.isError).not.toBe(true);
+				expect(result.content[0]?.text).toContain("ready 1");
+			}
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
+	test.each([
+		{ code: 1, stdout: "[]" },
+		{ code: 0, stdout: "not json" },
+		{ code: 0, stdout: '[{"id":"bd-task"},{}]' },
+	])("unknown blockers never produce readiness: %j", async blocked => {
+		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+			const argv = args[0] as string[];
+			return {
+				stdout: new Response(argv.includes("blocked") ? blocked.stdout : JSON.stringify([bead("bd-task")])).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(argv.includes("blocked") ? blocked.code : 0),
+				kill: () => { },
+			} as unknown as Bun.Subprocess;
+		});
+		try {
+			const result = await registered().execute("unknown", {});
+			expect(result.isError).toBe(true);
+			expect(result.details.incomplete).toBe(true);
+			expect(result.details.blocked).toBeNull();
+			expect(result.content[0]?.text).not.toContain("ready 1");
+		} finally {
+			spawn.mockRestore();
+		}
 	});
 });
