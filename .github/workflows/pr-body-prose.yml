@@ -1,8 +1,8 @@
 name: pr-body-prose
 
-# Gates human PR bodies. Release-please PRs are exempt: rewriting their
-# generated markers makes the next release run fail to parse the body
-# and merge untagged (measured on #22).
+# Gates human PR bodies. Renovate and release-please bodies are generated;
+# rewriting release-please markers can break release parsing (measured on #22).
+# Exempt only authenticated PR authors, never titles, labels, or the run actor.
 
 on:
   pull_request:
@@ -14,32 +14,19 @@ permissions:
 
 jobs:
   prose:
+    # GitHub REST author IDs: renovate[bot] (#13), sjorsr-release-bot[bot] (#22).
+    if: >-
+      ${{ !(github.event.pull_request.user.type == 'Bot'
+        && (github.event.pull_request.user.id == 29139614
+          || github.event.pull_request.user.id == 301724168)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Skip generated release-please bodies
-        if: >-
-          contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
-          || startsWith(github.event.pull_request.title, 'chore: release')
-        run: |
-          echo "Skipping prose gate: release-please generated body."
-          echo "Reason: label autorelease: pending or title starts with 'chore: release'."
-          echo "Rewriting that body strips markers release-please parses (measured: #22 untagged)."
-
       - uses: actions/checkout@v4
-        if: >-
-          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
-          && !startsWith(github.event.pull_request.title, 'chore: release')
 
       - uses: astral-sh/setup-uv@v5
-        if: >-
-          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
-          && !startsWith(github.event.pull_request.title, 'chore: release')
 
       - name: Fetch PR body
-        if: >-
-          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
-          && !startsWith(github.event.pull_request.title, 'chore: release')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -47,27 +34,22 @@ jobs:
           gh pr view "${{ github.event.pull_request.number }}" --json body -q .body > pr-body.md
 
       - name: Gate PR body
-        if: >-
-          !contains(github.event.pull_request.labels.*.name, 'autorelease: pending')
-          && !startsWith(github.event.pull_request.title, 'chore: release')
         run: |
           set +e
-          uvx slopvac pr-body.md --profile normal --format json > slopvac-pr-body.json
+          uvx --from slopvac==1.0.1 python scripts/prose-gate.py pr-body.md --profile normal --format json > slopvac-pr-body.json
           status=$?
           set -e
+          # Exit 1 is a prose threshold failure; retain the errors-only policy.
+          # All other nonzero exits mean the tool did not complete reliably.
+          case "$status" in
+            0|1) ;;
+            *)
+              echo "slopvac failed to run reliably (exit $status)"
+              exit "$status"
+              ;;
+          esac
           if [ ! -s slopvac-pr-body.json ]; then
             echo "slopvac wrote no report (exit $status)"
             exit 1
           fi
-          python3 - <<'PY'
-          import json
-          import sys
-          report = json.load(open("slopvac-pr-body.json"))
-          errors = report["summary"]["errors"]
-          score = report["summary"]["score"]
-          warnings = report["summary"]["warnings"]
-          print(f"slopvac score={score} errors={errors} warnings={warnings}")
-          if errors:
-              sys.exit(f"prose gate failed: {errors} error(s)")
-          print("prose gate passed: no errors (warnings do not fail the job)")
-          PY
+          python3 scripts/check-prose-report.py slopvac-pr-body.json
