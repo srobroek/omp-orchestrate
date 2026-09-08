@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/srobroek/omp-orchestrate/compare/v0.2.3...v0.2.4) (2026-09-08)
+
+
+### Bug Fixes
+
+* clarify reviewer model selection policy ([#48](https://github.com/srobroek/omp-orchestrate/issues/48)) ([ad3fd76](https://github.com/srobroek/omp-orchestrate/commit/ad3fd763d346d3ebbaa3225a0dd4de926fe28ddc))
+
 ## [0.2.3](https://github.com/srobroek/omp-orchestrate/compare/v0.2.2...v0.2.3) (2026-09-08)
 
 
