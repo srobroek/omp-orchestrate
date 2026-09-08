@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.2](https://github.com/srobroek/omp-orchestrate/compare/v0.2.1...v0.2.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **ci:** install Vale for complete prose rule coverage ([89b4de1](https://github.com/srobroek/omp-orchestrate/commit/89b4de1581f0bc568a1ac28c9edb01c791f5effe))
+* **ci:** repair prose validation and verify actual plugin loading ([6b478a7](https://github.com/srobroek/omp-orchestrate/commit/6b478a7b3365b4a09189bebc700e2d38dd83a837))
+* **deps:** update OMP runtime dependencies to 18.1.14 ([941a095](https://github.com/srobroek/omp-orchestrate/commit/941a095ff2e9a534c4b68f8840d809b4fbb2a6f9))
+* harden orchestration and reduce workflow overhead ([1161a2f](https://github.com/srobroek/omp-orchestrate/commit/1161a2f692dd41624434b638bd25903fa7ffce4f))
+* **orchestrate:** simplify prompts and reconcile safe workflow contracts ([0ec42b8](https://github.com/srobroek/omp-orchestrate/commit/0ec42b8e6ac84e5873fd13768c75c5f3c49a2d8f))
+* **report:** preserve child barrier and streamline worker closeout ([3adf60c](https://github.com/srobroek/omp-orchestrate/commit/3adf60c79bebd90b41acf04f0a043fa1f439edc4))
+* **runtime:** harden claim authority lifecycle and evidence handling ([4def74c](https://github.com/srobroek/omp-orchestrate/commit/4def74c90fdf0ec683d5786d4b38841d5351ed8b))
+* **worktree:** bound reconciliation command parsing ([6f70da2](https://github.com/srobroek/omp-orchestrate/commit/6f70da2e1e902e20fd3185be38ecfc28534d9528))
+* **worktree:** enforce claimed tree and scope boundaries ([8b79a22](https://github.com/srobroek/omp-orchestrate/commit/8b79a2284d69657db68e0ff070aac4cf1474f4ce))
+
 ## [0.2.1](https://github.com/srobroek/omp-orchestrate/compare/v0.2.0...v0.2.1) (2026-08-26)
 
 
