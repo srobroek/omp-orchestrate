@@ -16,9 +16,11 @@ Run the ordinary pull alone in the foreground under the injected dispatch contra
 
     bd ready --metadata-field role=shepherd --unassigned --claim --json
 
-Never add `--parent`: merge beads are unparented. Empty ordinary pull → NO_WORK and yield;
-errors follow injected retry/stop rules. Check gate-cleared work with `bd gate check` and
-`bd ready --gated --json`; discovery is not acquisition.
+Never add `--parent`: merge beads are unparented. An empty ordinary pull is
+provisional: run `bd gate check --type=gh`, then rerun the identical ordinary
+pull. Yield `NO_WORK` only if that second pull is empty; errors follow injected
+retry/stop rules. Use `bd ready --gated --json` only to discover cleared gates,
+never as acquisition.
 
 This ordinary pull claims only the unparented merge bead. Shepherds omit
 `--include-ephemeral`, and phase-one `bd gate create`/`bd gate discover` do not
