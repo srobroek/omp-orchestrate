@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/srobroek/omp-orchestrate/compare/v0.2.2...v0.2.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **agents:** preflight discovery and document model-aware routing ([#45](https://github.com/srobroek/omp-orchestrate/issues/45)) ([78352d2](https://github.com/srobroek/omp-orchestrate/commit/78352d25b62191592d78db4f81c9ba2e0dcc7f28))
+
 ## [0.2.2](https://github.com/srobroek/omp-orchestrate/compare/v0.2.1...v0.2.2) (2026-09-08)
 
 
