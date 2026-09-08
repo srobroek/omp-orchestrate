@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
+import * as bd from "../src/bd";
 import {
 	appendAudit,
 	auditDir,
@@ -15,7 +16,6 @@ import {
 	noteMcpStatus,
 	noteProgress,
 	progressSample,
-	DECLARED_MODEL_ROLES,
 	preflightSettings,
 	registerWatchers,
 	resetWatchers,
@@ -25,18 +25,18 @@ import {
 	stallMinutes,
 	sweepStalls,
 } from "../src/watchers";
-import declaredSurface from "./declared-surface.json";
 
 const MINUTE = 60_000;
 
 let cwd: string;
 
-const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST"] as const;
+const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "OMP_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET"] as const;
 
 beforeEach(async () => {
 	cwd = join(tmpdir(), `orc-watchers-${Math.random().toString(36).slice(2)}`);
 	await mkdir(cwd, { recursive: true });
 	for (const key of ENV_KEYS) delete process.env[key];
+	process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
 	resetWatchers();
 });
 
@@ -227,6 +227,13 @@ describe("bdMutationEvent across both runtime shapes", () => {
  * lose every claim. Verified against a real checkout copy, where a bead created in
  * the copy is invisible in the original.
  */
+async function stubSettings(values: Record<string, unknown>): Promise<void> {
+	const snapshot = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { value }]));
+	const bin = join(cwd, "fake-omp");
+	await writeFile(bin, `#!/bin/sh\n[ "$1 $2 $3" = "config list --json" ] || exit 1\nprintf '%s' '${JSON.stringify(snapshot).replace(/'/g, "'\\''")}'\n`, { mode: 0o755 });
+	process.env.OMP_BIN = bin;
+}
+
 describe("W5 shared-database precondition", () => {
 	/**
 	 * Stub the settings CLI. Without it these tests read whatever this host is
@@ -234,14 +241,8 @@ describe("W5 shared-database precondition", () => {
 	 * `omp` at all, where every key reads as unknown and the check correctly stays
 	 * quiet. The precondition under test is the database, so isolation is pinned on.
 	 */
-	async function stubOmp(mode: string): Promise<void> {
-		const bin = join(cwd, "fake-omp");
-		await writeFile(
-			bin,
-			`#!/bin/sh\nif [ "$3" = "task.isolation.mode" ]; then printf '{"key":"task.isolation.mode","value":"${mode}"}'; else exit 1; fi\n`,
-			{ mode: 0o755 },
-		);
-		process.env.OMP_BIN = bin;
+	async function stubOmp(enabled: boolean): Promise<void> {
+		await stubSettings({ "task.isolation.enabled": enabled });
 	}
 
 	afterEach(() => {
@@ -253,7 +254,7 @@ describe("W5 shared-database precondition", () => {
 		// The failure this replaces a server with. bd resolves by walking up from the working
 		// directory, `.beads/` is gitignored, so a clone or worktree arrives without one and the
 		// walk continues past the checkout. Measured on this host: `$HOME/.beads` exists.
-		await stubOmp("worktree");
+		await stubOmp(true);
 		await mkdir(join(cwd, ".beads"), { recursive: true });
 		delete process.env.BEADS_DIR;
 		const rig = harness();
@@ -271,7 +272,7 @@ describe("W5 shared-database precondition", () => {
 	test("a pinned path silences it", async () => {
 		// `/orchestrate-run` sets this, and every child inherits it, so the run's database is
 		// the one an isolated worker reaches.
-		await stubOmp("worktree");
+		await stubOmp(true);
 		await mkdir(join(cwd, ".beads"), { recursive: true });
 		process.env.BEADS_DIR = join(cwd, ".beads");
 		const rig = harness();
@@ -284,7 +285,7 @@ describe("W5 shared-database precondition", () => {
 		// Observed in the field: this warning fired in a repository that had never run
 		// `bd init`, where there are no claims to split and the advice was
 		// unactionable. The precondition applies to runs that track work in beads.
-		await stubOmp("worktree");
+		await stubOmp(true);
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
@@ -297,19 +298,7 @@ describe("W5 shared-database precondition", () => {
 	 * value of declaring one is that its absence is announced.
 	 */
 	async function stubOmpRoles(roles: string | undefined): Promise<void> {
-		const bin = join(cwd, "fake-omp-roles");
-		// `roles === undefined` leaves the key unreadable, which is a different state from
-		// an empty object: unreadable proves nothing, empty proves the role is absent.
-		const branch =
-			roles === undefined
-				? "exit 1"
-				: `printf '{"key":"modelRoles","value":${roles.replace(/'/g, "'\\''")}}'`;
-		await writeFile(
-			bin,
-			`#!/bin/sh\nif [ "$3" = "modelRoles" ]; then ${branch}; else exit 1; fi\n`,
-			{ mode: 0o755 },
-		);
-		process.env.OMP_BIN = bin;
+		await stubSettings(roles === undefined ? {} : { modelRoles: JSON.parse(roles) });
 	}
 
 	test.each([
@@ -337,14 +326,7 @@ describe("W5 shared-database precondition", () => {
 		);
 	});
 
-	test("the declared list matches the one the suite asserts against", () => {
-		// Two carriers, one truth: src announces an absent role, the manifest is what
-		// test/agents.test.ts accepts as a non-built-in alias. Drift would let an agent
-		// name a role nothing announces.
-		expect([...DECLARED_MODEL_ROLES]).toEqual(declaredSurface.modelRoles.roles);
-	});
-
-	test("an unreadable isolation mode warns about nothing", async () => {
+	test("an unreadable isolation setting warns about nothing", async () => {
 		// `omp` absent: nothing is known, so nothing is claimed. Reading a missing key
 		// as "isolating" would warn about a split database on a run with no isolation.
 		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
@@ -354,124 +336,51 @@ describe("W5 shared-database precondition", () => {
 		expect(rig.messages).toEqual([]);
 	});
 
-	test("isolation explicitly off warns about nothing", async () => {
-		await stubOmp("none");
+	test("isolation explicitly off warns about shared trees but not a split database", async () => {
+		await stubOmp(false);
+		await mkdir(join(cwd, ".beads"));
 
 		const rig = harness();
 		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
+		const deviations = await preflightSettings(rig.pi, cwd);
+		expect(deviations.map(item => item.key)).toEqual(["task.isolation.enabled"]);
 		// A run without isolation shares one checkout, so it shares one database.
 		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("BEADS_DIR is unset");
 	});
 });
 
-/**
- * Prerequisites are ensured, not merely named: the deviating project-ownable settings
- * are written into the run repository's own `.omp/config.yml`, because the global
- * config differs per machine and a run can start on any of them. Settings load at
- * process start, so the write repairs the next session and the message says restart.
- */
-describe("the settings preflight writes the project config", () => {
-	async function stubDeviantOmp(): Promise<void> {
-		const bin = join(cwd, "fake-omp-deviant");
-		await writeFile(
-			bin,
-			[
-				"#!/bin/sh",
-				'case "$3" in',
-				'  task.isolation.mode) printf \'{"key":"k","value":"worktree"}\';;',
-				'  task.isolation.merge) printf \'{"key":"k","value":"patch"}\';;',
-				'  task.isolation.apply) printf \'{"key":"k","value":true}\';;',
-				'  task.enableEffort) printf \'{"key":"k","value":false}\';;',
-				'  task.maxRecursionDepth) printf \'{"key":"k","value":2}\';;',
-				"  *) exit 1;;",
-				"esac",
-			].join("\n"),
-			{ mode: 0o755 },
-		);
-		process.env.OMP_BIN = bin;
+describe("the settings preflight preserves user configuration", () => {
+	async function deviantSettings(): Promise<void> {
+		await stubSettings({
+			"task.isolation.enabled": true,
+			"task.isolation.merge": "patch",
+			"task.isolation.apply": true,
+			"task.enableEffort": false,
+			"task.maxRecursionDepth": 2,
+		});
 	}
 
-	const configFile = () => join(cwd, ".omp", "config.yml");
-
-	afterEach(async () => {
-		delete process.env.OMP_BIN;
-		await rm(join(cwd, ".omp"), { recursive: true, force: true });
+	test("deviations warn without creating a project config", async () => {
+		await deviantSettings();
+		const rig = harness();
+		const deviations = await preflightSettings(rig.pi, cwd);
+		expect(deviations.map(item => item.key)).toEqual([
+			"task.isolation.merge", "task.isolation.apply", "task.enableEffort", "task.maxRecursionDepth",
+		]);
+		expect(rig.messages).toHaveLength(1);
+		expect(await readdir(cwd)).not.toContain(".omp");
 	});
 
-	test("deviating ownable settings land in .omp/config.yml, and the message says restart", async () => {
-		await stubDeviantOmp();
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-
-		const written = Bun.YAML.parse(await readFile(configFile(), "utf8")) as {
-			task: { isolation: { merge: string; apply: boolean }; enableEffort: boolean; maxRecursionDepth: number };
-		};
-		expect(written.task.isolation.merge).toBe("branch");
-		expect(written.task.isolation.apply).toBe(false);
-		expect(written.task.enableEffort).toBe(true);
-		expect(written.task.maxRecursionDepth).toBe(3);
-
-		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("task.maxRecursionDepth is 2");
-		expect(notice).toContain("written to");
-		expect(notice).toContain("Restart the run");
-	});
-
-	test("an existing config keeps its unrelated keys", async () => {
-		await stubDeviantOmp();
-		await mkdir(join(cwd, ".omp"), { recursive: true });
-		await writeFile(configFile(), 'task:\n  agentModelOverrides:\n    operator: "@smol"\n');
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-
-		const written = Bun.YAML.parse(await readFile(configFile(), "utf8")) as {
-			task: { agentModelOverrides: { operator: string }; isolation: { merge: string } };
-		};
-		expect(written.task.agentModelOverrides.operator).toBe("@smol");
-		expect(written.task.isolation.merge).toBe("branch");
-	});
-
-	test("a file that does not parse is left alone", async () => {
-		// Rewriting a file we cannot read destroys whatever it held, so the preflight
-		// falls back to the warn-only tail.
-		await stubDeviantOmp();
-		await mkdir(join(cwd, ".omp"), { recursive: true });
-		const broken = "task: [unclosed\n";
-		await writeFile(configFile(), broken);
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-
-		expect(await readFile(configFile(), "utf8")).toBe(broken);
-		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("Fix and restart the run");
-	});
-
-	test("clean settings write nothing", async () => {
-		const bin = join(cwd, "fake-omp-clean");
-		await writeFile(
-			bin,
-			[
-				"#!/bin/sh",
-				'case "$3" in',
-				'  task.isolation.mode) printf \'{"key":"k","value":"worktree"}\';;',
-				'  task.isolation.merge) printf \'{"key":"k","value":"branch"}\';;',
-				'  task.isolation.apply) printf \'{"key":"k","value":false}\';;',
-				'  task.enableEffort) printf \'{"key":"k","value":true}\';;',
-				'  task.maxRecursionDepth) printf \'{"key":"k","value":3}\';;',
-				"  *) exit 1;;",
-				"esac",
-			].join("\n"),
-			{ mode: 0o755 },
-		);
-		process.env.OMP_BIN = bin;
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(await readFile(configFile(), "utf8").catch(() => "absent")).toBe("absent");
+	test.each([
+		'# keep comments\n"key: with colon": yes\ntask:\n  isolation:\n    merge: patch\n',
+		"task: [unclosed\n",
+	])("existing configuration remains byte-for-byte unchanged", async config => {
+		await deviantSettings();
+		await mkdir(join(cwd, ".omp"));
+		const file = join(cwd, ".omp", "config.yml");
+		await writeFile(file, config);
+		await preflightSettings(harness().pi, cwd);
+		expect(await readFile(file, "utf8")).toBe(config);
 	});
 });
 
@@ -557,11 +466,10 @@ describe("sweepStalls", () => {
 		expect(sweepStalls(10 * MINUTE, 10 * MINUTE)).toEqual([{ child: "kid-1", silentMinutes: 10 }]);
 	});
 
-	test("flags a silent child exactly once", () => {
+	test("keeps an unreported child eligible on later sweeps", () => {
 		note("kid-1", 0);
 		expect(sweepStalls(11 * MINUTE, 10 * MINUTE)).toEqual([{ child: "kid-1", silentMinutes: 11 }]);
-		// A second sweep must not write a second comment on the same bead.
-		expect(sweepStalls(30 * MINUTE, 10 * MINUTE)).toEqual([]);
+		expect(sweepStalls(30 * MINUTE, 10 * MINUTE)).toEqual([{ child: "kid-1", silentMinutes: 30 }]);
 	});
 
 	test("a progress delta restarts the clock", () => {
@@ -681,8 +589,8 @@ describe("runEpics", () => {
 		expect(runEpics(epics, "bd-1").map(epic => epic.id)).toEqual(["bd-1", "bd-2", "bd-3"]);
 	});
 
-	test("an unbound marker reaches every open epic", () => {
-		expect(runEpics(epics, undefined).map(epic => epic.id)).toEqual(["bd-1", "bd-2", "bd-3", "bd-9"]);
+	test("an unbound marker reaches no epics", () => {
+		expect(runEpics(epics, undefined)).toEqual([]);
 	});
 
 	test("a run with no epics yields none rather than everything", () => {
@@ -700,10 +608,19 @@ async function fakeBd(): Promise<string> {
 	await writeFile(
 		bin,
 		[
-			"#!/bin/sh",
-			'{ printf ">>>\\n"; for arg in "$@"; do printf "%s\\n" "$arg"; done; } >> "$ORC_TEST_BD_LOG"',
-			'if [ "$1" = "list" ]; then printf "%s" "$ORC_TEST_BD_LIST"; fi',
-			"exit 0",
+			`#!${process.execPath}`,
+			'import { appendFileSync } from "node:fs";',
+			'const args = process.argv.slice(2);',
+			'appendFileSync(process.env.ORC_TEST_BD_LOG, ">>>\\n" + args.join("\\n") + "\\n");',
+			'if (args[0] === process.env.ORC_TEST_BD_FAIL && (!process.env.ORC_TEST_BD_TARGET || args[1] === process.env.ORC_TEST_BD_TARGET)) process.exit(1);',
+			'if (args[0] === "list") {',
+			'  const beads = JSON.parse(process.env.ORC_TEST_BD_LIST);',
+			'  const index = args.indexOf("--assignee");',
+			'  const matches = index === -1 ? beads : beads.filter(bead => bead.assignee === args[index + 1]);',
+			'  const limitIndex = args.indexOf("--limit");',
+			'  const limit = limitIndex === -1 ? 50 : Number(args[limitIndex + 1]);',
+			'  console.log(JSON.stringify(limit === 0 ? matches : matches.slice(0, limit)));',
+			'}',
 		].join("\n"),
 		"utf8",
 	);
@@ -753,13 +670,12 @@ function harness(tools: string[] = ["bash", "read", "task"]): Harness {
 		cwd,
 		setInterval: (callback: () => unknown) => {
 			sweeps.push(callback);
-			return 0;
+			return callback;
 		},
-		setTimeout: (callback: () => unknown) => {
-			sweeps.push(callback);
-			return 0;
+		clearTimer: (callback: () => unknown) => {
+			const index = sweeps.indexOf(callback);
+			if (index !== -1) sweeps.splice(index, 1);
 		},
-		clearTimer: () => {},
 	};
 
 	const pi = {
@@ -770,7 +686,10 @@ function harness(tools: string[] = ["bash", "read", "task"]): Harness {
 				const list = listeners.get(channel) ?? [];
 				list.push(handler);
 				listeners.set(channel, list);
-				return () => {};
+				return () => {
+					const index = list.indexOf(handler);
+					if (index !== -1) list.splice(index, 1);
+				};
 			},
 		},
 		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
@@ -815,6 +734,26 @@ describe("registerWatchers", () => {
 			"task:subagent:progress",
 		]);
 		expect(rig.sweeps).toHaveLength(1);
+	});
+
+	test("repeated starts replace timers and audit subscriptions", async () => {
+		const rig = harness();
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		await rig.fire("session_start", {});
+		expect(rig.sweeps).toHaveLength(1);
+		await rig.emit("task:subagent:event", {
+			...(bashEnd("kid-1") as Record<string, unknown>),
+			event: {
+				type: "tool_execution_end", toolName: "bash", toolCallId: "call-1",
+				args: { command: "bd update bd-7 --status open" },
+				result: {}, isError: false,
+			},
+		});
+		const entries = (await readFile(join(cwd, ".orchestration", "audit", "kid-1.bdlog"), "utf8")).trim().split("\n");
+		expect(entries.map(entry => JSON.parse(entry).argv)).toEqual(["bd update bd-7 --status open"]);
+		await rig.fire("session_shutdown", {});
+		expect(rig.sweeps).toEqual([]);
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {
@@ -872,6 +811,39 @@ describe("registerWatchers", () => {
 		// No kill, and no second report on the next sweep.
 		await rig.sweeps[0]!();
 		expect((await bdCalls()).filter(argv => argv[0] === "comment")).toHaveLength(1);
+	});
+
+	test("W1 eventually reports stalls beyond the read budget", async () => {
+		await fakeBd();
+		const beads = Array.from({ length: 13 }, (_, i) => ({ id: `bd-${i}`, status: "in_progress", assignee: `kid-${i}` }));
+		process.env.ORC_TEST_BD_LIST = JSON.stringify(beads);
+		const rig = harness();
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		for (const bead of beads) noteProgress({ child: bead.assignee, tokens: 0, output: "", terminal: false }, Date.now() - 20 * MINUTE);
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(12);
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment").map(call => call[1]).sort()).toEqual(beads.map(bead => bead.id).sort());
+	});
+
+	test("W1 retries failed writes without duplicating a successful partial comment", async () => {
+		await fakeBd();
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
+		const rig = harness();
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		noteProgress({ child: "kid-1", tokens: 0, output: "", terminal: false }, Date.now() - 20 * MINUTE);
+		process.env.ORC_TEST_BD_FAIL = "comment";
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "create")).toEqual([]);
+		process.env.ORC_TEST_BD_FAIL = "create";
+		await rig.sweeps[0]!();
+		delete process.env.ORC_TEST_BD_FAIL;
+		await Promise.all([rig.sweeps[0]!(), rig.sweeps[0]!()]);
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(2);
+		expect((await bdCalls()).filter(call => call[0] === "create")).toHaveLength(2);
 	});
 
 	test("W3 warns on a task spawn without ever blocking it", async () => {
@@ -940,6 +912,175 @@ describe("registerWatchers", () => {
 		expect(after[2]).toEqual(["comment", "bd-1", "GOAL complete: ship dispatch"]);
 	});
 
+	test("W4 reaches run epics beyond the default first 50 recipients", async () => {
+		await fakeBd();
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([
+			...Array.from({ length: 50 }, (_, index) => ({ id: `unrelated-${index}`, parent: "other-run" })),
+			{ id: "late-run", status: "in_progress" },
+			{ id: "late-epic", parent: "late-run" },
+		]);
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "late-run" }));
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		await rig.fire("goal_updated", { goal: { id: "g-1", objective: "ship late work", status: "active" } });
+
+		expect((await bdCalls()).filter(argv => argv[0] === "comment")).toEqual([
+			["comment", "late-run", "GOAL active: ship late work"],
+			["comment", "late-epic", "GOAL active: ship late work"],
+		]);
+		expect(rig.messages).toEqual([
+			expect.objectContaining({ content: "GOAL active stamped on late-run, late-epic" }),
+		]);
+	});
+
+	test.each([undefined, "pending"])("W4 writes nothing without a bound run (%p)", async runId => {
+		await fakeBd();
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }, { id: "bd-2" }]);
+		if (runId !== undefined) {
+			await mkdir(join(cwd, ".orchestration"));
+			await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: runId }));
+		}
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		await rig.fire("goal_updated", { goal: { id: "g-1", objective: "x", status: "active" } });
+		expect(await bdCalls()).toEqual([]);
+		expect(rig.messages).toEqual([]);
+	});
+
+	test("W4 retries failed reads and partial writes, coalesces concurrent events, and scopes deduplication by run", async () => {
+		await fakeBd();
+		await mkdir(join(cwd, ".orchestration"));
+		const marker = join(cwd, ".orchestration", ".active-run");
+		await writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }, { id: "bd-2", parent: "bd-1" }]);
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		const payload = { goal: { id: "g-1", objective: "x", status: "active" } };
+		process.env.ORC_TEST_BD_FAIL = "list";
+		await rig.fire("goal_updated", payload);
+		expect(rig.messages).toEqual([]);
+		process.env.ORC_TEST_BD_FAIL = "comment";
+		process.env.ORC_TEST_BD_TARGET = "bd-2";
+		await rig.fire("goal_updated", payload);
+		expect(rig.messages).toEqual([]);
+		delete process.env.ORC_TEST_BD_FAIL;
+		await Promise.all([rig.fire("goal_updated", payload), rig.fire("goal_updated", payload)]);
+		await rig.fire("goal_updated", payload);
+		expect((await bdCalls()).filter(call => call[0] === "comment").map(call => call[1])).toEqual(["bd-1", "bd-2", "bd-2"]);
+		expect(rig.messages).toHaveLength(1);
+		await writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "bd-2" }));
+		await rig.fire("goal_updated", payload);
+		expect((await bdCalls()).filter(call => call[0] === "comment").map(call => call[1])).toEqual(["bd-1", "bd-2", "bd-2", "bd-2"]);
+		expect(rig.messages).toHaveLength(2);
+	});
+
+	test("W4 discards an older goal whose lookup finishes after a newer event", async () => {
+		await fakeBd();
+		await mkdir(join(cwd, ".orchestration"));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<BdBead[]>();
+		const lookup = spyOn(bd, "bdList")
+			.mockImplementationOnce(() => {
+				started.resolve();
+				return release.promise;
+			})
+			.mockResolvedValue([{ id: "bd-1" }]);
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		try {
+			const old = rig.fire("goal_updated", { goal: { id: "g-1", objective: "old", status: "active" } });
+			await started.promise;
+			const latest = rig.fire("goal_updated", { goal: { id: "g-1", objective: "new", status: "active" } });
+			release.resolve([{ id: "bd-1" }]);
+			await Promise.all([old, latest]);
+			expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([
+				["comment", "bd-1", "GOAL active: new"],
+			]);
+		} finally {
+			release.resolve([]);
+			lookup.mockRestore();
+		}
+	});
+
+	test("W4 managed sweeps retry after binding and failed writes without another goal event", async () => {
+		await fakeBd();
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		await rig.fire("goal_updated", { goal: { id: "g-1", objective: "latest", status: "active" } });
+		expect(await bdCalls()).toEqual([]);
+		await mkdir(join(cwd, ".orchestration"));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		process.env.ORC_TEST_BD_FAIL = "comment";
+		await rig.sweeps[0]!();
+		expect(rig.messages).toEqual([]);
+		delete process.env.ORC_TEST_BD_FAIL;
+		await rig.sweeps[0]!();
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([
+			["comment", "bd-1", "GOAL active: latest"],
+			["comment", "bd-1", "GOAL active: latest"],
+		]);
+		expect(rig.messages).toHaveLength(1);
+	});
+
+	test("W4 relays A, B, then A again as three consecutive goal versions", async () => {
+		await fakeBd();
+		await mkdir(join(cwd, ".orchestration"));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		for (const objective of ["A", "B", "A", "A"]) {
+			await rig.fire("goal_updated", { goal: { id: "g-1", objective, status: "active" } });
+		}
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([
+			["comment", "bd-1", "GOAL active: A"],
+			["comment", "bd-1", "GOAL active: B"],
+			["comment", "bd-1", "GOAL active: A"],
+		]);
+	});
+
+	test("W4 periodic refresh delivers unchanged goals to newly created run epics only", async () => {
+		await fakeBd();
+		await mkdir(join(cwd, ".orchestration"));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		await rig.fire("goal_updated", { goal: { id: "g-1", objective: "A", status: "active" } });
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([
+			{ id: "bd-1" }, { id: "bd-2", parent: "bd-1" }, { id: "bd-3", parent: "other-run" },
+		]);
+		await rig.sweeps[0]!();
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([
+			["comment", "bd-1", "GOAL active: A"],
+			["comment", "bd-2", "GOAL active: A"],
+		]);
+	});
+
+	test("W4 clearing a failed goal cancels managed retries", async () => {
+		await fakeBd();
+		await mkdir(join(cwd, ".orchestration"));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		process.env.ORC_TEST_BD_FAIL = "comment";
+		await rig.fire("goal_updated", { goal: { id: "g-1", objective: "cancelled", status: "active" } });
+		await rig.fire("goal_updated", { goal: null });
+		delete process.env.ORC_TEST_BD_FAIL;
+		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(1);
+		expect(rig.messages).toEqual([]);
+	});
+
 	test("W4 relays from the lead only, and a cleared goal relays nothing", async () => {
 		await fakeBd();
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
@@ -979,7 +1120,7 @@ describe("W5 settings preflight", () => {
 	test("the platform defaults that broke a real run are all reported", () => {
 		// Observed live: `merge: patch` + `apply: true` captured no branch at all.
 		const found = settingsDeviations({
-			"task.isolation.mode": "auto",
+			"task.isolation.enabled": true,
 			"task.isolation.merge": "patch",
 			"task.isolation.apply": true,
 			"task.enableEffort": true,
@@ -991,19 +1132,46 @@ describe("W5 settings preflight", () => {
 	test("the required combination reports nothing", () => {
 		expect(
 			settingsDeviations({
-				"task.isolation.mode": "worktree",
+				"task.isolation.enabled": true,
 				"task.isolation.merge": "branch",
 				"task.isolation.apply": false,
 				"task.enableEffort": true,
+				"bash.autoBackground.enabled": false,
 			}),
 		).toEqual([]);
 	});
 
-	test("isolation mode rejects only none", () => {
-		for (const mode of ["auto", "worktree", "apfs", "fuse"]) {
-			expect(settingsDeviations({ "task.isolation.mode": mode })).toEqual([]);
+	test("isolation requires the boolean true, not a truthy value", () => {
+		expect(settingsDeviations({ "task.isolation.enabled": true })).toEqual([]);
+		for (const enabled of [false, "true", "false", 1, 0, null]) {
+			expect(settingsDeviations({ "task.isolation.enabled": enabled }).map(item => item.key)).toEqual([
+				"task.isolation.enabled",
+			]);
 		}
-		expect(settingsDeviations({ "task.isolation.mode": "none" })).toHaveLength(1);
+	});
+
+	test.each([true, "false"])("an unsafe automatic background snapshot (%p) warns without changing config", async enabled => {
+		await stubSettings({ "bash.autoBackground.enabled": enabled });
+		await mkdir(join(cwd, ".omp"));
+		const file = join(cwd, ".omp", "config.yml");
+		const config = "# operator owned\nbash:\n  autoBackground:\n    enabled: true\n";
+		await writeFile(file, config);
+		const rig = harness();
+		const deviations = await preflightSettings(rig.pi, cwd);
+		expect(deviations).toMatchObject([{
+			key: "bash.autoBackground.enabled",
+			want: "false",
+			observed: enabled,
+		}]);
+		expect(String(rig.messages[0]?.content)).toContain("bash.autoBackground.enabled");
+		expect(await readFile(file, "utf8")).toBe(config);
+	});
+
+	test("a disabled automatic background snapshot satisfies claim observation", async () => {
+		await stubSettings({ "bash.autoBackground.enabled": false });
+		const rig = harness();
+		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
+		expect(rig.messages).toEqual([]);
 	});
 
 	test("an unreadable setting is not a finding", () => {

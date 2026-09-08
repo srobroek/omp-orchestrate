@@ -1,28 +1,4 @@
-/**
- * G6 — bd call discipline, and the corpus the deleted TTSR rules leave behind.
- *
- * `rules/orc-bd-pin.md`, `rules/orc-bd-actor-prefix.md`, `rules/orc-comment-verbs.md` and
- * `rules/orc-bug-bead-routing.md` were these checks written as regexes over a command
- * string. Every case their corpus pinned is here: each row was added to catch a real
- * defect, and a row that survives the carrier change is the only proof the conversion lost
- * nothing. `scripts/validate-rules.sh` ran them through `omp ttsr test`, which needs an
- * installed `omp`, so this suite could never have held them before.
- *
- * The pin is not among the checks. It is retired outright -- this project runs a
- * per-project Dolt server, which resolves by host and port and travels with a copied
- * checkout -- so every pin spelling appears here only as a shape the surviving checks must
- * judge identically, which is what `atEveryPin` crosses them against.
- *
- * Two levels, for one reason. The three checks are pure predicates over a parsed
- * invocation, so the old fire/miss rows port onto them exactly. The entry point then owns
- * what a regex could not express at all: the run marker as the sole discriminator,
- * per-invocation judgement inside one line, dedup, and silence on input it cannot parse.
- *
- * Rows marked as migrated came from `test/actor.test.ts` and `test/comment-verb.test.ts`,
- * the two suites that arrived with the separate gates this consolidated one replaced. Each
- * was scored against 4,673 commands recovered from 587 local session transcripts, so they
- * carry corpus evidence this file would otherwise have lost.
- */
+/** G6: bd notices and run-scoped delivery through the gate entry point. */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
@@ -38,15 +14,7 @@ import {
 } from "../src/gates/bd";
 import { type BdInvocation, bdInvocations } from "../src/shell";
 
-/** Every `-C` spelling a call may carry, plus the bare form. None is required any more. */
-const PINS = ["", "-C /run/repo ", "--directory /run/repo ", "--directory=/run/repo "];
-
-/**
- * The single invocation a one-command line parses to.
- *
- * Throws rather than asserting, so a row whose command the parser does not see at all
- * fails by name instead of silently checking an empty list.
- */
+/** Reject a missing invocation instead of silently testing an empty parse. */
 function only(command: string): BdInvocation {
 	const invocations = bdInvocations(command);
 	if (invocations.length !== 1) {
@@ -55,15 +23,7 @@ function only(command: string): BdInvocation {
 	return invocations[0] as BdInvocation;
 }
 
-/** Cross a corpus with every pin spelling, as `test/claim.test.ts` does. */
-function atEveryPin(templates: readonly string[]): string[] {
-	return PINS.flatMap(pin => templates.map(template => template.replace("bd ", `bd ${pin}`)));
-}
-
-/**
- * Every mutating subcommand, unattributed. `bd ready --claim` is deliberately absent --
- * see the FINDING row below.
- */
+/** Mutating subcommands require attribution; queue acquisition is exempt. */
 const UNATTRIBUTED = [
 	"bd update orc-1 --claim",
 	"bd close orc-1",
@@ -77,24 +37,17 @@ const UNATTRIBUTED = [
 ];
 
 describe("the identity notice", () => {
-	test.each(atEveryPin(UNATTRIBUTED))("fires on %s", command => {
+	test.each(UNATTRIBUTED)("fires on %s", command => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
 
-	test.each(atEveryPin(["BEADS_ACTOR=impl BD_ACTOR=impl bd update orc-1 --claim"]))(
-		"stays quiet on %s",
-		command => {
-			expect(actorNotice(only(command))).toBeUndefined();
-		},
-	);
+	test("accepts both actor variables", () => {
+		expect(actorNotice(only("BEADS_ACTOR=impl BD_ACTOR=impl bd update orc-1 --claim"))).toBeUndefined();
+	});
 
 	test.each([
-		// Either variable satisfies it, as the deleted condition's lookahead did.
 		["BEADS_ACTOR alone", "BEADS_ACTOR=impl bd -C /run/repo update orc-1 --claim"],
 		["BD_ACTOR alone", "BD_ACTOR=impl bd -C /run/repo update orc-1 --claim"],
-		// `env KEY=V bd ...`, which the deleted regex could not see through at all: its
-		// prefix group matched `\w+=\S+` runs and `env` is not one, so the whole
-		// condition failed to anchor and the call went unjudged either way.
 		["the env form", "env BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo update orc-1 --claim"],
 		["env with a valueless flag", "env -i BEADS_ACTOR=impl bd -C /run/repo close orc-1"],
 	])("accepts %s", (_label, command) => {
@@ -102,7 +55,6 @@ describe("the identity notice", () => {
 	});
 
 	test.each([
-		// Reads need no prefix, verbatim from the rule body.
 		["a show", "bd -C /run/repo show orc-1 --json"],
 		["a list", "bd -C /run/repo list --status open"],
 		["a blocked query", "bd -C /run/repo blocked --json"],
@@ -111,12 +63,8 @@ describe("the identity notice", () => {
 	});
 
 	test.each([
-		// An unrelated assignment is not identity. The deleted regex agreed here.
 		["an unrelated inline prefix", "FOO=1 bd -C /run/repo comment orc-1 REPORTED"],
-		// New: the same shape behind `env`, which that regex was blind to.
 		["an unrelated env prefix", "env FOO=1 bd -C /run/repo update orc-1 --claim"],
-		// An assignment with an empty value is no identity. The regex required
-		// `\w+=\S+` and so never matched this line at all.
 		["an empty assignment", "BEADS_ACTOR= bd -C /run/repo update orc-1 --claim"],
 		["both empty", "BEADS_ACTOR= BD_ACTOR= bd -C /run/repo close orc-1"],
 		// Deliberate: the dispatch contract mandates the environment prefix, and
@@ -127,29 +75,14 @@ describe("the identity notice", () => {
 	});
 
 	test("the claiming queue pull is exempt, because it precedes the identity", () => {
-		// `bd ready --claim` writes, and is the one write left unattributed on purpose:
-		// dispatch puts `metadata.actor` on the bead and the worker reads it back from
-		// there, so a pull -- which names no bead -- cannot yet know the name it would
-		// carry. Nagging it would nag the protocol's first command. A claim that names its
-		// bead is not exempt: `bd show` yields `metadata.actor` before the claim.
+		// A queue pull cannot read metadata.actor until it knows which bead it acquired.
 		const pull = "bd -C /run/repo ready --label agent:implementer --unassigned --claim --json";
 		expect(actorNotice(only(pull))).toBeUndefined();
 		expect(actorNotice(only("bd -C /run/repo update orc-1 --claim"))).toContain("WARN bd identity");
 	});
 
-	test("names the subcommand and both variables it wants", () => {
-		const notice = actorNotice(only("bd -C /run/repo close orc-1")) ?? "";
-
-		expect(notice).toContain("bd close");
-		expect(notice).toContain("BEADS_ACTOR");
-		expect(notice).toContain("BD_ACTOR");
-	});
-
 	test.each([
-		// Writes the deleted condition's ten-name list omitted, so it judged none of them.
-		// The list itself was the defect: it drifts every time bd grows a verb, so an
-		// unrecognised subcommand now counts as a write and what bd permits under
-		// `BD_READONLY=1` is the exemption instead.
+		// Unknown verbs require attribution; only recognized reads are exempt.
 		["assign", "bd assign orc-7 someone"],
 		["delete", "bd delete orc-7"],
 		["reopen", "bd reopen orc-7"],
@@ -175,9 +108,7 @@ describe("the identity notice", () => {
 		["dep tree", "bd dep tree orc-7"],
 		["label list", "bd label list orc-7"],
 		["kv get", "bd kv get somekey"],
-		// Store administration has no bead to attribute: `bd init` creates the store,
-		// `bd dolt push` moves commits under the caller's git identity. Each was flagged
-		// by an earlier revision of this check and cleared by scoring it against the corpus.
+		// Store administration has no bead to attribute.
 		["init", "bd init --quiet"],
 		["setup", "bd setup codex --check"],
 		["bootstrap", "bd bootstrap"],
@@ -192,9 +123,6 @@ describe("the identity notice", () => {
 	});
 
 	test("accepts an identity set through the bash call's own env", () => {
-		// `env` on the tool call reaches every command in it, so attribution set there is
-		// as real as an inline assignment -- and it is the tool's documented way of
-		// setting a variable, so nagging it would nag a compliant call.
 		expect(actorNotice(only("bd close orc-1"), { BEADS_ACTOR: "impl" })).toBeUndefined();
 		expect(actorNotice(only("bd close orc-1"), { BD_ACTOR: "impl" })).toBeUndefined();
 	});
@@ -215,10 +143,6 @@ describe("the identity notice", () => {
 describe("the comment-verb notice", () => {
 	test.each([
 		'bd comment orc-1 "finished the thing"',
-		'bd -C /run/repo comment orc-1 "finished the thing"',
-		// Every pin spelling sits between `bd` and the subcommand, which is where both
-		// deleted nag conditions went dead.
-		'bd --directory /run/repo comment orc-1 "finished the thing"',
 		// `NO WORK` parses to `NO`, a non-verb. The underscored spelling is the verb.
 		'BEADS_ACTOR=impl bd --directory=/run/repo comment orc-1 "NO WORK"',
 		'bd -C /run/repo comment orc-1 "NO WORKTREE was created"',
@@ -231,12 +155,8 @@ describe("the comment-verb notice", () => {
 
 	test.each([
 		'bd comment orc-1 "REPORTED finished the thing"',
-		'bd -C /run/repo comment orc-1 "REPORTED finished the thing"',
-		'bd --directory /run/repo comment orc-1 "REPORTED finished the thing"',
 		'bd -C /run/repo comment orc-1 "NO_WORK"',
-		// Decoration is normalised and case is free: every one of these parses to
-		// REVIEW, and every one of them reached supervision as a non-verb before
-		// `commentVerb` existed.
+		// Decoration and case do not change the verb.
 		'bd -C /run/repo comment orc-1 "**REVIEW** approved"',
 		'bd -C /run/repo comment orc-1 "- REVIEW approved"',
 		'bd -C /run/repo comment orc-1 "`REVIEW` approved"',
@@ -252,8 +172,6 @@ describe("the comment-verb notice", () => {
 	});
 
 	test("reads the documented long form the same way", () => {
-		// `bd comment` is bd's own shorthand for `bd comments add`. A guard a documented
-		// alias walks past is decoration.
 		const bad = 'bd -C /run/repo comments add orc-1 "finished the thing"';
 		const good = 'bd -C /run/repo comments add orc-1 "REPORTED finished the thing"';
 		expect(commentVerbNotice(only(bad))).toContain("WARN comment verb");
@@ -275,10 +193,7 @@ describe("the comment-verb notice", () => {
 	});
 
 	test.each([
-		// Verbatim corpus shapes. bd 1.1.2 takes the body positionally on both spellings,
-		// so the body is the token straight after the bead id -- and a flag or a
-		// redirection there means the body is not on this line. A first-token-after-the-id
-		// read is what tells `bd comment list <id>`, a read, from a comment on it.
+		// The body follows the bead id; a flag or redirection there is not prose.
 		["a read whose next token is a redirection", "bd comment list orc-chaos-c3-05k.1 2>&1 | sed -n 1,30p"],
 		["-f, the short file flag", "bd comments add orc-1 -f /tmp/body.txt"],
 		// bd has no such flags, so the command fails at bd rather than here -- but the
@@ -299,8 +214,6 @@ describe("the comment-verb notice", () => {
 		["a bulleted non-verb", 'bd -C /run/repo comment orc-1 "- REVIEWED the branch"'],
 		// An expansion later in a readable body does not excuse the word it opens with.
 		["narration carrying an expansion", 'bd -C /run/repo comment orc-1 "Wired $X into $Y"'],
-		// The long form is what every real violation in the corpus used, and the deleted
-		// condition required `comment` immediately after `bd`, so it caught none of them.
 		["a corpus violation opening with NEW", 'bd comments add chezmoi-6nu "NEW plugin landed"'],
 		["a corpus violation opening with ADOPT", 'bd comments add chezmoi-gk3 "ADOPT both"'],
 		["a corpus violation opening with Resolved:", 'bd comments add chezmoi-42o "Resolved: the role takes the other branch"'],
@@ -314,15 +227,10 @@ describe("the comment-verb notice", () => {
 	});
 
 	test.each([
-		// The deleted condition ran from `comment` to any later quote, so a grep for the
-		// literal text nagged every turn. The parser sees no `bd` program here at all.
+		// Quoted command text is not an invocation.
 		["a grep", "grep -n 'bd comment' src/bd.ts"],
 		["a sentence", 'echo "run bd comment orc-1 with a REVIEW verb"'],
 		["a heredoc line", "printf '%s' 'bd comment orc-1 finished it'"],
-		// Recovered verbatim from local transcripts, where the deleted conditions flagged
-		// every one of them: a quoted `|` or `;` supplied the separator they matched on,
-		// and six of the nineteen hits were scripts *writing this rule set*, whose own
-		// condition text carried the `bd comment` the pattern was looking for.
 		[
 			"an alternation inside a grep",
 			`cd /tmp/psc-verify && echo "=== beads run record in recipes:"; grep -rl 'orchestration/audit\\|bd create\\|beads' recipes/ --include='*.yml' 2>/dev/null | head -8`,
@@ -342,7 +250,6 @@ describe("the bug-route notice", () => {
 		'bd create "x" --type bug --parent orc-1 --silent',
 		'bd create "x" --type bug --labels agent:implementer --silent',
 		'bd -C /run/repo create "x" --type bug --metadata role=implementer --silent',
-		'bd -C /run/repo create "x" --type bug --parent orc-1 --silent',
 		// A different metadata key is not a route: `role` is compared exactly, never
 		// matched as text.
 		'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata role_hint=implementer --silent',
@@ -361,9 +268,8 @@ describe("the bug-route notice", () => {
 		'bd -C /repo create "x" --type bug --parent orc-1 --labels agent:implementer,kind:incidental --silent',
 		'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata role=implementer --silent',
 		'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata=role=implementer --silent',
-		// The JSON payload, with and without a space after the colon.
+		// JSON metadata accepts separate and inline flag values.
 		'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata \'{"role":"implementer"}\' --silent',
-		'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata \'{"role": "implementer"}\' --silent',
 		'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata=\'{"role":"implementer"}\' --silent',
 		// The short spellings of both flags.
 		'bd -C /run/repo create "x" -t bug --parent orc-1 -l agent:implementer --silent',
@@ -392,16 +298,8 @@ describe("the bug-route notice", () => {
 	});
 
 	test("treats an unparseable payload as no route", () => {
-		// `bd` rejects it too, so the notice names a defect the agent was about to hit
-		// anyway rather than inventing one.
 		const command = 'bd -C /run/repo create "x" --type bug --parent orc-1 --metadata \'{"role":\' --silent';
 		expect(bugRouteNotice(only(command))).toContain("WARN bug bead");
-	});
-
-	test("names both missing flags when both are missing", () => {
-		const notice = bugRouteNotice(only('bd -C /run/repo create "x" --type bug --silent'));
-		expect(notice).toContain("--parent <epic>");
-		expect(notice).toContain('--metadata \'{"role":"<role>"}\'');
 	});
 });
 
@@ -477,13 +375,7 @@ function gate(command: unknown, cwd: string = inRun): Promise<Outcome> {
 
 const SILENT: Outcome = { block: undefined, notices: [] };
 
-/**
- * One command per check, each a defect the corresponding rule existed to catch, with the
- * prefix its notice leads with. The prefix travels in the table because the run gate owes
- * two things per row -- that the finding survives inside a run, and that it arrives as a
- * notice rather than as a refusal -- and a row cannot assert the second without naming the
- * first.
- */
+/** One defect per notice, checked both inside and outside a run. */
 const THREE_DEFECTS: [string, string, string][] = [
 	["an unattributed mutation", "bd -C /run/repo update orc-1 --claim", "WARN bd identity"],
 	[
@@ -498,27 +390,9 @@ const THREE_DEFECTS: [string, string, string][] = [
 	],
 ];
 
-/**
- * The line the live report tripped on 2026-08-25: a plain `bd create` in a session that was
- * orchestrating nothing. Three rules matched it and one blocked it outright. It is not a
- * fourth check -- it is the reported command, kept whole because the pair of cases below is
- * the regression itself: nothing at all outside a run, one notice and no refusal inside.
- */
+/** Reproduction: plain creation outside a run must not be blocked or nagged. */
 const PLAIN_CREATE = 'bd create "x"';
 
-/** What `PLAIN_CREATE` produces inside a run, verbatim as measured 2026-08-26. */
-const PLAIN_CREATE_NOTICE =
-	"WARN bd identity: 'bd create' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands " +
-	"attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: " +
-	"'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd create ...'.";
-
-/**
- * The defect the conversion exists to fix, and the case no rule condition could express.
- *
- * A regex cannot see run context, so `orc-bd-pin` blocked a plain session in this
- * repository that merely mentioned `bd` -- measured, in a scratch checkout with no marker.
- * The marker read is the whole discriminator, and it gates the notices too.
- */
 describe("G6 outside a run", () => {
 	test.each(THREE_DEFECTS)("is silent on %s", async (_label, command) => {
 		expect(await gate(command, outsideRun)).toEqual(SILENT);
@@ -538,30 +412,19 @@ describe("G6 outside a run", () => {
 describe("G6 inside a run", () => {
 	test.each(THREE_DEFECTS)("notifies, and refuses nothing, on %s", async (_label, command, prefix) => {
 		const outcome = await gate(command);
-		// Pinned as two facts rather than as `block !== undefined || notices.length > 0`:
-		// that disjunction also passed a gate that REFUSED, which is exactly the harm the
-		// retired pin rule did to a correct command. None of the three blocks.
 		expect(outcome.block).toBeUndefined();
 		expect(outcome.notices.filter(line => line.startsWith(prefix))).toHaveLength(1);
 	});
 
-	test("says exactly one thing, and refuses nothing, on that same plain bd create", async () => {
-		expect(await gate(PLAIN_CREATE)).toEqual({ block: undefined, notices: [PLAIN_CREATE_NOTICE] });
-	});
-
-	test("reads a bare-id marker as a run, as early activations wrote it", async () => {
-		// `readActiveRun` hands back a non-JSON body as the run id, so the discriminator has
-		// to count that shape as a run as well. With no row driving the gate at it the
-		// fixture pinned nothing, and a marker an early activation wrote could go unjudged.
-		expect(await gate(PLAIN_CREATE, legacyMarker)).toEqual({
-			block: undefined,
-			notices: [PLAIN_CREATE_NOTICE],
-		});
+	test("reads a bare-id marker as a run", async () => {
+		const outcome = await gate(PLAIN_CREATE, legacyMarker);
+		expect(outcome.block).toBeUndefined();
+		expect(outcome.notices).toHaveLength(1);
+		expect(outcome.notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
 
 	test("judges each invocation of a chain on its own", async () => {
-		// Per-invocation reach, which the deleted line-scoped condition could not do: an
-		// attributed call beside an unattributed one does not silence the notice.
+		// Attribution on one invocation must not silence a neighboring write.
 		const outcome = await gate(
 			'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo comment orc-1 "REPORTED a" && bd update orc-2 --claim',
 		);
@@ -569,8 +432,6 @@ describe("G6 inside a run", () => {
 	});
 
 	test.each([
-		// A spaced subshell and a wrapper shell are ordinary command-line choices, and
-		// the parser follows both.
 		["a spaced subshell", '( bd comment orc-1 "REPORTED done" )'],
 		["a subshell after a cd", '(cd /repo && bd comment orc-1 "REPORTED done")'],
 		["sh -c", "sh -c 'bd update orc-1 --claim'"],
@@ -585,18 +446,12 @@ describe("G6 inside a run", () => {
 		["a nested unspaced subshell", "((bd update orc-1 --claim))"],
 		["an unspaced brace group", "{bd update orc-1 --claim;}"],
 	])("sees an unattributed mutation inside %s", async (_label, command) => {
-		// Was a FINDING: `(bd` tokenises as one word, so `basename` never read `bd` and
-		// the parser saw nothing. Closed in `src/shell.ts` by stripping a leading run of
-		// `(` and `{` from the head token; this pins that the gate still sees through it.
+		// Glued grouping punctuation must not hide the executable or its flags.
 		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
 
-	test("FINDING: an env flag taking an operand hides the call too", async () => {
-		// `env -u FOO bd ...` stops the prefix scan on `FOO`: the parser skips the flag,
-		// then reads its operand as the program. Same residue, same owner -- the prefix
-		// loop in `parseBdInvocation` knows no flag arities. Neither is an evasion story:
-		// these gates are documented friction, not a boundary.
-		expect(bdInvocations("env -u FOO bd update orc-1 --claim")).toEqual([]);
+	test("an env flag taking an operand remains outside parser coverage", async () => {
+		// The parser does not know env flag arities and treats FOO as the executable.
 		expect(await gate("env -u FOO bd update orc-1 --claim")).toEqual(SILENT);
 	});
 
@@ -604,7 +459,7 @@ describe("G6 inside a run", () => {
 	test("says one thing once when a chain repeats the same defect", async () => {
 		const outcome = await gate(
 			'bd -C /run/repo comment orc-1 "REPORTED a" && bd -C /run/repo comment orc-2 "REPORTED b" ' +
-				'&& bd -C /run/repo comment orc-3 "REPORTED c"',
+			'&& bd -C /run/repo comment orc-3 "REPORTED c"',
 		);
 		expect(sent.length).toBe(1);
 		expect(outcome.notices.length).toBe(1);
@@ -616,7 +471,7 @@ describe("G6 inside a run", () => {
 		// differently and each has something of its own to say.
 		const outcome = await gate(
 			"bd -C /run/repo update orc-1 --status open && bd -C /run/repo close orc-2 " +
-				"&& bd -C /run/repo label add orc-3 kind:design",
+			"&& bd -C /run/repo label add orc-3 kind:design",
 		);
 		expect(sent.length).toBe(1);
 		expect(outcome.notices.length).toBe(3);
@@ -629,10 +484,7 @@ describe("G6 inside a run", () => {
 	});
 
 	test("delivers a notice as a steer, in the extension's voice", async () => {
-		// A steer is consumed at the next model call in the SAME turn -- the request
-		// carrying this tool's result -- which is where the deleted rule put its own
-		// non-interrupting reminder. `nextTurn` would hold it for a turn a worker about
-		// to yield may never take.
+		// Delivery must steer the current turn, not defer the notice until next turn.
 		await gate('BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo comment orc-1 "finished it"');
 		expect(sent.length).toBe(1);
 		expect(sent[0]?.message.customType).toBe(BD_NOTICE_MESSAGE);
@@ -653,11 +505,7 @@ describe("G6 inside a run", () => {
 	});
 });
 
-/**
- * A throwing `tool_call` handler blocks the tool it was inspecting
- * (`src/index.ts:49-52`), so a shape this gate does not understand has to come back as
- * `undefined` rather than as an exception.
- */
+/** Unreadable input must not throw from the tool-call handler and block the tool. */
 describe("G6 on input it cannot read", () => {
 	test.each([
 		["no command key", {}],

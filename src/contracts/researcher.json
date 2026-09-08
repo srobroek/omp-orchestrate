@@ -8,7 +8,8 @@
       "require": "metadata.output_ref",
       "when": [
         "artifact",
-        "comment"
+        "comment",
+        "external"
       ]
     },
     {
@@ -21,7 +22,8 @@
       "require": "label ~ ^agent:reviewer$",
       "when": [
         "artifact",
-        "comment"
+        "comment",
+        "external"
       ]
     },
     {
@@ -29,7 +31,8 @@
       "require": "assignee cleared",
       "when": [
         "artifact",
-        "comment"
+        "comment",
+        "external"
       ]
     },
     {
@@ -37,7 +40,8 @@
       "require": "comment.verb in [REPORTED]",
       "when": [
         "artifact",
-        "comment"
+        "comment",
+        "external"
       ]
     },
     {

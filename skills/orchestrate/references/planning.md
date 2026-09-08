@@ -2,15 +2,13 @@
 
 Two actors own two different plans, and neither does the other's job.
 
-- **The lead** owns which epics exist, who owns them, and what "done" means for the run. It
-  never reads domain code to decide that.
+- **The lead** owns which epics exist, who owns them, and what "done" means for the run.
 - **The architect** owns the decomposition inside its epic: features, tasks, scopes,
   dependencies. It reads the domain, because that is the part that cannot be delegated
   upward.
 
-Owning a plan means owning the decisions and the graph, not doing the deep reading. Push
-codebase exploration and any large planning pass to a read-only agent and keep only its
-conclusions.
+Do small factual checks directly. Delegate a bounded investigation when its read set or
+independent slices justify a separate context; retain ownership of decisions and the graph.
 
 ## Decide the planning system
 
@@ -23,9 +21,8 @@ conclusions.
   `ASK` wisps. `speckit-verify` and `speckit-sync` keep their own agents, and `specs/*/tasks.md`
   belongs to the conductor -- writes to it are denied.
 - **No framework:** build the default DAG below.
-- **Work spanning more than three tasks with cross-cutting deps, or an unfamiliar
-  subsystem:** delegate one deep planning pass to a read-only agent before committing the
-  decomposition. You still own the final graph.
+- **Unfamiliar subsystem or unresolved cross-cutting dependencies:** investigate the gap
+  before committing the graph. A helper is optional, not a task-count-triggered planning phase.
 
 Never build a second graph beside one that exists. There is no in-memory ledger, no JSON
 plan, and no `graph.py`: the epic and its dependency edges ARE the DAG.
@@ -85,7 +82,7 @@ empty commit.
 
 ## Dispatch ready work
 
-Dispatch is a pull, and the `role` key is the whole route. There is no activation message.
+Ordinary dispatch is a pull, and the `role` key is the whole route. There is no activation message.
 
 **Queue (the default).** Leave the bead unassigned with one `role=<role>` key. A worker
 claims the first ready bead in its queue atomically:
@@ -103,13 +100,12 @@ empty result, and the loser retries the identical pull -- `references/dispatch-c
 holds the signatures and the retry budget. One activation owns at most one bead and cannot
 claim another until the first is terminal.
 
-**Directed (the exception).** A bead with an assignee is invisible to every `--unassigned`
-pull, so it goes only to that actor and must be spawned deliberately. Confirm its
-`execution_task_kind`, `execution_kind`, and `scope` are compatible with that actor first;
-an incompatible directed assignment stays pinned and unclaimed rather than being silently
-rerouted. Automatic correction may update evidence-backed envelope fields only. It never
-changes an assignee: that needs an explicit release or a recovery under the contracts in
-`references/lifecycle.md`.
+**No directed preassignment.** A bead with an assignee is invisible to every
+`--unassigned` pull. Spawning that actor does not make the role's pull acquire it.
+Leave new work unassigned; an existing assignment needs explicit release or recovery
+under `references/lifecycle.md`, never automatic assignee correction. The sole
+receipt-directed acquisition here is the shepherd's exact approved-owner resume in
+`references/queue-watcher.md`; it is not a dispatch path for preassigned task work.
 
 While a bead stays unassigned, the architect that owns the epic may stamp, change, or drop
 its `role` key (`--set-metadata role=<role>`, `--unset-metadata role`). No other role may:
@@ -153,22 +149,43 @@ catches the honest mistake, not a substitute for disjoint globs.
 
 ## Concurrency
 
-`task.maxConcurrency` is the ceiling, and it counts live agents rather than CPU. Count every
-one of these:
+`task.maxConcurrency` is a per-spawner ceiling, not a run-wide budget. Each architect
+can admit its own full wave, including reviewers, researchers and helpers. The lead
+must coordinate aggregate wave widths across architects when provider, context or
+disk limits require a run-wide cap. Reported workers exit rather than waiting for review.
+Three limits matter:
 
-- each architect
-- each worker in a wave, including one still waiting for its review
-- each reviewer and researcher
-- the shepherd
-- each helper inside an architect's await
-
-Nothing in a run is CPU-bound. Three limits matter:
-
-- **Provider rate limit.** While requests are accepted and the lead's context has room, a
-  wider wave is free. On the first rejection, narrow it.
+- **Provider rate limit.** Narrow aggregate waves when requests are rejected.
 - **Lead context.** Every wave you observe costs the lead tokens it never gets back.
 - **Disk.** Every isolated worker copy carries its own build artifacts. If disk is tight,
   narrow the wave again.
 
 Wave sizing is the architect's judgement: a wave that finishes early is cheap to respawn, and
 one sized past the cap simply idles against it.
+
+## Runtime dispatch settings
+
+Before the first wave, require these effective settings; fix deviations and restart or
+obtain explicit acceptance of the reported limitations. Preflight never rewrites config.
+Claim foreground observation remains mandatory even if a settings warning is accepted.
+
+| Setting | Value |
+|---|---|
+| `task.isolation.enabled` | `true` |
+| `task.isolation.merge` | `branch` |
+| `task.isolation.apply` | `false` |
+| `task.enableEffort` | `true` for per-entry effort |
+| `task.maxRecursionDepth` | `3` for worker helpers; each spawner also needs its explicit allowlist |
+| `bash.autoBackground.enabled` | `false` |
+| `BEADS_DIR` | the same absolute embedded run database in every child |
+
+Architects use persistent Worktrunk feature trees, not isolated spawns. Worker entry:
+
+```
+{ name: "<CamelCase>", agent: "orc-implementer", task: "<epic id + queue, not the work>", isolated: true }
+```
+
+Use per-entry `effort: "lo" | "med" | "hi"` for the actual slice. Use `outputSchema`
+with `schemaMode: "strict"` for shape checking; it does not prove semantic acceptance.
+Collect terminal results, not job receipts, before consuming captures or resuming writes.
+MCP/LSP degradation is recorded as `WARN preflight` on the epic; it does not hold a wave.

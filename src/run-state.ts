@@ -17,12 +17,13 @@
  * retarget -- while rebinding to the same id stays a no-op so a retried command
  * is harmless.
  *
- * Writes go through a `<name>.<pid>.tmp` sibling plus rename, because the gates
- * read this file on paths they do not control: a reader must never observe a
- * half-written marker, and a crash must not leave one behind.
+ * Writers hold an exclusive sibling lock through read/validate/rename. Readers see
+ * atomic snapshots; a leftover lock requires explicit operator reconciliation.
  */
 
-import fs from "node:fs/promises";
+import fs, { type FileHandle } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ensureBeadsPath } from "./beads-mode";
@@ -40,9 +41,9 @@ import { ensurePatrolWisp } from "./supervision";
  * keeps only the fields below, so a marker written by an older version still reads.
  */
 export interface ActiveRun {
-	schema_version: 1;
-	run_id: string;
-	session_id?: string;
+ schema_version: 1;
+ run_id: string;
+ session_id?: string;
 }
 
 /** Run id written before the run epic exists. Bindable; never treated as bound. */
@@ -58,9 +59,9 @@ const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
  * exporting the variable blank cannot point the marker at the repository root.
  */
 export function markerPath(cwd: string): string {
-	const configured = process.env.ORCHESTRATE_MARKER_FILE;
-	if (configured !== undefined && configured.length > 0) return path.resolve(cwd, configured);
-	return path.join(cwd, ".orchestration", ".active-run");
+ const configured = process.env.ORCHESTRATE_MARKER_FILE;
+ if (configured !== undefined && configured.length > 0) return path.resolve(cwd, configured);
+ return path.join(cwd, ".orchestration", ".active-run");
 }
 
 /**
@@ -71,20 +72,20 @@ export function markerPath(cwd: string): string {
  * run's binding.
  */
 export async function readActiveRun(cwd: string): Promise<ActiveRun | null> {
-	let raw: string;
-	try {
-		raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
-	} catch {
-		return null;
-	}
-	if (raw.length === 0) return null;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		return { schema_version: 1, run_id: raw };
-	}
-	return asActiveRun(parsed);
+ let raw: string;
+ try {
+  raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
+ } catch {
+  return null;
+ }
+ if (raw.length === 0) return null;
+ let parsed: unknown;
+ try {
+  parsed = JSON.parse(raw);
+ } catch {
+  return { schema_version: 1, run_id: raw };
+ }
+ return asActiveRun(parsed);
 }
 
 /**
@@ -94,30 +95,88 @@ export async function readActiveRun(cwd: string): Promise<ActiveRun | null> {
  * from a parsed one stays byte-identical instead of gaining `null`s.
  */
 function asActiveRun(value: unknown): ActiveRun | null {
-	if (typeof value === "string") return value.length > 0 ? { schema_version: 1, run_id: value } : null;
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-	const record = value as Record<string, unknown>;
-	const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
-	const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
-	// An unknown key is dropped rather than carried: see the note on ActiveRun.
-	const state: ActiveRun = { schema_version: 1, run_id: runId };
-	if (sessionId !== undefined) state.session_id = sessionId;
-	return state;
+ if (typeof value === "string") return value.length > 0 ? { schema_version: 1, run_id: value } : null;
+ if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+ const record = value as Record<string, unknown>;
+ const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
+ const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
+ // An unknown key is dropped rather than carried: see the note on ActiveRun.
+ const state: ActiveRun = { schema_version: 1, run_id: runId };
+ if (sessionId !== undefined) state.session_id = sessionId;
+ return state;
+}
+
+/** Transactional reads distinguish absence from unreadable or malformed authority. */
+async function readMarkerForMutation(cwd: string): Promise<ActiveRun | null> {
+ let raw: string;
+ try {
+  raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
+ } catch (error) {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+  throw error;
+ }
+ let parsed: unknown;
+ try {
+  parsed = JSON.parse(raw);
+ } catch {
+  if (RUN_ID_RE.test(raw)) return { schema_version: 1, run_id: raw };
+  throw new Error("Active-run marker is malformed; reconcile it before activation or binding");
+ }
+ if (typeof parsed === "string" && RUN_ID_RE.test(parsed)) {
+  return { schema_version: 1, run_id: parsed };
+ }
+ if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+  throw new Error("Active-run marker is malformed; reconcile it before activation or binding");
+ }
+ const record = parsed as Record<string, unknown>;
+ if (typeof record.run_id !== "string" || !RUN_ID_RE.test(record.run_id)
+  || (record.schema_version !== undefined && record.schema_version !== 1)
+  || (record.session_id !== undefined && (typeof record.session_id !== "string" || record.session_id.length === 0))) {
+  throw new Error("Active-run marker is malformed or unsupported; reconcile it before activation or binding");
+ }
+ const state: ActiveRun = { schema_version: 1, run_id: record.run_id };
+ if (typeof record.session_id === "string") state.session_id = record.session_id;
+ return state;
 }
 
 /** Write the marker atomically, leaving no temporary behind on either path. */
 async function writeMarker(target: string, state: ActiveRun): Promise<void> {
-	await fs.mkdir(path.dirname(target), { recursive: true });
-	const temporary = `${target}.${process.pid}.tmp`;
-	try {
-		// Sorted keys keep the file byte-stable across rewrites, so an unchanged
-		// marker does not show up as a diff in a run's worktree.
-		await fs.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}\n`, "utf8");
-		await fs.rename(temporary, target);
-	} catch (error) {
-		await fs.rm(temporary, { force: true }).catch(() => {});
-		throw error;
-	}
+ await fs.mkdir(path.dirname(target), { recursive: true });
+ const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+ try {
+  // Sorted keys keep the file byte-stable across rewrites, so an unchanged
+  // marker does not show up as a diff in a run's worktree.
+  await fs.writeFile(temporary, `${JSON.stringify(state, Object.keys(state).sort())}\n`, { encoding: "utf8", flag: "wx" });
+  await fs.rename(temporary, target);
+ } catch (error) {
+  await fs.rm(temporary, { force: true }).catch(() => { });
+  throw error;
+ }
+}
+
+/** Bounded cross-process exclusion; never steal a lock based on age or a guessed PID. */
+async function withMarkerLock<T>(cwd: string, action: () => Promise<T>): Promise<T> {
+ const target = markerPath(cwd);
+ await fs.mkdir(path.dirname(target), { recursive: true });
+ const lock = `${target}.lock`;
+ let handle: FileHandle | undefined;
+ for (let attempt = 0; attempt < 20; attempt++) {
+  try {
+   handle = await fs.open(lock, "wx");
+   break;
+  } catch (error) {
+   if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+   if (attempt === 19) throw new Error(`Active-run marker is locked: ${lock}; reconcile its writer before retrying`);
+   await delay(25);
+  }
+ }
+ if (handle === undefined) throw new Error(`Could not acquire active-run marker lock: ${lock}`);
+ try {
+  return await action();
+ } finally {
+  await handle.close();
+  await fs.unlink(lock);
+ }
 }
 
 /**
@@ -126,12 +185,14 @@ async function writeMarker(target: string, state: ActiveRun): Promise<void> {
  * previous activation recorded.
  */
 export async function activateRun(cwd: string, sessionId?: string): Promise<ActiveRun> {
-	const existing = await readActiveRun(cwd);
-	const session = sessionId ?? existing?.session_id;
-	const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
-	if (session !== undefined) state.session_id = session;
-	await writeMarker(markerPath(cwd), state);
-	return state;
+ return withMarkerLock(cwd, async () => {
+  const existing = await readMarkerForMutation(cwd);
+  const session = sessionId ?? existing?.session_id;
+  const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
+  if (session !== undefined) state.session_id = session;
+  await writeMarker(markerPath(cwd), state);
+  return state;
+ });
 }
 
 /**
@@ -145,26 +206,23 @@ export async function activateRun(cwd: string, sessionId?: string): Promise<Acti
  * unarmed patrol costs a reconciliation sweep, an unbound marker costs the run.
  */
 export async function bindRun(cwd: string, runId: string): Promise<void> {
-	if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
-	const existing = await readActiveRun(cwd);
-	if (existing === null) throw new Error("no active-run marker to bind; run /orchestrate-run first");
-	if (existing.run_id !== PENDING && existing.run_id !== runId) {
-		throw new Error(`active-run marker is already bound to ${existing.run_id}`);
-	}
-	await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
-	// Binding is its own dispatch, so it owns its read budget. `bd.ts` caps reads per
-	// dispatch and only the `tool_call` handler resets the counter, so a slash command
-	// arriving after twelve gated reads in the same turn would find the budget spent.
-	// `bdList` returns without spawning when it is, so the patrol existence check
-	// reports "none linked" and a second patrol is armed beside the live one.
-	resetReadBudget();
-	// Arming must not fail the bind, which this function's contract already promises:
-	// the marker is written by now, so a caller told the bind failed may retry or
-	// abandon a run that is in fact bound. An unarmed patrol costs one reconciliation
-	// sweep; a caller misled about the marker costs the run. The internals already
-	// fail open on a missing or failing `bd`, so reaching this catch means something
-	// unexpected threw -- which is exactly when the marker matters most.
-	await ensurePatrolWisp(runId, cwd).catch(() => {});
+ if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
+ await withMarkerLock(cwd, async () => {
+  const existing = await readMarkerForMutation(cwd);
+  if (existing === null) throw new Error("no active-run marker to bind; run /orchestrate-run first");
+  if (existing.run_id !== PENDING && existing.run_id !== runId) {
+   throw new Error(`active-run marker is already bound to ${existing.run_id}`);
+  }
+  await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
+ });
+ // Binding owns its evidence budget; arming failure must not undo the marker.
+ resetReadBudget();
+ await ensurePatrolWisp(runId, cwd).catch(error => {
+  process.emitWarning(
+   `Run ${runId} is bound, but patrol arming needs architect attention: ${error instanceof Error ? error.message : String(error)}`,
+   { code: "ORCHESTRATE_PATROL_UNCONFIRMED" },
+  );
+ });
 }
 
 /**
@@ -175,49 +233,49 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
  * `orchestrate-status` is registered by the entry point, not here.
  */
 export function registerRunCommands(pi: ExtensionAPI): void {
-	pi.registerCommand("orchestrate-run", {
-		description: "Activate orchestrate run enforcement in this repository",
-		handler: async (_args, ctx) => {
-			const cwd = ctx.sessionManager.getCwd();
-			// Refusing here is the point. Activation arms enforcement for every agent the run
-			// spawns, and bd resolves its database by walking up from the working directory, so
-			// a worker in an isolated checkout can reach a database nobody else reads. This
-			// pins one path for the run and every child that inherits its environment.
-			const beads = await ensureBeadsPath(cwd);
-			if (!beads.ok) {
-				ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
-				return;
-			}
-			if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
-			try {
-				const state = await activateRun(cwd, ctx.sessionManager.getSessionId());
-				ctx.ui.notify(
-					state.run_id === PENDING
-						? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)"
-						: `orchestrate run active, bound to ${state.run_id}`,
-					"info",
-				);
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
-			}
-		},
-	});
+ pi.registerCommand("orchestrate-run", {
+  description: "Activate orchestrate run enforcement in this repository",
+  handler: async (_args, ctx) => {
+   const cwd = ctx.sessionManager.getCwd();
+   // Refusing here is the point. Activation arms enforcement for every agent the run
+   // spawns, and bd resolves its database by walking up from the working directory, so
+   // a worker in an isolated checkout can reach a database nobody else reads. This
+   // pins one path for the run and every child that inherits its environment.
+   const beads = await ensureBeadsPath(cwd);
+   if (!beads.ok) {
+    ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
+    return;
+   }
+   if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
+   try {
+    const state = await activateRun(cwd, ctx.sessionManager.getSessionId());
+    ctx.ui.notify(
+     state.run_id === PENDING
+      ? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)"
+      : `orchestrate run active, bound to ${state.run_id}`,
+     "info",
+    );
+   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
+   }
+  },
+ });
 
-	pi.registerCommand("orchestrate-bind", {
-		description: "Bind the active orchestrate run to a run epic id",
-		handler: async (args, ctx) => {
-			const runId = args.trim();
-			try {
-				// `bindRun` arms the S2 patrol wisp; this handler only reports.
-				await bindRun(ctx.sessionManager.getCwd(), runId);
-				// Not "patrol armed": arming fails open, so the bind succeeding does not
-				// prove a patrol exists. `/orchestrate-status` reports the run's wisps.
-				ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
-		},
-	});
+ pi.registerCommand("orchestrate-bind", {
+  description: "Bind the active orchestrate run to a run epic id",
+  handler: async (args, ctx) => {
+   const runId = args.trim();
+   try {
+    // `bindRun` arms the S2 patrol wisp; this handler only reports.
+    await bindRun(ctx.sessionManager.getCwd(), runId);
+    // Not "patrol armed": arming fails open, so the bind succeeding does not
+    // prove a patrol exists. `/orchestrate-status` reports the run's wisps.
+    ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
+   } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+   }
+  },
+ });
 }
 

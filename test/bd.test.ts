@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { bdRun, commentVerb, metadataString, resetReadBudget } from "../src/bd";
+import { describe, expect, spyOn, test } from "bun:test";
+import { bdLinkedChecked, bdListChecked, bdRun, commentVerb, metadataString, resetReadBudget } from "../src/bd";
 
 describe("bdRun never throws", () => {
 	// The whole reason this wrapper exists: a throw inside a tool_call handler
@@ -31,10 +31,144 @@ describe("bdRun never throws", () => {
 });
 
 describe("read budget", () => {
-	test("reset makes the budget available again", () => {
-		// Exercised for its side effect: the gates call this once per dispatch, and
-		// a stuck counter would silently fail every contract evaluation open.
-		expect(() => resetReadBudget()).not.toThrow();
+	test("overlapping operations retain independent read counts across resets", async () => {
+		const previous = process.env.BD_BIN;
+		process.env.BD_BIN = "echo";
+		const paused = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		try {
+			const first = (async () => {
+				resetReadBudget();
+				for (let i = 0; i < 12; i++) expect(await bdListChecked(["[]"])).toEqual([]);
+				paused.resolve();
+				await resume.promise;
+				expect(await bdListChecked(["[]"])).toBeNull();
+			})();
+			await paused.promise;
+			resetReadBudget();
+			expect(await bdListChecked(["[]"])).toEqual([]);
+			resume.resolve();
+			await first;
+			for (let i = 1; i < 12; i++) expect(await bdListChecked(["[]"])).toEqual([]);
+			expect(await bdListChecked(["[]"])).toBeNull();
+		} finally {
+			resume.resolve();
+			if (previous === undefined) delete process.env.BD_BIN;
+			else process.env.BD_BIN = previous;
+		}
+	});
+
+	test("successful calls share an absolute deadline and expiry prevents mutations", async () => {
+		let now = 0;
+		const clock = spyOn(performance, "now").mockImplementation(() => now);
+		const spawn = spyOn(Bun, "spawn").mockImplementation(() => {
+			now += 8_000;
+			return {
+				stdout: new Response("[]").body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => { },
+			} as unknown as Bun.Subprocess;
+		});
+		try {
+			resetReadBudget();
+			expect(await bdListChecked(["list", "--json"])).toEqual([]);
+			expect(await bdListChecked(["list", "--json"])).toEqual([]);
+			expect(await bdListChecked(["list", "--json"])).toBeNull();
+			expect(await bdRun(["update", "bd-task", "--status", "open"])).toBeNull();
+			expect(spawn).toHaveBeenCalledTimes(3);
+			resetReadBudget();
+			expect(await bdListChecked(["list", "--json"])).toEqual([]);
+		} finally {
+			spawn.mockRestore();
+			clock.mockRestore();
+			resetReadBudget();
+		}
+	});
+
+	test("a process is killed at the remaining deadline rather than a fresh timeout", async () => {
+		let now = 0;
+		const clock = spyOn(performance, "now").mockImplementation(() => now);
+		let scheduled: (() => void) | undefined;
+		let delay: number | undefined;
+		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, ms: number) => {
+			scheduled = callback;
+			delay = ms;
+			return 0;
+		}) as unknown as typeof setTimeout);
+		const exited = Promise.withResolvers<number>();
+		let killed = false;
+		const spawn = spyOn(Bun, "spawn").mockImplementation(() => ({
+			stdout: new Response("").body,
+			stderr: new Response("").body,
+			exited: exited.promise,
+			kill: () => { killed = true; exited.resolve(143); },
+		}) as unknown as Bun.Subprocess);
+		try {
+			resetReadBudget();
+			now = 19_900;
+			const pending = bdRun(["list", "--json"]);
+			expect(delay).toBe(100);
+			scheduled?.();
+			expect(await pending).toBeNull();
+			expect(killed).toBe(true);
+		} finally {
+			exited.resolve(0);
+			spawn.mockRestore();
+			timer.mockRestore();
+			clock.mockRestore();
+			resetReadBudget();
+		}
+	});
+});
+
+describe("checked linked evidence", () => {
+	test("node dependents and wisp dependencies follow their requested directions", async () => {
+		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+			const argv = args[0] as string[];
+			const payload = argv.includes("--direction=down")
+				? [{ issue_id: "bd-wisp", depends_on_id: "bd-node" }]
+				: [{ issue_id: "bd-dependent", depends_on_id: "bd-wisp" }];
+			return {
+				stdout: new Response(JSON.stringify(payload)).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => { },
+			} as unknown as Bun.Subprocess;
+		});
+		try {
+			resetReadBudget();
+			expect(await bdLinkedChecked("bd-wisp", "relates-to")).toEqual(["bd-dependent"]);
+			expect(await bdLinkedChecked("bd-wisp", "relates-to", undefined, "down")).toEqual(["bd-node"]);
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
+	test.each([
+		{
+			rows: [{ id: "omp-orchestrate-wisp-42", title: "review-task", assignee: "reviewer-7", dependency_type: "relates-to" }],
+			expected: ["omp-orchestrate-wisp-42"],
+		},
+		{
+			rows: [{ issue_id: "omp-orchestrate-wisp-42", depends_on_id: "bd-node", created_by: "lead-1", type: "relates-to" }],
+			expected: ["omp-orchestrate-wisp-42"],
+		},
+		{ rows: [{ assignee: "reviewer-7" }], expected: null },
+		{ rows: [{ issue_id: "bd-wisp", depends_on_id: "bd-unrelated" }], expected: null },
+	])("reads dependency endpoints without harvesting actor IDs: %j", async ({ rows, expected }) => {
+		const spawn = spyOn(Bun, "spawn").mockImplementation(() => ({
+			stdout: new Response(JSON.stringify(rows)).body,
+			stderr: new Response("").body,
+			exited: Promise.resolve(0),
+			kill: () => { },
+		}) as unknown as Bun.Subprocess);
+		try {
+			resetReadBudget();
+			expect(await bdLinkedChecked("bd-node", "relates-to")).toEqual(expected === null ? null : [...expected]);
+		} finally {
+			spawn.mockRestore();
+		}
 	});
 });
 
@@ -50,6 +184,32 @@ describe("metadataString", () => {
 		expect(metadataString(bead, "absent")).toBeUndefined();
 		expect(metadataString(bead, "count")).toBeUndefined();
 		expect(metadataString(null, "worktree")).toBeUndefined();
+	});
+
+	test("object and JSON-string metadata produce identical evidence", async () => {
+		const metadata = { worktree: "/tmp/worktree", execution_kind: "git", output_ref: "refs/heads/feature" };
+		expect(metadataString({ metadata }, "worktree")).toBe("/tmp/worktree");
+		expect(metadataString({ metadata: JSON.stringify(metadata) }, "worktree")).toBe("/tmp/worktree");
+		for (const raw of ["{broken", "[]", "null", '"text"']) {
+			expect(metadataString({ metadata: raw }, "worktree")).toBeUndefined();
+		}
+		const spawn = spyOn(Bun, "spawn").mockImplementation(() => ({
+			stdout: new Response(JSON.stringify([
+				{ id: "bd-object", metadata },
+				{ id: "bd-string", metadata: JSON.stringify(metadata) },
+			])).body,
+			stderr: new Response("").body,
+			exited: Promise.resolve(0),
+			kill: () => { },
+		}) as unknown as Bun.Subprocess);
+		try {
+			resetReadBudget();
+			const beads = await bdListChecked(["list", "--json"]);
+			expect(beads?.map(value => value.metadata)).toEqual([metadata, metadata]);
+			expect(beads?.map(value => metadataString(value, "execution_kind"))).toEqual(["git", "git"]);
+		} finally {
+			spawn.mockRestore();
+		}
 	});
 });
 
@@ -149,6 +309,27 @@ describe("the timeout breaker", () => {
 		});
 	});
 
+	test("another operation cannot clear or inherit a pending timeout breaker", async () => {
+		await withSleepBin(async () => {
+			const resumed = Promise.withResolvers<void>();
+			const timedOut = Promise.withResolvers<void>();
+			resetReadBudget();
+			const first = (async () => {
+				expect(await bdRun(["30"], 30)).toBeNull();
+				timedOut.resolve();
+				await resumed.promise;
+				expect(await bdRun(["0"])).toBeNull();
+			})();
+			resetReadBudget();
+			await timedOut.promise;
+			try {
+				expect((await bdRun(["0"]))?.code).toBe(0);
+			} finally {
+				resumed.resolve();
+			}
+			await first;
+		});
+	});
 	test("the next dispatch starts with the breaker clear", async () => {
 		// The breaker is per dispatch, not per session: a database that recovers must be
 		// readable again on the next tool_call rather than staying written off.

@@ -5,9 +5,9 @@
  * claimed bead needs the actor, and reading the actor off a bead needs the bead.
  * `ExtensionContext` exposes no agent id, so neither end is available.
  *
- * The way out is to watch the claim happen. The claim gate parses every
- * `bd ... --claim` on `bash` anyway, so it records the actor and bead ids here and
- * the worktree gate reads them back.
+ * Successful claim reports supply the actor and bead IDs. Acquisition gates refresh
+ * previous ownership before clearing this observation for a new claim, and work
+ * gates enforce the observed claim's boundaries.
  *
  * This module-level state is correctly session-scoped without extra work: the
  * extension module is re-imported and its factory re-run per session
@@ -17,8 +17,8 @@
 
 /** Actor and beads seen on this session's own `bd --claim`. */
 export interface ClaimObservation {
-	actor: string;
-	beadIds: string[];
+ actor: string;
+ beadIds: string[];
 }
 
 /**
@@ -30,21 +30,21 @@ export interface ClaimObservation {
 
 let observed: ClaimObservation | undefined;
 
-/**
- * Record a claim this session issued. A later claim replaces an earlier one: a
- * worker holds one bead at a time, and a second claim means the first is done.
- */
+/** Preserve every observed acquisition until ownership refresh confirms release. */
 export function recordClaim(observation: ClaimObservation): void {
-	if (observation.actor.length === 0 || observation.beadIds.length === 0) return;
-	observed = observation;
+ if (observation.actor.length === 0 || observation.beadIds.length === 0) return;
+ if (observed === undefined) {
+  observed = { actor: observation.actor, beadIds: [...new Set(observation.beadIds)] };
+ } else if (observed.actor === observation.actor) {
+  observed = { actor: observed.actor, beadIds: [...new Set([...observed.beadIds, ...observation.beadIds])] };
+ }
 }
 
 /** The claim this session made, or `undefined` when none was seen. */
 export function observedClaim(): ClaimObservation | undefined {
-	return observed;
+ return observed;
 }
-
-/** Drop the recorded claim. Test seam; also correct after a bounce releases a bead. */
+/** Drop the recorded claim after verified release, or reset a test session. */
 export function forgetClaim(): void {
-	observed = undefined;
+ observed = undefined;
 }

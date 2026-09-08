@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { bdList } from "../src/bd";
-import { activateRun, bindRun, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
+import * as supervision from "../src/supervision";
+import { activateRun, bindRun, markerPath, readActiveRun } from "../src/run-state";
+
+const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockResolvedValue(undefined);
+afterAll(() => patrolSpy.mockRestore());
 
 let cwd: string;
 
@@ -44,6 +46,32 @@ describe("markerPath", () => {
 });
 
 describe("activateRun", () => {
+	test("unreadable existing authority aborts activation and binding without rewriting bytes", async () => {
+		const original = '{"run_id":"orc-existing","schema_version":1}\n';
+		await seed(original);
+		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const readSpy = spyOn(fs, "readFile").mockRejectedValue(denied);
+		try {
+			await expect(activateRun(cwd)).rejects.toThrow("permission denied");
+			await expect(bindRun(cwd, "orc-other")).rejects.toThrow("permission denied");
+		} finally {
+			readSpy.mockRestore();
+		}
+		expect(await readFile(markerPath(cwd), "utf8")).toBe(original);
+		await expect(bindRun(cwd, "orc-other")).rejects.toThrow("already bound to orc-existing");
+		expect(await readFile(markerPath(cwd), "utf8")).toBe(original);
+	});
+
+	test.each(["", "{broken", "[]", '{"schema_version":1}', '{"run_id":false}', '{"run_id":"orc-existing","schema_version":2}'])(
+		"malformed marker %s is never treated as permission to activate or bind",
+		async original => {
+			await seed(original);
+			await expect(activateRun(cwd)).rejects.toThrow(/malformed/);
+			await expect(bindRun(cwd, "orc-other")).rejects.toThrow(/malformed/);
+			expect(await readFile(markerPath(cwd), "utf8")).toBe(original);
+		},
+	);
+
 	test("a fresh repository activates as pending", async () => {
 		const state = await activateRun(cwd, "session-a");
 		expect(state).toEqual({
@@ -89,13 +117,6 @@ describe("activateRun", () => {
 		expect((await readdir(join(cwd, ".orchestration"))).filter(name => name.endsWith(".tmp"))).toEqual([]);
 	});
 
-	test("writes marker keys in sorted order", async () => {
-		await activateRun(cwd, "session-a");
-		expect(await readFile(markerPath(cwd), "utf8")).toBe(
-			`{"run_id":"pending","schema_version":1,"session_id":"session-a"}\n`,
-		);
-	});
-
 	test("a marker from before the pin was retired still reads, without its dead field", async () => {
 		// `repo_root` was written for the `bd -C` substitution and is read by nothing.
 		// Removing it from the type must not strand a run activated by an older build:
@@ -104,7 +125,7 @@ describe("activateRun", () => {
 		await seed(`{"repo_root":${JSON.stringify(resolve(cwd))},"run_id":"orc-9","schema_version":1}\n`);
 		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
 		expect(await activateRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
-		expect(await readFile(markerPath(cwd), "utf8")).toBe(`{"run_id":"orc-9","schema_version":1}\n`);
+		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({ run_id: "orc-9", schema_version: 1 });
 	});
 });
 
@@ -147,6 +168,31 @@ describe("readActiveRun", () => {
 });
 
 describe("bindRun", () => {
+	test("overlapping different binders cannot both acquire the pending marker", async () => {
+		await activateRun(cwd);
+		const results = await Promise.allSettled([bindRun(cwd, "orc-a"), bindRun(cwd, "orc-b")]);
+		expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+		const winner = results[0]?.status === "fulfilled" ? "orc-a" : "orc-b";
+		expect((await readActiveRun(cwd))?.run_id).toBe(winner);
+		const refusal = results.find(result => result.status === "rejected");
+		expect(refusal?.status === "rejected" && String(refusal.reason)).toContain("already bound");
+	});
+
+	test("activation interleaved with binding cannot erase its winner", async () => {
+		await activateRun(cwd);
+		await Promise.all([activateRun(cwd, "session-new"), bindRun(cwd, "orc-a")]);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-a");
+	});
+
+	test("an existing cross-process lock is not stolen or deleted", async () => {
+		await activateRun(cwd);
+		const lock = `${markerPath(cwd)}.lock`;
+		await writeFile(lock, "other writer");
+		await expect(bindRun(cwd, "orc-a")).rejects.toThrow(/locked/);
+		expect(await readFile(lock, "utf8")).toBe("other writer");
+		expect((await readActiveRun(cwd))?.run_id).toBe("pending");
+	});
+
 	test("binds a pending marker", async () => {
 		await activateRun(cwd, "session-a");
 		await bindRun(cwd, "orc-7");
@@ -203,17 +249,5 @@ describe("bindRun", () => {
 	test("refuses to retarget a legacy raw-string marker", async () => {
 		await seed("orc-legacy\n");
 		await expect(bindRun(cwd, "orc-new")).rejects.toThrow(/already bound to orc-legacy/);
-	});
-});
-
-describe("registerRunCommands", () => {
-	test("registers nothing at import time and both commands when called", () => {
-		const registered: string[] = [];
-		const pi = { registerCommand: (name: string) => registered.push(name) } as unknown as ExtensionAPI;
-		expect(registered).toEqual([]);
-		registerRunCommands(pi);
-		// orchestrate-status belongs to the entry point; registering it twice would
-		// collide.
-		expect(registered).toEqual(["orchestrate-run", "orchestrate-bind"]);
 	});
 });

@@ -27,6 +27,16 @@ An exact active orchestrate bead owns its PR. Every merge bead this run creates 
 `integration_owner=orchestrate` alongside its `pr:merge` label and `role=shepherd` metadata,
 and the generic shepherd refuses those. That precedence is what stops two merge actors from
 racing.
+Live ownership includes `open`, `in_progress` and `blocked` beads marked either
+`orc-node` or both `pr:merge` and `metadata.integration_owner=orchestrate`.
+Exactly one node and one marked `role=shepherd` merge bead for the same PR transfer
+integration ownership to the merge only when its `origin_bead` equals that node's id
+or explicit parent. The merge's own status, approval and head govern eligibility.
+Dispatch, lifecycle and replay then target only the merge; source receipts remain
+history and do not replay. Multiple nodes/merges, three or more candidates, or missing
+or contradictory lineage remain ambiguous and fail closed.
+Only a candidate missing both repository and PR with no queue receipt is never-owned;
+partial or malformed identity fails closed.
 
 ## Record identity
 
@@ -38,28 +48,32 @@ and `lifecycleKey`. Orchestrate adds only this: a dispatch's identity is
 
 For every line:
 
-1. Snapshot the active beads:
+1. Snapshot the whole beads workspace, including unparented merge beads:
 
    ```text
-   bd list --parent <epic> --status in_progress --json > <snapshot>
+   bd list --status all --json > <snapshot>
    ```
 
 2. Call `orc_resolve_queue_dispatch` with `nodesFile: <snapshot>` and `record: <the line>`.
    Despite its name the resolver validates both dispatch and lifecycle records.
-3. An exact orchestrate match owns the record. Exit 2 means no orchestrate owner: offer the
-   unchanged line once to `pr-shepherd`'s `resolve-queue-event` with an active merge-bead
-   snapshot.
-4. Exit 3 means ambiguous or invalid orchestrate ownership and must not fall through. Exit 1
-   is invalid input. Control records are ignored. Malformed, stale, or ambiguous records
-   produce an `orc.note` and no dispatch. Never fan one line to both consumers.
+3. Resolve the live `open`, `blocked` or `in_progress` owner by canonical repository and PR first.
+   Exit 2 positively establishes no orchestrate owner: offer the unchanged line once to
+   `pr-shepherd`'s `resolve-queue-event` with an active merge-bead snapshot.
+4. Exit 3 means an existing owner is stale, unapproved, malformed or ambiguous and must
+   not fall through. Exit 1 is invalid input. Control records are ignored. Invalid
+   ownership produces an `orc.note` and no dispatch. Never fan one line to both consumers.
 
 ## Ready dispatch receipts
 
-The resolver requires exactly one `state:approved` bead matching `repo`, `pr`, and `head_sha`.
+The resolver first requires exactly one live orchestrate owner matching canonical
+`repo` and `pr`, then requires that owner to be `in_progress`, carry `state:approved`
+and match the dispatch's exact `head_sha`. A parked owner or failed approval/head
+check does not erase ownership and never permits generic-shepherd fallback.
+Lifecycle records still route to a parked owner; terminal beads do not own records.
 
 1. Apply all `requiredMetadata` in one `bd update`. A new dispatch atomically stamps
    `queue_dispatch` and `queue_dispatch_pending`.
-2. Write the durable handoff on the merge bead, then wake:
+2. Write the durable handoff on the resolved canonical owner, then wake:
 
    ```text
    NOTE <bead>
@@ -72,10 +86,39 @@ The resolver requires exactly one `state:approved` bead matching `repo`, `pr`, a
    dispatch: <identity-key>
    ```
 
-3. The wake is a spawn of `orc-shepherd`, or a content-free `hub` send to a live one. Stamp
-   `queue_dispatch_sent=<identity-key>` only after the wake is accepted. The shepherd
-   validates the matching pending or sent receipt and stamps
-   `queue_dispatch_ack=<identity-key>` before it revalidates anything authoritative.
+3. The wake is a spawn of `orc-shepherd`, or a content-free `hub` send to a live one.
+   A spawn may identify the durable receipt, never assign ownership through its prompt.
+   Stamp `queue_dispatch_sent=<identity-key>` only after the wake is accepted.
+   Before claiming, the shepherd takes a fresh complete workspace snapshot and resolves
+   the stored dispatch again, requiring the same canonical owner, repository, PR and
+   exact approved head. Validate `role=shepherd`, run membership, scope, checkout and
+   actor identity. An owner routed to another role remains owned: report BLOCKED to its
+   architect for the established linked merge handoff, without rewriting role, status,
+   assignee or labels and without generic fallback.
+   A same-actor `in_progress` claim may be resumed directly only after operational
+   proof that this activation exclusively controls that actor. Another live holder
+   requires release/recovery under `lifecycle.md`; a receipt never authorizes
+   impersonating that holder. An unassigned `in_progress` owner is NOT directly
+   claimable: Beads rejects it with `issue not claimable: status in_progress`.
+   For that case, the lead or owning architect must perform the exclusive
+   reconciliation below. Then, or for the validated same-actor resume, the designated
+   shepherd runs one standalone foreground acquisition:
+
+   ```text
+   BEADS_ACTOR=<metadata.actor> BD_ACTOR=<metadata.actor> bd update <exact-owner-id> --claim --json
+   ```
+
+   Do not use `bd ready --unassigned --claim` for this dispatch or its reconciliation.
+   Keep the run's BEADS_DIR unchanged and
+   `bash.autoBackground.enabled=false`; no pipes, extra commands or async execution.
+   Observe the successful unmodified claim result, then freshly resolve the stored
+   dispatch against the whole workspace and re-read all current receipts. Require
+   the same canonical owner, restored `in_progress`, your assignee, approval, head
+   and exact receipt keys before stamping `queue_dispatch_ack=<identity-key>`.
+   Changed authority, another holder or missing claim evidence means BLOCKED, not
+   NO_WORK or a substitute target.
+   Only then revalidate GitHub head, base, review, dependencies and checks for landing;
+   repeat authoritative checks under the merge slot and merge with the exact head guard.
 4. `status=replay` reuses pending or sent receipts; apply any emitted legacy normalization
    first. `status=duplicate` already has a matching ack and is not re-sent.
 
@@ -83,6 +126,40 @@ Pending, sent, and ack are monotonic receipts. A late sent update must not erase
 Every receipt present for the current dispatch must carry its exact identity key. Do not
 replace an unacknowledged dispatch with a later record: the resolver exits 3 on crossed or
 mismatched receipts. Acknowledgment records delivery, never merge permission.
+
+### Unassigned approved-owner reconciliation
+
+This is an exact receipt handoff, not a return to the ordinary ready queue. The
+shepherd must not reopen the owner on a fresh read alone.
+
+1. The lead or owning architect establishes an operationally exclusive window:
+   stop or exclude every other claim, status, dispatch, receipt, supervision and branch
+   writer that could affect this owner. Keep that exclusion through the designated
+   shepherd's observed acquisition and final authoritative re-read. A fresh read,
+   an old actor timestamp, human consent or the merge slot alone is not exclusion.
+   If exclusion cannot be established, preserve the bead and report BLOCKED.
+2. Inside that window, resolve the stored dispatch against a fresh complete snapshot.
+   Require the exact canonical owner to remain unassigned, `in_progress`,
+   `state:approved`, `role=shepherd`, and unchanged in repository, PR, head, scope,
+   run and actor identity. Record the exact receipt and status-only reconciliation
+   as a durable NOTE. Preserve approval, evidence, dependencies, routing, receipts,
+   assignee and every branch/resource anchor.
+3. Only the coordinator changes status with `bd update <exact-owner-id> --status open`,
+   using its own attributed identity. Do not clear an assignee or call `set-state`;
+   do not wake an ordinary puller. This transient `open` is not resolver admission.
+   While every competing writer remains excluded, the designated shepherd executes
+   the exact standalone named claim above under its validated actor identity.
+4. Observe successful claim JSON, then freshly resolve the stored dispatch against
+   the whole workspace. Require the same canonical owner and receipt authority,
+   restored `in_progress` and the intended actor's assignee. Only then acknowledge
+   delivery and release exclusion. All normal GitHub, dependency and merge checks
+   still apply; the transient reopen authorizes no code work or landing.
+5. On an acquisition error or interruption, retain exclusion and inspect the actual
+   owner before deciding. If still unassigned and transiently `open` with the same
+   receipt authority, the coordinator restores only status to `in_progress` before
+   releasing exclusion. If a claim succeeded, preserve it and reconcile its observed
+   result; never clear it as rollback. Changed authority or lost exclusion means
+   unresolved recovery: no blind restoration, release, acknowledgment or retry.
 
 ## Lifecycle receipts
 
@@ -116,8 +193,10 @@ stops that replay: log it rather than guessing. A current key holding a receipt 
 key, or a new record arriving before the current key is acknowledged, is invalid ownership
 state.
 
-A shepherd's own startup scan also resumes acknowledged, approved, unmerged beads, so a lost
-wake is not a lost landing.
+A shepherd's startup scan also examines current durable dispatch receipts on acknowledged,
+approved, unmerged owners. Resume one exact owner through the same fresh resolution and
+named acquisition above; an acknowledged receipt is not permission to skip those checks.
+No matching receipt work leaves the ordinary role-specific ready pull unchanged.
 
 REST reconciliation belongs to the watcher, and initial reconciliation may emit records before
 `watcher-active`. On `webhook-error`, `reconcile-error`, malformed output, or watcher exit,

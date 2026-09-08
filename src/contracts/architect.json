@@ -16,7 +16,11 @@
     {
       "check": "output_ref",
       "require": "metadata.output_ref",
-      "when": "artifact"
+      "when": [
+        "artifact",
+        "comment",
+        "external"
+      ]
     },
     {
       "check": "artifact_path",
@@ -25,13 +29,11 @@
     },
     {
       "check": "handoff",
-      "require": "label ~ ^agent:reviewer$",
-      "when": "git"
+      "require": "label ~ ^agent:reviewer$"
     },
     {
       "check": "unclaimed",
-      "require": "assignee cleared",
-      "when": "git"
+      "require": "assignee cleared"
     },
     {
       "check": "reported",

@@ -108,8 +108,11 @@ description = """
 Preconditions all true: the worktree exists, its bead var reads {{owner_bead}},
 the tree is clean, ignored inputs are present, and metadata.worktree is stamped.
 Only now may work under {{owner_bead}} be pulled:
-`bd ready --parent {{owner_bead}} --label agent:<x> --claim` (add
-`--include-ephemeral` for wisp queues).
+`bd ready --parent {{owner_bead}} --metadata-field role=<role> --unassigned --claim --json`.
+Use role=implementer for implementation and role=architect for child epics;
+reviewer and researcher pulls also require `--include-ephemeral`. Shepherds
+instead pull `bd ready --metadata-field role=shepherd --unassigned --claim --json`
+without a parent, since merge beads are unparented.
 
 The order is the rule, not a preference. A claim is how an actor discovers its
 work, and the claim carries no checkout with it. Readying {{owner_bead}} before

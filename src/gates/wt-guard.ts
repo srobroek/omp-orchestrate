@@ -20,30 +20,30 @@ import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { invokesCommand } from "../shell";
 
 interface ForbiddenInvocation {
-	argv: readonly string[];
-	reason: string;
+ argv: readonly string[];
+ reason: string;
 }
 
 const FORBIDDEN: readonly ForbiddenInvocation[] = [
-	{
-		argv: ["git", "worktree"],
-		reason: "worktrees are managed by wt; use 'wt switch --create <branch>' rather than 'git worktree'",
-	},
-	{
-		argv: ["gh", "pr", "checkout"],
-		reason: "use 'wt switch' rather than 'gh pr checkout'; the checkout must stay bound to its bead",
-	},
+ ...["add", "move", "lock", "unlock", "prune", "remove", "repair"].map(subcommand => ({
+  argv: ["git", "worktree", subcommand],
+  reason: "worktrees are managed by wt; use 'wt switch --create <branch>' rather than 'git worktree'",
+ })),
+ {
+  argv: ["gh", "pr", "checkout"],
+  reason: "use 'wt switch' rather than 'gh pr checkout'; the checkout must stay bound to its bead",
+ },
 ];
 
 /** Refuse a shell command that would create a checkout Worktrunk does not know about. */
 export function gateWorktrunkOwnership(input: Record<string, unknown>): ToolCallEventResult | undefined {
-	const command = input.command;
-	if (typeof command !== "string" || command.length === 0) return undefined;
+ const command = input.command;
+ if (typeof command !== "string" || command.length === 0) return undefined;
 
-	for (const forbidden of FORBIDDEN) {
-		if (invokesCommand(command, forbidden.argv)) {
-			return { block: true, reason: forbidden.reason };
-		}
-	}
-	return undefined;
+ for (const forbidden of FORBIDDEN) {
+  if (invokesCommand(command, forbidden.argv)) {
+   return { block: true, reason: forbidden.reason };
+  }
+ }
+ return undefined;
 }

@@ -72,17 +72,31 @@ only when a choice leaves one bead's scope.
 
 ## Prerequisite (checked once, at run start)
 
-```
-command -v bd >/dev/null || { echo "orchestrate requires the beads CLI (bd)"; }
-bd info >/dev/null 2>&1 || bd init --stealth --prefix orc
-```
-
-- No `bd` on `PATH` → stop and tell the user to install beads. No fallback store exists.
+- Require both `bd` and `wt` on `PATH`; missing either → stop. No fallback store or
+  alternate checkout mechanism exists. A failed database read is not proof no database exists.
 - `bd` present, no database → `bd init --stealth --prefix orc` (git-invisible: writes
   `.git/info/exclude`, leaves `git status` clean).
 - The recovery and landing formulas are read from `<beads-dir>/formulas/` and
   `.beads/formulas/`. Copy the plugin's `formulas/*.formula.toml` there once per repository;
   a linked package contributes none of them by itself.
+
+At run start, verify copied formulas with `bd formula list`, then `/orchestrate-run`.
+It creates `.orchestration/.active-run` with `run_id=pending` or preserves the existing
+binding on restart. Gitignore `.orchestration/`.
+Create the run epic with `run_id`, `primary_branch`, `base_sha`, `origin_actor` and an
+absolute `artifacts` directory outside every worktree. Create its related ephemeral
+patrol wisp. Bind with `/orchestrate-bind <epic-id>` and read back the binding before
+dispatch; pending claims are invalid. Binding requires an active marker, permits the
+same id and refuses a different run.
+
+`/orchestrate-run` pins the embedded run database in absolute `BEADS_DIR`; every child
+must inherit it unchanged. Copies can lack ignored `.beads/` and discover an unrelated
+database by upward traversal. Diagnose empty copied-checkout queues with `bd where`,
+not by re-pouring work. Embedded storage needs no Dolt server.
+
+With the repository's Dolt remote configured, run `bd dolt push` after graph creation,
+at landed phase boundaries and before standing down. A git branch push does not carry
+`refs/dolt/data`; `bd backup` is not remote sync. A Worktrunk commit hook is only a convenience.
 
 ## Bead type vocabulary
 
@@ -161,7 +175,7 @@ bd update <bead> --status <status>                    # only where status change
 | `pending` | `open` | `state:pending` | creator at `bd create` (lead for epics, architect for features and tasks) |
 | `ready` | `open` | -- (derived, never stored) | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` |
 | `working` | `in_progress` | `state:working` | the claimant itself: `bd ready … --claim` (atomic, first-wins, sets assignee) then `set-state` |
-| `reported` | `in_progress` | `state:reported` | worker, after its commits are captured |
+| `reported` | `in_progress` | `state:reported` | worker stamps pre-yield evidence; parent verifies capture only after successful terminal task result |
 | `in_review` | `in_progress` | `state:in_review` | architect, when it creates the review wisps |
 | `changes_requested` | `in_progress` | `state:changes_requested` | architect on `REVIEW verdict=changes` |
 | `approved` | `in_progress` | `state:approved` | architect on `REVIEW verdict=approve` |
@@ -175,9 +189,9 @@ Semantics that fall out of the status column:
 - **Deps clear on `closed`.** A dependent becomes ready only once its upstreams are
   `merged`/`dismissed`.
 - **Pick the dependency type from what the dependent waits for.** `blocks` waits for the
-  shepherd's merge, and the worker's code is already captured on a branch at `reported`.
-  - Needs the upstream CODE: use a non-blocking type and stamp `base_ref=<upstream branch>`
-    on the dependent. It then starts from the captured branch instead of the merge.
+  shepherd's merge. A pre-yield `reported` state does not prove parent-side branch capture.
+  - Needs upstream CODE: first verify successful task completion and its captured branch,
+    then use a non-blocking type and stamp `base_ref=<upstream branch>` on the dependent.
   - Needs the upstream DECISION to land first: keep `blocks`, which gates `bd ready`.
   - A `base_ref` dependent rebases when the upstream takes review changes. That rebase
     returns through the existing CONFLICT bounce-back path.
@@ -210,10 +224,10 @@ Anchors are stamped so any later session can find where work physically lives:
 |---|---|---|
 | Feature worktree prepared | architect | `wt switch --create <branch> --base <base> --no-cd --format=json`, stamp the Worktrunk var `bead=<feature-id>` on the branch (`wt config state vars set bead <feature-id> --branch <branch>`), stamp the feature's `branch`, canonical `worktree`, `base_sha` |
 | Task dispatched | architect | nothing to provision: the runtime creates the isolated copy. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
-| Worker reported | worker | `metadata.branch=omp/task/<id>` plus `push=<commit sha>` (the captured head) |
-| Branch reclaimed after a child died | extension (reaper) | `recovered_branch=omp/task/<id>` |
-| Branch proven integrated | extension (reaper) | `integrated=true`, then the branch is deleted |
-| Claim | claim-holder | read `metadata.worktree` off the claimed bead -- the only authoritative source of where it works -- and cross-check `wt -C <path> step eval '{{ vars.bead }}' --format json` returns the same bead id. A mismatch means another actor owns that tree: stop and do not write |
+| Worker reported | worker | `head_sha=<final commit>` before yield; no claim that parent-side capture exists yet |
+| Successful child result collected | architect | verify captured `omp/task/<id>` branch and reported head before recording the capture anchor or integrating |
+| Recovery or branch cleanup | architect | only in an exclusive window with all claim/dispatch/branch writers stopped; reaper appends observations, never rewrites anchors or deletes branches |
+| Claim | claim-holder | resolve the authoritative `metadata.worktree`, including inheritance. For a persistent Worktrunk checkout, check `wt -C <path> step eval '{{ vars.bead }}' --format json` against the bead that owns that checkout, not necessarily the task being claimed. A mismatch or unresolved owner means stop without writing |
 | Merge | shepherd | `bd update <bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` |
 
 Add a `repo` key when work lands in a different repository than the run epic. `--metadata`
@@ -224,6 +238,11 @@ merge anchors survive checkout teardown.
 
 - Every claim-holder resource that owns a tree owns its own canonical `worktree`. Task beads
   inherit from their feature; do not store a reviewer's path on a work node.
+- Validate an inherited feature checkout against that feature's binding. Architects
+  still validate the binding of the persistent checkout they own.
+- Runtime-owned isolated task copies have no task-specific Worktrunk binding.
+  Use the assigned isolated root and claimed scope; never require its inherited
+  feature binding to equal the task id or rewrite that binding for the task.
 - Stamp it as an absolute path. The worktree-confinement rule matches the session's `cwd`
   against that value.
 - Clear the pointer only after the claim is released and the checkout is reclaimed.

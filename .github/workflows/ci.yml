@@ -44,11 +44,21 @@ jobs:
       # uvx is not preinstalled on GitHub runners.
       - uses: astral-sh/setup-uv@v5
 
-      # `_test_*.py` matches neither of pytest's default collection patterns, so a
-      # `pytest <dir>` invocation here collects nothing and passes vacuously. The one
-      # surviving script suite is stdlib unittest; run it as the module it is.
-      - name: Script tests
+      - name: Install Vale
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v3.17.1 --repo errata-ai/vale --pattern 'vale_3.17.1_Linux_64-bit.tar.gz' --dir "$RUNNER_TEMP/vale"
+          tar -xzf "$RUNNER_TEMP/vale/vale_3.17.1_Linux_64-bit.tar.gz" -C "$RUNNER_TEMP/vale"
+          echo "$RUNNER_TEMP/vale" >> "$GITHUB_PATH"
+
+      # `_test_*.py` matches neither of pytest's default collection patterns.
+      # Run the stdlib unittest scripts directly.
+      - name: Worktree cleanup tests
         run: python3 skills/orchestrate/scripts/_test_worktree_sweep.py
 
+      - name: Prose checker regression
+        run: uvx --from slopvac==1.0.1 python scripts/_test_prose_gate.py
+
       - name: Prose gate
-        run: uvx slopvac README.md skills/orchestrate/SKILL.md --profile normal
+        run: uvx --from slopvac==1.0.1 python scripts/prose-gate.py README.md skills/orchestrate/SKILL.md --profile normal
