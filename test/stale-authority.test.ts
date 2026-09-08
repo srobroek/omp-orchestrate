@@ -456,8 +456,7 @@ describe("G4 replay of an earlier round's verdict", () => {
  test("FINDING: metadata presence is not provenance -- any string satisfies the delivery check", async () => {
   // `metadata.<key>` is a presence test. The exit contract never checks that `head_sha`
   // is a sha, that it is reachable from `metadata.branch`, or that this worker produced
-  // it -- while `resolve-queue-dispatch.ts` applies `HEAD_SHA_RE` to the same field. A
-  // worker can close its `delivery` check with the word "none".
+  // it. A worker can close its `delivery` check with the word "none".
   for (const sha of ["none", "unknown", "see the branch", OLD_HEAD]) {
    reads.bead = delivered({ head_sha: sha });
    expect(await gateExitContract(IMPLEMENTER)).toBeUndefined();

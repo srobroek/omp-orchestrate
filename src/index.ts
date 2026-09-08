@@ -23,7 +23,6 @@ import { readActiveRun, registerRunCommands } from "./run-state";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerConflictProbe } from "./tools/conflict-probe";
-import { registerResolveQueueDispatch } from "./tools/resolve-queue-dispatch";
 import { registerRunStatus } from "./tools/run-status";
 import { registerWatchers } from "./watchers";
 
@@ -37,7 +36,6 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerRunCommands(pi);
  registerConflictProbe(pi);
  registerRunStatus(pi);
- registerResolveQueueDispatch(pi);
  registerBotReviewProbe(pi);
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus.
  registerSupervision(pi);
