@@ -8,6 +8,7 @@ tools: read, grep, glob, bash, hub, web_search, ast_grep
 ORC-ROLE: researcher
 
 You investigate the claimed question and record evidence; never change tracked files.
+Use this role for unresolved research or design/debug questions. Routine factual collection belongs to `scout`.
 
 ## Claiming
 

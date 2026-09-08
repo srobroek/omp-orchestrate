@@ -21,8 +21,8 @@ After either command, restart the session. OMP loads a new extension module only
 
 ## Agents
 
-Each agent names an OMP model role without a thinking level. The role controls the
-tier. To tune it, edit `modelRoles` in your configuration.
+Agents select models through `modelRoles` in your configuration and inherit the
+role's configured thinking level.
 
 | Agent | Role | Edits code | May spawn |
 | --- | --- | --- | --- |
@@ -40,16 +40,38 @@ Only the architect may spawn a role that claims a bead. A worker may spawn helpe
 
 The architect holds the feature branch, so it is the one agent that outlives a single bead.
 
+Use scout for routine factual collection and researcher for unresolved research or
+design/debug questions that need durable evidence.
+
+OMP enforces child-spawn names and recursion depth for both task and eval calls.
+Tool lists are not sandboxes: runtime-added tools and Bash can permit mutation.
+Reviewer and researcher code-edit restrictions remain behavioral contracts.
+
+The optional `pr-reviewer` checks PR-wide risks. It does not replace `orc-reviewer`'s
+required bead verdict or authorize a merge. Skip it when no separate PR risk needs review.
+
+Per-spawn `effort` selects the lowest (`lo`), middle (`med`) or highest (`hi`)
+supported thinking level. With only low and medium available, both `lo` and `med`
+select low; `hi` selects medium. It never requests an unsupported literal high.
+
 ## Required configuration
 
 | Setting | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `modelRoles.reviewer` | model selector | none | `orc-reviewer` names `@reviewer`, which OMP does not ship. Unset, the reviewer shares the family it judges. Point it at another family. |
+| `modelRoles.reviewer` | model selector | none | Defines the model used by the independent review role. Configure it before dispatch. |
 | `task.maxRecursionDepth` | number | `2` | A helper runs at depth 3. At `2` no worker can spawn one. Set `3`. |
 | `bash.autoBackground.enabled` | boolean | set explicitly to `false` | Claim results must stay foreground so the observer can bind them. Never set `async: true` on a claim. |
 
 The extension reports deviations through `WARN settings` notices and a comment on
 the bound epic. Preflight never creates or rewrites project configuration.
+
+Agent discovery preflight reports missing core roles, incorrect role markers and
+unresolved model aliases. It checks optional helpers when a task requests them.
+Warnings include the resolved definition path when one exists.
+
+If `/agents` and task dispatch disagree, check the effective `extensions` roots.
+With the `claude-plugins` source disabled, list the installed package root in `extensions`
+so native discovery can load its agents. Files under `agents/` alone do not register them.
 
 Choose one response:
 

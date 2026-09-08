@@ -1,10 +1,10 @@
 /**
- * W1-W4 — the runtime watchers.
+ * W1-W5 — the runtime watchers.
  *
- * Four deterministic observers that record and warn but never gate: stall
- * detection, the bd-mutation audit ledger, dispatch preflight, and the goal
- * relay. Enforcement stays with G1 and the reaper; a watcher's worst failure is
- * silence.
+ * Five deterministic observers that record and warn but never gate: stall
+ * detection, the bd-mutation audit ledger, agent and dependency preflight,
+ * the goal relay, and settings checks. Enforcement stays with G1 and the reaper;
+ * a watcher's worst failure is silence.
  *
  * Nothing here throws out of a handler. A throwing `tool_call` handler blocks the
  * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`), and
@@ -21,13 +21,17 @@
  * spawned, never a sibling's.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { type AgentDiscoveryFinding, discoverAgentFindings, requestedAgentNames } from "./agent-preflight";
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
 import { bdInvocations } from "./shell";
+type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
+ Partial<Pick<ExtensionContext, "models">>;
 
 /**
  * Bus channels, as `task/types.ts:59-65`, `mcp/startup-events.ts:4`, and
@@ -43,6 +47,7 @@ const LSP_STARTUP_CHANNEL = "lsp:startup";
 /** Custom-message types for the plugin's notices, namespaced as its others are. */
 const GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
+const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
 
 /**
  * Model roles this plugin's agents name that OMP does NOT ship.
@@ -226,8 +231,14 @@ async function reportStall(flag: StallFlag): Promise<void> {
   report.commented = true;
  }
  const result = await bdRun([
-  "create", report.notice, "--ephemeral", "--wisp-type", "error",
-  "--deps", `relates-to:${report.bead}`, "--silent",
+  "create",
+  report.notice,
+  "--ephemeral",
+  "--wisp-type",
+  "error",
+  "--deps",
+  `relates-to:${report.bead}`,
+  "--silent",
  ]);
  if (result?.code === 0) state.flagged = true;
 }
@@ -535,6 +546,79 @@ async function warnPreflight(cwd: string, atMs: number): Promise<void> {
  await bdRun(["comment", epic, `WARN preflight: ${items.join(", ")} degraded`]);
 }
 
+const AGENT_PREFLIGHT_TIMEOUT_MS = 10_000;
+
+function findingKey(finding: AgentDiscoveryFinding): string {
+ return `${finding.agent}\0${finding.message}\0${finding.path ?? ""}`;
+}
+
+function findingLine(finding: AgentDiscoveryFinding): string {
+ return `${finding.agent}: ${finding.message}${finding.path === undefined ? "" : ` (${finding.path})`}`;
+}
+
+/**
+ * Check core and explicitly requested agent definitions without changing spawn policy.
+ * When the runtime exposes effective roots, callers can pass them to the discovery
+ * helper; ExtensionContext currently exposes no roots field, so the watcher delegates
+ * to OMP's initialized discovery scope and otherwise reports what that scope resolves.
+ */
+export async function preflightAgents(
+ pi: ExtensionAPI,
+ ctx: AgentPreflightContext,
+ requested: readonly string[] = [],
+ reportedAgentFindings?: Set<string>,
+): Promise<AgentDiscoveryFinding[]> {
+ if (ctx.models === undefined) return [];
+ const settings = await readSettings(ctx.cwd);
+ const rawOverrides = settings["task.agentModelOverrides"];
+ const modelOverrides =
+  rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
+   ? (rawOverrides as Record<string, unknown>)
+   : {};
+ let rejectTimeout: (reason: Error) => void = () => {};
+ const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
+  rejectTimeout = reason => reject(reason);
+ });
+ const timer = ctx.setTimeout(() => rejectTimeout(new Error("agent discovery timed out")), AGENT_PREFLIGHT_TIMEOUT_MS);
+ try {
+  const findings = await Promise.race([discoverAgentFindings(ctx, requested, undefined, modelOverrides), timeout]).catch(
+   (error): AgentDiscoveryFinding[] => [{
+    agent: "discovery",
+    message: `unavailable: ${error instanceof Error ? error.message : String(error)}`,
+   }],
+  );
+  const fresh = findings.filter(finding => {
+   const key = findingKey(finding);
+   if (reportedAgentFindings?.has(key)) return false;
+   reportedAgentFindings?.add(key);
+   return true;
+  });
+  if (fresh.length > 0) {
+   pi.sendMessage({
+    customType: AGENT_PREFLIGHT_MESSAGE,
+    content: ["WARN agents: runtime discovery is incomplete or inconsistent.", ...fresh.map(finding => `- ${findingLine(finding)}`)].join("\n"),
+    display: true,
+   });
+  }
+  if (findings.length === 0) return findings;
+  const epic = await boundEpic(ctx.cwd);
+  if (epic !== undefined) {
+   const pending = findings.filter(finding => !reportedAgentFindings?.has(`epic:${epic}\0${findingKey(finding)}`));
+   if (pending.length > 0) {
+    const keys = pending.map(finding => `epic:${epic}\0${findingKey(finding)}`);
+    for (const key of keys) reportedAgentFindings?.add(key);
+    const result = await bdRun(["comment", epic, `WARN agents: ${pending.map(findingLine).join("; ")}`], undefined, ctx.cwd);
+    if (result?.code !== 0) {
+     for (const key of keys) reportedAgentFindings?.delete(key);
+    }
+   }
+  }
+  return findings;
+ } finally {
+  ctx.clearTimer(timer);
+ }
+}
+
 // ============================================================================
 // W4 — goal relay
 // ============================================================================
@@ -591,7 +675,13 @@ export function runEpics(epics: readonly BdBead[], runId: string | undefined): B
  * Extensions have no IRC API, so the live half is a one-line notice in the lead's
  * own transcript; the content is already durable on the beads.
  */
-async function deliverGoal(pi: ExtensionAPI, cwd: string, queue: GoalQueue, goal: GoalNotice, refresh: boolean): Promise<void> {
+async function deliverGoal(
+ pi: ExtensionAPI,
+ cwd: string,
+ queue: GoalQueue,
+ goal: GoalNotice,
+ refresh: boolean,
+): Promise<void> {
  resetReadBudget();
  const runId = await boundEpic(cwd);
  if (runId === undefined || queue.latest !== goal) return;
@@ -601,7 +691,11 @@ async function deliverGoal(pi: ExtensionAPI, cwd: string, queue: GoalQueue, goal
   queue.deliveries.set(runId, delivery);
  }
  if (delivery.complete && !refresh) return;
- const open = await bdList(["list", "--type", "epic", "--status", "open,in_progress", "--limit", "0", "--json"], undefined, cwd);
+ const open = await bdList(
+  ["list", "--type", "epic", "--status", "open,in_progress", "--limit", "0", "--json"],
+  undefined,
+  cwd,
+ );
  const targets = runEpics(open, runId);
  if (targets.length === 0 || queue.latest !== goal) return;
  delivery.complete = false;
@@ -650,8 +744,13 @@ async function relayGoal(pi: ExtensionAPI, cwd: string, goal: GoalNotice | null)
  if (queue === undefined) {
   queue = { latest: goal === null ? null : { ...goal }, running: undefined, deliveries: new Map() };
   goalQueues.set(cwd, queue);
- } else if (goal === null || queue.latest === null || goal.id !== queue.latest.id ||
-  goal.status !== queue.latest.status || goal.objective !== queue.latest.objective) {
+ } else if (
+  goal === null ||
+  queue.latest === null ||
+  goal.id !== queue.latest.id ||
+  goal.status !== queue.latest.status ||
+  goal.objective !== queue.latest.objective
+ ) {
   queue.latest = goal === null ? null : { ...goal };
   queue.deliveries.clear();
  }
@@ -717,7 +816,8 @@ const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
   key: "task.isolation.merge",
   want: "branch",
   satisfied: value => value === "branch",
-  consequence: "commits are replayed as a patch instead of captured as a branch, so no omp/task/<id> branch survives to integrate or to recover after a crash",
+  consequence:
+   "commits are replayed as a patch instead of captured as a branch, so no omp/task/<id> branch survives to integrate or to recover after a crash",
  },
  {
   key: "task.isolation.apply",
@@ -742,7 +842,8 @@ const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
   key: "bash.autoBackground.enabled",
   want: "false",
   satisfied: value => value === false,
-  consequence: "slow claim commands can auto-background, so their completion bypasses the tool_result observer and the worker's claim is not adopted",
+  consequence:
+   "slow claim commands can auto-background, so their completion bypasses the tool_result observer and the worker's claim is not adopted",
  },
 ];
 
@@ -790,7 +891,7 @@ async function readSettings(cwd: string): Promise<Record<string, unknown>> {
    const parsed: unknown = JSON.parse(stdout);
    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
    const observed: Record<string, unknown> = {};
-   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles"]) {
+   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles", "task.agentModelOverrides"]) {
     const entry: unknown = (parsed as Record<string, unknown>)[key];
     if (entry !== null && typeof entry === "object" && "value" in entry) observed[key] = entry.value;
    }
@@ -879,7 +980,8 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 
  if (lines.length === 0) return deviations;
 
- const tail = "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.";
+ const tail =
+  "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.";
 
  pi.sendMessage({
   customType: SETTINGS_PREFLIGHT_MESSAGE,
@@ -906,21 +1008,26 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  * module has no observable effect.
  */
 export function registerWatchers(pi: ExtensionAPI): void {
- let dispose = () => { };
+ // Lifecycle handlers can run after construction's async scope has ended.
+ const runInDiscoveryScope = AsyncLocalStorage.snapshot();
+ let reportedAgentFindings = new Set<string>();
+ let dispose = () => {};
  pi.on("session_start", async (_event, ctx) => {
   dispose();
+  reportedAgentFindings = new Set<string>();
   const unsubscribers: Array<() => void> = [];
   dispose = () => {
    for (const unsubscribe of unsubscribers) unsubscribe();
   };
   const cwd = ctx.cwd;
-
   // W1. `progress.id` names the child; `Date.now()` is the only clock the
   // live watcher needs, and the sweep takes its own so it can be exercised.
-  unsubscribers.push(pi.events.on(PROGRESS_CHANNEL, data => {
-   const sample = progressSample(data);
-   if (sample !== undefined) noteProgress(sample, Date.now());
-  }));
+  unsubscribers.push(
+   pi.events.on(PROGRESS_CHANNEL, data => {
+    const sample = progressSample(data);
+    if (sample !== undefined) noteProgress(sample, Date.now());
+   }),
+  );
   // Returning the promise is deliberate: the managed timer contains a
   // rejection only when it can see one (`managed-timers.ts:66-75`).
   const timer = ctx.setInterval(async () => {
@@ -936,26 +1043,30 @@ export function registerWatchers(pi: ExtensionAPI): void {
   // cannot change it, so warning there would only duplicate the notice.
   if (sessionRole(pi) === "lead") {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
+   runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
+    logFailure(pi, "agent discovery preflight", error),
+   );
   }
-
   // W2. Passive provenance of every child's bead mutations. A bus handler is
   // handed no context, so the ledger is rooted at the session's cwd as it was
   // at start; a run that relocates names its directory through `setAuditDir`,
   // which is why the path is resolved per write rather than captured here.
-  unsubscribers.push(pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
-   const mutation = bdMutationEvent(data);
-   if (mutation === undefined) return;
-   try {
-    await appendAudit(auditDir(cwd), {
-     ts: new Date().toISOString(),
-     child: mutation.child,
-     argv: mutation.command,
-     exitCode: mutation.exitCode,
-    });
-   } catch (error) {
-    logFailure(pi, "audit ledger", error);
-   }
-  }));
+  unsubscribers.push(
+   pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
+    const mutation = bdMutationEvent(data);
+    if (mutation === undefined) return;
+    try {
+     await appendAudit(auditDir(cwd), {
+      ts: new Date().toISOString(),
+      child: mutation.child,
+      argv: mutation.command,
+      exitCode: mutation.exitCode,
+     });
+    } catch (error) {
+     logFailure(pi, "audit ledger", error);
+    }
+   }),
+  );
 
   // W3, first half: watch what degrades.
   unsubscribers.push(pi.events.on(MCP_STATUS_CHANNEL, noteMcpStatus));
@@ -975,11 +1086,11 @@ export function registerWatchers(pi: ExtensionAPI): void {
   if (event.toolName !== "task") return undefined;
   try {
    resetReadBudget();
+   await runInDiscoveryScope(() => preflightAgents(pi, ctx, requestedAgentNames(event.input), reportedAgentFindings));
    await warnPreflight(ctx.cwd, Date.now());
   } catch (error) {
    logFailure(pi, "preflight warning", error);
   }
-  return undefined;
  });
 
  /**
