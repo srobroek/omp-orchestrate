@@ -15,9 +15,12 @@ same_hook() {
 	cmp -s -- "$candidate" "$current"
 }
 
-# Activation records the previous hook path in local Git config. If no path was
-# configured, preserve the conventional common .git/hooks/pre-commit, including
-# linked worktrees whose per-worktree git dir has no hooks directory.
+# Activate this hook in a checkout with ./scripts/install-agnix-hooks.sh. The
+# installer uses per-worktree Git config and preserves the previous hook path.
+# Git does not install tracked hooks automatically.
+
+# If no path was configured, preserve the conventional common .git/hooks/pre-commit,
+# including linked worktrees whose per-worktree git dir has no hooks directory.
 previous_hooks="$(git config --get agnix.previousHooksPath || true)"
 if [[ -z "$previous_hooks" ]]; then
 	common_hooks="$(git rev-parse --git-common-dir)/hooks"

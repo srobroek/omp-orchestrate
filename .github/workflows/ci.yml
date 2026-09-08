@@ -30,8 +30,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          git read-tree "$BASE_SHA"
-          git add --all
+          index_file="$(mktemp)"
+          trap 'rm -f "$index_file"' EXIT
+          cp "$(git rev-parse --git-path index)" "$index_file"
+          export GIT_INDEX_FILE="$index_file"
+          git read-tree HEAD
+          export AGNIX_DIFF_BASE="$BASE_SHA"
           scripts/check-agnix-staged.sh
 
       - run: bun install --frozen-lockfile

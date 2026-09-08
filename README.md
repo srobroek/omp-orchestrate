@@ -15,6 +15,10 @@ This plugin coordinates agents in OMP. It stores work in
 | Install | `omp plugin marketplace add srobroek/omp-orchestrate` then `omp plugin install orchestrate@omp-orchestrate` |
 | Install for development | `omp plugin link /path/to/omp-orchestrate` |
 
+For development, run `./scripts/install-agnix-hooks.sh` once in each checkout. It preserves
+an existing hook path and validates staged instruction files; Git does not install tracked
+hooks automatically.
+
 After either command, restart the session. OMP loads a new extension module only at startup, so
 `/reload-plugins` does not find it. Claude Code reads the same catalog from
 `.claude-plugin/marketplace.json`.

@@ -32,15 +32,29 @@ is_agentic_path() {
 
 staged_paths=()
 config_changed=0
+diff_args=(--cached --name-status --no-renames --diff-filter=ACMDT)
+if [[ -n "${AGNIX_DIFF_BASE:-}" ]]; then
+	if ! diff_base="$(git rev-parse --verify "${AGNIX_DIFF_BASE}^{commit}")"; then
+		printf 'AGNIX_DIFF_BASE does not resolve to a commit: %s\n' "$AGNIX_DIFF_BASE" >&2
+		exit 1
+	fi
+	diff_args+=("$diff_base")
+fi
 while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+	# Any tracked deletion can remove an input referenced by a surviving agentic file.
+	# Rescan the surviving inputs before applying path filters.
+	if [[ "$status" == "D" ]]; then
+		config_changed=1
+		continue
+	fi
 	is_ignored_path "$path" && continue
 	is_agentic_path "$path" || continue
-	if [[ "$path" == ".agnix.toml" || "$status" == "D" ]]; then
+	if [[ "$path" == ".agnix.toml" ]]; then
 		config_changed=1
 		continue
 	fi
 	staged_paths+=("$path")
-done < <(git diff --cached --name-status -z --no-renames --diff-filter=ACMDT --)
+done < <(git diff "${diff_args[@]}" --)
 
 if ((config_changed)); then
 	staged_paths=()
