@@ -33,24 +33,24 @@ import { effectiveSegments, parseBdInvocation } from "./shell";
 
 /** A `tool_result` event, structurally: the host's own type is not needed at runtime. */
 export interface ToolResultLike {
-	toolName?: string;
-	isError?: boolean;
-	input?: Record<string, unknown>;
-	details?: unknown;
-	content?: unknown;
+ toolName?: string;
+ isError?: boolean;
+ input?: Record<string, unknown>;
+ details?: unknown;
+ content?: unknown;
 }
 
 /** Concatenate the text parts of a result payload, ignoring images. */
 function resultText(content: unknown): string {
-	if (!Array.isArray(content)) return "";
-	let text = "";
-	for (const part of content) {
-		if (part !== null && typeof part === "object" && "text" in part) {
-			const value = (part as { text?: unknown }).text;
-			if (typeof value === "string") text += value;
-		}
-	}
-	return text;
+ if (!Array.isArray(content)) return "";
+ let text = "";
+ for (const part of content) {
+  if (part !== null && typeof part === "object" && "text" in part) {
+   const value = (part as { text?: unknown }).text;
+   if (typeof value === "string") text += value;
+  }
+ }
+ return text;
 }
 
 /**
@@ -62,12 +62,19 @@ function resultText(content: unknown): string {
  * its payload describes a job that was started, not a claim that completed.
  */
 function plausiblySucceeded(event: ToolResultLike): boolean {
-	if (event.isError === true) return false;
-	const details = event.details as { exitCode?: unknown; timedOut?: unknown; async?: unknown } | undefined;
-	if (details?.exitCode !== undefined) return false;
-	if (details?.timedOut === true) return false;
-	if (details?.async !== undefined && details.async !== false) return false;
-	return true;
+ if (event.isError === true) return false;
+ const details = event.details as {
+  exitCode?: unknown;
+  timedOut?: unknown;
+  async?: unknown;
+  truncated?: unknown;
+  meta?: { truncation?: unknown };
+ } | undefined;
+ if (details?.exitCode !== undefined) return false;
+ if (details?.timedOut === true) return false;
+ if (details?.async !== undefined && details.async !== false) return false;
+ if (details?.truncated || details?.meta?.truncation) return false;
+ return true;
 }
 
 /**
@@ -78,13 +85,13 @@ function plausiblySucceeded(event: ToolResultLike): boolean {
  * reject every normal claim.
  */
 function claimedBead(record: unknown): { id: string; assignee: string } | undefined {
-	if (record === null || typeof record !== "object") return undefined;
-	const { id, status, assignee } = record as { id?: unknown; status?: unknown; assignee?: unknown };
-	if (typeof id !== "string" || id.length === 0) return undefined;
-	// A claim sets both. Either absent means this is a read, or some other JSON.
-	if (status !== "in_progress") return undefined;
-	if (typeof assignee !== "string" || assignee.length === 0) return undefined;
-	return { id, assignee };
+ if (record === null || typeof record !== "object") return undefined;
+ const { id, status, assignee } = record as { id?: unknown; status?: unknown; assignee?: unknown };
+ if (typeof id !== "string" || id.length === 0) return undefined;
+ // A claim sets both. Either absent means this is a read, or some other JSON.
+ if (status !== "in_progress") return undefined;
+ if (typeof assignee !== "string" || assignee.length === 0) return undefined;
+ return { id, assignee };
 }
 
 /**
@@ -99,28 +106,58 @@ function claimedBead(record: unknown): { id: string; assignee: string } | undefi
  * assignees is not one session's claim and records nothing.
  */
 function reportedClaims(event: ToolResultLike): { actor: string; beadIds: string[] } | undefined {
-	const text = resultText(event.content).trim();
-	if (!text.startsWith("[")) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch {
-		return undefined;
-	}
-	if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+ let text = resultText(event.content).trim();
+ const footerAt = text.lastIndexOf("\n\nWall time: ");
+ if (footerAt !== -1) {
+  const notices = text.slice(footerAt + 2).split("\n");
+  const details = event.details as {
+   wallTimeMs?: unknown;
+   timeoutSeconds?: unknown;
+   requestedTimeoutSeconds?: unknown;
+  } | undefined;
+  if (!/^Wall time: \d+\.\d{2} seconds$/.test(notices[0] ?? "")) return undefined;
+  if (details?.wallTimeMs !== undefined &&
+   (typeof details.wallTimeMs !== "number" || !Number.isFinite(details.wallTimeMs) ||
+    notices[0] !== `Wall time: ${(details.wallTimeMs / 1000).toFixed(2)} seconds`)) return undefined;
+  let next = 1;
+  if (notices[next]?.startsWith("Timeout clamped to ")) {
+   const effective = details?.timeoutSeconds;
+   const requested = details?.requestedTimeoutSeconds;
+   if (typeof effective !== "number" || !Number.isFinite(effective) ||
+    typeof requested !== "number" || !Number.isFinite(requested) || effective === requested) return undefined;
+   const prefix = `Timeout clamped to ${effective}s (requested ${requested}s; `;
+   const notice = notices[next];
+   if (notice !== `${prefix}allowed range 1-3600s).` &&
+    !(effective > 0 && effective < 3600 && notice === `${prefix}global tools.maxTimeout ceiling ${effective}s).`)) return undefined;
+   next++;
+  }
+  if (notices[next] === "pty requested but unavailable in this environment; ran without a terminal") next++;
+  if (next !== notices.length) return undefined;
+  text = text.slice(0, footerAt);
+ }
+ let parsed: unknown;
+ try {
+  parsed = JSON.parse(text);
+ } catch {
+  return undefined;
+ }
+ if (parsed !== null && typeof parsed === "object" && "schema_version" in parsed && "data" in parsed) {
+  parsed = parsed.data;
+ }
+ if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
 
-	const beadIds: string[] = [];
-	let actor: string | undefined;
-	for (const record of parsed) {
-		const claimed = claimedBead(record);
-		// One unclaimed record means this is not a claim report at all.
-		if (claimed === undefined) return undefined;
-		if (actor === undefined) actor = claimed.assignee;
-		else if (actor !== claimed.assignee) return undefined;
-		beadIds.push(claimed.id);
-	}
-	if (actor === undefined) return undefined;
-	return { actor, beadIds };
+ const beadIds: string[] = [];
+ let actor: string | undefined;
+ for (const record of parsed) {
+  const claimed = claimedBead(record);
+  // One unclaimed record means this is not a claim report at all.
+  if (claimed === undefined) return undefined;
+  if (actor === undefined) actor = claimed.assignee;
+  else if (actor !== claimed.assignee) return undefined;
+  beadIds.push(claimed.id);
+ }
+ if (actor === undefined) return undefined;
+ return { actor, beadIds };
 }
 /**
  * Whether the command is exactly one claiming `bd` call and nothing else.
@@ -130,13 +167,13 @@ function reportedClaims(event: ToolResultLike): { actor: string; beadIds: string
  * Counting invocations would have recorded `victim` on a failure.
  */
 function soleClaimingSegment(command: unknown): boolean {
-	if (typeof command !== "string") return false;
-	const segments = effectiveSegments(command);
-	if (segments.length !== 1) return false;
-	const segment = segments[0];
-	if (segment === undefined) return false;
-	const invocation = parseBdInvocation(segment);
-	return invocation !== null && invocation.hasClaim;
+ if (typeof command !== "string") return false;
+ const segments = effectiveSegments(command);
+ if (segments.length !== 1) return false;
+ const segment = segments[0];
+ if (segment === undefined) return false;
+ const invocation = parseBdInvocation(segment);
+ return invocation !== null && invocation.hasClaim;
 }
 
 /**
@@ -146,11 +183,11 @@ function soleClaimingSegment(command: unknown): boolean {
  * never throws: each guard returns before any parse that could.
  */
 export function observeClaimResult(event: ToolResultLike): void {
-	if (event.toolName !== "bash") return;
-	if (!plausiblySucceeded(event)) return;
-	if (!soleClaimingSegment(event.input?.command)) return;
+ if (event.toolName !== "bash") return;
+ if (!plausiblySucceeded(event)) return;
+ if (!soleClaimingSegment(event.input?.command)) return;
 
-	const claimed = reportedClaims(event);
-	if (claimed === undefined) return;
-	recordClaim(claimed);
+ const claimed = reportedClaims(event);
+ if (claimed === undefined) return;
+ recordClaim(claimed);
 }
