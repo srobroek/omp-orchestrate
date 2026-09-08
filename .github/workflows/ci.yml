@@ -15,6 +15,24 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # v1.23.0
+        if: github.event_name == 'pull_request'
+
+      - name: Install agnix
+        if: github.event_name == 'pull_request'
+        env:
+          BINSTALL_DISABLE_TELEMETRY: "true"
+        run: cargo binstall agnix-cli@0.52.2 --no-confirm
+
+      - name: Agentic staged check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git read-tree "$BASE_SHA"
+          git add --all
+          scripts/check-agnix-staged.sh
 
       - run: bun install --frozen-lockfile
 
