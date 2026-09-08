@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolveExplicitModelRole } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { agentDiscoveryFindings, discoverAgentFindings, requestedAgentNames } from "../src/agent-preflight";
 import declared from "./declared-surface.json";
+import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const AGENTS_DIR = join(ROOT, "agents");
@@ -41,10 +45,7 @@ const parsed = new Map<string, AgentDefinition>(
 );
 
 const rawFrontmatter = new Map<string, Record<string, unknown>>(
- files.map(file => [
-  file,
-  parseFrontmatter(text.get(file) ?? "", { location: file, level: "fatal" }).frontmatter,
- ]),
+ files.map(file => [file, parseFrontmatter(text.get(file) ?? "", { location: file, level: "fatal" }).frontmatter]),
 );
 
 /**
@@ -135,7 +136,6 @@ describe("agent definitions", () => {
    test("frontmatter names the agent after its role", () => {
     expect(parsed.get(file)?.name).toBe(`orc-${role}`);
    });
-
   });
  }
 
@@ -261,5 +261,84 @@ describe("agent definitions", () => {
    expect(tools).toContain("bash");
   }
  });
+});
 
+describe("runtime discovery preflight", () => {
+ const definition = (
+  name: string,
+  role: string,
+  model = "@task:medium",
+  filePath = `/tmp/${name}.md`,
+ ): AgentDefinition =>
+  parseAgent(
+   filePath,
+   `---\nname: ${name}\ndescription: test agent\nmodel: "${model}"\n---\nORC-ROLE: ${role}\n`,
+   "project",
+  );
+
+ test("reports missing requested agents and role overrides with source paths", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  agents[2] = definition("orc-reviewer", "researcher", "@task:medium", "/override/agents/orc-reviewer.md");
+  const findings = agentDiscoveryFindings(agents, ["operator"], spec => (spec === "@task:medium" ? {} : undefined));
+
+  expect(findings).toContainEqual({ agent: "operator", message: "requested agent is not discoverable" });
+  expect(findings).toContainEqual({
+   agent: "orc-reviewer",
+   message: "resolved override declares ORC-ROLE researcher; expected reviewer",
+   path: "/override/agents/orc-reviewer.md",
+  });
+ });
+
+ test("checks an effective model override before a declaration alias", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role, "@missing:high"));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   spec =>
+    resolveExplicitModelRole([spec], {
+     getModelRole: role => ((MODEL_ROLE_IDS as string[]).includes(role) ? role : undefined),
+    })
+     ? {}
+     : undefined,
+   { "orc-reviewer": "@task:medium" },
+  );
+
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-architect", message: 'model alias "@missing" does not resolve' }),
+  );
+  expect(
+   findings.some(finding => finding.agent === "orc-reviewer" && finding.message.includes("does not resolve")),
+  ).toBe(false);
+ });
+
+ test("reads task names from flat and batch requests", () => {
+  expect(requestedAgentNames({ agent: " operator ", tasks: [{ agent: "scout" }, { agent: "operator" }] })).toEqual([
+   "operator",
+   "scout",
+  ]);
+ });
+
+ test("discovers an agent from an explicit extension root", async () => {
+  const root = mkdtempSync(join(tmpdir(), "orc-agent-root-"));
+  const agentsDir = join(root, "agents");
+  mkdirSync(agentsDir);
+  writeFileSync(
+   join(agentsDir, "orc-helper.md"),
+   '---\nname: orc-helper\ndescription: explicit helper\nmodel: "@task"\n---\nA helper.\n',
+  );
+  try {
+   const runInSessionScope = withOmpExtensionRootScope([root], "explicit-only", () => AsyncLocalStorage.snapshot());
+   // Simulates a lifecycle handler invoked after the SDK construction callback returned.
+   const findings = await runInSessionScope(() =>
+    discoverAgentFindings({ cwd: ROOT }, ["orc-helper"]),
+   );
+   expect(
+    findings.some(
+     finding => finding.agent === "orc-helper" && finding.message === "requested agent is not discoverable",
+    ),
+   ).toBe(false);
+  } finally {
+   rmSync(root, { recursive: true, force: true });
+  }
+ });
 });
