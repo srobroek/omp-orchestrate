@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import type { BdBead } from "../src/bd";
 import * as bd from "../src/bd";
 import {
@@ -659,15 +660,21 @@ interface Harness {
 	failures: string[];
 }
 
-function harness(tools: string[] = ["bash", "read", "task"]): Harness {
+function harness(tools: string[] = ["bash", "read", "task"], withModels = false): Harness {
 	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 	const listeners = new Map<string, Array<(data: unknown) => unknown>>();
 	const sweeps: Array<() => unknown> = [];
 	const messages: Array<Record<string, unknown>> = [];
 	const failures: string[] = [];
+	const timeouts = new Set<() => unknown>();
 
 	const ctx = {
 		cwd,
+		...(withModels ? { models: { resolve: () => undefined } } : {}),
+		setTimeout: (callback: () => unknown) => {
+			timeouts.add(callback);
+			return callback;
+		},
 		setInterval: (callback: () => unknown) => {
 			sweeps.push(callback);
 			return callback;
@@ -675,6 +682,7 @@ function harness(tools: string[] = ["bash", "read", "task"]): Harness {
 		clearTimer: (callback: () => unknown) => {
 			const index = sweeps.indexOf(callback);
 			if (index !== -1) sweeps.splice(index, 1);
+			timeouts.delete(callback);
 		},
 	};
 
@@ -720,6 +728,50 @@ function harness(tools: string[] = ["bash", "read", "task"]): Harness {
 }
 
 describe("registerWatchers", () => {
+	test("reports an unresolved discovery defect again in the next session", async () => {
+		await fakeBd();
+		const rig = harness(undefined, true);
+		await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "empty-agent-fixture", omp: {} }));
+		withOmpExtensionRootScope(
+			[cwd], "explicit-only",
+			() => registerWatchers(rig.pi),
+		);
+		const warnings = () => rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight");
+
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(warnings()).toHaveLength(1);
+		expect(warnings()[0]?.content).toContain("orc-architect");
+
+		await rig.fire("session_shutdown", {});
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(warnings()).toHaveLength(2);
+		expect(warnings()[1]?.content).toContain("orc-architect");
+		await rig.fire("session_shutdown", {});
+	});
+
+	test("records an already displayed discovery warning after an epic is bound", async () => {
+		await fakeBd();
+		const rig = harness(undefined, true);
+		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([]);
+
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		const comments = (await bdCalls()).filter(call => call[0] === "comment");
+		expect(comments).toHaveLength(1);
+		expect(comments[0]?.[1]).toBe("bd-1");
+		expect(comments[0]?.[2]).toContain("orc-architect");
+		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
+		await rig.fire("session_shutdown", {});
+	});
+
 	test("subscribes nothing before a session starts", async () => {
 		const rig = harness();
 		registerWatchers(rig.pi);

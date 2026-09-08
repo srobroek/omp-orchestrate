@@ -547,7 +547,6 @@ async function warnPreflight(cwd: string, atMs: number): Promise<void> {
 }
 
 const AGENT_PREFLIGHT_TIMEOUT_MS = 10_000;
-const reportedAgentFindings = new Set<string>();
 
 function findingKey(finding: AgentDiscoveryFinding): string {
  return `${finding.agent}\0${finding.message}\0${finding.path ?? ""}`;
@@ -567,6 +566,7 @@ export async function preflightAgents(
  pi: ExtensionAPI,
  ctx: AgentPreflightContext,
  requested: readonly string[] = [],
+ reportedAgentFindings?: Set<string>,
 ): Promise<AgentDiscoveryFinding[]> {
  if (ctx.models === undefined) return [];
  const settings = await readSettings(ctx.cwd);
@@ -589,21 +589,30 @@ export async function preflightAgents(
   );
   const fresh = findings.filter(finding => {
    const key = findingKey(finding);
-   if (reportedAgentFindings.has(key)) return false;
-   reportedAgentFindings.add(key);
+   if (reportedAgentFindings?.has(key)) return false;
+   reportedAgentFindings?.add(key);
    return true;
   });
-  if (fresh.length === 0) return findings;
-  const lines = fresh.map(findingLine);
-  pi.sendMessage({
-   customType: AGENT_PREFLIGHT_MESSAGE,
-   content: ["WARN agents: runtime discovery is incomplete or inconsistent.", ...lines.map(line => `- ${line}`)].join(
-    "\n",
-   ),
-   display: true,
-  });
+  if (fresh.length > 0) {
+   pi.sendMessage({
+    customType: AGENT_PREFLIGHT_MESSAGE,
+    content: ["WARN agents: runtime discovery is incomplete or inconsistent.", ...fresh.map(finding => `- ${findingLine(finding)}`)].join("\n"),
+    display: true,
+   });
+  }
+  if (findings.length === 0) return findings;
   const epic = await boundEpic(ctx.cwd);
-  if (epic !== undefined) await bdRun(["comment", epic, `WARN agents: ${lines.join("; ")}`], undefined, ctx.cwd);
+  if (epic !== undefined) {
+   const pending = findings.filter(finding => !reportedAgentFindings?.has(`epic:${epic}\0${findingKey(finding)}`));
+   if (pending.length > 0) {
+    const keys = pending.map(finding => `epic:${epic}\0${findingKey(finding)}`);
+    for (const key of keys) reportedAgentFindings?.add(key);
+    const result = await bdRun(["comment", epic, `WARN agents: ${pending.map(findingLine).join("; ")}`], undefined, ctx.cwd);
+    if (result?.code !== 0) {
+     for (const key of keys) reportedAgentFindings?.delete(key);
+    }
+   }
+  }
   return findings;
  } finally {
   ctx.clearTimer(timer);
@@ -760,7 +769,6 @@ export function resetWatchers(): void {
  activity.clear();
  pendingBd.clear();
  degraded.clear();
- reportedAgentFindings.clear();
  lastPreflightMs = Number.NEGATIVE_INFINITY;
  for (const queue of goalQueues.values()) queue.latest = null;
  goalQueues.clear();
@@ -1002,9 +1010,11 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
 export function registerWatchers(pi: ExtensionAPI): void {
  // Lifecycle handlers can run after construction's async scope has ended.
  const runInDiscoveryScope = AsyncLocalStorage.snapshot();
+ let reportedAgentFindings = new Set<string>();
  let dispose = () => {};
  pi.on("session_start", async (_event, ctx) => {
   dispose();
+  reportedAgentFindings = new Set<string>();
   const unsubscribers: Array<() => void> = [];
   dispose = () => {
    for (const unsubscribe of unsubscribers) unsubscribe();
@@ -1033,7 +1043,7 @@ export function registerWatchers(pi: ExtensionAPI): void {
   // cannot change it, so warning there would only duplicate the notice.
   if (sessionRole(pi) === "lead") {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
-   runInDiscoveryScope(() => preflightAgents(pi, ctx)).catch(error =>
+   runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
     logFailure(pi, "agent discovery preflight", error),
    );
   }
@@ -1076,7 +1086,7 @@ export function registerWatchers(pi: ExtensionAPI): void {
   if (event.toolName !== "task") return undefined;
   try {
    resetReadBudget();
-   await runInDiscoveryScope(() => preflightAgents(pi, ctx, requestedAgentNames(event.input)));
+   await runInDiscoveryScope(() => preflightAgents(pi, ctx, requestedAgentNames(event.input), reportedAgentFindings));
    await warnPreflight(ctx.cwd, Date.now());
   } catch (error) {
    logFailure(pi, "preflight warning", error);
