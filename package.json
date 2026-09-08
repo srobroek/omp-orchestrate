@@ -15,7 +15,7 @@
 	"devDependencies": {
 		"@oh-my-pi/pi-coding-agent": "^18.0.4",
 		"@types/bun": "latest",
-		"typescript": "^5"
+		"typescript": "^7.0.0"
 	},
 	"scripts": {
 		"build": "bun build src/index.ts --outdir dist --target bun --external '@oh-my-pi/*'",
