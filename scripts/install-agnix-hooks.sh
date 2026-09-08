@@ -41,36 +41,37 @@ previous_hooks="$(git config --worktree --get agnix.previousHooksPath || true)"
 if [[ -n "$previous_hooks" ]]; then
 	previous_hooks="$(resolve_hooks_path "$previous_hooks")"
 fi
+common_hooks="$(resolve_hooks_path "$(git rev-parse --git-common-dir)/hooks")"
 
 source_hooks=()
 if [[ -n "$current_hooks_dir" && "$current_hooks_dir" == "$agnix_hooks" ]]; then
 	if [[ -n "$previous_hooks" ]]; then
 		source_hooks+=("$previous_hooks")
 	else
-		source_hooks+=("$(git rev-parse --git-common-dir)/hooks")
+		previous_hooks="$common_hooks"
+		git config --worktree agnix.previousHooksPath "$previous_hooks"
+		source_hooks+=("$previous_hooks")
 	fi
 elif [[ -n "$current_hooks_dir" ]]; then
 	# Another scanner may have replaced our generated directory. Capture that
 	# effective path and rebuild the chain around it.
 	previous_hooks="$current_hooks_dir"
-	git config --worktree agnix.previousHooksPath "$previous_hooks"
 	if [[ "$current_hooks_dir" == "$tracked_hooks" ]]; then
 		# The old tracked-only activation had no metadata. Preserve its
 		# siblings and the conventional common hooks directory.
-		previous_hooks="$(git rev-parse --git-common-dir)/hooks"
+		previous_hooks="$common_hooks"
 		git config --worktree agnix.previousHooksPath "$previous_hooks"
 		source_hooks+=("$tracked_hooks")
 		source_hooks+=("$previous_hooks")
 	else
+		git config --worktree agnix.previousHooksPath "$previous_hooks"
 		source_hooks+=("$previous_hooks")
 	fi
 else
 	# With no configured path Git uses the common hooks directory.
-	source_hooks+=("$(git rev-parse --git-common-dir)/hooks")
-fi
-
-if [[ -z "$previous_hooks" ]]; then
-	git config --worktree --unset agnix.previousHooksPath >/dev/null 2>&1 || true
+	previous_hooks="$common_hooks"
+	git config --worktree agnix.previousHooksPath "$previous_hooks"
+	source_hooks+=("$previous_hooks")
 fi
 
 if [[ -e "$agnix_hooks" && ! -d "$agnix_hooks" ]]; then

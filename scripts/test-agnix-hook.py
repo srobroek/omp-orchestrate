@@ -166,6 +166,27 @@ def test_hook_installation() -> None:
         if run_hook(repo, "pre-commit") != ["second-pre-commit:sentinel"]:
             raise AssertionError("reinstalled pre-commit chain did not run")
 
+        git(repo, "config", "--worktree", "--unset", "core.hooksPath")
+        git(repo, "config", "--unset", "core.hooksPath")
+        common_git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
+        if not common_git_dir.is_absolute():
+            common_git_dir = repo / common_git_dir
+        common_hooks = common_git_dir / "hooks"
+        common_hooks.mkdir(parents=True, exist_ok=True)
+        for hook_name in ("commit-msg", "pre-commit", "pre-push"):
+            write_hook(common_hooks / hook_name, f"common-{hook_name}")
+        run_installer(repo)
+        if git(repo, "config", "--get", "agnix.previousHooksPath") != str(
+            common_hooks
+        ):
+            raise AssertionError("default common hook path was not recorded")
+        if run_hook(repo, "commit-msg") != ["common-commit-msg:sentinel"]:
+            raise AssertionError("common commit-msg hook did not survive installation")
+        if run_hook(repo, "pre-push") != ["common-pre-push:sentinel"]:
+            raise AssertionError("common pre-push hook did not survive installation")
+        if run_hook(repo, "pre-commit") != ["common-pre-commit:sentinel"]:
+            raise AssertionError("common pre-commit chain did not survive installation")
+
 
 def main() -> None:
     if shutil.which("agnix") is None:
