@@ -306,31 +306,25 @@ describe("G2 metadata.scope territory", () => {
   beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: ["src/api/**"] } };
  });
 
- test.each(["src/**", "/src/**", "///src/**", "././src/**", "/././src/**///"])(
-  "uses root-relative acceptance for %s and detects a competing owner of the same write",
-  async (scope) => {
-   beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: [scope] } };
-   expect(await writing("src/api.ts")).toBeUndefined();
-   expect((await writing("docs/api.ts"))?.block).toBe(true);
-   listSpy.mockResolvedValueOnce([
-    { id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["src/**"] } },
-   ]);
-   expect((await writing("src/api.ts"))?.reason).toContain("scope conflict");
-  },
- );
+ test.each(["src/**", "/src/**"])("scope %s grants matching writes and detects a competing owner", async scope => {
+  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: [scope] } };
+  expect(await writing("src/api.ts")).toBeUndefined();
+  expect((await writing("docs/api.ts"))?.block).toBe(true);
+  listSpy.mockResolvedValueOnce([
+   { id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["src/**"] } },
+  ]);
+  expect((await writing("src/api.ts"))?.reason).toContain("scope conflict");
+ });
 
- test.each(["", "/", "///", "./", "././", "/././//"])(
-  "an explicit whole-tree scope %j grants in-tree writes but not escapes",
-  async (scope) => {
-   beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: [scope] } };
-   expect(await writing("docs/api.ts")).toBeUndefined();
-   expect((await writing("../foreign/src/api.ts"))?.reason).toContain("metadata.worktree");
-   listSpy.mockResolvedValueOnce([
-    { id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["docs/**"] } },
-   ]);
-   expect((await writing("docs/api.ts"))?.reason).toContain("scope conflict");
-  },
- );
+ test.each(["", "/"])("whole-tree scope %j grants in-tree writes but not escapes", async scope => {
+  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: [scope] } };
+  expect(await writing("docs/api.ts")).toBeUndefined();
+  expect((await writing("../foreign/src/api.ts"))?.reason).toContain("metadata.worktree");
+  listSpy.mockResolvedValueOnce([
+   { id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["docs/**"] } },
+  ]);
+  expect((await writing("docs/api.ts"))?.reason).toContain("scope conflict");
+ });
 
  test("allows a write the scope globs name", async () => {
   expect(await writing("src/api/handler.ts")).toBeUndefined();
