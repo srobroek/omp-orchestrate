@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/omp-orchestrate/compare/v0.2.4...v0.3.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* Remove orc_resolve_queue_dispatch and release-queue-watch.
+
+### Features
+
+* remove release-queue-watch support ([0e375c7](https://github.com/srobroek/omp-orchestrate/commit/0e375c74a7848eed6592ffb5463246df102fe542))
+
+
+### Bug Fixes
+
+* check cleared gates before no-work ([33f173a](https://github.com/srobroek/omp-orchestrate/commit/33f173aa7bd99488edc688607426d5e75ff1857d))
+* **ci:** execute staged agnix check in pull requests ([9b9b051](https://github.com/srobroek/omp-orchestrate/commit/9b9b0513cdfaa45749d6153717f12cf4c63df27e))
+* harden staged agnix follow-up ([4f736dc](https://github.com/srobroek/omp-orchestrate/commit/4f736dc9e7de140dd7e0ceef7124b78d417d77b0))
+* normalize common hook paths ([aa92e26](https://github.com/srobroek/omp-orchestrate/commit/aa92e2661e131a429e801be1de94c5f0c6e6a782))
+* preserve every existing git hook ([a8b6613](https://github.com/srobroek/omp-orchestrate/commit/a8b66136e7728727a3089666f5417edceceaf815))
+* preserve staged agnix diff records ([8bf36c9](https://github.com/srobroek/omp-orchestrate/commit/8bf36c968e5c8dc4bc1d2514102c0f433d8c7191))
+* refresh landing gates before claiming ([6749052](https://github.com/srobroek/omp-orchestrate/commit/6749052e83ed91ca968bd1a8c15acc3fba3fb66f))
+* reopen gated landing beads safely ([57e2010](https://github.com/srobroek/omp-orchestrate/commit/57e2010097a211fb906a324d885e99d15c051b09))
+
 ## [0.2.4](https://github.com/srobroek/omp-orchestrate/compare/v0.2.3...v0.2.4) (2026-09-08)
 
 
