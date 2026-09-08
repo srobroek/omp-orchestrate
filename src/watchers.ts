@@ -57,8 +57,8 @@ const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
  * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
  * unconfigured alias without warning -- so the run must announce it instead.
  *
- * `reviewer` is here because a critic must not share the model family it judges, and no
- * built-in expresses that: `slow` and `plan` are the authoring tier.
+ * `reviewer` gives the independent review agent its own configurable model selection.
+ * Model-family separation is optional and requires an explicit model choice.
  *
  * `test/declared-surface.json` carries the same list and the suite asserts they agree.
  */
@@ -575,7 +575,7 @@ export async function preflightAgents(
   rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
    ? (rawOverrides as Record<string, unknown>)
    : {};
- let rejectTimeout: (reason: Error) => void = () => {};
+ let rejectTimeout: (reason: Error) => void = () => { };
  const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
   rejectTimeout = reason => reject(reason);
  });
@@ -956,14 +956,9 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   );
  }
 
- // `orc-reviewer` names `@reviewer`, which is NOT one of OMP's ten built-in roles. An
- // alias OMP cannot resolve returns undefined with NO warning and falls back to the
- // session default, so an unconfigured consumer would silently run its reviewer on the
- // author's own model -- losing the family separation the role exists to provide.
- //
- // Announced here because a prerequisite that fails silently is the defect this whole
- // preflight exists to prevent. `test/declared-surface.json` holds the same list, and
- // the suite asserts the two agree, so neither can drift alone.
+ // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
+ // may fall back to the session model or fail selection. Preflight checks that the
+ // selection exists, not whether author and reviewer use different model families.
  //
  // An UNREADABLE setting is skipped, matching this function's rule of warning only
  // about what it can prove. An empty object is not unreadable: it proves the role is
@@ -973,7 +968,7 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   for (const role of DECLARED_MODEL_ROLES) {
    if (Object.hasOwn(roles, role)) continue;
    lines.push(
-    `modelRoles.${role} is not configured, so \`@${role}\` resolves to nothing and the agent naming it silently runs the session default -- add it, or accept that a critic shares the family it judges`,
+    `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
    );
   }
  }
@@ -1011,7 +1006,7 @@ export function registerWatchers(pi: ExtensionAPI): void {
  // Lifecycle handlers can run after construction's async scope has ended.
  const runInDiscoveryScope = AsyncLocalStorage.snapshot();
  let reportedAgentFindings = new Set<string>();
- let dispose = () => {};
+ let dispose = () => { };
  pi.on("session_start", async (_event, ctx) => {
   dispose();
   reportedAgentFindings = new Set<string>();
