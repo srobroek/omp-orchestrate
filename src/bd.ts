@@ -204,6 +204,28 @@ export async function bdListChecked(args: string[], timeoutMs = DEFAULT_TIMEOUT_
  return beads;
 }
 
+/**
+ * Ephemeral wisp listing, or `null` when the command failed or returned malformed data.
+ *
+ * Unlike ordinary `bd list --json` responses, `bd mol wisp list --json` returns a
+ * schema object containing the rows under `wisps`. Keep this exception at its API
+ * seam so the generic list reader remains strict about array-shaped responses.
+ */
+export async function bdWispListChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
+ const payload = await readJson(["mol", "wisp", "list", "--json"], timeoutMs, cwd);
+ const envelope = metadataRecord(payload);
+ if (envelope === undefined || envelope.schema_version !== 1 || typeof envelope.count !== "number"
+  || !Number.isInteger(envelope.count) || envelope.count < 0 || !Array.isArray(envelope.wisps)
+  || envelope.count !== envelope.wisps.length) return null;
+ const wisps: BdBead[] = [];
+ for (const entry of envelope.wisps) {
+  const bead = asBead(entry);
+  if (!bead) return null;
+  wisps.push(bead);
+ }
+ return wisps;
+}
+
 /** Comments on a bead, oldest first as `bd` returns them. */
 export async function bdComments(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[]> {
  return (await bdCommentsChecked(id, timeoutMs)) ?? [];

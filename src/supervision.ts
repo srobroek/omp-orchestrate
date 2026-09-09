@@ -6,7 +6,7 @@
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdListChecked, bdRun, resetReadBudget } from "./bd";
+import { type BdBead, bdListChecked, bdRun, bdWispListChecked, resetReadBudget } from "./bd";
 import architect from "./contracts/architect.json";
 import generic from "./contracts/generic.json";
 import implementer from "./contracts/implementer.json";
@@ -133,7 +133,7 @@ export async function reapChild(child: ChildLifecycle, options: ReapOptions): Pr
 async function candidateBeads(child: ChildLifecycle): Promise<{ beads: BdBead[]; unknown: boolean }> {
  const flags = ["--include-infra", "--include-gates", "--status", "open,in_progress,blocked,deferred", "--limit", "0", "--json"];
  const claimed = await bdListChecked(["list", "--assignee", child.id, ...flags]);
- const wisps = await bdListChecked(["mol", "wisp", "list", "--json"]);
+ const wisps = await bdWispListChecked();
  const stamped = child.status === "completed"
   ? await bdListChecked(["list", "--metadata-field", `actor=${child.id}`, ...flags])
   : [];

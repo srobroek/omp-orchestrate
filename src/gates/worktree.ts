@@ -174,6 +174,24 @@ function declaredTargets(toolName: string, input: Record<string, unknown>): stri
  const args = textual ? { input: raw } : { ...input, path: input.path ?? input._path };
  const modes = textual ? ["hashline", "apply_patch", "sloppy"] : ["replace", "patch"];
  const targets = new Set<string>();
+ if (textual) {
+  for (const match of raw.matchAll(/^\*{3}\s+(?:Add|Update|Delete) File:\s*(.+)$/gim)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^\*{3}\s+Move to:\s*(.+)$/gim)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^§(?!\*)\s*(\S.*)$/gm)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^\[([^\]\n]+)\]$/gm)) {
+   const target = match[1]?.replace(/#[0-9a-f]{4}$/i, "").trim();
+   if (target) targets.add(target);
+  }
+ }
  try {
   const json = JSON.stringify(args);
   for (const mode of modes) {
@@ -185,7 +203,7 @@ function declaredTargets(toolName: string, input: Record<string, unknown>): stri
    }
   }
  } catch {
-  return undefined;
+  // Native inspection is optional for incomplete payloads; header parsing still applies.
  }
  return targets.size > 0 ? [...targets] : undefined;
 }
