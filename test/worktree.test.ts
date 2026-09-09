@@ -610,7 +610,7 @@ describe("G2 isolated checkout containment", () => {
    const workspace = await fs.mkdtemp(path.join(base, "orc-confinement-"));
    try {
     await promisify(execFile)("git", ["init", workspace], { timeout: 1500 });
-    expect((await gateWorktreeScope(ctxAt(workspace), "bash", { cwd: owned, command: "touch src/api/x.ts" }))?.block).toBe(true);
+    expect((await gateWorktreeScope(claims, ctxAt(workspace), "bash", { cwd: owned, command: "touch src/api/x.ts" }))?.block).toBe(true);
     expect(await writing("src/api/x.ts", workspace)).toBeUndefined();
    } finally {
     await fs.rm(workspace, { recursive: true, force: true });
@@ -635,7 +635,7 @@ describe("G2 isolated checkout containment", () => {
   if (process.env[childFlag] === "1") {
    delete process.env.OMP_WORKTREE_DIR;
    setWorktreesDir(isolationBase);
-   expect((await gateWorktreeScope(ctxAt(isolated), "bash", { cwd: owned, command: "touch src/api/x.ts" }))?.block).toBe(true);
+   expect((await gateWorktreeScope(claims, ctxAt(isolated), "bash", { cwd: owned, command: "touch src/api/x.ts" }))?.block).toBe(true);
    expect(await writing("src/api/x.ts", isolated)).toBeUndefined();
    return;
   }
