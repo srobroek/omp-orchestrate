@@ -1,6 +1,6 @@
 ---
 description: "bd ready pulling a reviewer/researcher queue without --include-ephemeral"
-condition: "(?:^|[\\s;|&])bd\\s+ready\\b(?![^\\n]*--include-ephemeral)[^\\n]*--label\\s+agent:(?:reviewer|researcher)\\b"
+condition: "(?:^|[\\s;|&])bd(?:\\s+(?:-C|--directory)(?:\\s+|=)\\S+)?\\s+ready\\b(?![^\\n]*--include-ephemeral)[^\\n]*(?:--label\\s+agent:|--metadata-field(?:\\s+|=)role=)(?:reviewer|researcher)\\b"
 scope: "tool:bash, tool:eval"
 interruptMode: "tool-only"
 ---

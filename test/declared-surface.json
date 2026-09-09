@@ -23,9 +23,6 @@
    "@srobroek/delivery": [
     "pr-reviewer"
    ],
-   "@srobroek/design": [
-    "ui-ux-specialist"
-   ],
    "@srobroek/quality": [
     "adversarial-challenger",
     "docs-guard",

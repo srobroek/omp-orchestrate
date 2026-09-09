@@ -29,11 +29,12 @@ type = "task"
 priority = 1
 labels = ["arch-teardown", "phase:release"]
 description = """
-bd list --parent {{owner_bead}} --status in_progress --json must be empty.
-
-A child that is still claimed is still committing onto its own captured
-`omp/task/<id>` branch, so the set of branches to integrate is not final yet.
-Tearing the feature worktree down under it strands those commits unintegrated.
+Inspect child ownership and reporting evidence together with the live job roster.
+Wait for live writers and collect their final task results before integration.
+An unassigned child in state:reported, state:in_review, or state:approved may
+still have status=in_progress; that is not a running worker and must not block
+integrate-branches. A dead claim requires recovery, not indefinite waiting.
+Missing report or capture evidence needs an explicit disposition before teardown.
 """
 
 [[steps]]
@@ -44,10 +45,11 @@ priority = 1
 needs = ["children-done"]
 labels = ["arch-teardown", "phase:exit"]
 description = """
-Workers commit in isolated workspaces and never push; their commits arrive as
-`omp/task/<id>` branches in {{repo}} (`task.isolation.apply: false`). You are
-the only mutator of the feature worktree, so integration is yours and it happens
-here, before commit-work.
+OMP 18.1.14 captures commits plus remaining working-tree delta on a successful
+isolated child result as an `omp/task/<id>` branch (`task.isolation.apply: false`).
+Failed or aborted children may have no surviving branch; do not infer success
+from local commits. Collect the actual capture result and correlate each branch
+with its child before integrating. You alone mutate the feature worktree.
 
 git -C {{repo}} branch --list 'omp/task/*' lists the candidates. For each branch
 belonging to a child of {{owner_bead}}:
@@ -60,10 +62,10 @@ patch-id equivalence is the only proof. Cherry-pick every `+` commit serially,
 resolve conflicts as your own work, and re-run git cherry until the branch reads
 all `-`.
 
-Only then delete the branch, and delete only branches proven all `-`. A branch
-that still shows `+` blocks this step: never force-delete it, never discard the
-commits to make teardown pass. Stamp integrated=true on the child bead as each
-branch clears.
+Integration is nondestructive: retain every captured branch through review and
+terminal disposition. A branch still showing `+` blocks this step; never discard
+commits to make teardown pass. Stamp integrated=true with the verified branch/head
+on the child bead. Branch deletion belongs only to cleanup-captured-branches.
 """
 
 [[steps]]
@@ -98,6 +100,12 @@ priority = 1
 needs = ["commit-work"]
 labels = ["arch-teardown", "phase:release"]
 description = """
+After integrating captured branches, require every child to reach its legitimate
+terminal disposition through review/landing or explicit cancellation. Reported
+in_progress children must not be closed merely to make teardown pass. If review
+or landing still needs the feature worktree, retain its binding and stop teardown
+before clear-vars.
+
 Write the completion comment on {{owner_bead}} before clear-vars runs. Measured
 invariant, in this order: once the bead var is cleared, the link between the bead
 and its checkout is gone in both directions -- nothing on the path names the bead
@@ -106,10 +114,32 @@ that has no state left to draw on.
 """
 
 [[steps]]
+id = "cleanup-captured-branches"
+title = "remove terminal children’s proven integrated capture refs"
+type = "task"
+needs = ["report-owner", "push-branch"]
+labels = ["arch-teardown", "phase:release"]
+description = """
+Recheck each child's legitimate terminal disposition and recorded capture ref/head.
+Before deleting anything, establish an operationally EXCLUSIVE cleanup window:
+stop or exclude all claim, dispatch, and branch writers. Retain exclusion through
+ref deletion, binding removal, and worktree removal. If exclusion cannot be
+established or is lost, preserve the refs and worktree and report unresolved cleanup.
+
+Inside that window, freshly verify repository and worktree containment, ref
+ownership, unchanged capture and integration heads, and patch equivalence against
+the retained integration branch. Require git cherry to show no unintegrated `+`
+commits and confirm the ref is not checked out or needed by another consumer.
+Delete only those exact verified capture refs with a checked expected-old-head
+operation. Missing, moved, ambiguous, or unintegrated refs block deletion; never
+force-delete them on the strength of an earlier integration stamp.
+"""
+
+[[steps]]
 id = "clear-vars"
 title = "clear the worktree binding"
 type = "task"
-needs = ["report-owner", "push-branch"]
+needs = ["cleanup-captured-branches"]
 labels = ["arch-teardown", "phase:release"]
 description = """
 wt -C <worktree> config state vars clear

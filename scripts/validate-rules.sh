@@ -11,22 +11,36 @@
 # Five bd rules used to live here -- the -C pin, the actor prefix, the comment verb, the
 # bug-bead route and the one-claim count. They are tool_call gates now, because a regex
 # cannot see whether a run is active and so nagged every session that mentioned `bd`. The
-# pin is retired outright: this project runs a per-project Dolt server. Their corpus moved
+# pin is retired as a regex rule: the run explicitly pins its embedded database with BEADS_DIR. Their corpus moved
 # to `test/gate-bd.test.ts` and `test/one-claim.test.ts`, which run in CI. Do not re-add
 # them here.
 set -u
-cd "$(dirname "$0")/.." 2>/dev/null || cd ~/personal/dev/omp-orchestrate || exit 2
+cd "$(dirname "$0")/.." 2>/dev/null || exit 2
 
 fail=0
 
 check() {
-	rule="$1"; expect="$2"; src="$3"; tool="$4"; snippet="$5"
+	rule="$1"
+	expect="$2"
+	src="$3"
+	tool="$4"
+	snippet="$5"
 	if [ "$src" = "text" ]; then
 		out=$(omp ttsr test --rule "rules/$rule" --source text "$snippet" 2>&1)
+		status=$?
 	else
 		out=$(omp ttsr test --rule "rules/$rule" --source tool --tool "$tool" "$snippet" 2>&1)
+		status=$?
 	fi
-	if printf '%s' "$out" | grep -q "No rules triggered"; then got=miss; else got=fire; fi
+	case "$status:$out" in
+	1:*"No rules triggered."*) got=miss ;;
+	0:*) got=fire ;;
+	*)
+		printf 'FAIL %-26s engine exit=%s :: %s\n' "$rule" "$status" "$out"
+		fail=$((fail + 1))
+		return
+		;;
+	esac
 	if [ "$got" = "$expect" ]; then
 		printf 'ok   %-26s %-4s %s\n' "$rule" "$got" "$(printf '%s' "$snippet" | cut -c1-58)"
 	else
@@ -36,26 +50,25 @@ check() {
 	fi
 }
 
-check orc-ready-ephemeral.md   fire tool bash 'bd ready --parent orc-1 --label agent:reviewer --unassigned --claim --json'
-check orc-ready-ephemeral.md   miss tool bash 'bd ready --include-ephemeral --parent orc-1 --label agent:reviewer --unassigned --claim --json'
-check orc-ready-ephemeral.md   miss tool bash 'bd ready --parent orc-1 --label agent:implementer --unassigned --claim --json'
+check orc-ready-ephemeral.md fire tool bash 'bd ready --parent orc-1 --label agent:reviewer --unassigned --claim --json'
+check orc-ready-ephemeral.md miss tool bash 'bd ready --include-ephemeral --parent orc-1 --label agent:reviewer --unassigned --claim --json'
+check orc-ready-ephemeral.md miss tool bash 'bd ready --parent orc-1 --label agent:implementer --unassigned --claim --json'
+check orc-ready-ephemeral.md fire tool bash 'bd ready --parent orc-1 --metadata-field role=reviewer --unassigned --claim --json'
+check orc-ready-ephemeral.md fire tool bash 'bd -C /repo ready --metadata-field=role=researcher --claim --json'
+check orc-ready-ephemeral.md miss tool bash 'bd ready --metadata-field role=reviewer --include-ephemeral --claim --json'
+check orc-ready-ephemeral.md miss tool bash 'bd ready --metadata-field role=implementer --claim --json'
 
 check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
 check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
+check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --metadata-field role=shepherd --label pr:merge --claim --json'
+check orc-shepherd-no-parent.md fire tool bash 'bd -C /repo ready --metadata-field=role=shepherd --parent orc-1 --claim --json'
+check orc-shepherd-no-parent.md miss tool bash 'bd ready --metadata-field role=shepherd --label pr:merge --claim --json'
+check orc-shepherd-no-parent.md miss tool bash 'bd ready --parent orc-1 --metadata-field role=implementer --claim --json'
 
-check orc-spawn-isolated.md    fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
-check orc-spawn-isolated.md    miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'
-check orc-wait-grammar.md      fire text - 'WAIT: then CLAIM the bead'
-check orc-wait-grammar.md      miss text - 'WAITING_HUMAN on the gate'
+check orc-spawn-isolated.md fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
+check orc-spawn-isolated.md miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'
+check orc-wait-grammar.md fire text - 'WAIT: then CLAIM the bead'
+check orc-wait-grammar.md miss text - 'WAITING_HUMAN on the gate'
 
-
-# Fail loud if stray probe tests sit under test/_* -- bun test collects them.
-# Recursive on purpose: bun collects nested files too, so a stray under test/sub/
-# would run while a depth-1 check called the tree clean.
-strays=$(find test -name '_*' -print 2>/dev/null)
-if [ -n "$strays" ]; then
-	printf 'FAIL stray underscore-prefixed test files:\n%s\n' "$strays"
-	fail=$((fail + 1))
-fi
 printf '\n%s\n' "$([ "$fail" -eq 0 ] && echo 'ALL HOST-ENGINE CHECKS PASS' || echo "$fail HOST-ENGINE FAILURES")"
 exit "$fail"

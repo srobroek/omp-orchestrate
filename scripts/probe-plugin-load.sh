@@ -1,93 +1,210 @@
 #!/bin/sh
-# Deterministic packaging oracle: did OMP import and invoke THIS entry point?
-#
-# Run it whenever `omp.extensions` or the build changes. Always run a baseline branch
-# too: an oracle that cannot detect a working load proves nothing, and two earlier
-# attempts at this used needles absent from transcripts by design, so both reported
-# failure against a branch that worked.
-#
-# No model output, no transcript archaeology. The clone's own extension factory writes a
-# unique marker as its last statement, so the marker exists if and only if OMP resolved
-# the manifest, imported that exact file, called its default export, and every
-# registration completed. A failed model call cannot hide it, because factories run
-# during session init. A throw mid-factory cannot leave a marker: the write is last.
-#
-# Usage: sh scripts/probe-plugin-load.sh <branch> <tag>
-#
-#   sh scripts/probe-plugin-load.sh main baseline
-#   sh scripts/probe-plugin-load.sh my/branch candidate
+# Real OMP packaging oracle; no install, credentials, prompt, or model request.
+# Usage (from the checkout root): sh scripts/probe-plugin-load.sh [--negative-import]
+# --negative-import deliberately breaks ONLY the snapshot; expect exit 1, never PASS.
+# Historical branch/tag arguments are no longer accepted. Switch working trees instead.
+# Requires python3 and an installed omp (18.1.14). Runtime is bounded to 30 seconds.
 set -eu
+case $# in
+0) negative=no ;;
+1) case $1 in
+	--negative-import) negative=yes ;;
+	--help | -h)
+		sed -n '2,6p' "$0"
+		exit 0
+		;;
+	*)
+		echo 'Usage: sh scripts/probe-plugin-load.sh [--negative-import]' >&2
+		exit 2
+		;;
+	esac ;;
+*)
+	echo 'Usage: sh scripts/probe-plugin-load.sh [--negative-import]' >&2
+	exit 2
+	;;
+esac
+command -v python3 >/dev/null 2>&1 || {
+	echo 'FAIL: python3 is required' >&2
+	exit 1
+}
+OMP=$(command -v omp) || {
+	echo 'FAIL: omp is required on PATH' >&2
+	exit 1
+}
+# Resolve relative PATH entries before entering the isolated project.
+case $OMP in /*) ;; *) OMP=$PWD/$OMP ;; esac
+umask 077
+SCRATCH=$(mktemp -d /tmp/omp-plugin-probe.XXXXXXXXXX)
+# Only the directory returned by this invocation's mktemp is ever removed.
+trap 'rm -rf -- "$SCRATCH"' 0
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+python3 - "$PWD" "$SCRATCH" "$OMP" "$negative" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import uuid
 
-BRANCH=$1
-TAG=$2
-CLONE=/tmp/orc-$TAG-clone
-PROJ=/tmp/orc-$TAG-proj
-MARKER=/tmp/orc-$TAG-marker
-HANDLER=/tmp/orc-$TAG-handler
+root, scratch, omp, negative = sys.argv[1:]
+root, scratch = Path(root), Path(scratch)
+snapshot = scratch / 'package'
 
-rm -rf "$CLONE" "$PROJ" "$MARKER" "$HANDLER"
-git clone -q --branch "$BRANCH" --single-branch "$HOME/personal/dev/omp-orchestrate" "$CLONE"
 
-printf 'branch=%-28s dist=%-4s entry=%s\n' \
-	"$BRANCH" \
-	"$([ -d "$CLONE/dist" ] && echo YES || echo no)" \
-	"$(python3 -c "import json;print(json.load(open('$CLONE/package.json'))['omp']['extensions'][0])")"
+def fail(message):
+    raise SystemExit('FAIL: ' + message)
 
-# Instrument the factory in the clone only. The parent repository is never touched.
-python3 - "$CLONE" "$MARKER" "$HANDLER" <<'PY'
-import pathlib, re, sys
-clone, marker, handler = sys.argv[1], sys.argv[2], sys.argv[3]
-src = pathlib.Path(clone) / "src" / "index.ts"
+
+# Copy plugin-owned assets, not a git clone: modified and untracked source files
+# are included. An allowlist avoids copying credentials, .git, .beads, node_modules,
+# .omp configuration, worktrees, sessions, or other checkout-local user state.
+# No symlinks: imports must not escape to live files outside this snapshot.
+owned = ('package.json', 'src', 'agents', 'skills', 'rules', 'formulas',
+         '.omp-plugin', '.claude-plugin')
+excluded = {'.git', '.beads', 'node_modules', '.omp', '.pi', '__pycache__',
+            'auth.json', 'auth.db', 'credentials.json', '.env'}
+
+
+def copy_owned(source, dest):
+    if source.name in excluded or source.name.startswith('.env.'):
+        return
+    if source.is_symlink():
+        fail(f'symlink in plugin assets is not isolated: {source.relative_to(root)}')
+    if source.is_dir():
+        dest.mkdir()
+        for child in source.iterdir():
+            copy_owned(child, dest / child.name)
+    elif source.is_file():
+        shutil.copyfile(source, dest)
+    else:
+        fail(f'not a regular plugin asset: {source}')
+
+
+snapshot.mkdir()
+for name in owned:
+    source = root / name
+    if source.exists() or source.is_symlink():
+        copy_owned(source, snapshot / name)
+try:
+    manifest = json.loads((snapshot / 'package.json').read_text())
+    entries = manifest['omp']['extensions']
+except (OSError, ValueError, KeyError, TypeError) as error:
+    fail(f'missing or invalid package.json omp.extensions: {error}')
+# This oracle instruments the source factory, never a stale bundle or fallback
+# index. A packaging change needs an explicit new instrumentation strategy.
+if entries != ['./src/index.ts']:
+    fail(f'expected omp.extensions=["./src/index.ts"], got {entries!r}')
+src = snapshot / 'src/index.ts'
+if not src.is_file():
+    fail('manifest entry src/index.ts is missing')
 text = src.read_text()
-m = re.search(r"^export default function [A-Za-z_]+\([^)]*\)[^\{]*\{", text, re.M)
-if not m:
-    raise SystemExit("could not find the default factory in src/index.ts")
-# Last statement of the factory. The factory is the last construct in src/index.ts,
-# so the file's final closing brace is the factory's closer — no brace counting.
-closer = text.rfind("}")
-if closer == -1:
-    raise SystemExit("could not find the factory closer in src/index.ts")
-text = text[:closer] + f'\trequire("node:fs").writeFileSync({marker!r}, "invoked");\n' + text[closer:]
+factory = re.findall(r'^export default function [A-Za-z_$][\w$]*\(pi: ExtensionAPI\): void \{\n', text, re.M)
+# Conservatively require the existing layout: the factory is the final top-level
+# construct, and its final brace is the only unindented line in its body. Reject
+# layout drift rather than placing a success marker outside the factory.
+if len(factory) != 1:
+    fail('cannot uniquely instrument the source default factory')
+start = text.index(factory[0]) + len(factory[0])
+body = text[start:]
+if not re.fullmatch(r'(?:[ \t][^\n]*\n|\n)*\}\s*', body):
+    fail('factory must be the final top-level construct with an indented body')
+handler_pattern = r'pi\.on\("session_start", async \(_event, ctx\) => \{'
+handlers = list(re.finditer(handler_pattern, text))
+if len(handlers) != 1:
+    fail('cannot uniquely instrument the source session_start handler')
+token = uuid.uuid4().hex
+factory_marker, handler_marker = scratch / 'factory', scratch / 'handler'
 
-# Second marker inside a registered handler, before its first guard, so dispatch is
-# proved rather than inferred from registration.
-h = re.search(r'pi\.on\("session_start",[^\{]*\{', text)
-if not h:
-    raise SystemExit("could not find the session_start registration")
-text = text[: h.end()] + f'\n\t\trequire("node:fs").writeFileSync({handler!r}, "dispatched");' + text[h.end() :]
+
+def marker_statement(path):
+    return f'require("node:fs").writeFileSync({json.dumps(str(path))}, {json.dumps(token)});'
+
+
+closer = text.rfind('}')
+text = text[:closer] + '\t' + marker_statement(factory_marker) + '\n' + text[closer:]
+handler = handlers[0]
+# Observe dispatch before the original first guard; leave the handler intact.
+text = text[:handler.end()] + '\n\t\t' + marker_statement(handler_marker) + text[handler.end():]
+if negative == 'yes':
+    text = 'import "./__probe_intentionally_missing_' + token + '.ts";\n' + text
 src.write_text(text)
-print("instrumented factory and session_start handler")
+
+for name in ('project', 'home', 'agent', 'config', 'cache', 'data', 'tmp'):
+    (scratch / name).mkdir()
+# Whitelist environment rather than trying to enumerate every provider's secrets
+# or inherited OMP/Beads control variable. PATH locates the installed runtime only.
+environment = {
+    'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+    'HOME': str(scratch / 'home'),
+    'PI_CODING_AGENT_DIR': str(scratch / 'agent'),
+    'XDG_CONFIG_HOME': str(scratch / 'config'),
+    'XDG_CACHE_HOME': str(scratch / 'cache'),
+    'XDG_DATA_HOME': str(scratch / 'data'),
+    'TMPDIR': str(scratch / 'tmp'),
+    'SHELL': '/bin/sh', 'TERM': 'dumb', 'NO_COLOR': '1',
+}
+# extension-loading.md: -e PACKAGE resolves omp.extensions even with
+# --no-extensions. Print mode initializes extensions/session_start before its
+# optional prompt loop. Empty stdin and NO positional prompt mean no model call.
+# Explicit bundled model selection avoids the no-model startup guard; no API key
+# is needed because no prompt is submitted. No fake credential is supplied either.
+argv = [omp, '--no-extensions', '-e', str(snapshot), '--no-skills',
+        '--no-rules', '--no-tools', '--no-session', '--provider', 'anthropic',
+        '--model', 'claude-sonnet-4-5', '-p']
+print(f'Snapshot: {root} (working tree, including uncommitted plugin assets)', flush=True)
+process = None
+
+
+def stop_process():
+    if process is not None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def interrupted(signum, _frame):
+    stop_process()
+    raise SystemExit(128 + signum)
+
+
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, interrupted)
+try:
+    # File-backed output cannot fill a pipe while the host is starting.
+    with (scratch / 'omp.log').open('w+b') as log:
+        process = subprocess.Popen(argv, cwd=scratch / 'project', env=environment,
+                                   stdin=subprocess.DEVNULL, stdout=log,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        timed_out = False
+        try:
+            status = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stop_process()
+            status = process.returncode
+        finally:
+            # Also reap any descendants remaining after the host exits.
+            stop_process()
+        observed = []
+        for label, path in (('factory invoked', factory_marker), ('handler dispatched', handler_marker)):
+            ok = path.is_file() and path.read_text() == token
+            observed.append(ok)
+            print(f'{label}: {"yes" if ok else "NO"}')
+        if timed_out or status != 0 or not all(observed):
+            log.seek(0, os.SEEK_END)
+            length = log.tell()
+            log.seek(max(0, length - 16000))
+            print(log.read().decode(errors='replace'), file=sys.stderr)
+            fail(f'OMP exit={status}, timeout={timed_out}; required both exact-source markers'
+                 + (' (deliberately broken import)' if negative == 'yes' else ''))
+except OSError as error:
+    fail(f'could not run installed OMP: {error}')
+print('PASS: OMP resolved the snapshot manifest, completed its factory and dispatched session_start')
 PY
-
-# The entry OMP loads must be the instrumented one. On main that is the bundle, so it is
-# rebuilt from the instrumented source; on the source branch there is nothing to build.
-if [ -d "$CLONE/dist" ]; then
-	(cd "$CLONE" && bun install --silent >/dev/null 2>&1 || true; cd "$CLONE" && bun run build >/dev/null 2>&1) || {
-		echo "FAIL: could not rebuild the instrumented bundle"
-		exit 1
-	}
-	echo "rebuilt the bundle from instrumented source"
-fi
-
-mkdir -p "$PROJ"
-cd "$PROJ"
-git init -q -b main
-git config user.email probe@test.local
-git config user.name Probe
-
-omp plugin link "$CLONE" --scope project >/dev/null 2>&1 || true
-echo "link resolves: $(omp plugin list 2>/dev/null | grep -c 'omp-orchestrate' || echo 0)"
-
-SHELL=/bin/sh omp -p "reply DONE" >/dev/null 2>&1 || true
-
-ENTRY=$(python3 -c "import json;print(json.load(open('$CLONE/package.json'))['omp']['extensions'][0])")
-printf 'factory invoked:  %s\n' "$([ -f "$MARKER" ] && echo yes || echo NO)"
-printf 'handler dispatch: %s\n' "$([ -f "$HANDLER" ] && echo yes || echo NO)"
-
-if [ -f "$MARKER" ] && [ -f "$HANDLER" ]; then
-	echo "PASS [$TAG]: OMP loaded $ENTRY and dispatched a registered handler"
-	rm -rf "$CLONE" "$PROJ" "$MARKER" "$HANDLER"
-	exit 0
-fi
-echo "FAIL [$TAG]: $ENTRY did not load, or registered without dispatching"
-exit 1

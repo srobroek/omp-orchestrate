@@ -41,10 +41,10 @@ narrowed here, so a reviewer may argue with the set without arguing with the ver
 | `IDLE` | Nothing was landable this transaction. The merge slot is released and the waiter queue outlives the exit. | `shepherd` |
 | `NO_WORK` | The role's queue is empty. Yield rather than widen the filter or invent work. | `*` -- every claiming role |
 | `ASK` | A product-intent question only a human can settle. Pairs with a human gate on the held bead. | `*` -- every claiming role (inferred) |
-| `NOTE` | A durable observation with no protocol consequence, such as the id of a bead discovered mid-run. | `*` -- every claiming role (inferred) |
+| `NOTE` | Durable observation without a state transition, including the reaper's recovery-needed evidence. | acting roles; extension observer |
 | `LOCAL_DECISION` | A reversible bead-local default, provisional or accepted, carrying an objective revisit trigger. | `architect`, `implementer` (inferred) |
-| `BOUNCE` | The exit contract force-allowed after the bounce budget. This attempt is invalidated; repair the envelope, never continue the session. | `extension` -- this plugin's own code |
-| `RECLAIM` | A stranded claim was released and its bead reopened, with any surviving branch stamped. | `extension` -- this plugin's own code |
+| `BOUNCE` | Reserved extension verb for attempt invalidation; the current local exit escape does not emit it or mutate the bead. | `extension` |
+| `RECLAIM` | Reserved for completed claim recovery, never an observation or intent. The current reaper emits `NOTE` instead. | `extension` |
 | `STALL` | A claimed child went silent past its threshold. No kill -- the spawner decides. | `extension` -- this plugin's own code |
 | `WARN` | A degraded preflight or a settings deviation the run should see but not stop for. | `extension` -- this plugin's own code |
 | `GOAL` | The run objective and its status, stamped on every epic each time it changes. | `extension` -- this plugin's own code |
@@ -52,8 +52,8 @@ narrowed here, so a reviewer may argue with the set without arguing with the ver
 ## The confusable pair
 
 `BOUNCED` is a shepherd disposition: this merge attempt is refused back to its origin.
-`BOUNCE` is written by the exit gate when a role burns its bounce budget. One is a merge
-outcome, the other is a contract verdict on an agent. They are never interchangeable.
+`BOUNCE` is reserved for extension attempt invalidation; current budget escape is not a
+bead mutation or a `BOUNCE` comment. Neither is interchangeable with a merge disposition.
 
 ## Adding a verb
 

@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { ensureBeadsPath } from "../src/beads-mode";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Every branch is driven through a stub `bd` on `BD_BIN`, the same seam `bdRun` reads.
@@ -64,6 +68,51 @@ exit 0`);
 		expect(await argv()).toEqual(["where"]);
 	});
 
+	test("a linked worktree pins the primary checkout database", async () => {
+		const primary = path.join(dir, "primary");
+		const worktree = path.join(dir, "linked");
+		await fs.mkdir(primary);
+		await execFileAsync("git", ["init", primary]);
+		await execFileAsync("git", ["-C", primary, "config", "user.email", "test@example.com"]);
+		await execFileAsync("git", ["-C", primary, "config", "user.name", "Test"]);
+		await execFileAsync("git", ["-C", primary, "commit", "--allow-empty", "-m", "init"]);
+		await execFileAsync("git", ["-C", primary, "worktree", "add", "-b", "linked", worktree]);
+		const primaryBeads = path.join(primary, ".beads");
+		await fs.mkdir(primaryBeads);
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "${primaryBeads}"
+exit 0`);
+
+		const result = await ensureBeadsPath(worktree);
+
+		expect(result.ok).toBe(true);
+		expect(process.env.BEADS_DIR).toBe(primaryBeads);
+	});
+
+	test("a worktree attached to a bare repository cannot adopt an ancestor database", async () => {
+		const source = path.join(dir, "source");
+		const bare = path.join(dir, "remote.git");
+		const worktree = path.join(dir, "bare-linked");
+		await fs.mkdir(source);
+		await execFileAsync("git", ["init", source]);
+		await execFileAsync("git", ["-C", source, "config", "user.email", "test@example.com"]);
+		await execFileAsync("git", ["-C", source, "config", "user.name", "Test"]);
+		await execFileAsync("git", ["-C", source, "commit", "--allow-empty", "-m", "init"]);
+		await execFileAsync("git", ["clone", "--bare", source, bare]);
+		await execFileAsync("git", ["--git-dir", bare, "worktree", "add", "-b", "linked", worktree]);
+		const ancestorBeads = path.join(dir, ".beads");
+		await fs.mkdir(ancestorBeads);
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "${ancestorBeads}"
+exit 0`);
+
+		const result = await ensureBeadsPath(worktree);
+
+		expect(result.ok).toBe(false);
+		expect(result.ok === false && result.reason).toContain("does not belong to this checkout");
+		expect(process.env.BEADS_DIR).toBeUndefined();
+	});
+
 	test("an inherited BEADS_DIR is left exactly as it arrived", async () => {
 		// The run resolved it; re-resolving inside an isolated checkout would replace a correct
 		// value with a local one, which is the whole failure this module exists to prevent.
@@ -88,7 +137,7 @@ exit 0`);
 
 		const result = await ensureBeadsPath(dir);
 		expect(result.ok).toBe(false);
-		expect(result.ok === false && result.reason).toContain("outside this checkout");
+		expect(result.ok === false && result.reason).toContain("does not belong to this checkout");
 		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
@@ -103,14 +152,23 @@ exit 0`);
 		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
-	test("bd's own failure is reported rather than worked around", async () => {
+	test("a project without a beads workspace is left unpinned", async () => {
 		await stub(`echo "$@" >> "$ARGV_LOG"
-echo "Error: no beads database found" >&2
+echo "No active beads workspace found" >&2
+exit 1`);
+
+		expect(await ensureBeadsPath(dir)).toEqual({ ok: true, tracked: false });
+		expect(process.env.BEADS_DIR).toBeUndefined();
+	});
+
+	test("bd's unexpected failure is reported rather than worked around", async () => {
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "permission denied" >&2
 exit 1`);
 
 		const result = await ensureBeadsPath(dir);
 		expect(result.ok).toBe(false);
-		expect(result.ok === false && result.reason).toContain("no beads database found");
+		expect(result.ok === false && result.reason).toContain("permission denied");
 		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
