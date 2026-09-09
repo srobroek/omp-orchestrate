@@ -103,9 +103,7 @@ claim another until the first is terminal.
 **No directed preassignment.** A bead with an assignee is invisible to every
 `--unassigned` pull. Spawning that actor does not make the role's pull acquire it.
 Leave new work unassigned; an existing assignment needs explicit release or recovery
-under `references/lifecycle.md`, never automatic assignee correction. The sole
-receipt-directed acquisition here is the shepherd's exact approved-owner resume in
-`references/queue-watcher.md`; it is not a dispatch path for preassigned task work.
+under `references/lifecycle.md`, never automatic assignee correction.
 
 While a bead stays unassigned, the architect that owns the epic may stamp, change, or drop
 its `role` key (`--set-metadata role=<role>`, `--unset-metadata role`). No other role may:
@@ -125,11 +123,6 @@ never with `--wait`). A held slot is advisory: report the holder and either enqu
 waiter and yield, or retry later. Order follows successful acquisition, not a FIFO guarantee.
 The shepherd conflict-guards every integration with `orc_conflict_probe`. The graph expresses
 dependencies, not integration sequence.
-
-For GitHub-backed runs, `release-queue-watch` priority affects which eligible PR readiness
-hint arrives first. It does not rewrite the DAG and does not reserve the merge slot. Only an
-exact existing approved bead is admitted; after admission, the slot waiters remain the
-integration order. See `references/queue-watcher.md`.
 
 ## Scope hygiene
 

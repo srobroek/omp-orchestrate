@@ -231,8 +231,12 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
  * tests can import the marker functions without touching the registry.
  *
  * `orchestrate-status` is registered by the entry point, not here.
+ *
+ * `onActivate` runs after the marker is written and the database is pinned. The
+ * settings preflight lives in `watchers.ts`, which imports this module, so the
+ * hook is injected rather than imported.
  */
-export function registerRunCommands(pi: ExtensionAPI): void {
+export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string) => Promise<unknown>): void {
  pi.registerCommand("orchestrate-run", {
   description: "Activate orchestrate run enforcement in this repository",
   handler: async (_args, ctx) => {
@@ -244,6 +248,10 @@ export function registerRunCommands(pi: ExtensionAPI): void {
    const beads = await ensureBeadsPath(cwd);
    if (!beads.ok) {
     ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
+    return;
+   }
+   if (beads.tracked === false) {
+    ctx.ui.notify("orchestrate run NOT activated: no active Beads workspace was found", "error");
     return;
    }
    if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
@@ -258,6 +266,15 @@ export function registerRunCommands(pi: ExtensionAPI): void {
    } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
+    return;
+   }
+   // The run is active by now, whatever the hook does; a failing readiness check
+   // must not read as a failed activation.
+   try {
+    await onActivate?.(cwd);
+   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`orchestrate run active; readiness check failed: ${reason}`, "warning");
    }
   },
  });

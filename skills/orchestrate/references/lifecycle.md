@@ -103,10 +103,9 @@ Do not use type `merge-request`: it is a ready-filter alias, not a creatable typ
 Stamp `repo`, `branch`, `base_sha`, `origin_bead` and `integration_owner=orchestrate`.
 When transferring ownership for the same repository/PR, `origin_bead` names the source
 node or its explicit parent; preserve that parent in ownership snapshots. Source
-approval and receipts do not transfer. After the shepherd verifies the PR/head,
+approval does not transfer. After the shepherd verifies the PR/head,
 stamp the merge's own `pr` and `head_sha`; its own approval, `in_progress` state and
-exact head govern dispatch. LOAD `skill://orchestrate/references/queue-watcher.md`
-before receipt-directed acquisition or acknowledgment.
+exact head govern dispatch.
 
 ## Persistence classes
 
@@ -178,10 +177,6 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    Do not release a retained claim merely to re-enter the runtime. Collect any prior terminal
    result and capture evidence first; replacement requires the same exclusive claim/dispatch/
    branch-writer window and recovery procedure.
-6. For GitHub-backed runs, restart the release watcher with `--slots=1` and replay
-   unacknowledged records first: `orc_resolve_queue_dispatch` with a `bd list --json`
-   snapshot and `replayUnacknowledged`. Only a matching ack suppresses a replay. See
-   `references/queue-watcher.md`.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
 replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
@@ -276,11 +271,13 @@ source of truth.
 
 - **Architect:** replace it between waves, never mid-integration. The feature branch and the
   bead state carry the domain.
-- **Shepherd:** it is already two ephemeral phases. Restart from the merge bead after the
-  slot is released, never during a landing transaction.
-- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a recovery-needed note alone never makes work claimable.
-- **Standalone `pr-shepherd`:** repository-global recovery and queue drain only, when no run
-  shepherd owns the landing.
+- **Shepherd:** it is already two ephemeral phases, but each phase claims only the ordinary
+  merge bead; gate creation/discovery and the merge slot are separate controls, not wisp
+  claims. Restart from the merge bead after the slot is released, never during a landing
+  transaction.
+- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
+  recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
+  ephemeral ownership separately and releases each through its own path.
 
 ## Human-in-the-loop and safe autonomy
 
@@ -328,10 +325,12 @@ Nobody polls it and nobody holds a session open for it.
 
 Park the bead instead. Record what is awaited with `bd set-state <bead> state=waiting_gate
 --reason "<what is awaited and how to resume>"`, add `bd gate create --type=gh:run --blocks
-<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR
-merge, then continue unrelated beads from `bd ready`. When nothing else is ready and only
-external waits remain, write the run report and exit; the gate bead and the next pass own
-the wait. `bd gate check` plus `bd ready --gated` is how the cleared gate re-enters the run.
+<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR,
+then release the phase-one claim with `bd update <bead> --status open --assignee ""`. Continue
+unrelated beads from `bd ready`. When nothing else is ready and only external waits remain,
+write the run report and exit; the gate bead and the next pass own the wait. `bd gate check`
+plus `bd ready --gated` is how the cleared gate is discovered, after which ordinary
+`bd ready --claim` acquires the reopened bead.
 
 Two campaign runs violated this on their final release bead: each polled a release workflow
 and a package-executing reviewer until the stream aborted, leaving that bead `in_progress`

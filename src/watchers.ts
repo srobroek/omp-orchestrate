@@ -29,6 +29,7 @@ import { type AgentDiscoveryFinding, discoverAgentFindings, requestedAgentNames 
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
+import { ensureBeadsPath } from "./beads-mode";
 import { bdInvocations } from "./shell";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
  Partial<Pick<ExtensionContext, "models">>;
@@ -57,8 +58,8 @@ const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
  * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
  * unconfigured alias without warning -- so the run must announce it instead.
  *
- * `reviewer` is here because a critic must not share the model family it judges, and no
- * built-in expresses that: `slow` and `plan` are the authoring tier.
+ * `reviewer` gives the independent review agent its own configurable model selection.
+ * Model-family separation is optional and requires an explicit model choice.
  *
  * `test/declared-surface.json` carries the same list and the suite asserts they agree.
  */
@@ -575,7 +576,7 @@ export async function preflightAgents(
   rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
    ? (rawOverrides as Record<string, unknown>)
    : {};
- let rejectTimeout: (reason: Error) => void = () => {};
+ let rejectTimeout: (reason: Error) => void = () => { };
  const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
   rejectTimeout = reason => reject(reason);
  });
@@ -934,36 +935,33 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  // Only an observed true proves isolation is on; an unavailable setting
  // cannot establish that this repository risks a split database.
  const isolating = observed["task.isolation.enabled"] === true;
- // A repository with no beads database has no claims to split, so the precondition
- // does not apply and saying so is noise. Observed in the field: this fired in a
- // repository that had never run `bd init`, where the advice was unactionable.
- const tracked = await fs
-  .stat(path.join(cwd, ".beads"))
-  .then(entry => entry.isDirectory())
-  .catch(() => false);
- // Under an embedded database the precondition is a pinned PATH, not a server. bd resolves
- // by walking up from the working directory, `.beads/` is gitignored, so a clone or worktree
- // arrives without one and the walk continues past the checkout. Measured on this host:
- // `$HOME/.beads` exists, so the walk can end in a personal database that no run reads.
+ // Probe through bd itself instead of looking only for cwd/.beads. Linked worktrees share the
+ // primary checkout's database and intentionally have no local .beads directory.
+ // Under an embedded database the precondition is a pinned path, not a server. A copied
+ // checkout can resolve a private or unrelated ancestor database because `.beads/` is
+ // gitignored. A linked worktree resolves the primary checkout's database but still needs
+ // the pin so every child inherits the same answer.
  //
- // An earlier version of this line demanded a per-project Dolt server instead. That server
+ // The pin is applied here rather than demanded of the operator. `ensureBeadsPath` asks bd
+ // for the active database, accepts the checkout or its Git-shared primary database, rejects
+ // unrelated external databases, and exports the canonical path. Only refusal merits a line.
+ //
+ // An earlier version of this block demanded a per-project Dolt server instead. That server
  // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
  // rather than from the port, so a removed pid file made every later call start a rival --
  // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
- if (tracked && isolating && (process.env.BEADS_DIR ?? "") === "") {
-  lines.push(
-   "isolation is on and BEADS_DIR is unset, so an isolated worker resolves its own beads database rather than this run's. bd walks up from the working directory and `.beads/` is gitignored, so a clone or worktree arrives without one and the walk can end in a personal database. `/orchestrate-run` pins the run's path for this session and every child it spawns",
-  );
+ if (isolating && (process.env.BEADS_DIR ?? "") === "") {
+  const pinned = await ensureBeadsPath(cwd);
+  if (!pinned.ok) {
+   lines.push(
+    `isolation is on and BEADS_DIR could not be pinned, so an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+   );
+  }
  }
 
- // `orc-reviewer` names `@reviewer`, which is NOT one of OMP's ten built-in roles. An
- // alias OMP cannot resolve returns undefined with NO warning and falls back to the
- // session default, so an unconfigured consumer would silently run its reviewer on the
- // author's own model -- losing the family separation the role exists to provide.
- //
- // Announced here because a prerequisite that fails silently is the defect this whole
- // preflight exists to prevent. `test/declared-surface.json` holds the same list, and
- // the suite asserts the two agree, so neither can drift alone.
+ // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
+ // may fall back to the session model or fail selection. Preflight checks that the
+ // selection exists, not whether author and reviewer use different model families.
  //
  // An UNREADABLE setting is skipped, matching this function's rule of warning only
  // about what it can prove. An empty object is not unreadable: it proves the role is
@@ -973,7 +971,7 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   for (const role of DECLARED_MODEL_ROLES) {
    if (Object.hasOwn(roles, role)) continue;
    lines.push(
-    `modelRoles.${role} is not configured, so \`@${role}\` resolves to nothing and the agent naming it silently runs the session default -- add it, or accept that a critic shares the family it judges`,
+    `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
    );
   }
  }
@@ -1011,7 +1009,7 @@ export function registerWatchers(pi: ExtensionAPI): void {
  // Lifecycle handlers can run after construction's async scope has ended.
  const runInDiscoveryScope = AsyncLocalStorage.snapshot();
  let reportedAgentFindings = new Set<string>();
- let dispose = () => {};
+ let dispose = () => { };
  pi.on("session_start", async (_event, ctx) => {
   dispose();
   reportedAgentFindings = new Set<string>();
@@ -1041,7 +1039,13 @@ export function registerWatchers(pi: ExtensionAPI): void {
   // W5. The isolation contract is a session setting, so it is checked once, in
   // the session that spawns. A worker inherits whatever the lead was given and
   // cannot change it, so warning there would only duplicate the notice.
-  if (sessionRole(pi) === "lead") {
+  //
+  // Checked at start only where a run is already active: the contract governs
+  // orchestrated runs, and a repository that merely tracks work in beads has no
+  // claims to split until one starts. `/orchestrate-run` runs the settings check
+  // at activation, and the `task` handler below checks agents at spawn, so a
+  // session that never orchestrates hears nothing.
+  if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
     logFailure(pi, "agent discovery preflight", error),
