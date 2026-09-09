@@ -19,14 +19,14 @@ import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead, BdComment } from "../src/bd";
 import * as actualBd from "../src/bd";
-import { forgetClaim, recordClaim } from "../src/claim-state";
+import { createClaimState } from "../src/claim-state";
 import architect from "../src/contracts/architect.json";
 import generic from "../src/contracts/generic.json";
 import implementer from "../src/contracts/implementer.json";
 import researcher from "../src/contracts/researcher.json";
 import reviewer from "../src/contracts/reviewer.json";
 import shepherd from "../src/contracts/shepherd.json";
-import { gateExitContract, resetUnclaimedReminder, satisfies } from "../src/gates/exit";
+import { createExitGuard, satisfies } from "../src/gates/exit";
 import { beadRouting, orcRole } from "../src/identity";
 import {
  type BotReviewState,
@@ -322,6 +322,9 @@ interface Reads {
 }
 
 let reads: Reads;
+let claims = createClaimState();
+let gateExitContract: ReturnType<typeof createExitGuard>;
+function freshSession(): void { claims = createClaimState(); gateExitContract = createExitGuard(claims); }
 let issued: string[][];
 
 // Restore each export without leaving a process-wide module mock for later suites.
@@ -339,7 +342,7 @@ const bdSpies = [
 afterAll(() => {
  for (const spy of bdSpies) spy.mockRestore();
  process.env.TZ = ORIGINAL_TZ;
- forgetClaim();
+ freshSession();
 });
 
 const NODE = "orc-42";
@@ -383,9 +386,9 @@ function checks(result: ToolCallEventResult | undefined): string[] {
 beforeEach(() => {
  issued = [];
  reads = { bead: delivered(), comments: { [NODE]: [{ text: "REPORTED: 3 files, tests green" }] }, linked: [] };
- resetUnclaimedReminder();
- forgetClaim();
- recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
+ freshSession();
+ gateExitContract = createExitGuard(claims);
+ claims.recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
 });
 
 describe("G4 replay of an earlier round's verdict", () => {
@@ -393,8 +396,8 @@ describe("G4 replay of an earlier round's verdict", () => {
   reads.bead = { id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review", metadata: { review_round: "3" } };
   reads.linked = [NODE];
   reads.comments = { [WISP]: [], [NODE]: [{ text: "REVIEW verdict=approve review_round=1 head_sha=b0b0b0b" }] };
-  forgetClaim();
-  recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
+  freshSession();
+  claims.recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
 
   expect(checks(await gateExitContract(roleCtx("reviewer")))).toContain("verdict");
   expect(issued).toEqual([]);
@@ -407,8 +410,8 @@ describe("G4 replay of an earlier round's verdict", () => {
   };
   reads.linked = [NODE];
   reads.comments = { [WISP]: [], [NODE]: [{ text: `REVIEW verdict=approve review_round=3 head_sha=${HEAD}` }] };
-  forgetClaim();
-  recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
+  freshSession();
+  claims.recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
   expect(await gateExitContract(roleCtx("reviewer"))).toBeUndefined();
   expect(issued).toEqual([]);
  });
@@ -417,8 +420,8 @@ describe("G4 replay of an earlier round's verdict", () => {
   reads.bead = { id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review", metadata: { review_round: "3" } };
   reads.linked = [NODE];
   reads.comments = { [WISP]: [], [NODE]: [{ text: "note: read the diff, no opinion recorded" }] };
-  forgetClaim();
-  recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
+  freshSession();
+  claims.recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
 
   expect(checks(await gateExitContract(roleCtx("reviewer")))).toEqual(["verdict"]);
  });
@@ -631,16 +634,16 @@ describe("G4 a role name cannot buy a contract-free exit", () => {
 
  test.each(WITHOUT_FLOOR)("role %s rejects unsupported or unstamped resources", async name => {
   for (const metadata of [{}, { worktree: "/tmp/wt" }]) {
-   forgetClaim();
-   recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
+   freshSession();
+   claims.recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
    reads.bead = { id: NODE, status: "in_progress", assignee: "", labels: [`agent:${name}`], metadata };
    reads.comments = { [NODE]: [{ text: "note: nothing delivered" }] };
    expect(checks(await gateExitContract(roleCtx()))).toContain("execution-kind");
   }
 
   // The same role IS judged once the dispatcher stamps a kind its checks name.
-  forgetClaim();
-  recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
+  freshSession();
+  claims.recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
   reads.bead = {
    id: NODE,
    status: "in_progress",

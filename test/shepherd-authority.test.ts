@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
+
+const claims = createClaimState();
 
 const shepherd = { getSystemPrompt: () => ["ORC-ROLE: shepherd"] } as unknown as ExtensionContext;
 const reviewer = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
@@ -17,7 +20,7 @@ describe("shepherd state authorship", () => {
    `bd set-state orc-merge -- state=${state}`,
    `bd set-state orc-merge --reason state=landed state=${state}`,
   ]) {
-   expect((await gateClaimEligibility(shepherd, { command }))?.block).toBe(true);
+   expect((await gateClaimEligibility(claims, shepherd, { command }))?.block).toBe(true);
   }
  });
  test.each([
@@ -33,11 +36,11 @@ describe("shepherd state authorship", () => {
   "bd set-state orc-merge note=state=approved",
   "bd set-state state=approved state=landed",
  ])("allows legitimate set-state transitions and prose: %s", async command => {
-  expect(await gateClaimEligibility(shepherd, { command })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, shepherd, { command })).toBeUndefined();
  });
  test.each(["approved", "reported", "changes_requested"])("preserves reviewer and architect set-state authority for %s", async state => {
   for (const role of [reviewer, architect]) {
-   expect(await gateClaimEligibility(role, { command: `bd set-state orc-merge state=${state}` })).toBeUndefined();
+   expect(await gateClaimEligibility(claims, role, { command: `bd set-state orc-merge state=${state}` })).toBeUndefined();
   }
  });
  test.each([
@@ -61,10 +64,10 @@ describe("shepherd state authorship", () => {
   "bash -lc 'bd update orc-merge --set-labels=state:approved'",
   "printf ready\n# commentary\nbd update orc-merge --add-label state:approved",
  ])("refuses shepherd authored approval: %s", async command => {
-  expect((await gateClaimEligibility(shepherd, { command }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, shepherd, { command }))?.block).toBe(true);
  });
  test.each(["reported", "changes_requested"])("also refuses shepherd authored %s", async state => {
-  expect((await gateClaimEligibility(shepherd, { command: `bd update orc-merge --add-label state:${state}` }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, shepherd, { command: `bd update orc-merge --add-label state:${state}` }))?.block).toBe(true);
  });
  test.each([
   "bd list --label state:approved --json",
@@ -78,9 +81,9 @@ describe("shepherd state authorship", () => {
   "bd update orc-merge --notes 'bd update orc-merge --status approved'",
   "bd create 'state:approved' --labels orc-merge",
  ])("does not attribute inherited/read/prose states to shepherd: %s", async command => {
-  expect(await gateClaimEligibility(shepherd, { command })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, shepherd, { command })).toBeUndefined();
  });
  test("reviewer may author approval", async () => {
-  expect(await gateClaimEligibility(reviewer, { command: "bd update orc-merge --add-label state:approved" })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, reviewer, { command: "bd update orc-merge --add-label state:approved" })).toBeUndefined();
  });
 });

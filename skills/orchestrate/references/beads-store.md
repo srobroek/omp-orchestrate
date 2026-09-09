@@ -222,13 +222,19 @@ Anchors are stamped so any later session can find where work physically lives:
 
 | When | Who | Stamp |
 |---|---|---|
-| Feature worktree prepared | architect | `wt switch --create <branch> --base <base> --no-cd --format=json`, stamp the Worktrunk var `bead=<feature-id>` on the branch (`wt config state vars set bead <feature-id> --branch <branch>`), stamp the feature's `branch`, canonical `worktree`, `base_sha` |
-| Task dispatched | architect | nothing to provision: the runtime creates the isolated copy. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
+| Feature worktree prepared | architect | `wt switch --create <branch> --base <base> --no-cd --format=json`, stamp the Worktrunk var `bead=<feature-id>` on the branch (`wt config state vars set bead=<feature-id> --branch <branch>`), stamp the feature's `branch`, canonical `worktree`, `base_sha`; `--no-cd` reports the path but does not relocate the architect session |
+| Task dispatched | architect | nothing to provision: non-isolated children inherit the parent session's `cwd`; isolated children run in runtime-created copies snapshotted from that parent-session `cwd`. Metadata and checkout flags do not relocate either session. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
 | Worker reported | worker | `head_sha=<final commit>` before yield; no claim that parent-side capture exists yet |
-| Successful child result collected | architect | verify captured `omp/task/<id>` branch and reported head before recording the capture anchor or integrating |
+| Successful child result collected | architect | verify the actual architect-repository `omp/task/<id>` branch and reported head before recording the capture anchor or integrating; include accepted dirty delta in the source snapshot |
 | Recovery or branch cleanup | architect | only in an exclusive window with all claim/dispatch/branch writers stopped; reaper appends observations, never rewrites anchors or deletes branches |
-| Claim | claim-holder | resolve the authoritative `metadata.worktree`, including inheritance. For a persistent Worktrunk checkout, check `wt -C <path> step eval '{{ vars.bead }}' --format json` against the bead that owns that checkout, not necessarily the task being claimed. A mismatch or unresolved owner means stop without writing |
+| Claim | claim-holder | resolve the authoritative `metadata.worktree`, including inheritance. A persistent architect must establish session `cwd` at its canonical Worktrunk path and verify its binding; an isolated worker/reviewer uses the runtime-assigned isolated root and claimed scope, even when metadata inherits the feature path. A mismatch or unresolved owner stops the claim without writing |
 | Merge | shepherd | `bd update <bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` |
+
+The architect establishes its canonical session cwd before claiming or dispatching. Runtime
+re-entry preserves absolute `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`; metadata inheritance
+identifies ownership but never switches cwd. The supported re-entry and source-object
+procedure is canonical in `planning.md`; preserve dirty resumed trees and distinguish missing
+Git objects from cwd failures.
 
 Add a `repo` key when work lands in a different repository than the run epic. `--metadata`
 merges with existing keys, so stamps never clobber `node` or `scope`. Branch, push, PR, and
@@ -239,14 +245,17 @@ merge anchors survive checkout teardown.
 - Every claim-holder resource that owns a tree owns its own canonical `worktree`. Task beads
   inherit from their feature; do not store a reviewer's path on a work node.
 - Validate an inherited feature checkout against that feature's binding. Architects
-  still validate the binding of the persistent checkout they own.
+  still validate the binding of the persistent checkout they own, from the canonical session cwd.
 - Runtime-owned isolated task copies have no task-specific Worktrunk binding.
   Use the assigned isolated root and claimed scope; never require its inherited
   feature binding to equal the task id or rewrite that binding for the task.
 - Stamp it as an absolute path. The worktree-confinement rule matches the session's `cwd`
-  against that value.
+  against that value; reading the value does not relocate the session.
 - Clear the pointer only after the claim is released and the checkout is reclaimed.
 
+On resumed work, preserve dirty trees, captured branches, accepted deltas, and anchors.
+Do not release a claim for runtime re-entry; use the exclusive recovery procedure in
+`lifecycle.md` before any replacement.
 Choosing between a label and a metadata key is a cardinality rule plus an authority rule,
 not a style preference. Both filter on `bd ready` and both compose with `--claim`, so
 filterability does not distinguish them.

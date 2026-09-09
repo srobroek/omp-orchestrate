@@ -22,7 +22,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../bd";
 import { bdList, bdShow } from "../bd";
-import { forgetClaim, observedClaim } from "../claim-state";
+import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
 import { scopeOf, scopesOverlap } from "../scope";
 import { type BdInvocation, bdInvocations, effectiveSegments } from "../shell";
@@ -355,6 +355,7 @@ function shepherdStateWrite(invocation: BdInvocation): boolean {
  * Queue claims are observed from their result and checked for conflicts before work.
  */
 export async function gateClaimEligibility(
+ claims: ClaimState,
  ctx: ExtensionContext,
  input: Record<string, unknown>,
 ): Promise<ToolCallEventResult | undefined> {
@@ -377,20 +378,20 @@ export async function gateClaimEligibility(
   if (denial) return denial;
  }
 
- const claims = invocations.filter(invocation => invocation.hasClaim);
- if (claims.length === 0) return undefined;
+ const claimInvocations = invocations.filter(invocation => invocation.hasClaim);
+ if (claimInvocations.length === 0) return undefined;
  if (input.async === true) {
   return { block: true, reason: "Run claims in the foreground; background completion is not delivered to the claim observer." };
  }
- if (sessionRoleName !== undefined && (claims.length !== 1 || effectiveSegments(command).length !== 1)) {
+ if (sessionRoleName !== undefined && (claimInvocations.length !== 1 || effectiveSegments(command).length !== 1)) {
   return { block: true, reason: "Run the claiming command alone so claim observation can bind; no pipelines or additional command leaves." };
  }
- for (const claim of claims) {
+ for (const claim of claimInvocations) {
   const targets = claimTargets(claim);
   if (sessionRoleName !== undefined && claim.subcommand !== "ready" && targets.length !== 1) {
    return { block: true, reason: "A named claim must identify exactly one bead; finish or release it before claiming another." };
   }
-  const previous = observedClaim();
+  const previous = claims.observedClaim();
   if (previous === undefined) continue;
   const sameBead = targets.length === 1 && previous.beadIds.length === 1 && targets[0] === previous.beadIds[0];
   let live = false;
@@ -406,10 +407,10 @@ export async function gateClaimEligibility(
   if (live && !sameBead) {
    return { block: true, reason: `This activation still holds ${previous.beadIds.join(", ")}; finish or release it before another named or queue claim.` };
   }
-  if (!live) forgetClaim();
+  if (!live) claims.forgetClaim();
  }
 
- for (const claim of claims) {
+ for (const claim of claimInvocations) {
   // `bd ready --claim` selects by filter rather than naming a bead. When the
   // filter already pins a role, compare against that and skip the lookup.
   if (claim.subcommand === "ready") {

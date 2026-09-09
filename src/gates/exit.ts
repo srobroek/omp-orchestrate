@@ -15,7 +15,7 @@ import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdCommentsChecked, bdLinkedChecked, bdShow, commentVerb, metadataString } from "../bd";
-import { type ClaimObservation, observedClaim } from "../claim-state";
+import { type ClaimObservation, type ClaimState } from "../claim-state";
 import { beadRouting, orcRole } from "../identity";
 
 import architect from "../contracts/architect.json";
@@ -263,21 +263,24 @@ export async function collectExitEvidence(bead: BdBead): Promise<Evidence | null
  return { bead, verbs, linkedVerbs, openEscalation, artifactContained };
 }
 
-/**
- * Whether this session has already been told it holds no claim. One reminder is the
- * whole budget: a revived worker whose claim was made in a previous process has no
- * observed claim through no fault of its own, and trapping it would cost the run
- * more than the silent exit costs.
- */
-let unclaimedReminded = false;
-let refusalClaim: ClaimObservation | undefined;
-let refusalCount = 0;
+interface ExitGuardState {
+ unclaimedReminded: boolean;
+ refusalClaim: ClaimObservation | undefined;
+ refusalCount: number;
+}
 
-/** Test seam, and the correct reset when a session is replaced. */
-export function resetUnclaimedReminder(): void {
- unclaimedReminded = false;
- refusalClaim = undefined;
- refusalCount = 0;
+/** Create an exit guard with reminder and refusal budgets private to one factory invocation. */
+export function createExitGuard(claims: ClaimState): (ctx: ExtensionContext, input?: Record<string, unknown>) => Promise<ToolCallEventResult | undefined> {
+ const state: ExitGuardState = { unclaimedReminded: false, refusalClaim: undefined, refusalCount: 0 };
+ return async (ctx, input) => {
+  const claim = claims.observedClaim();
+  if (claim === undefined || claim.beadIds.length === 0) return await gateUnclaimedExit(state, ctx, input);
+  for (const beadId of claim.beadIds) {
+   const result = await gateClaimedExit(state, ctx, claim, beadId);
+   if (result !== undefined) return result;
+  }
+  return undefined;
+ };
 }
 
 /**
@@ -305,21 +308,18 @@ const CONTENTION_EVIDENCE = /error\s*1213|40001|serialization failure/i;
  * false empty queue.
  */
 async function gateUnclaimedExit(
+ state: ExitGuardState,
  ctx: ExtensionContext,
  input: Record<string, unknown> | undefined,
 ): Promise<ToolCallEventResult | undefined> {
- // No marker means a contract-free helper or the lead: neither pulls work.
  if (orcRole(ctx) === undefined) return undefined;
- if (unclaimedReminded) return undefined;
+ if (state.unclaimedReminded) return undefined;
 
  const payload = input === undefined ? "" : JSON.stringify(input);
- // `NO_WORK` is the declared empty-queue exit, wherever the payload carries it.
  if (payload.includes("NO_WORK")) return undefined;
- // Contention is the other claimless exit the protocol defines, and the quoted error
- // is what separates it from an invented one.
  if (CONTENTION_EVIDENCE.test(payload)) return undefined;
 
- unclaimedReminded = true;
+ state.unclaimedReminded = true;
  return {
   block: true,
   reason:
@@ -334,20 +334,9 @@ async function gateUnclaimedExit(
  * session holding no claim is handled by {@link gateUnclaimedExit} instead, because
  * every check here hangs off a bead.
  */
-export async function gateExitContract(
- ctx: ExtensionContext,
- input?: Record<string, unknown>,
-): Promise<ToolCallEventResult | undefined> {
- const claim = observedClaim();
- if (claim === undefined || claim.beadIds.length === 0) return await gateUnclaimedExit(ctx, input);
- for (const beadId of claim.beadIds) {
-  const result = await gateClaimedExit(ctx, claim, beadId);
-  if (result !== undefined) return result;
- }
- return undefined;
-}
 
 async function gateClaimedExit(
+ state: ExitGuardState,
  ctx: ExtensionContext,
  claim: ClaimObservation,
  beadId: string,
@@ -426,11 +415,11 @@ async function gateClaimedExit(
  if (failures.length === 0) return undefined;
 
  // Refusals belong to this activation, not to mutable shared bead metadata.
- if (refusalClaim !== claim) {
-  refusalClaim = claim;
-  refusalCount = 0;
+ if (state.refusalClaim !== claim) {
+  state.refusalClaim = claim;
+  state.refusalCount = 0;
  }
- const attempts = ++refusalCount;
+ const attempts = ++state.refusalCount;
  const maxAttempts = contract.bounce?.max_attempts ?? 3;
  if (attempts >= maxAttempts) return undefined;
 

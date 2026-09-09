@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { observeClaimResult } from "../src/claim-observer";
-import { forgetClaim, observedClaim } from "../src/claim-state";
+import { createClaimState } from "../src/claim-state";
 
 /**
  * A claim report as beads 1.1.2 prints it on success, trimmed to the fields read.
@@ -13,24 +13,26 @@ function report(fields: Record<string, unknown>): { text: string }[] {
 
 const QUEUE_CLAIM = "bd ready --parent orc-epic --metadata-field role=implementer --unassigned --claim --json";
 
+let claims = createClaimState();
+
 function observe(event: Record<string, unknown>): void {
- observeClaimResult({ toolName: "bash", input: { command: QUEUE_CLAIM }, content: report({}), ...event });
+ observeClaimResult(claims, { toolName: "bash", input: { command: QUEUE_CLAIM }, content: report({}), ...event });
 }
 
 afterEach(() => {
- forgetClaim();
+ claims = createClaimState();
 });
 
 describe("observeClaimResult", () => {
  test("records the bead a queue claim returned", () => {
   observe({});
-  expect(observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1"] });
+  expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1"] });
  });
 
  test("records a named claim from its report, not from the command", () => {
   // The id in the command is irrelevant: the report is what proves acquisition.
   observe({ input: { command: "BEADS_ACTOR=impl-1 bd update orc-1 --claim --json" } });
-  expect(observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1"] });
+  expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1"] });
  });
 
  test("a successful result carries no exitCode, so its absence must not reject", () => {
@@ -40,12 +42,12 @@ describe("observeClaimResult", () => {
    details: { timeoutSeconds: 120, wallTimeMs: 40 },
    content: [{ text: `${report({})[0]?.text}\n\nWall time: 0.04 seconds` }],
   });
-  expect(observedClaim()?.beadIds).toEqual(["orc-1"]);
+  expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
  });
 
  test("accepts a decorated supported envelope", () => {
   observe({ content: [{ text: `${JSON.stringify({ schema_version: 1, data: JSON.parse(report({})[0]!.text) })}\n\nWall time: 0.04 seconds` }] });
-  expect(observedClaim()?.beadIds).toEqual(["orc-1"]);
+  expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
  });
 
  test("observes OMP timeout-clamp and PTY-fallback success notices", () => {
@@ -54,13 +56,13 @@ describe("observeClaimResult", () => {
    { timeoutSeconds: 30, requestedTimeoutSeconds: 300, notice: "Timeout clamped to 30s (requested 300s; global tools.maxTimeout ceiling 30s)." },
   ];
   for (const { notice, ...details } of cases) {
-   forgetClaim();
+   claims = createClaimState();
    observe({
     input: { command: QUEUE_CLAIM, pty: true },
     details: { wallTimeMs: 40, ...details },
     content: [{ text: `${report({})[0]?.text}\n\nWall time: 0.04 seconds\n${notice}\npty requested but unavailable in this environment; ran without a terminal` }],
    });
-   expect(observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1"] });
+   expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1"] });
   }
  });
 
@@ -70,7 +72,7 @@ describe("observeClaimResult", () => {
    details: { timeoutSeconds: 300, wallTimeMs: 40 },
    content: [{ text: `${report({})[0]?.text}\n\nWall time: 0.04 seconds\npty requested but unavailable in this environment; ran without a terminal` }],
   });
-  expect(observedClaim()?.beadIds).toEqual(["orc-1"]);
+  expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
  });
 
  test("rejects unknown notices, mismatched transport metadata, and partial JSON before recognized notices", () => {
@@ -82,76 +84,76 @@ describe("observeClaimResult", () => {
    { details: { wallTimeMs: 40, timeoutSeconds: 3600, requestedTimeoutSeconds: 4000 }, content: [{ text: `[{"id":"orc-1"${footer}` }] },
   ]) {
    observe(event);
-   expect(observedClaim()).toBeUndefined();
+   expect(claims.observedClaim()).toBeUndefined();
   }
  });
 
  test("records static shell and eval wrappers without counting ancestors", () => {
   for (const command of [`bash -lc '${QUEUE_CLAIM}'`, `eval '${QUEUE_CLAIM}'`]) {
-   forgetClaim();
+   claims = createClaimState();
    observe({ input: { command } });
-   expect(observedClaim()?.beadIds).toEqual(["orc-1"]);
+   expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
   }
  });
 
  test("rejects wrapped extra commands and multiple reports", () => {
   for (const command of [`bash -lc '${QUEUE_CLAIM}; true'`, `eval '${QUEUE_CLAIM}; touch extra'`, `${QUEUE_CLAIM}\ntrue`]) {
    observe({ input: { command } });
-   expect(observedClaim()).toBeUndefined();
+   expect(claims.observedClaim()).toBeUndefined();
   }
   observe({ content: [{ text: `${report({})[0]?.text}\n${report({})[0]?.text}` }] });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("rejects truncated payloads even when the visible JSON is complete", () => {
   observe({ details: { meta: { truncation: { originalLines: 20 } } } });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
   observe({ content: [{ text: `${report({})[0]?.text}\n\nWall time: 0.04 seconds\n(output truncated)` }] });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a present exitCode means failure and is rejected", () => {
   observe({ details: { exitCode: 1 } });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("an error result is rejected", () => {
   observe({ isError: true });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a timed-out result is rejected", () => {
   observe({ details: { timedOut: true } });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("an async result is rejected: it describes a job started, not a claim completed", () => {
   observe({ details: { async: true } });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a trailing command cannot launder a failed claim", async () => {
   // The laundering shape: the claim failed, a trailing `true` makes the shell exit 0,
   // and a valid-looking report is on stdout from something else in the chain. The
   // payload alone cannot distinguish this, so the segment count must.
-  observeClaimResult({
+  observeClaimResult(claims, {
    toolName: "bash",
    input: { command: "BEADS_ACTOR=x bd update victim-1 --claim --json; true" },
    content: [{ text: JSON.stringify([{ id: "victim-1", status: "in_progress", assignee: "x" }]) }],
   });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("prose naming a bead records nothing", () => {
   observe({ content: [{ text: "claimed orc-1 successfully, status in_progress" }] });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("an echoed lookalike object records nothing", () => {
   // No id scavenging: this is valid JSON in the right shape but not a claim report,
   // because a claim report is an array.
   observe({ content: [{ text: '{"id":"orc-9","status":"in_progress","assignee":"impl-1"}' }] });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a two-bead claim records both, so the worktree gate is armed for each", () => {
@@ -168,7 +170,7 @@ describe("observeClaimResult", () => {
     },
    ],
   });
-  expect(observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1", "orc-2"] });
+  expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-1", "orc-2"] });
  });
 
  test("records nothing when the report mixes assignees", () => {
@@ -183,7 +185,7 @@ describe("observeClaimResult", () => {
     },
    ],
   });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("records nothing when one record in the report is unclaimed", () => {
@@ -197,31 +199,31 @@ describe("observeClaimResult", () => {
     },
    ],
   });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a read of an open bead records nothing", () => {
   observe({ content: report({ status: "open", assignee: "" }) });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("an in-progress bead with no assignee records nothing", () => {
   observe({ content: report({ assignee: "" }) });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a non-claiming command records nothing", () => {
   observe({ input: { command: "bd ready --metadata-field role=implementer --unassigned --json" } });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a non-bash tool records nothing", () => {
   observe({ toolName: "read" });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("malformed JSON records nothing", () => {
   observe({ content: [{ text: "[{" }] });
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 });

@@ -56,8 +56,22 @@ code and report drift rather than working around it. Task detail carried in a pr
 is advisory; the bead is authority.
 
 Scope. Own only the globs in metadata.scope. Work inside the worktree named by
-metadata.worktree, or inside the isolated copy you were given. Writing outside the
+metadata.worktree, or inside the assigned isolated copy. Writing outside the
 tree your claimed bead names is refused.
+
+Session/worktree invariant. Non-isolated children inherit the parent session's cwd.
+Isolated children run in a runtime-created copy snapshotted from that parent cwd.
+metadata.worktree routes queue ownership and scope; it never switches cwd. An
+architect starts in the canonical Worktrunk root derived from its session before
+claiming, writing, or dispatching. If the runtime is elsewhere, use the supported
+OMP CLI with --cwd <canonical-worktree>, preserving the same absolute BEADS_DIR
+and ORCHESTRATE_MARKER_FILE. Verify the session root before any write or dispatch.
+
+Architect pulls remain atomic ordinary queue pulls: derive the canonical session
+worktree root, filter metadata.worktree to that root alongside the existing
+parent, role, and unassigned filters, then validate the actually claimed epic's
+metadata.worktree and WT bead binding. Never candidate-pick or preclaim a specific
+bead. See planning.md for the full rooted-entry and recovery procedure.
 
 Evidence. Every factual claim carries a file:line, a command result, a bead id, or the
 literal word untested. Cite prior facts by reference; never paste them into a message.

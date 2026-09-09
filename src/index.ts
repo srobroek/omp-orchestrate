@@ -10,10 +10,11 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdListChecked, bdRun, resetReadBudget } from "./bd";
 import { observeClaimResult } from "./claim-observer";
+import { createClaimState } from "./claim-state";
 import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
-import { gateExitContract } from "./gates/exit";
+import { createExitGuard } from "./gates/exit";
 import { gateOneClaim } from "./gates/one-claim";
 import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
@@ -30,6 +31,8 @@ import { preflightSettings, registerWatchers } from "./watchers";
 const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true };
 
 export default function ompOrchestrate(pi: ExtensionAPI): void {
+ const claims = createClaimState();
+ const gateExitContract = createExitGuard(claims);
  pi.setLabel("Orchestrate");
 
  // Deterministic surfaces the pull loop and the shepherd call by schema, not prose.
@@ -78,14 +81,14 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     const exclusivity = gateOneClaim(ctx, input);
     if (exclusivity) return exclusivity;
 
-    const eligibility = await gateClaimEligibility(ctx, input);
+    const eligibility = await gateClaimEligibility(claims, ctx, input);
     if (eligibility) return eligibility;
    }
 
    if (GATED_WRITE_TOOLS[event.toolName] === true) {
     // G2 needs the input: its containment check is on the path the tool
     // names, not only on the cwd the session sits in.
-    const scope = await gateWorktreeScope(ctx, event.toolName, input);
+    const scope = await gateWorktreeScope(claims, ctx, event.toolName, input);
     if (scope) return scope;
    }
 
@@ -139,7 +142,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  // exit contract took its no-bead branch for every session that pulled work normally,
  // and every check that hangs off the claimed bead went unevaluated.
  pi.on("tool_result", event => {
-  observeClaimResult(event);
+  observeClaimResult(claims, event);
  });
 
  pi.registerCommand("orchestrate-status", {
