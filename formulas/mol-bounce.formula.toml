@@ -10,9 +10,9 @@ description = "the merge bead being bounced; stays open and parked, never closed
 required = true
 description = "failure identity over repo, failure kind, and exact detail; a review-bot round is keyed bot:<slug>@<head_sha>"
 
-[vars.route_label]
-required = true
-description = "routing label for the fix bead: the originating implementation role, e.g. agent:coder or agent:reviewer"
+[vars.route_role]
+default = "implementer"
+description = "metadata role for the durable code-fix bead; must be implementer"
 
 [[steps]]
 id = "dedupe"
@@ -42,8 +42,14 @@ priority = 1
 needs = ["dedupe"]
 labels = ["bounce", "phase:route"]
 description = """
-`bd create ... --deps discovered-from:{{merge_bead}}`, UNASSIGNED, labelled
-{{route_label}}.
+Validate {{route_role}} is implementer before creation. Resolve the owning epic
+from {{merge_bead}}'s origin_bead; never copy the unparented merge bead's placement.
+Create the unassigned durable fix with `--parent <owning-epic>`,
+`--deps discovered-from:{{merge_bead}}`, and metadata `role={{route_role}}`,
+`execution_kind=git`, `execution_task_kind=code`, plus the origin work's relevant
+scope, repo, base_ref, acceptance criteria, and evidence pointers.
+Its consumer pulls
+`bd ready --parent <owning-epic> --metadata-field role=implementer --unassigned --claim --json`.
 
 It is a DURABLE bead and never a wisp. The whole mechanism is the blocking
 dependency edge park-merge-bead adds next, and that edge dies with a burned wisp:
@@ -58,9 +64,10 @@ is written.
 
 Unassigned is deliberate. The specialist discovers this work by CLAIMING the fix
 bead and does the work in its own isolated workspace -- it never enters the
-feature worktree and never pushes; its commits are captured on an
-`omp/task/<id>` branch for the architect to integrate. The orchestrator routes;
-it never claims or relays the diagnosis.
+feature worktree and never pushes. OMP 18.1.14 captures its commits and remaining
+working-tree delta on successful completion for the architect to integrate.
+Failed or aborted isolated work may not survive cleanup. The orchestrator
+routes; it never claims or relays the diagnosis.
 """
 
 [[steps]]
@@ -71,13 +78,25 @@ priority = 1
 needs = ["create-fix-bead"]
 labels = ["bounce", "phase:route"]
 description = """
-Add the blocking dependency once, fix bead blocks {{merge_bead}}. A blocked merge
-bead stays out of `bd ready`, so nothing can land the branch until the fix bead
-closes -- and closing the fix bead re-readies every dependent merge bead on its
-own.
+Add the blocking dependency once: the fix bead blocks {{merge_bead}} and keeps
+it out of `bd ready` while the fix is unresolved.
 
-{{merge_bead}} stays OPEN and parked. Closing it, or closing the PR, is not a
-bounce: it destroys the queue entry this molecule exists to preserve.
+For a fix delivered IN THE SAME PR, closing the fix before landing would create
+a cycle. The architect instead verifies the captured fix is integrated into
+that PR and that independent review and CI approve its exact current head.
+Only then remove the blocking edge with
+`bd dep remove {{merge_bead}} <fix-bead>`, recording the verified PR/head and
+evidence on both beads. Preserve the discovered-from provenance and the fix's
+nonterminal landing record; never close the fix merely to unblock the merge.
+The unparented merge bead can now enter the shepherd queue, subject to all
+remaining blockers. The shepherd closes the fix only after verifying actual
+guarded landing of that approved head.
+
+For a fix delivered in a SEPARATE prerequisite PR, retain the blocking edge
+until that prerequisite actually lands and its fix bead legitimately closes.
+
+{{merge_bead}} stays OPEN and parked until the applicable evidence permits it
+to re-enter the queue. Closing it, or closing the PR, is not a bounce.
 """
 
 [[steps]]

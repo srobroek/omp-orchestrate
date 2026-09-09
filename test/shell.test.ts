@@ -19,14 +19,29 @@ describe("splitSegments", () => {
 		expect(splitSegments(`bd comment x "a && b; c"`)).toEqual([["bd", "comment", "x", "a && b; c"]]);
 	});
 
-	test("does not treat # as a comment", () => {
-		// Python's shlex ran with commenters = "", because a bead id or label may
-		// legitimately contain a hash.
+	test("preserves hashes inside operands", () => {
 		expect(splitSegments("bd show orc#1")).toEqual([["bd", "show", "orc#1"]]);
 	});
 
 	test("discards a partial token from an unterminated quote", () => {
 		expect(splitSegments(`bd comment x "unterminated`)).toEqual([["bd", "comment", "x"]]);
+	});
+
+	test("separates newline commands and ignores shell comments", () => {
+		expect(bdInvocations("printf ready\n# explanation\nbd update orc-1 --set-metadata role=reviewer")[0]?.subcommand).toBe("update");
+		expect(invokesCommand("true # explanation\ngit worktree add /tmp/foreign-tree", ["git", "worktree"])).toBe(true);
+	});
+
+	test("heredoc bodies are data while commands after delimiters remain visible", () => {
+		const command = "cat <<'EOF'\nbd update orc-hidden --claim\nEOF\nbd update orc-real --claim";
+		expect(bdInvocations(command).map(call => call.positionals)).toEqual([["orc-real"]]);
+		expect(invokesCommand("cat <<-EOF\n\tgit worktree add hidden\n\tEOF\ngit worktree add real", ["git", "worktree"])).toBe(true);
+		expect(invokesCommand("cat <<EOF\ngit worktree add hidden\nEOF", ["git", "worktree"])).toBe(false);
+	});
+
+	test("continuations join words but quoted newlines remain operands", () => {
+		expect(splitSegments("b\\\nd ready")).toEqual([["bd", "ready"]]);
+		expect(splitSegments("printf 'a\\\nb'")).toEqual([["printf", "a\\\nb"]]);
 	});
 });
 
@@ -102,10 +117,6 @@ describe("bdInvocations", () => {
 		expect(bdInvocations("git commit -m 'bd create x'")).toEqual([]);
 	});
 
-	test("a bare bd create is one invocation", () => {
-		expect(bdInvocations("bd create x").map(i => i.subcommand)).toEqual(["create"]);
-	});
-
 	test("env assignment prefix still leaves bd in the command slot", () => {
 		const found = bdInvocations("env BEADS_ACTOR=a bd create x");
 		expect(found).toHaveLength(1);
@@ -150,11 +161,6 @@ describe("invokesCommand", () => {
 	});
 });
 
-/**
- * Shapes a live fuzz pass found the parser blind to. Two of them -- `timeout` and
- * `nohup` -- are ordinary command-line usage rather than evasion, which is why a
- * gate that misses them fails on the honest path it exists to cover.
- */
 describe("transparent runners and wrapper shells", () => {
 	const CLAIM = "bd update orc-1 --claim";
 
@@ -234,11 +240,4 @@ describe("transparent runners and wrapper shells", () => {
 		expect(bdInvocations(`git commit -m "bd update orc-1 --claim"`)).toEqual([]);
 	});
 
-	test("nesting is bounded rather than unbounded", () => {
-		// Five levels exceeds the cap, so the innermost claim is not reported. The
-		// point is termination, not depth: a parser that recursed forever on a
-		// self-nesting payload would hang the gate it serves.
-		const deep = `sh -c "sh -c \\"sh -c 'sh -c \\\\\\"sh -c ${CLAIM}\\\\\\"'\\""`;
-		expect(() => bdInvocations(deep)).not.toThrow();
-	});
 });

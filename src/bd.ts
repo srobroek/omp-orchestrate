@@ -12,37 +12,40 @@
  * uniformly, fail open.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /** A bead as the gates need it. Extra fields pass through untouched. */
 export interface BdBead {
-	id: string;
-	status?: string;
-	assignee?: string;
-	labels?: string[];
-	metadata?: Record<string, unknown>;
-	spec_id?: string;
-	updated_at?: string;
-	[key: string]: unknown;
+ id: string;
+ status?: string;
+ assignee?: string;
+ labels?: string[];
+ metadata?: Record<string, unknown>;
+ spec_id?: string;
+ updated_at?: string;
+ [key: string]: unknown;
 }
 
 export interface BdComment {
-	text: string;
-	author?: string;
+ text: string;
+ author?: string;
 }
 
 export interface BdResult {
-	code: number;
-	stdout: string;
-	stderr: string;
+ code: number;
+ stdout: string;
+ stderr: string;
 }
 
 /** Env every invocation sets, so output is parseable and never blocks on a pager. */
 const BD_ENV: Record<string, string> = {
-	BD_JSON_ENVELOPE: "1",
-	BD_NO_PAGER: "1",
-	BD_NON_INTERACTIVE: "1",
+ BD_JSON_ENVELOPE: "1",
+ BD_NO_PAGER: "1",
+ BD_NON_INTERACTIVE: "1",
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const OPERATION_TIMEOUT_MS = 20_000;
 
 /**
  * Reads allowed per turn, mirroring `rules-eval.py`'s `BD_READ_BUDGET = 12`.
@@ -54,28 +57,11 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  */
 const READ_BUDGET = 12;
 
-let readsUsed = 0;
+const readBudget = new AsyncLocalStorage<{ readsUsed: number; timedOut: boolean; deadline: number }>();
 
-/**
- * Set when a `bd` call is killed for exceeding its timeout, cleared per dispatch.
- *
- * The read budget caps how many calls a dispatch may make; it does nothing about how long
- * each one takes. Those are different failures, and the slow one is worse. Measured: with
- * the server alive but `.beads/dolt-server.pid` missing, every `bd` call hung, several
- * gates ran per `tool_call`, and the extension exceeded its 30s budget -- so EVERY bash
- * call in the session died with `Extension .../dist/index.js timed out after 30000ms`
- * rather than degrading. Gates already fail open when `bd` is unavailable; an unresponsive
- * `bd` is the same answer arriving too late to be useful.
- *
- * One timeout is enough evidence for the rest of the dispatch: the cause is the database,
- * not the argv, so the next call would wait the same 10s to learn the same thing.
- */
-let timedOut = false;
-
-/** Reset the per-turn read budget and the timeout breaker. Call once per `tool_call` dispatch. */
+/** Start a fresh budget for this async operation and its descendants. */
 export function resetReadBudget(): void {
-	readsUsed = 0;
-	timedOut = false;
+ readBudget.enterWith({ readsUsed: 0, timedOut: false, deadline: performance.now() + OPERATION_TIMEOUT_MS });
 }
 
 /**
@@ -88,49 +74,52 @@ export function resetReadBudget(): void {
  * run's beads.
  */
 export async function bdRun(
-	args: string[],
-	timeoutMs = DEFAULT_TIMEOUT_MS,
-	cwd?: string,
+ args: string[],
+ timeoutMs = DEFAULT_TIMEOUT_MS,
+ cwd?: string,
 ): Promise<BdResult | null> {
-	// An earlier call in this dispatch already waited out the full timeout. What is
-	// unresponsive is the database, not the argv, so this call would spend the same wait to
-	// learn the same thing -- and the caller already treats an unknown answer as permission
-	// to proceed.
-	if (timedOut) return null;
-	const bin = process.env.BD_BIN ?? "bd";
-	try {
-		const proc = Bun.spawn([bin, ...args], {
-			...(cwd === undefined ? {} : { cwd }),
-			env: { ...process.env, ...BD_ENV },
-			stdout: "pipe",
-			stderr: "pipe",
-		});
+ // An earlier call in this dispatch already waited out the full timeout. What is
+ // unresponsive is the database, not the argv, so this call would spend the same wait to
+ // learn the same thing -- and the caller already treats an unknown answer as permission
+ // to proceed.
+ const budget = readBudget.getStore();
+ if (budget?.timedOut) return null;
+ const remainingMs = budget ? budget.deadline - performance.now() : timeoutMs;
+ if (remainingMs <= 0) return null;
+ const bin = process.env.BD_BIN ?? "bd";
+ try {
+  const proc = Bun.spawn([bin, ...args], {
+   ...(cwd === undefined ? {} : { cwd }),
+   env: { ...process.env, ...BD_ENV },
+   stdout: "pipe",
+   stderr: "pipe",
+  });
 
-		let killed = false;
-		const timer = setTimeout(() => {
-			killed = true;
-			timedOut = true;
-			proc.kill();
-		}, timeoutMs);
-		try {
-			const [stdout, stderr, code] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-				proc.exited,
-			]);
-			// A killed process still resolves, carrying whatever the kill left behind. Handing
-			// that back would let a gate read a truncated stdout or a signal's exit code as
-			// bd's answer, so a timeout reports the unknown it actually is.
-			if (killed) return null;
-			return { code, stdout, stderr };
-		} finally {
-			clearTimeout(timer);
-		}
-	} catch {
-		// Missing binary, spawn failure, or a killed process. The caller treats an
-		// unknown answer as permission to proceed.
-		return null;
-	}
+  let killed = false;
+  const timer = setTimeout(() => {
+   killed = true;
+   if (budget) budget.timedOut = true;
+   proc.kill();
+  }, Math.min(timeoutMs, remainingMs));
+  try {
+   const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+   ]);
+   // A killed process still resolves, carrying whatever the kill left behind. Handing
+   // that back would let a gate read a truncated stdout or a signal's exit code as
+   // bd's answer, so a timeout reports the unknown it actually is.
+   if (killed || (budget && performance.now() >= budget.deadline)) return null;
+   return { code, stdout, stderr };
+  } finally {
+   clearTimeout(timer);
+  }
+ } catch {
+  // Missing binary, spawn failure, or a killed process. The caller treats an
+  // unknown answer as permission to proceed.
+  return null;
+ }
 }
 
 /**
@@ -139,33 +128,51 @@ export async function bdRun(
  * subcommands emit a bare value, so both shapes are accepted.
  */
 function parsePayload(stdout: string): unknown {
-	try {
-		const parsed: unknown = JSON.parse(stdout);
-		if (parsed !== null && typeof parsed === "object" && "schema_version" in parsed && "data" in parsed) {
-			return parsed.data;
-		}
-		return parsed;
-	} catch {
-		return undefined;
-	}
+ try {
+  const parsed: unknown = JSON.parse(stdout);
+  if (parsed !== null && typeof parsed === "object" && "schema_version" in parsed && "data" in parsed) {
+   return parsed.data;
+  }
+  return parsed;
+ } catch {
+  return undefined;
+ }
 }
 
 /** Run a read, honouring the per-turn budget, and return its parsed payload. */
 async function readJson(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<unknown> {
-	if (readsUsed >= READ_BUDGET) return undefined;
-	readsUsed += 1;
-	const result = await bdRun(args, timeoutMs, cwd);
-	if (!result || result.code !== 0) return undefined;
-	return parsePayload(result.stdout);
+ const budget = readBudget.getStore();
+ if (budget && budget.readsUsed++ >= READ_BUDGET) return undefined;
+ const result = await bdRun(args, timeoutMs, cwd);
+ if (!result || result.code !== 0) return undefined;
+ return parsePayload(result.stdout);
+}
+
+export function metadataRecord(raw: unknown): Record<string, unknown> | undefined {
+ if (typeof raw === "string") {
+  try {
+   raw = JSON.parse(raw);
+  } catch {
+   return undefined;
+  }
+ }
+ return raw !== null && typeof raw === "object" && !Array.isArray(raw)
+  ? raw as Record<string, unknown>
+  : undefined;
 }
 
 function asBead(value: unknown): BdBead | null {
-	if (value === null || typeof value !== "object") return null;
-	if (!("id" in value) || typeof value.id !== "string") return null;
-	// Checked above: `value` is an object whose `id` is a string, which is the only
-	// field the gates require. Every other field stays optional on BdBead.
-	const bead = value as BdBead;
-	return bead;
+ if (value === null || typeof value !== "object") return null;
+ if (!("id" in value) || typeof value.id !== "string") return null;
+ // Checked above: `value` is an object whose `id` is a string, which is the only
+ // field the gates require. Every other field stays optional on BdBead.
+ const bead = value as BdBead;
+ if ("metadata" in bead) {
+  const metadata = metadataRecord(bead.metadata);
+  if (metadata === undefined) delete bead.metadata;
+  else bead.metadata = metadata;
+ }
+ return bead;
 }
 
 /**
@@ -174,70 +181,108 @@ function asBead(value: unknown): BdBead | null {
  * `bd show --json` returns a single-element array, so both an array and a bare
  * object are accepted.
  */
-export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdBead | null> {
-	const payload = await readJson(["show", id, "--json"], timeoutMs);
+export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead | null> {
+	const payload = await readJson(["show", id, "--json"], timeoutMs, cwd);
 	if (Array.isArray(payload)) return asBead(payload[0]);
 	return asBead(payload);
 }
 
 /** Beads matching a caller-supplied query. The caller passes its own `--json`. */
 export async function bdList(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[]> {
-	const payload = await readJson(args, timeoutMs, cwd);
-	if (!Array.isArray(payload)) return [];
+ return (await bdListChecked(args, timeoutMs, cwd)) ?? [];
+}
+
+function asBeadArray(payload: unknown): BdBead[] | null {
+	if (!Array.isArray(payload)) return null;
 	const beads: BdBead[] = [];
 	for (const entry of payload) {
 		const bead = asBead(entry);
-		if (bead) beads.push(bead);
+		if (!bead) return null;
+		beads.push(bead);
 	}
 	return beads;
 }
 
-/** Comments on a bead, oldest first as `bd` returns them. */
-export async function bdComments(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[]> {
-	const payload = await readJson(["comments", id, "--json"], timeoutMs);
-	if (!Array.isArray(payload)) return [];
-	const comments: BdComment[] = [];
-	for (const entry of payload) {
-		if (entry === null || typeof entry !== "object") continue;
-		// `text` is the documented field; `body` and `comment` appear in older
-		// payloads and fixtures, so accept any of them rather than silently
-		// evaluating a contract against zero comments.
-		let text: unknown;
-		if ("text" in entry) text = entry.text;
-		else if ("body" in entry) text = entry.body;
-		else if ("comment" in entry) text = entry.comment;
-		if (typeof text !== "string") continue;
-		const author = "author" in entry && typeof entry.author === "string" ? entry.author : undefined;
-		comments.push(author === undefined ? { text } : { text, author });
-	}
-	return comments;
+export async function bdListChecked(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
+	return asBeadArray(await readJson(args, timeoutMs, cwd));
 }
 
 /**
- * Ids of beads linked to `id` by `type`, looking at dependents.
+ * Ephemeral wisp listing, or `null` when the command failed or returned malformed data.
  *
- * A review or escalation wisp is attached to its node with `relates-to`, so from
- * the node the wisps are its *dependents* — hence `--direction=up`. `bd dep list`
- * emits "a flat array of dependency records"; the field naming is not contractual,
- * so every string field that is not the queried id is treated as a candidate rather
- * than guessing one key.
+ * Unlike ordinary `bd list --json` responses, `bd mol wisp list --json` returns a
+ * schema object containing the rows under `wisps`. Keep this exception at its API
+ * seam so the generic list reader remains strict about array-shaped responses.
  */
+export async function bdWispListChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
+ const payload = await readJson(["mol", "wisp", "list", "--json"], timeoutMs, cwd);
+ const envelope = metadataRecord(payload);
+ if (envelope === undefined || envelope.schema_version !== 1 || typeof envelope.count !== "number"
+  || !Number.isInteger(envelope.count) || envelope.count < 0 || !Array.isArray(envelope.wisps)
+  || envelope.count !== envelope.wisps.length) return null;
+ const wisps: BdBead[] = [];
+ for (const entry of envelope.wisps) {
+  const bead = asBead(entry);
+  if (!bead) return null;
+  wisps.push(bead);
+ }
+ return wisps;
+}
+
+/** Comments on a bead, oldest first as `bd` returns them. */
+export async function bdComments(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[]> {
+ return (await bdCommentsChecked(id, timeoutMs)) ?? [];
+}
+
+export async function bdCommentsChecked(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[] | null> {
+ const payload = await readJson(["comments", id, "--json"], timeoutMs);
+ if (!Array.isArray(payload)) return null;
+ const comments: BdComment[] = [];
+ for (const entry of payload) {
+  if (entry === null || typeof entry !== "object") return null;
+  // `text` is the documented field; `body` and `comment` appear in older
+  // payloads and fixtures, so accept any of them rather than silently
+  // evaluating a contract against zero comments.
+  let text: unknown;
+  if ("text" in entry) text = entry.text;
+  else if ("body" in entry) text = entry.body;
+  else if ("comment" in entry) text = entry.comment;
+  if (typeof text !== "string") return null;
+  const author = "author" in entry && typeof entry.author === "string" ? entry.author : undefined;
+  comments.push(author === undefined ? { text } : { text, author });
+ }
+ return comments;
+}
+
+/** Linked dependents of a node. */
 export async function bdLinked(id: string, type: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string[]> {
-	const payload = await readJson(["dep", "list", id, "--direction=up", "--type", type, "--json"], timeoutMs);
-	if (!Array.isArray(payload)) return [];
-	const linked: string[] = [];
-	for (const entry of payload) {
-		if (entry === null || typeof entry !== "object") continue;
-		for (const value of Object.values(entry)) {
-			if (typeof value !== "string" || value === id || value === type) continue;
-			// Bead ids are `<prefix>-<suffix>`, optionally dotted for children. This
-			// filters out free-text fields such as a description or a timestamp.
-			if (/^[A-Za-z0-9][A-Za-z0-9._]*-[A-Za-z0-9][A-Za-z0-9._]*$/.test(value) && !linked.includes(value)) {
-				linked.push(value);
-			}
-		}
-	}
-	return linked;
+ return (await bdLinkedChecked(id, type, timeoutMs)) ?? [];
+}
+
+export async function bdLinkedChecked(
+ id: string,
+ type: string,
+ timeoutMs = DEFAULT_TIMEOUT_MS,
+ direction: "up" | "down" = "up",
+): Promise<string[] | null> {
+ const payload = await readJson(["dep", "list", id, `--direction=${direction}`, "--type", type, "--json"], timeoutMs);
+ if (!Array.isArray(payload)) return null;
+ const linked: string[] = [];
+ for (const entry of payload) {
+  if (entry === null || typeof entry !== "object") return null;
+  let endpoint: unknown;
+  if ("issue_id" in entry || "depends_on_id" in entry) {
+   const source = "issue_id" in entry ? entry.issue_id : undefined;
+   const target = "depends_on_id" in entry ? entry.depends_on_id : undefined;
+   if ((direction === "up" ? target : source) !== id) return null;
+   endpoint = direction === "up" ? source : target;
+  } else {
+   endpoint = "id" in entry ? entry.id : undefined;
+  }
+  if (typeof endpoint !== "string" || endpoint.length === 0 || /\s/.test(endpoint) || endpoint === id) return null;
+  if (!linked.includes(endpoint)) linked.push(endpoint);
+ }
+ return linked;
 }
 
 /**
@@ -247,28 +292,29 @@ export async function bdLinked(id: string, type: string, timeoutMs = DEFAULT_TIM
  * `max((updated_at, id))` tie-break, so a stale claim never shadows a live one.
  */
 export async function claimedBead(actor: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdBead | null> {
-	if (actor.length === 0) return null;
-	const candidates = await bdList(
-		["list", "--include-infra", "--assignee", actor, "--status", "open,in_progress,blocked", "--json"],
-		timeoutMs,
-	);
-	let best: BdBead | null = null;
-	for (const bead of candidates) {
-		if (!best) {
-			best = bead;
-			continue;
-		}
-		const a = `${bead.updated_at ?? ""}\u0000${bead.id}`;
-		const b = `${best.updated_at ?? ""}\u0000${best.id}`;
-		if (a > b) best = bead;
-	}
-	return best;
+ if (actor.length === 0) return null;
+ const candidates = await bdList(
+  ["list", "--include-infra", "--assignee", actor, "--status", "open,in_progress,blocked", "--json"],
+  timeoutMs,
+ );
+ let best: BdBead | null = null;
+ for (const bead of candidates) {
+  if (!best) {
+   best = bead;
+   continue;
+  }
+  const a = `${bead.updated_at ?? ""}\u0000${bead.id}`;
+  const b = `${best.updated_at ?? ""}\u0000${best.id}`;
+  if (a > b) best = bead;
+ }
+ return best;
 }
 
 /** A metadata value as a string, or `undefined` when absent or not a string. */
-export function metadataString(bead: BdBead | null, key: string): string | undefined {
-	const value = bead?.metadata?.[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
+export function metadataString(bead: { metadata?: unknown } | null, key: string): string | undefined {
+ const metadata = metadataRecord(bead?.metadata);
+ const value = metadata && Object.hasOwn(metadata, key) ? metadata[key] : undefined;
+ return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -297,6 +343,6 @@ export function metadataString(bead: BdBead | null, key: string): string | undef
  * silence, and the Python is no longer in this repository to mirror.
  */
 export function commentVerb(text: string): string {
-	const token = /^[\s\-*+>`_~]*(\S*)/.exec(text)?.[1] ?? "";
-	return token.replace(/[*_`~:,.;!?]+$/, "").toUpperCase();
+ const token = /^[\s\-*+>`_~]*(\S*)/.exec(text)?.[1] ?? "";
+ return token.replace(/[*_`~:,.;!?]+$/, "").toUpperCase();
 }

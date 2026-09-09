@@ -1,5 +1,5 @@
 formula = "mol-arch-setup"
-description = "static preamble the architect completes in {{repo}} before any worker claims {{owner_bead}}"
+description = "static preamble the lead completes before launching the native architect for {{owner_bead}}"
 type = "workflow"
 
 [vars.repo]
@@ -12,7 +12,7 @@ description = "branch the worktree is created on"
 
 [vars.owner_bead]
 required = true
-description = "epic or feature bead this worktree is provisioned for; the architect that claims it is its only mutator"
+description = "unassigned architect epic this root is provisioned for; the lead prepares and binds it before launching the native architect"
 
 [vars.copies_ignored]
 default = "true"
@@ -25,11 +25,22 @@ type = "task"
 priority = 1
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C {{repo}} switch --create {{branch}} --no-cd -y
+Pass runtime values through the Bash tool's structured env map, never by
+interpolating them into command text: ORC_REPO is {{repo}}, ORC_BRANCH is
+{{branch}}, and ORC_OWNER_BEAD is {{owner_bead}}. Supply these values on every
+call; do not assume a prior call exported them.
 
-Refuse to continue if the path already carries a bead var naming a different
-bead: one path serves one bead, and a second stamp makes the cross-check in
-bind-vars ambiguous for whoever adopts {{owner_bead}} later.
+wt -C "$ORC_REPO" switch --create "$ORC_BRANCH" --no-cd --format=json -y
+
+Parse the returned JSON and use its absolute `path` as ORC_WORKTREE in the
+structured env map for subsequent calls. Do not derive it from the branch name.
+Read its existing binding before stamping it:
+wt -C "$ORC_WORKTREE" step eval '{{ vars.bead }}' --format json
+Refuse a binding naming another bead or an unresolved read; an absent binding
+is expected only for a newly created worktree.
+
+The command does not relocate the spawning session. Establish the native
+architect's session at this root before launch; see planning.md.
 """
 
 [[steps]]
@@ -39,11 +50,11 @@ type = "task"
 needs = ["create-worktree"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C <worktree> config state vars set bead={{owner_bead}}
+wt -C "$ORC_WORKTREE" config state vars set "bead=$ORC_OWNER_BEAD" --branch "$ORC_BRANCH"
 
 Then read it back:
 
-wt -C <worktree> step eval '{{ vars.bead }}' --format json
+wt -C "$ORC_WORKTREE" step eval '{{ vars.bead }}' --format json
 
 The result must be {{owner_bead}}. This pair -- the bead var on the path and
 metadata.worktree on the bead (stamp-owner) -- is the whole binding. It records
@@ -59,14 +70,16 @@ never enter it, so nothing here is provisioned for them.
 
 [[steps]]
 id = "verify-writable"
-title = "verify the worktree is clean and writable"
+title = "verify the worktree state and writability"
 type = "task"
 needs = ["bind-vars"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-git -C <worktree> status --porcelain must print nothing, and the path must be
-writable. A dirty inherited worktree mixes someone else's work into the first
-commit made against {{owner_bead}}.
+For a fresh setup, `git -C "$ORC_WORKTREE" status --porcelain` must print nothing,
+and the path must be writable. A resumed tree may be dirty: preserve and inspect
+its existing changes and accepted delta; do not reset or clean it merely to
+make recovery look fresh. A dirty fresh setup mixes someone else's work into
+the first commit made against {{owner_bead}} and must be refused.
 """
 
 [[steps]]
@@ -77,7 +90,7 @@ needs = ["bind-vars"]
 condition = "{{copies_ignored}}"
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C {{repo}} step copy-ignored --require-include <worktree>
+wt -C "$ORC_REPO" step copy-ignored --require-include "$ORC_WORKTREE"
 
 Skip only when the build genuinely needs no untracked inputs. A missing .env or
 target/ becomes a build failure attributed to the work rather than to setup.
@@ -90,7 +103,22 @@ type = "task"
 needs = ["verify-writable"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-bd update {{owner_bead}} --metadata '{"worktree":"<abs path>","branch":"{{branch}}"}'
+Build the metadata JSON without interpolating values into JSON or shell source:
+
+jq -nc --arg worktree "$ORC_WORKTREE" --arg branch "$ORC_BRANCH" '{worktree:$worktree,branch:$branch}'
+
+Pass that output as ORC_METADATA through the next Bash call's structured env
+map, alongside ORC_OWNER_BEAD:
+
+bd update "$ORC_OWNER_BEAD" --metadata "$ORC_METADATA"
+
+Then read the bead back:
+
+bd show "$ORC_OWNER_BEAD" --json
+
+The returned `metadata.worktree` must equal ORC_WORKTREE, and
+`metadata.branch` must equal ORC_BRANCH. Refuse any mismatch before declaring
+the epic ready.
 
 Metadata, not a label: exactly one worktree may be true per bead, and this single
 value is what the architect claiming {{owner_bead}} reads to find its tree. Two
@@ -106,10 +134,15 @@ needs = ["stamp-owner", "copy-ignored"]
 labels = ["arch-setup", "phase:provision"]
 description = """
 Preconditions all true: the worktree exists, its bead var reads {{owner_bead}},
-the tree is clean, ignored inputs are present, and metadata.worktree is stamped.
-Only now may work under {{owner_bead}} be pulled:
-`bd ready --parent {{owner_bead}} --label agent:<x> --claim` (add
-`--include-ephemeral` for wisp queues).
+fresh setup is clean (or resumed dirty state is preserved and inspected),
+ignored inputs are present, and metadata.worktree equals the Worktrunk-returned
+path. The lead now launches the native architect with its session rooted at this
+canonical worktree. Only then may the architect pull work under {{owner_bead}}:
+`bd ready --parent "$ORC_OWNER_BEAD" --metadata-field role=<role> --unassigned --claim --json`.
+Use role=implementer for implementation and role=architect for child epics;
+reviewer and researcher pulls also require `--include-ephemeral`. Shepherds
+instead pull `bd ready --metadata-field role=shepherd --unassigned --claim --json`
+without a parent, since merge beads are unparented.
 
 The order is the rule, not a preference. A claim is how an actor discovers its
 work, and the claim carries no checkout with it. Readying {{owner_bead}} before

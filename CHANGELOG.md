@@ -1,5 +1,107 @@
 # Changelog
 
+## [0.3.4](https://github.com/srobroek/omp-orchestrate/compare/v0.3.3...v0.3.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* authorize terminal releases and preserve literal setup values ([#65](https://github.com/srobroek/omp-orchestrate/issues/65)) ([3457ee7](https://github.com/srobroek/omp-orchestrate/commit/3457ee7788bad9661ab4d6b3563d4ae4f56788fe))
+
+## [0.3.3](https://github.com/srobroek/omp-orchestrate/compare/v0.3.2...v0.3.3) (2026-09-09)
+
+
+### Features
+
+* supervise workers and roll architects ([6f2398f](https://github.com/srobroek/omp-orchestrate/commit/6f2398ffdc51a25297b40147d19611aedd306ca3))
+* supervise workers and roll architects ([54b8ba6](https://github.com/srobroek/omp-orchestrate/commit/54b8ba65c42352e4d770cc708b5b06453c020234))
+
+
+### Bug Fixes
+
+* bind architect metadata to returned worktree ([2d088b5](https://github.com/srobroek/omp-orchestrate/commit/2d088b5b58d563ddb0fe8b0822525228130e1912))
+* bind recovery supervision to live runs ([f50940c](https://github.com/srobroek/omp-orchestrate/commit/f50940cd019ca5cb616608bba42d95c60df13935))
+* bind recovery supervision to live runs ([6b8b08a](https://github.com/srobroek/omp-orchestrate/commit/6b8b08a300246d78a78afa3c41e9c429bc0d6104))
+* confine isolated workers to native worktree roots ([6e2dfed](https://github.com/srobroek/omp-orchestrate/commit/6e2dfed6ef4c37024d84e30f772e8bd233f4911d))
+* enforce checkout and claim ownership per session ([1bf5300](https://github.com/srobroek/omp-orchestrate/commit/1bf5300877be2e3a9a9015fcfb24842b5222009c))
+* enforce core agent assignment contracts ([f06c23d](https://github.com/srobroek/omp-orchestrate/commit/f06c23d573e1b3660a6c3116735f0c0c6383574a))
+* enforce core agent assignment contracts ([fb04b7d](https://github.com/srobroek/omp-orchestrate/commit/fb04b7d41947ee4bc2ef2c9a2650750c64cc5ae9))
+* enforce fresh ownership and recover spaced worktrees ([73159e7](https://github.com/srobroek/omp-orchestrate/commit/73159e7a794fdb7b0a2370476e214d97b6ad08df))
+* follow live session cwd in supervision ([f829399](https://github.com/srobroek/omp-orchestrate/commit/f829399a57e3ed555d45203c56e64737fa151eb6))
+* harden assignment recovery checks ([4f4ea3d](https://github.com/srobroek/omp-orchestrate/commit/4f4ea3db1c36a3069f11786d801d543f4c475390))
+* resolve run marker from session checkout ([00f8470](https://github.com/srobroek/omp-orchestrate/commit/00f8470a24bf8adae528e9a478a374b42a5bc9ac))
+* scope helper readonly mode to active runs ([a0ffa53](https://github.com/srobroek/omp-orchestrate/commit/a0ffa53a41160a666d2e7adc3c77f21a267d6323))
+* scope helper readonly mode to active runs ([14351a2](https://github.com/srobroek/omp-orchestrate/commit/14351a293113c3d74068aaf7240a0e3ad56c0618))
+
+## [0.3.2](https://github.com/srobroek/omp-orchestrate/compare/v0.3.1...v0.3.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* parse textual edit targets through the locked API ([287bce9](https://github.com/srobroek/omp-orchestrate/commit/287bce93ad86c935c4dc4db3aae3a9501ac4106c))
+* parse wisp envelopes and resolve edit targets ([76df661](https://github.com/srobroek/omp-orchestrate/commit/76df66148589ed8a03c6523a87a38a6902ec66ab))
+* parse wisp envelopes and resolve edit targets ([dbdf9d6](https://github.com/srobroek/omp-orchestrate/commit/dbdf9d6a3ba145ce3bb3a7b47bf68407d96570a5))
+
+## [0.3.1](https://github.com/srobroek/omp-orchestrate/compare/v0.3.0...v0.3.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* contain activation-hook failures in /orchestrate-run ([#54](https://github.com/srobroek/omp-orchestrate/issues/54)) ([f95e006](https://github.com/srobroek/omp-orchestrate/commit/f95e006dc36b24d4269be3ad20861f578de32503))
+* pin beads across linked worktrees ([#55](https://github.com/srobroek/omp-orchestrate/issues/55)) ([600bc5b](https://github.com/srobroek/omp-orchestrate/commit/600bc5b35ca45f7f6b344f572a714c56863c56b0))
+* preflight only orchestrated runs, and pin BEADS_DIR instead of asking ([#52](https://github.com/srobroek/omp-orchestrate/issues/52)) ([20ff941](https://github.com/srobroek/omp-orchestrate/commit/20ff9412e72b94348b6bb165bec607770da27033))
+
+## [0.3.0](https://github.com/srobroek/omp-orchestrate/compare/v0.2.4...v0.3.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* Remove orc_resolve_queue_dispatch and release-queue-watch.
+
+### Features
+
+* remove release-queue-watch support ([0e375c7](https://github.com/srobroek/omp-orchestrate/commit/0e375c74a7848eed6592ffb5463246df102fe542))
+
+
+### Bug Fixes
+
+* check cleared gates before no-work ([33f173a](https://github.com/srobroek/omp-orchestrate/commit/33f173aa7bd99488edc688607426d5e75ff1857d))
+* **ci:** execute staged agnix check in pull requests ([9b9b051](https://github.com/srobroek/omp-orchestrate/commit/9b9b0513cdfaa45749d6153717f12cf4c63df27e))
+* harden staged agnix follow-up ([4f736dc](https://github.com/srobroek/omp-orchestrate/commit/4f736dc9e7de140dd7e0ceef7124b78d417d77b0))
+* normalize common hook paths ([aa92e26](https://github.com/srobroek/omp-orchestrate/commit/aa92e2661e131a429e801be1de94c5f0c6e6a782))
+* preserve every existing git hook ([a8b6613](https://github.com/srobroek/omp-orchestrate/commit/a8b66136e7728727a3089666f5417edceceaf815))
+* preserve staged agnix diff records ([8bf36c9](https://github.com/srobroek/omp-orchestrate/commit/8bf36c968e5c8dc4bc1d2514102c0f433d8c7191))
+* refresh landing gates before claiming ([6749052](https://github.com/srobroek/omp-orchestrate/commit/6749052e83ed91ca968bd1a8c15acc3fba3fb66f))
+* reopen gated landing beads safely ([57e2010](https://github.com/srobroek/omp-orchestrate/commit/57e2010097a211fb906a324d885e99d15c051b09))
+
+## [0.2.4](https://github.com/srobroek/omp-orchestrate/compare/v0.2.3...v0.2.4) (2026-09-08)
+
+
+### Bug Fixes
+
+* clarify reviewer model selection policy ([#48](https://github.com/srobroek/omp-orchestrate/issues/48)) ([ad3fd76](https://github.com/srobroek/omp-orchestrate/commit/ad3fd763d346d3ebbaa3225a0dd4de926fe28ddc))
+
+## [0.2.3](https://github.com/srobroek/omp-orchestrate/compare/v0.2.2...v0.2.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **agents:** preflight discovery and document model-aware routing ([#45](https://github.com/srobroek/omp-orchestrate/issues/45)) ([78352d2](https://github.com/srobroek/omp-orchestrate/commit/78352d25b62191592d78db4f81c9ba2e0dcc7f28))
+
+## [0.2.2](https://github.com/srobroek/omp-orchestrate/compare/v0.2.1...v0.2.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **ci:** install Vale for complete prose rule coverage ([89b4de1](https://github.com/srobroek/omp-orchestrate/commit/89b4de1581f0bc568a1ac28c9edb01c791f5effe))
+* **ci:** repair prose validation and verify actual plugin loading ([6b478a7](https://github.com/srobroek/omp-orchestrate/commit/6b478a7b3365b4a09189bebc700e2d38dd83a837))
+* **deps:** update OMP runtime dependencies to 18.1.14 ([941a095](https://github.com/srobroek/omp-orchestrate/commit/941a095ff2e9a534c4b68f8840d809b4fbb2a6f9))
+* harden orchestration and reduce workflow overhead ([1161a2f](https://github.com/srobroek/omp-orchestrate/commit/1161a2f692dd41624434b638bd25903fa7ffce4f))
+* **orchestrate:** simplify prompts and reconcile safe workflow contracts ([0ec42b8](https://github.com/srobroek/omp-orchestrate/commit/0ec42b8e6ac84e5873fd13768c75c5f3c49a2d8f))
+* **report:** preserve child barrier and streamline worker closeout ([3adf60c](https://github.com/srobroek/omp-orchestrate/commit/3adf60c79bebd90b41acf04f0a043fa1f439edc4))
+* **runtime:** harden claim authority lifecycle and evidence handling ([4def74c](https://github.com/srobroek/omp-orchestrate/commit/4def74c90fdf0ec683d5786d4b38841d5351ed8b))
+* **worktree:** bound reconciliation command parsing ([6f70da2](https://github.com/srobroek/omp-orchestrate/commit/6f70da2e1e902e20fd3185be38ecfc28534d9528))
+* **worktree:** enforce claimed tree and scope boundaries ([8b79a22](https://github.com/srobroek/omp-orchestrate/commit/8b79a2284d69657db68e0ff070aac4cf1474f4ce))
+
 ## [0.2.1](https://github.com/srobroek/omp-orchestrate/compare/v0.2.0...v0.2.1) (2026-08-26)
 
 

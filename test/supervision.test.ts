@@ -1,64 +1,69 @@
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { markerPath, readActiveRun } from "../src/run-state";
 import * as realBd from "../src/bd";
 import type { BdBead, BdComment, BdResult } from "../src/bd";
 import type { Exec, ExecResult } from "../src/supervision";
 
 /**
- * `bd` is replaced wholesale, because the reaper's whole observable effect is the argv
- * it runs. The real module's pure helpers (`commentVerb`, `metadataString`) are spread
- * back in: `satisfies` in the exit gate calls them, and a second copy here would be a
- * copy of the predicate semantics under test.
+ * The reaper's observable effect is its argv. Spies record those calls while the
+ * real pure helpers remain in place; restoring the spies leaves no module mock
+ * behind for suites that exercise the real bd subprocess.
  */
-const real = { ...realBd };
 
 /** Every `bd` argv the module under test ran, in order. */
 let ran: string[][] = [];
 
 /** What each `bd` read answers this test. */
 interface BdWorld {
-	/** `bd list --assignee <child> --status in_progress` */
-	claimed: BdBead[];
-	/** `bd list --metadata-field actor=<child>` */
-	stamped: BdBead[];
-	/** `bd dep list <id> --direction=up` */
-	linked: BdBead[];
-	/** Comment text per bead id. */
-	comments: Record<string, string[]>;
+ /** `bd list --assignee <child> --status in_progress` */
+ claimed: BdBead[] | null;
+ wisps: BdBead[] | null;
+ /** `bd list --metadata-field actor=<child>` */
+ stamped: BdBead[] | null;
+ /** `bd dep list <id> --direction=up` */
+ linked: BdBead[] | null;
+ /** Comment text per bead id. */
+ comments: Record<string, string[] | null>;
 }
 
-let world: BdWorld = { claimed: [], stamped: [], linked: [], comments: {} };
+let world: BdWorld = { claimed: [], wisps: [], stamped: [], linked: [], comments: {} };
 
-function listFor(args: string[]): BdBead[] {
-	if (args[0] === "dep") return world.linked;
-	if (args.includes("--metadata-field")) return world.stamped;
-	if (args.includes("--assignee")) return world.claimed;
-	return [];
+function listFor(args: string[]): BdBead[] | null {
+ if (args[0] === "dep") return world.linked;
+ if (args.includes("--metadata-field")) return world.stamped;
+ if (args.includes("--assignee")) return world.claimed;
+ return [];
 }
 
-mock.module("../src/bd", () => ({
-	...real,
-	bdList: async (args: string[]): Promise<BdBead[]> => {
-		ran.push(args);
-		return listFor(args);
-	},
-	bdRun: async (args: string[]): Promise<BdResult | null> => {
-		ran.push(args);
-		return { code: 0, stdout: "", stderr: "" };
-	},
-	bdComments: async (id: string): Promise<BdComment[]> => {
-		ran.push(["comments", id]);
-		return (world.comments[id] ?? []).map(text => ({ text }));
-	},
-	// No wisps in these fixtures: `linked.comment.verb` predicates belong to the
-	// reviewer contract, which the exit-gate tests already cover.
-	bdLinked: async (): Promise<string[]> => [],
-}));
+const bdSpies = [
+ spyOn(realBd, "bdListChecked").mockImplementation(async (args: string[]): Promise<BdBead[] | null> => {
+  ran.push(args);
+  return listFor(args);
+ }),
+ spyOn(realBd, "bdWispListChecked").mockImplementation(async (): Promise<BdBead[] | null> => {
+  ran.push(["mol", "wisp", "list", "--json"]);
+  return world.wisps;
+ }),
+ spyOn(realBd, "bdRun").mockImplementation(async (args: string[]): Promise<BdResult | null> => {
+  ran.push(args);
+  return { code: 0, stdout: "", stderr: "" };
+ }),
+ spyOn(realBd, "bdCommentsChecked").mockImplementation(async (id: string): Promise<BdComment[] | null> => {
+  ran.push(["comments", id]);
+  if (world.comments[id] === null) return null;
+  return (world.comments[id] ?? []).map(text => ({ text }));
+ }),
+ // No wisps in these fixtures: linked-comment predicates belong to the exit tests.
+ spyOn(realBd, "bdLinkedChecked").mockImplementation(async (): Promise<string[]> => []),
+];
 
-// `mock.module` installs the fake `bd` at runtime, so the module under test must be
-// loaded after that statement; a static import would evaluate it first and bind the
-// real one.
-const { branchIntegrated, ensurePatrolWisp, reapChild, registerSupervision } = await import("../src/supervision");
+// Deliberately import after installing spies: the import-time assertion below
+// must observe any bd calls made while the module is evaluated.
+const { branchIntegrated, reapChild, registerSupervision } = await import("../src/supervision");
 
 /** Nothing may run at import time: the plugin loads in every session, gates included. */
 const ranDuringImport = ran.length;
@@ -68,402 +73,385 @@ const ranDuringImport = ran.length;
  * `assignee: null` of an unassigned bead, which `BdBead`'s optional field cannot type.
  */
 function bead(fields: Record<string, unknown> = {}): BdBead {
-	return {
-		id: "orc-1",
-		status: "in_progress",
-		labels: ["agent:implementer"],
-		metadata: { actor: "impl-7", role: "implementer" },
-		...fields,
-	} as BdBead;
+ return {
+  id: "orc-1",
+  status: "in_progress",
+  labels: ["agent:implementer"],
+  metadata: { actor: "impl-7", role: "implementer" },
+  ...fields,
+ } as BdBead;
 }
 
 /** A git seam that answers `branch --list` with `branches` and nothing else. */
 function gitWith(branches: string[]): Exec {
-	return async (argv: string[]): Promise<ExecResult | null> => {
-		if (argv[1] === "branch") return { code: 0, stdout: branches.map(name => `  ${name}\n`).join(""), stderr: "" };
-		return null;
-	};
+ return async (argv: string[]): Promise<ExecResult | null> => {
+  if (argv[1] === "branch") return { code: 0, stdout: branches.map(name => `  ${name}\n`).join(""), stderr: "" };
+  return null;
+ };
 }
 
 /** The `bd update` argv the reaper ran, or `undefined` when it ran none. */
 function update(): string[] | undefined {
-	return ran.find(argv => argv[0] === "update");
+ return ran.find(argv => argv[0] === "update");
 }
 
 /** The text of the single comment the reaper wrote, or `undefined`. */
 function comment(): string | undefined {
-	return ran.find(argv => argv[0] === "comment")?.[2];
+ return ran.find(argv => argv[0] === "comment")?.[2];
 }
 
 beforeEach(() => {
-	ran = [];
-	world = { claimed: [], stamped: [], linked: [], comments: {} };
+ ran = [];
+ world = { claimed: [], wisps: [], stamped: [], linked: [], comments: {} };
 });
 
 afterAll(() => {
-	// `mock.module` mutates the process-wide module registry and `mock.restore()`
-	// does not undo a module mock (bun 1.3.14), while bun runs every test file in one
-	// process: re-mocking with the captured real exports is what stops
-	// `test/bd.test.ts` from exercising this file's fake `bd`.
-	mock.module("../src/bd", () => real);
+ for (const spy of bdSpies) spy.mockRestore();
 });
 
 describe("import", () => {
-	test("loading the module touches neither bd nor git", () => {
-		expect(ranDuringImport).toBe(0);
-	});
+ test("loading the module touches neither bd nor git", () => {
+  expect(ranDuringImport).toBe(0);
+ });
 });
 
-describe("reapChild — clean exit", () => {
-	test("a released claim whose contract holds only gets its branch recorded", async () => {
-		// Routing label absent: the generic contract applies, whose one check is a
-		// REPORTED comment. The claim is released, so the bead is found by actor.
-		world.stamped = [bead({ status: "open", labels: [], assignee: null })];
-		world.comments["orc-1"] = ["REPORTED delivered the parser"];
+describe("reapChild recovery observations", () => {
+ test("released shepherd IDLE preserves inherited approval and is a clean exit", async () => {
+  const head = "a".repeat(40);
+  const approved = bead({
+   status: "open",
+   assignee: "",
+   labels: ["state:approved"],
+   metadata: { actor: "shepherd-1", role: "shepherd", execution_kind: "git", head_sha: head },
+  });
+  world.stamped = [approved];
+  world.comments["orc-1"] = [`IDLE head_sha=${head}`];
+  const outcome = await reapChild({ id: "shepherd-1", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+  expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "clean", failures: [], recovery: "not-needed" }]);
+  expect(approved.labels).toContain("state:approved");
+  expect(approved.assignee).toBe("");
+  expect(update()).toBeUndefined();
+  expect(comment()).toBeUndefined();
+ });
 
-		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
-			cwd: "/repo",
-			exec: gitWith(["omp/task/impl-7"]),
-		});
+ test("a successor claiming during git discovery is never overwritten", async () => {
+  const current = bead({ assignee: "impl-7" });
+  world.claimed = [{ ...current }];
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, {
+   cwd: "/repo", exec: async () => {
+    current.assignee = "successor";
+    current.status = "closed";
+    return { code: 0, stdout: "omp/task/impl-7", stderr: "" };
+   },
+  });
+  expect(current.assignee).toBe("successor");
+  expect(current.status).toBe("closed");
+  expect(update()).toBeUndefined();
+  expect(outcome.reaped[0]?.recovery).toBe("recorded");
+  expect(comment()).toContain("exclusive recovery window");
+ });
 
-		expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "clean", failures: [] }]);
-		expect(outcome.branch).toBe("omp/task/impl-7");
-		expect(comment()).toBeUndefined();
-		expect(update()).toEqual(["update", "orc-1", "--set-metadata", "branch=omp/task/impl-7"]);
-	});
+ test("unreadable completion evidence is unknown, never missing", async () => {
+  world.stamped = [bead({ status: "open", assignee: null })];
+  world.comments["orc-1"] = null;
+  const result = await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+  expect(result.reaped[0]).toMatchObject({ case: "unknown", failures: [], recovery: "recorded" });
+  expect(update()).toBeUndefined();
+ });
 
-	test("a branch the child stamped itself is never overwritten", async () => {
-		world.stamped = [
-			bead({ status: "open", labels: [], assignee: null, metadata: { actor: "impl-7", branch: "omp/task/impl-7" } }),
-		];
-		world.comments["orc-1"] = ["REPORTED delivered the parser"];
+ test.each([null, { code: 1, stdout: "", stderr: "git failed" }])("git failure is not evidence of no work", async result => {
+  world.claimed = [bead({ assignee: "impl-7" })];
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: async () => result });
+  expect(outcome.branchState).toBe("unknown");
+  expect(outcome.reaped[0]?.case).toBe("unknown");
+  expect(update()).toBeUndefined();
+ });
 
-		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
-			cwd: "/repo",
-			exec: gitWith(["omp/task/impl-7"]),
-		});
+ test("positive absence and positive branch evidence remain distinct", async () => {
+  world.claimed = [bead({ assignee: "impl-7" })];
+  const absent = await reapChild({ id: "impl-7", status: "aborted" }, { cwd: "/repo", exec: gitWith([]) });
+  const found = await reapChild({ id: "impl-7", status: "aborted" }, { cwd: "/repo", exec: gitWith(["omp/task/impl-7"]) });
+  expect(absent.branchState).toBe("absent");
+  expect(found.branch).toBe("omp/task/impl-7");
+  expect(found.branchState).toBe("found");
+  expect(update()).toBeUndefined();
+ });
 
-		expect(outcome.reaped[0]?.case).toBe("clean");
-		expect(update()).toBeUndefined();
-	});
+ test("clean completion does not stamp over concurrent metadata", async () => {
+  world.stamped = [bead({ status: "open", labels: [], metadata: { actor: "impl-7" }, assignee: null })];
+  world.comments["orc-1"] = ["REPORTED delivered"];
+  const outcome = await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith(["omp/task/impl-7"]) });
+  expect(outcome.reaped[0]?.case).toBe("clean");
+  expect(update()).toBeUndefined();
+ });
 
-	test("a branch belonging to a child with a longer id is not attributed", async () => {
-		world.stamped = [bead({ status: "open", labels: [], assignee: null })];
-		world.comments["orc-1"] = ["REPORTED delivered the parser"];
+ test("failed evidence persistence never reports recovery recorded", async () => {
+  world.claimed = [bead({ assignee: "impl-7" })];
+  const failing = spyOn(realBd, "bdRun").mockResolvedValueOnce({ code: 1, stdout: "", stderr: "write refused" });
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
+  expect(outcome.reaped[0]?.recovery).toBe("record-failed");
+  expect(update()).toBeUndefined();
+  failing.mockImplementation(async args => { ran.push(args); return { code: 0, stdout: "", stderr: "" }; });
+ });
 
-		// `omp/task/impl-7*` also matches child impl-70's captured branch.
-		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
-			cwd: "/repo",
-			exec: gitWith(["omp/task/impl-70"]),
-		});
+ test("discovers open, blocked, deferred claims and review wisps without truncation", async () => {
+  world.claimed = [bead({ id: "orc-open", status: "open", assignee: "impl-7" }), bead({ id: "orc-blocked", status: "blocked", assignee: "impl-7" })];
+  world.wisps = [bead({ id: "orc-review", status: "deferred", assignee: "impl-7", ephemeral: true })];
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
+  expect(outcome.reaped.map(row => row.bead)).toEqual(["orc-open", "orc-blocked", "orc-review"]);
+  expect(ran[0]).toContain("--include-infra");
+  expect(ran[0]).toContain("open,in_progress,blocked,deferred");
+  expect(ran[0]).toContain("--limit");
+ });
 
-		expect(outcome.branch).toBeUndefined();
-		expect(update()).toBeUndefined();
-	});
-});
+ test("partial candidate lookup is reported, not an empty successful sweep", async () => {
+  world.wisps = null;
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
+  expect(outcome.discoveryUnknown).toBe(true);
+ });
 
-describe("reapChild — semantic incompletion", () => {
-	test("a completed child that never released its claim is reclaimed", async () => {
-		world.claimed = [bead({ assignee: "impl-7" })];
-		world.comments["orc-1"] = ["REPORTED shipped it"];
-
-		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
-			cwd: "/repo",
-			exec: gitWith(["omp/task/impl-7"]),
-		});
-
-		expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "incomplete", failures: [] }]);
-		expect(comment()).toBe("RECLAIM child impl-7 exited without completing: claim still held");
-		expect(update()).toEqual([
-			"update",
-			"orc-1",
-			"--assignee",
-			"",
-			"--status",
-			"open",
-			"--set-metadata",
-			"recovered_branch=omp/task/impl-7",
-		]);
-	});
-
-	test("a released claim with an unsatisfied contract is reclaimed and named", async () => {
-		// Delivered nothing: no REPORTED comment, and a git-kind bead owes a branch,
-		// a push, a reviewer hand-off and a released claim.
-		world.stamped = [
-			bead({
-				status: "open",
-				assignee: null,
-				metadata: { actor: "impl-7", role: "implementer", worktree: "/wt", execution_kind: "git" },
-			}),
-		];
-
-		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
-			cwd: "/repo",
-			exec: gitWith([]),
-		});
-
-		expect(outcome.reaped[0]?.case).toBe("incomplete");
-		expect(outcome.reaped[0]?.failures).toEqual(["branch", "delivery", "handoff", "reported"]);
-		expect(comment()).toBe("RECLAIM child impl-7 exited without completing: branch, delivery, handoff, reported");
-		// No captured branch, so nothing is stamped as recoverable.
-		expect(update()).toEqual(["update", "orc-1", "--assignee", "", "--status", "open"]);
-	});
-
-	test("a bead another actor now holds is left alone", async () => {
-		world.stamped = [bead({ status: "in_progress", assignee: "impl-9" })];
-
-		const outcome = await reapChild({ id: "impl-7", status: "completed" }, {
-			cwd: "/repo",
-			exec: gitWith(["omp/task/impl-7"]),
-		});
-
-		expect(outcome.reaped).toEqual([]);
-		expect(ran.filter(argv => argv[0] === "comment" || argv[0] === "update")).toEqual([]);
-	});
-
-	test("a bead still routed by a legacy label says so in the reclamation", async () => {
-		// The reaper picks the contract from the bead, because the session that held it is
-		// gone. When a legacy label made that choice, the RECLAIM comment records it: bd's
-		// comment history is the run's durable audit trail, and the note names the bead
-		// that still needs its stamp.
-		world.claimed = [bead({ assignee: "impl-7", metadata: { actor: "impl-7" } })];
-		world.comments["orc-1"] = ["REPORTED shipped it"];
-
-		await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
-
-		expect(comment()).toBe(
-			"RECLAIM child impl-7 exited without completing: claim still held " +
-				"(contract from legacy agent:implementer; stamp metadata.role)",
-		);
-	});
-
-	test("a metadata-routed bead adds no provenance note", async () => {
-		world.claimed = [bead({ assignee: "impl-7" })];
-		world.comments["orc-1"] = ["REPORTED shipped it"];
-
-		await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
-
-		expect(comment()).toBe("RECLAIM child impl-7 exited without completing: claim still held");
-	});
-});
-
-describe("reapChild — technical death", () => {
-	test("a captured branch survives as the recovery pointer", async () => {
-		world.claimed = [bead({ assignee: "impl-7" })];
-
-		const outcome = await reapChild({ id: "impl-7", status: "failed" }, {
-			cwd: "/repo",
-			exec: gitWith(["main", "omp/task/impl-7"]),
-		});
-
-		expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "died-with-work", failures: [] }]);
-		expect(comment()).toBe("RECLAIM child impl-7 died (failed); commits preserved on omp/task/impl-7");
-		expect(update()).toEqual([
-			"update",
-			"orc-1",
-			"--assignee",
-			"",
-			"--status",
-			"open",
-			"--set-metadata",
-			"recovered_branch=omp/task/impl-7",
-		]);
-		// A dead child's contract is moot, so its comments are never read.
-		expect(ran.some(argv => argv[0] === "comments")).toBe(false);
-	});
-
-	test("with no branch the claim is released and nothing is stamped", async () => {
-		world.claimed = [bead({ assignee: "impl-7" })];
-
-		const outcome = await reapChild({ id: "impl-7", status: "aborted" }, {
-			cwd: "/repo",
-			exec: gitWith([]),
-		});
-
-		expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "died-without-work", failures: [] }]);
-		expect(outcome.branch).toBeUndefined();
-		expect(comment()).toBe("RECLAIM child impl-7 died (aborted); no captured branch, nothing to recover");
-		expect(update()).toEqual(["update", "orc-1", "--assignee", "", "--status", "open"]);
-	});
-
-	test("a dead child holding nothing is not looked up by actor", async () => {
-		world.stamped = [bead({ status: "open", assignee: null })];
-
-		const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
-
-		expect(outcome.reaped).toEqual([]);
-		expect(ran).toEqual([["list", "--assignee", "impl-7", "--status", "in_progress", "--json"]]);
-	});
-});
-
-describe("reapChild — non-terminal and unavailable", () => {
-	test("a started child is not reaped", async () => {
-		world.claimed = [bead({ assignee: "impl-7" })];
-
-		const outcome = await reapChild({ id: "impl-7", status: "started" }, { cwd: "/repo", exec: gitWith([]) });
-
-		expect(outcome).toEqual({ child: "impl-7", reaped: [] });
-		expect(ran).toEqual([]);
-	});
-
-	test("git that cannot run leaves the reclaim without a branch", async () => {
-		world.claimed = [bead({ assignee: "impl-7" })];
-
-		const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: async () => null });
-
-		expect(outcome.reaped[0]?.case).toBe("died-without-work");
-		expect(update()).toEqual(["update", "orc-1", "--assignee", "", "--status", "open"]);
-	});
+ test("a nonterminal child and an already reassigned bead cause no writes", async () => {
+  world.stamped = [bead({ assignee: "successor" })];
+  await reapChild({ id: "impl-7", status: "started" }, { cwd: "/repo", exec: gitWith([]) });
+  await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+  expect(comment()).toBeUndefined();
+  expect(update()).toBeUndefined();
+ });
 });
 
 describe("branchIntegrated", () => {
-	const cherry = (result: ExecResult | null): Exec => async () => result;
+ const cherry = (result: ExecResult | null): Exec => async () => result;
 
-	test("every commit already upstream is integrated", async () => {
-		const stdout = "- 845d702a86971732ca63375f3b4ff3137bdf08b5\n- 1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d\n";
-		expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", cherry({ code: 0, stdout, stderr: "" }))).toBe(
-			"integrated",
-		);
-		// Nothing to compare is the same answer: no commit is missing upstream.
-		expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", cherry({ code: 0, stdout: "", stderr: "" }))).toBe(
-			"integrated",
-		);
-	});
+ test("every commit already upstream is integrated", async () => {
+  const stdout = "- 845d702a86971732ca63375f3b4ff3137bdf08b5\n- 1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d\n";
+  expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", cherry({ code: 0, stdout, stderr: "" }))).toBe(
+   "integrated",
+  );
+  // Nothing to compare is the same answer: no commit is missing upstream.
+  expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", cherry({ code: 0, stdout: "", stderr: "" }))).toBe(
+   "integrated",
+  );
+ });
 
-	test("one missing commit is pending, even beside integrated ones", async () => {
-		const stdout = "- 845d702a86971732ca63375f3b4ff3137bdf08b5\n+ 1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d\n";
-		expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", cherry({ code: 0, stdout, stderr: "" }))).toBe(
-			"pending",
-		);
-	});
+ test("one missing commit is pending, even beside integrated ones", async () => {
+  const stdout = "- 845d702a86971732ca63375f3b4ff3137bdf08b5\n+ 1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d\n";
+  expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", cherry({ code: 0, stdout, stderr: "" }))).toBe(
+   "pending",
+  );
+ });
 
-	test("an unknown ref, an unrunnable git, or an unparseable line is unknown", async () => {
-		const bad = cherry({ code: 128, stdout: "", stderr: "fatal: unknown commit omp/task/impl-7" });
-		expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", bad)).toBe("unknown");
-		expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", async () => null)).toBe("unknown");
-		// Never read as integrated: the caller deletes branches on that answer.
-		const noise = cherry({ code: 0, stdout: "warning: refname is ambiguous\n", stderr: "" });
-		expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", noise)).toBe("unknown");
-	});
+ test("an unknown ref, an unrunnable git, or an unparseable line is unknown", async () => {
+  const bad = cherry({ code: 128, stdout: "", stderr: "fatal: unknown commit omp/task/impl-7" });
+  expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", bad)).toBe("unknown");
+  expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", async () => null)).toBe("unknown");
+  // Never read as integrated: the caller deletes branches on that answer.
+  const noise = cherry({ code: 0, stdout: "warning: refname is ambiguous\n", stderr: "" });
+  expect(await branchIntegrated("feat/x", "omp/task/impl-7", "/repo", noise)).toBe("unknown");
+ });
 });
 
-describe("ensurePatrolWisp", () => {
-	test("creates the wisp when the epic has none", async () => {
-		await ensurePatrolWisp("orc-epic-1");
+/** Match the marker half of production binding without a Beads fixture. */
+async function markerBound(cwd: string): Promise<boolean> {
+ const marker = await readActiveRun(cwd);
+ return marker !== null && marker.run_id !== "pending";
+}
 
-		expect(ran).toEqual([
-			["dep", "list", "orc-epic-1", "--direction=up", "--type", "relates-to", "--json"],
-			[
-				"create",
-				"patrol: orc-epic-1 claim reconciliation",
-				"--ephemeral",
-				"--wisp-type",
-				"patrol",
-				"--deps",
-				"relates-to:orc-epic-1",
-				"--silent",
-			],
-		]);
-	});
-
-	test("an open patrol is left as the one marker", async () => {
-		world.linked = [{ id: "orc-wisp-vcg", status: "open", ephemeral: true, wisp_type: "patrol" }];
-
-		await ensurePatrolWisp("orc-epic-1");
-
-		expect(ran.some(argv => argv[0] === "create")).toBe(false);
-	});
-
-	test("a patrol being drained is not duplicated", async () => {
-		world.linked = [{ id: "orc-wisp-vcg", status: "in_progress", ephemeral: true, wisp_type: "patrol" }];
-
-		await ensurePatrolWisp("orc-epic-1");
-
-		expect(ran.some(argv => argv[0] === "create")).toBe(false);
-	});
-
-	test("a closed patrol is re-armed, and other wisps do not count", async () => {
-		world.linked = [
-			{ id: "orc-wisp-vcg", status: "closed", ephemeral: true, wisp_type: "patrol" },
-			{ id: "orc-wisp-abc", status: "open", ephemeral: true, wisp_type: "error" },
-		];
-
-		await ensurePatrolWisp("orc-epic-1");
-
-		expect(ran.some(argv => argv[0] === "create")).toBe(true);
-	});
-});
+function contextAt(getCwd: () => string): ExtensionContext {
+ return { sessionManager: { getCwd } } as unknown as ExtensionContext;
+}
 
 /** Collect what `registerSupervision` subscribes, without an OMP session. */
 function recordingApi(): {
-	pi: ExtensionAPI;
-	/** Extension events it subscribed, in order. */
-	events: string[];
-	/** Bus channels it subscribed, in order. */
-	channels: string[];
-	sessionStart: (ctx: ExtensionContext) => void;
-	deliver: (payload: unknown) => Promise<void>;
+ pi: ExtensionAPI;
+ /** Extension events it subscribed, in order. */
+ events: string[];
+ /** Bus channels it subscribed, in order. */
+ channels: string[];
+ messages: string[];
+ errors: string[];
+ sessionStart: (ctx: ExtensionContext) => void;
+ sessionSwitch: (ctx: ExtensionContext) => void;
+ sessionBranch: (ctx: ExtensionContext) => void;
+ sessionShutdown: () => void;
+ deliver: (payload: unknown) => Promise<void>;
 } {
-	const events: string[] = [];
-	const channels: string[] = [];
-	const handlers: ((event: unknown, ctx: ExtensionContext) => void)[] = [];
-	const listeners: ((data: unknown) => unknown)[] = [];
-	const stub = {
-		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
-			events.push(event);
-			handlers.push(handler);
-		},
-		events: {
-			on: (channel: string, listener: (data: unknown) => unknown) => {
-				channels.push(channel);
-				listeners.push(listener);
-			},
-		},
-		logger: { error: () => {}, debug: () => {}, warn: () => {}, info: () => {} },
-	};
-	return {
-		pi: stub as unknown as ExtensionAPI,
-		events,
-		channels,
-		sessionStart: ctx => {
-			for (const handler of handlers) handler({}, ctx);
-		},
-		deliver: async payload => {
-			// The handler hands its promise back to the bus, so the reap is awaited
-			// here rather than guessed at with a delay.
-			for (const listener of listeners) await listener(payload);
-		},
-	};
+ const events: string[] = [];
+ const channels: string[] = [];
+ const messages: string[] = [];
+ const errors: string[] = [];
+ const handlers: { event: string; handler: (event: unknown, ctx: ExtensionContext) => unknown }[] = [];
+ const listeners = new Set<(data: unknown) => unknown>();
+ const emitSession = (event: string, ctx: ExtensionContext): void => {
+  for (const entry of handlers) {
+   if (entry.event === event) void entry.handler({}, ctx);
+  }
+ };
+ const stub = {
+  sendMessage: (message: { content: string }) => { messages.push(message.content); },
+  on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
+   events.push(event);
+   handlers.push({ event, handler });
+  },
+  events: {
+   on: (channel: string, listener: (data: unknown) => unknown) => {
+    channels.push(channel);
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+   },
+  },
+  logger: {
+   error: (message: string) => { errors.push(message); },
+   debug: () => { },
+   warn: () => { },
+   info: () => { },
+  },
+ };
+ return {
+  pi: stub as unknown as ExtensionAPI,
+  events,
+  channels,
+  messages,
+  errors,
+  sessionStart: ctx => emitSession("session_start", ctx),
+  sessionSwitch: ctx => emitSession("session_switch", ctx),
+  sessionBranch: ctx => emitSession("session_branch", ctx),
+  sessionShutdown: () => emitSession("session_shutdown", {} as ExtensionContext),
+  deliver: async payload => {
+   for (const listener of listeners) await listener(payload);
+  },
+ };
 }
 
 describe("registerSupervision", () => {
-	const ctx = { cwd: "/repo" } as unknown as ExtensionContext;
+ const ctx = contextAt(() => "/repo");
+ const bound = async () => true;
 
-	test("subscribes the lifecycle channel once, inside session_start", () => {
-		const api = recordingApi();
-		registerSupervision(api.pi);
-		expect(api.events).toEqual(["session_start"]);
-		expect(api.channels).toEqual([]);
+ test("unbound and pending markers skip discovery and notices", async () => {
+  const noRun = await mkdtemp(join(tmpdir(), "orc-supervision-no-run-"));
+  const pending = await mkdtemp(join(tmpdir(), "orc-supervision-pending-"));
+  try {
+   await mkdir(join(pending, ".orchestration"));
+   await writeFile(markerPath(pending), JSON.stringify({ schema_version: 1, run_id: "pending" }));
+   const api = recordingApi();
+   registerSupervision(api.pi, markerBound);
 
-		api.sessionStart(ctx);
-		api.sessionStart(ctx);
-		expect(api.channels).toEqual(["task:subagent:lifecycle"]);
-	});
+   api.sessionStart(contextAt(() => noRun));
+   await api.deliver({ id: "impl-7", status: "failed" });
+   api.sessionSwitch(contextAt(() => pending));
+   await api.deliver({ id: "impl-7", status: "failed" });
 
-	test("a terminal payload reaps, a malformed one is ignored", async () => {
-		const api = recordingApi();
-		registerSupervision(api.pi);
-		api.sessionStart(ctx);
+   expect(ran).toEqual([]);
+   expect(api.messages).toEqual([]);
+  } finally {
+   await Promise.all([rm(noRun, { recursive: true, force: true }), rm(pending, { recursive: true, force: true })]);
+  }
+ });
 
-		await api.deliver({ id: "impl-7", status: "completed" });
-		expect(ran).toEqual([
-			["list", "--assignee", "impl-7", "--status", "in_progress", "--json"],
-			["list", "--metadata-field", "actor=impl-7", "--status", "open,in_progress", "--json"],
-		]);
+ test("binding after session start activates subsequent terminal events", async () => {
+  let boundNow = false;
+  const api = recordingApi();
+  registerSupervision(api.pi, async () => boundNow);
+  api.sessionStart(ctx);
 
-		ran = [];
-		await api.deliver({ agent: "orc-implementer" });
-		await api.deliver(null);
-		expect(ran).toEqual([]);
-	});
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran).toEqual([]);
+  expect(api.messages).toEqual([]);
+
+  boundNow = true;
+  world.wisps = null;
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran.some(args => args[0] === "mol")).toBe(true);
+  expect(api.messages.some(message => message.includes("explicitly reconcile"))).toBe(true);
+ });
+
+ test("reads live cwd and follows session switch and branch contexts", async () => {
+  const oldCwd = "/bound-repository";
+  const movedCwd = "/moved-repository";
+  const switchedCwd = "/switched-repository";
+  const branchedCwd = "/branched-repository";
+  let currentCwd = oldCwd;
+  const checked: string[] = [];
+  const api = recordingApi();
+  registerSupervision(api.pi, async cwd => {
+   checked.push(cwd);
+   return cwd === oldCwd;
+  });
+  api.sessionStart(contextAt(() => currentCwd));
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran.length).toBeGreaterThan(0);
+
+  ran = [];
+  currentCwd = movedCwd;
+  await api.deliver({ id: "impl-7", status: "failed" });
+  api.sessionSwitch(contextAt(() => switchedCwd));
+  await api.deliver({ id: "impl-7", status: "failed" });
+  api.sessionBranch(contextAt(() => branchedCwd));
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(checked).toEqual([oldCwd, movedCwd, switchedCwd, branchedCwd]);
+  expect(ran).toEqual([]);
+  expect(api.messages).toEqual([]);
+ });
+
+ test("an unavailable liveness check does not allege child recovery", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, async () => {
+   throw new Error("marker unreadable");
+  });
+  api.sessionStart(ctx);
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran).toEqual([]);
+  expect(api.messages).toEqual([]);
+  expect(api.errors).toEqual(["orchestrate run liveness check unavailable; recovery skipped"]);
+ });
+
+ test("unread candidate discovery notifies the spawning session with a reconciliation action", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+  world.wisps = null;
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(api.messages.some(message => message.includes("explicitly reconcile"))).toBe(true);
+  expect(api.messages.some(message => message.includes("exclusive recovery window"))).toBe(true);
+ });
+
+ test("subscribes the lifecycle channel once, inside session_start", () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  expect(api.events).toEqual(["session_start", "session_switch", "session_branch", "session_shutdown"]);
+  expect(api.channels).toEqual([]);
+
+  api.sessionStart(ctx);
+  api.sessionStart(ctx);
+  expect(api.channels).toEqual(["task:subagent:lifecycle"]);
+ });
+
+ test("disposes the lifecycle subscription on shutdown", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+  api.sessionShutdown();
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran).toEqual([]);
+
+  api.sessionStart(ctx);
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran.filter(args => args[0] === "mol")).toHaveLength(1);
+  expect(api.channels).toEqual(["task:subagent:lifecycle", "task:subagent:lifecycle"]);
+ });
+
+ test("a completed generic helper with empty candidate lists remains quiet", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+
+  await api.deliver({ id: "impl-7", status: "completed" });
+  expect(ran.some(args => args[0] === "mol")).toBe(true);
+  expect(update()).toBeUndefined();
+  expect(api.messages).toEqual([]);
+
+  ran = [];
+  await api.deliver({ agent: "orc-implementer" });
+  await api.deliver(null);
+  expect(ran).toEqual([]);
+ });
 });

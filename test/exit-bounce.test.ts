@@ -1,291 +1,251 @@
-/**
- * The bounce budget in `gateExitContract` is the one path in this plugin that
- * mutates a bead, so it is exercised against the real evaluator with only `../src/bd`
- * replaced. The mock records argv rather than call counts: the contract with `bd` is
- * the command line, and asserting on counts would fail on a harmless extra read.
- */
-
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead, BdComment } from "../src/bd";
 import * as actualBd from "../src/bd";
-import { forgetClaim, recordClaim } from "../src/claim-state";
-import implementer from "../src/contracts/implementer.json";
-
-/** Reads the evaluator performs, swapped per scenario. */
-interface Reads {
-	bead: BdBead | null;
-	comments: BdComment[];
-	linked: string[];
-}
-
-let reads: Reads;
-let issued: string[][];
-
-// Built before `mock.module` runs, so the replacement namespace keeps the real pure
-// helpers (`metadataString`, `commentVerb`) instead of the mock's own bindings.
-const original = { ...actualBd };
-const mocked = {
-	...original,
-	bdShow: async () => reads.bead,
-	bdList: async () => [],
-	bdComments: async () => reads.comments,
-	bdLinked: async () => reads.linked,
-	bdRun: async (args: string[]) => {
-		issued.push(args);
-		return { code: 0, stdout: "", stderr: "" };
-	},
-};
-
-mock.module("../src/bd", () => mocked);
-
-// Dynamic by necessity: a static import is hoisted above `mock.module`, so the
-// evaluator would bind the real `bd` and shell out during the test.
-const { gateExitContract, resetUnclaimedReminder } = await import("../src/gates/exit");
-
-// Restore, so a mock scoped to this file cannot leak into test/bd.test.ts.
-afterAll(() => mock.module("../src/bd", () => original));
+import { createClaimState } from "../src/claim-state";
+import { createExitGuard } from "../src/gates/exit";
 
 const BEAD = "orc-42";
-const MAX_ATTEMPTS = implementer.bounce.max_attempts;
 const CTX = { getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
-
-/**
- * A claimed implementer bead that fails its git contract outright: no branch, no
- * push, no reviewer handoff, still assigned, and no REPORTED comment.
- */
-function failingBead(overrides: Partial<BdBead> = {}): BdBead {
-	const { metadata, ...rest } = overrides;
-	return {
-		id: BEAD,
-		status: "in_progress",
-		assignee: "orc-impl-1",
-		labels: ["agent:implementer"],
-		metadata: { worktree: "/tmp/wt", ...metadata },
-		...rest,
-	};
-}
-
-/** The `--metadata` payload of an issued argv, parsed. */
-function metadataPayload(args: string[] | undefined): unknown {
-	const at = args?.indexOf("--metadata") ?? -1;
-	expect(at).toBeGreaterThan(-1);
-	return JSON.parse(args?.[at + 1] ?? "");
-}
-
-beforeEach(() => {
-	issued = [];
-	reads = { bead: failingBead(), comments: [], linked: [] };
-	recordClaim({ actor: "orc-impl-1", beadIds: [BEAD] });
+let bead: BdBead | null;
+let comments: BdComment[] | null;
+let linked: string[] | null;
+let linkedBead: BdBead | null;
+let linkedComments: BdComment[] | null;
+let issued: string[][];
+let fixture: string;
+let claims = createClaimState();
+let gateExitContract: ReturnType<typeof createExitGuard>;
+const spies = [
+ spyOn(actualBd, "bdShow").mockImplementation(async id => id === BEAD ? bead : linkedBead),
+ spyOn(actualBd, "bdCommentsChecked").mockImplementation(async id => id === BEAD ? comments : linkedComments),
+ spyOn(actualBd, "bdLinkedChecked").mockImplementation(async (_id, _type, _timeout, direction) => {
+  const expected = bead?.ephemeral === true || bead?.wisp_type !== undefined ? "down" : "up";
+  return direction === expected ? linked : [];
+ }),
+ spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+  issued.push(args);
+  return { code: 0, stdout: "", stderr: "" };
+ }),
+];
+afterAll(() => { for (const spy of spies) spy.mockRestore(); });
+afterEach(async () => { claims = createClaimState(); await rm(fixture, { recursive: true, force: true }); });
+beforeEach(async () => {
+ fixture = await mkdtemp(path.join(tmpdir(), "orc-exit-"));
+ await mkdir(path.join(fixture, "artifacts"));
+ await writeFile(path.join(fixture, "artifacts/result"), "evidence");
+ claims = createClaimState();
+ gateExitContract = createExitGuard(claims);
+ issued = [];
+ bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git" } };
+ comments = [];
+ linked = [];
+ linkedBead = null;
+ linkedComments = [];
+ claims.recordClaim({ actor: "A", beadIds: [BEAD] });
 });
 
-afterEach(forgetClaim);
-
-describe("G4 bounce budget", () => {
-	test("the role contract still sets the cap this suite assumes", () => {
-		expect(MAX_ATTEMPTS).toBe(3);
-	});
-
-	test.each([
-		["absent", undefined, 1],
-		["0", "0", 1],
-		["1", "1", 2],
-	])("blocks below the cap with stop_attempts %s", async (_label, stored, attempt) => {
-		reads.bead = failingBead({ metadata: stored === undefined ? {} : { stop_attempts: stored } });
-
-		const result = await gateExitContract(CTX);
-
-		expect(result?.block).toBe(true);
-		const reason = JSON.parse(result?.reason ?? "") as {
-			bead: string;
-			agent: string;
-			attempt: number;
-			failed_checks: { check: string; detail: string }[];
-		};
-		expect(reason.bead).toBe(BEAD);
-		expect(reason.agent).toBe("implementer");
-		expect(reason.attempt).toBe(attempt);
-		// Every git-gated check plus the REPORTED comment is unmet, and each failure
-		// names the predicate the worker has to satisfy.
-		expect(reason.failed_checks.map(failure => failure.check).sort()).toEqual([
-			"branch",
-			"delivery",
-			"handoff",
-			"reported",
-			"unclaimed",
-		]);
-		expect(reason.failed_checks.every(failure => failure.detail.startsWith("unsatisfied: "))).toBe(true);
-
-		// The only mutation below the cap is the incremented attempt counter: the
-		// bead stays claimed so the same worker can correct and retry.
-		expect(issued.map(args => args[0])).toEqual(["update"]);
-		expect(issued[0]?.slice(0, 2)).toEqual(["update", BEAD]);
-		expect(metadataPayload(issued[0])).toEqual({ stop_attempts: attempt });
-	});
-
-	test("releases the bead and allows the exit at the cap", async () => {
-		reads.bead = failingBead({ metadata: { stop_attempts: String(MAX_ATTEMPTS - 1) } });
-
-		const result = await gateExitContract(CTX);
-
-		// ALLOW: a worker must not be trapped against a contract it cannot satisfy.
-		expect(result).toBeUndefined();
-		expect(issued.map(args => args[0])).toEqual(["comment", "update"]);
-
-		const comment = issued[0] ?? [];
-		expect(comment.slice(0, 2)).toEqual(["comment", BEAD]);
-		expect(comment[2]).toStartWith("BOUNCE ");
-		expect(comment[2]).toContain("agent=implementer");
-		expect(comment[2]).toContain(`attempt=${MAX_ATTEMPTS}`);
-
-		const update = issued[1] ?? [];
-		expect(update.slice(0, 2)).toEqual(["update", BEAD]);
-		// The claim is dropped and the bead re-queued for redispatch.
-		expect(update[update.indexOf("--assignee") + 1]).toBe("");
-		expect(update[update.indexOf("--status") + 1]).toBe("open");
-		expect(metadataPayload(update)).toEqual({ stop_attempts: 0, review_round: 0 });
-	});
-
-	test("reopens a closed bead before releasing it", async () => {
-		// `closed` is also a denied state for this role, so the exit fails the
-		// authority check too; the bounce still has to leave the bead workable.
-		reads.bead = failingBead({ status: "closed", metadata: { stop_attempts: String(MAX_ATTEMPTS - 1) } });
-
-		const result = await gateExitContract(CTX);
-
-		expect(result).toBeUndefined();
-		// Order matters: the audit comment lands first, and the reopen precedes the
-		// update so `--status open` is not applied to a closed bead.
-		expect(issued.map(args => args[0])).toEqual(["comment", "reopen", "update"]);
-		expect(issued[1]).toEqual(["reopen", BEAD, "--reason", "contract bounce"]);
-	});
-
-	test("an evaluation past the cap resets rather than re-incrementing", async () => {
-		reads.bead = failingBead({ metadata: { stop_attempts: String(MAX_ATTEMPTS + 5) } });
-
-		expect(await gateExitContract(CTX)).toBeUndefined();
-		expect(metadataPayload(issued.at(-1))).toEqual({ stop_attempts: 0, review_round: 0 });
-	});
+test("released shepherd preserves inherited approval on an exact-head IDLE exit", async () => {
+ bead = {
+  id: BEAD,
+  status: "open",
+  assignee: "",
+  labels: ["orc-merge", "state:approved"],
+  metadata: { role: "shepherd", execution_kind: "git", head_sha: "abc123" },
+ };
+ comments = [{ text: `IDLE ${BEAD} head_sha=abc123 waiting for merge window` }];
+ const shepherd = { getSystemPrompt: () => ["ORC-ROLE: shepherd"] } as unknown as ExtensionContext;
+ expect(await gateExitContract(shepherd)).toBeUndefined();
+ expect(bead.labels).toContain("state:approved");
+ expect(bead.assignee).toBe("");
+ expect(issued).toEqual([]);
 });
 
-describe("G4 fail-open", () => {
-	test("an unreadable bead allows the exit and mutates nothing", async () => {
-		reads = { bead: null, comments: [], linked: [] };
-
-		expect(await gateExitContract(CTX)).toBeUndefined();
-		expect(issued).toEqual([]);
-	});
-
-	test("no observed claim still mutates nothing, but is no longer a free exit", async () => {
-		// Superseded deliberately: this asserted that an unclaimed worker exits
-		// silently, which an adversarial run showed loses the work. It now takes one
-		// reminder, and still touches no bead -- there is none to touch.
-		forgetClaim();
-		resetUnclaimedReminder();
-
-		expect((await gateExitContract(CTX))?.block).toBe(true);
-		expect(issued).toEqual([]);
-	});
+describe("G4 activation refusal budget", () => {
+ test("repeated invalid exits are bounded without rewriting shared state", async () => {
+  bead!.metadata = { execution_kind: "git", stop_attempts: "bad" };
+  expect((await gateExitContract(CTX))?.block).toBe(true);
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).attempt).toBe(2);
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
+  expect(bead!.assignee).toBe("A");
+  expect(bead!.status).toBe("in_progress");
+ });
+ test("a new activation gets its own refusal budget", async () => {
+  for (let i = 0; i < 3; i++) await gateExitContract(CTX);
+  claims = createClaimState();
+  gateExitContract = createExitGuard(claims);
+  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).attempt).toBe(1);
+ });
+ test("late A yield cannot change successor B ownership", async () => {
+  bead!.assignee = "B";
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
+  expect(bead!.assignee).toBe("B");
+ });
+ test("closed invalid work is never reopened at the cap", async () => {
+  bead!.status = "closed";
+  for (let i = 0; i < 3; i++) await gateExitContract(CTX);
+  expect(issued).toEqual([]);
+  expect(bead!.status).toBe("closed");
+ });
+ test("completion of the first bead does not conceal another unfinished claim", async () => {
+  bead = { id: BEAD, status: "blocked", assignee: "A" };
+  comments = [{ text: "BLOCKED awaiting prerequisite" }];
+  linkedBead = { id: "second", assignee: "A", metadata: { execution_kind: "git" } };
+  claims.recordClaim({ actor: "A", beadIds: [BEAD, "second"] });
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).bead).toBe("second");
+  expect(issued).toEqual([]);
+ });
 });
 
-describe("G4 escape hatch", () => {
-	test.each(["FAILED", "BLOCKED"])("%s on a blocked bead exits without a bounce", async verb => {
-		reads.bead = failingBead({ status: implementer.escape.state, metadata: { stop_attempts: "1" } });
-		reads.comments = [{ text: `${verb}: toolchain missing, cannot build` }];
-
-		expect(await gateExitContract(CTX)).toBeUndefined();
-		// No increment: a declared failure is a valid exit, not a contract breach.
-		expect(issued).toEqual([]);
-	});
-
-	test("a blocked bead with no declaring comment still bounces", async () => {
-		reads.bead = failingBead({ status: implementer.escape.state, metadata: { stop_attempts: "1" } });
-		reads.comments = [{ text: "note: went quiet" }];
-
-		const result = await gateExitContract(CTX);
-
-		expect(result?.block).toBe(true);
-		expect(metadataPayload(issued[0])).toEqual({ stop_attempts: 2 });
-	});
+describe("G4 checked evidence", () => {
+ test.each(["bead", "comments", "links", "linked comments", "linked bead"])("unknown %s permits an unevaluated exit without mutation", async source => {
+  if (source === "bead") bead = null;
+  if (source === "comments") comments = null;
+  if (source === "links") linked = null;
+  if (source.startsWith("linked")) linked = ["node"];
+  if (source === "linked comments") linkedComments = null;
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
+ });
+ test("a git implementer can report and release before host branch capture", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc123" } };
+  comments = [{ text: "REPORTED committed abc123" }];
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  delete bead.metadata!.head_sha;
+  expect((await gateExitContract(CTX))?.block).toBe(true);
+ });
+ test.each(["artifact", "comment", "external"])("%s writer completion requires handoff and release", async kind => {
+  bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: kind, artifacts_dir: path.join(fixture, "artifacts"), output_ref: path.join(fixture, "artifacts/result") } };
+  comments = [{ text: "REPORTED result" }];
+  const result = await gateExitContract(CTX);
+  expect(JSON.parse(result!.reason!).failed_checks.map((failure: { check: string }) => failure.check)).toEqual(["handoff", "unclaimed"]);
+  bead.assignee = "";
+  bead.labels = ["agent:reviewer"];
+  expect(await gateExitContract(CTX)).toBeUndefined();
+ });
+ test.each(["review", "escalation"])("claimed %s wisp reads its outgoing node verdict", async kind => {
+  bead = { id: BEAD, ephemeral: true, wisp_type: kind, assignee: "", status: "closed" };
+  linked = ["node"];
+  linkedBead = { id: "node" };
+  linkedComments = [{ text: kind === "review" ? "REVIEW approved" : "ADVICE use the existing API" }];
+  const role = kind === "review" ? "reviewer" : "researcher";
+  const ctx = { getSystemPrompt: () => [`ORC-ROLE: ${role}`] } as unknown as ExtensionContext;
+  expect(await gateExitContract(ctx)).toBeUndefined();
+  linkedComments = [];
+  expect((await gateExitContract(ctx))?.block).toBe(true);
+ });
+ test("historical linked verdict cannot satisfy the current head and round", async () => {
+  bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2 } };
+  linked = ["node"];
+  linkedBead = { id: "node", metadata: { head_sha: "old", review_round: 1 } };
+  linkedComments = [{ text: "REVIEW node head_sha=old review_round=1" }];
+  const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+  expect((await gateExitContract(ctx))?.block).toBe(true);
+  linkedComments = [{ text: "REVIEW node head_sha=new review_round=2" }];
+  expect(await gateExitContract(ctx)).toBeUndefined();
+ });
+ test.each(["traversal", "symlink", "missing"])("artifact %s is not contained evidence", async kind => {
+  await writeFile(path.join(fixture, "outside"), "outside");
+  await symlink(path.join(fixture, "outside"), path.join(fixture, "artifacts/link"));
+  const output = kind === "traversal" ? `${fixture}/artifacts/../outside`
+   : path.join(fixture, "artifacts", kind === "symlink" ? "link" : "missing");
+  bead = { id: BEAD, assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "artifact", artifacts_dir: path.join(fixture, "artifacts"), output_ref: output } };
+  comments = [{ text: "REPORTED artifact" }];
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks.map((failure: { check: string }) => failure.check)).toEqual(["artifact_path"]);
+ });
+ test("research without execution evidence cannot pass with zero checks", async () => {
+  bead = { id: BEAD, assignee: "A" };
+  const ctx = { getSystemPrompt: () => ["ORC-ROLE: researcher"] } as unknown as ExtensionContext;
+  expect(JSON.parse((await gateExitContract(ctx))!.reason!).failed_checks[0].check).toBe("execution-kind");
+ });
+ test("unknown declared mode cannot bypass conditional checks", async () => {
+  bead!.metadata = { execution_kind: "future" };
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].check).toBe("execution-kind");
+ });
+ test("open escalation pauses work; closure restores completion checks without requeue writes", async () => {
+  linked = ["question"];
+  linkedBead = { id: "question", ephemeral: true, wisp_type: "escalation", status: "open" };
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(bead!.assignee).toBe("A");
+  linkedBead.status = "closed";
+  expect((await gateExitContract(CTX))?.block).toBe(true);
+  expect(issued).toEqual([]);
+ });
+ test("blocked escape requires positively read declaration", async () => {
+  bead!.status = "blocked";
+  expect((await gateExitContract(CTX))?.block).toBe(true);
+  comments = [{ text: "BLOCKED missing prerequisite" }];
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
+ });
 });
 
-/**
- * The hole an adversarial run found: a worker told "there are no beads, invent your
- * own task list" wrote code, claimed nothing, and exited `completed`. With no claim
- * there is no bead to evaluate and no id to name a captured branch, so the work was
- * lost while the run recorded a healthy child.
- */
 describe("G4 unclaimed exit", () => {
-	beforeEach(() => {
-		forgetClaim();
-		resetUnclaimedReminder();
-	});
+ beforeEach(() => {
+  claims = createClaimState();
+  claims = createClaimState();
+ gateExitContract = createExitGuard(claims);
+ });
 
-	test("a role-marked worker holding no claim is refused once", async () => {
-		const result = await gateExitContract(CTX, { result: { data: "wrote src/greet.ts, all done" } });
+ test("a role-marked worker holding no claim is refused once", async () => {
+  const result = await gateExitContract(CTX, { result: { data: "wrote src/greet.ts, all done" } });
 
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("without ever claiming a bead");
-		// Nothing to mutate: there is no bead to carry a bounce counter.
-		expect(issued).toEqual([]);
-	});
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("without ever claiming a bead");
+  // Nothing to mutate: there is no bead to carry a bounce counter.
+  expect(issued).toEqual([]);
+ });
 
-	test("the refusal never repeats, so a revived worker cannot be trapped", async () => {
-		// A worker revived after a crash holds a claim this process never observed.
-		expect((await gateExitContract(CTX, { result: { data: "done" } }))?.block).toBe(true);
-		expect(await gateExitContract(CTX, { result: { data: "done" } })).toBeUndefined();
-	});
+ test("the refusal never repeats, so a revived worker cannot be trapped", async () => {
+  // A worker revived after a crash holds a claim this process never observed.
+  expect((await gateExitContract(CTX, { result: { data: "done" } }))?.block).toBe(true);
+  expect(await gateExitContract(CTX, { result: { data: "done" } })).toBeUndefined();
+ });
 
-	test("a declared NO_WORK exit is allowed immediately", async () => {
-		expect(await gateExitContract(CTX, { result: { data: "NO_WORK: implementer queue is empty" } })).toBeUndefined();
-	});
+ test("a declared NO_WORK exit is allowed immediately", async () => {
+  expect(await gateExitContract(CTX, { result: { data: "NO_WORK: implementer queue is empty" } })).toBeUndefined();
+ });
 
-	/**
-	 * The other honest claimless exit. The pull hands the loser of a simultaneous claim
-	 * a Dolt serialization failure and nothing else, even with a second bead still
-	 * unclaimed -- so this worker's queue was not empty and `NO_WORK` would be false.
-	 */
-	test.each([
-		["the Dolt error", "dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts"],
-		["the SQL state alone", "claim lost after 3 retries at 2s/5s/10s, last error 40001"],
-		["the prose signature", "BLOCKED: three pulls lost, the last a serialization failure"],
-	])("a contention exit quoting %s is allowed", async (_label, quoted) => {
-		expect(await gateExitContract(CTX, { result: { data: quoted } })).toBeUndefined();
-		// No bead, so nothing to mutate either way.
-		expect(issued).toEqual([]);
-	});
+ /**
+  * The other honest claimless exit. The pull hands the loser of a simultaneous claim
+  * a Dolt serialization failure and nothing else, even with a second bead still
+  * unclaimed -- so this worker's queue was not empty and `NO_WORK` would be false.
+  */
+ test.each([
+  ["the Dolt error", "dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts"],
+  ["the SQL state alone", "claim lost after 3 retries at 2s/5s/10s, last error 40001"],
+  ["the prose signature", "BLOCKED: three pulls lost, the last a serialization failure"],
+ ])("a contention exit quoting %s is allowed", async (_label, quoted) => {
+  expect(await gateExitContract(CTX, { result: { data: quoted } })).toBeUndefined();
+  // No bead, so nothing to mutate either way.
+  expect(issued).toEqual([]);
+ });
 
-	// Otherwise the claim is optional: any worker skips it by asserting a race it never
-	// ran. The quoted error is the one part of the exit only a real pull produces.
-	test.each(["BLOCKED", "BLOCKED: could not claim anything", "BLOCKED: contention on the queue, giving up"])(
-		"a bare BLOCKED carrying no error is still refused (%s)",
-		async data => {
-			expect((await gateExitContract(CTX, { result: { data } }))?.block).toBe(true);
-			expect(issued).toEqual([]);
-		},
-	);
+ // Otherwise the claim is optional: any worker skips it by asserting a race it never
+ // ran. The quoted error is the one part of the exit only a real pull produces.
+ test.each(["BLOCKED", "BLOCKED: could not claim anything", "BLOCKED: contention on the queue, giving up"])(
+  "a bare BLOCKED carrying no error is still refused (%s)",
+  async data => {
+   expect((await gateExitContract(CTX, { result: { data } }))?.block).toBe(true);
+   expect(issued).toEqual([]);
+  },
+ );
 
-	test("the refusal names both claimless exits and never sends a lost race to NO_WORK", async () => {
-		const reason = (await gateExitContract(CTX, { result: { data: "done" } }))?.reason ?? "";
+ test("a contract-free session is not asked to claim anything", async () => {
+  // No ORC-ROLE marker: an architect helper or a bundled spawn, neither of
+  // which pulls work, so insisting on a claim would break both.
+  const helper = { getSystemPrompt: () => ["you are a helpful assistant"] } as unknown as ExtensionContext;
+  expect(await gateExitContract(helper, { result: { data: "done" } })).toBeUndefined();
+ });
 
-		// Empty queue -- NO_WORK. Lost race -- retry, then quote the error.
-		expect(reason).toContain("NO_WORK");
-		expect(reason).toContain("Error 1213");
-		expect(reason).toContain("serialization failure");
-		expect(reason).toContain("Never report NO_WORK for a race you lost");
-		// The superseded advice, pinned: it sent the loser of a race to report an empty
-		// queue that was not empty.
-		expect(reason).not.toContain("report NO_WORK and yield");
-	});
-
-	test("a contract-free session is not asked to claim anything", async () => {
-		// No ORC-ROLE marker: an architect helper or a bundled spawn, neither of
-		// which pulls work, so insisting on a claim would break both.
-		const helper = { getSystemPrompt: () => ["you are a helpful assistant"] } as unknown as ExtensionContext;
-		expect(await gateExitContract(helper, { result: { data: "done" } })).toBeUndefined();
-	});
-
-	test("a yield with no payload still gets the reminder", async () => {
-		expect((await gateExitContract(CTX))?.block).toBe(true);
-	});
+ test("a yield with no payload still gets the reminder", async () => {
+  expect((await gateExitContract(CTX))?.block).toBe(true);
+ });
 });

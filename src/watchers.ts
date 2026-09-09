@@ -1,10 +1,10 @@
 /**
- * W1-W4 — the runtime watchers.
+ * W1-W5 — the runtime watchers.
  *
- * Four deterministic observers that record and warn but never gate: stall
- * detection, the bd-mutation audit ledger, dispatch preflight, and the goal
- * relay. Enforcement stays with G1 and the reaper; a watcher's worst failure is
- * silence.
+ * Five deterministic observers that record and warn but never gate: stall
+ * detection, the bd-mutation audit ledger, agent and dependency preflight,
+ * the goal relay, and settings checks. Enforcement stays with G1 and the reaper;
+ * a watcher's worst failure is silence.
  *
  * Nothing here throws out of a handler. A throwing `tool_call` handler blocks the
  * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`), and
@@ -21,13 +21,36 @@
  * spawned, never a sibling's.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
+import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import {
+ coreContractForAgent,
+ coreContractForRole,
+ ROLE_MARKER,
+ type AgentDiscoveryFinding,
+ discoverAgentFindings,
+ requestedAgentNames,
+} from "./agent-preflight";
+import {
+ type BdBead,
+ bdCommentsChecked,
+ bdList,
+ bdRun,
+ bdShow,
+ claimedBead,
+ commentVerb,
+ metadataString,
+ resetReadBudget,
+} from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
-import { bdInvocations } from "./shell";
+import { ensureBeadsPath } from "./beads-mode";
+import { createClaimState, type ClaimObservation, type ClaimState } from "./claim-state";
+import { bdInvocations, effectiveSegments, parseBdInvocation } from "./shell";
+type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
+ Partial<Pick<ExtensionContext, "models">>;
 
 /**
  * Bus channels, as `task/types.ts:59-65`, `mcp/startup-events.ts:4`, and
@@ -43,6 +66,7 @@ const LSP_STARTUP_CHANNEL = "lsp:startup";
 /** Custom-message types for the plugin's notices, namespaced as its others are. */
 const GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
+const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
 
 /**
  * Model roles this plugin's agents name that OMP does NOT ship.
@@ -52,8 +76,8 @@ const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-prefli
  * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
  * unconfigured alias without warning -- so the run must announce it instead.
  *
- * `reviewer` is here because a critic must not share the model family it judges, and no
- * built-in expresses that: `slow` and `plan` are the authoring tier.
+ * `reviewer` gives the independent review agent its own configurable model selection.
+ * Model-family separation is optional and requires an explicit model choice.
  *
  * `test/declared-surface.json` carries the same list and the suite asserts they agree.
  */
@@ -67,9 +91,9 @@ const PENDING_RUN = "pending";
 
 /** Record a watcher failure and carry on: a watcher never interferes with a session. */
 function logFailure(pi: ExtensionAPI, watcher: string, error: unknown): void {
-	pi.logger.error(`orchestrate ${watcher} failed`, {
-		error: error instanceof Error ? error.message : String(error),
-	});
+ pi.logger.error(`orchestrate ${watcher} failed`, {
+  error: error instanceof Error ? error.message : String(error),
+ });
 }
 
 /**
@@ -77,9 +101,9 @@ function logFailure(pi: ExtensionAPI, watcher: string, error: unknown): void {
  * bound run.
  */
 async function boundEpic(cwd: string): Promise<string | undefined> {
-	const run = await readActiveRun(cwd);
-	if (run === null || run.run_id === PENDING_RUN) return undefined;
-	return run.run_id;
+ const run = await readActiveRun(cwd);
+ if (run === null || run.run_id === PENDING_RUN) return undefined;
+ return run.run_id;
 }
 
 // ============================================================================
@@ -93,19 +117,19 @@ const DEFAULT_STALL_MINUTES = 10;
 
 /** Minutes of silence that make a child stalled: `ORC_STALL_MINUTES`, or 10. */
 export function stallMinutes(): number {
-	const configured = Number(process.env.ORC_STALL_MINUTES);
-	return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALL_MINUTES;
+ const configured = Number(process.env.ORC_STALL_MINUTES);
+ return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALL_MINUTES;
 }
 
 /** What stall detection reads off one progress payload. */
 export interface ProgressSample {
-	child: string;
-	/** Cumulative tokens the child has spent. */
-	tokens: number;
-	/** The child's recent output tail, flattened so two samples compare by value. */
-	output: string;
-	/** True once the runtime reports the child as settled. */
-	terminal: boolean;
+ child: string;
+ /** Cumulative tokens the child has spent. */
+ tokens: number;
+ /** The child's recent output tail, flattened so two samples compare by value. */
+ output: string;
+ /** True once the runtime reports the child as settled. */
+ terminal: boolean;
 }
 
 /**
@@ -118,33 +142,34 @@ export interface ProgressSample {
  * casting — the doctrine `mcp/startup-events.ts:108-112` states for the same bus.
  */
 export function progressSample(data: unknown): ProgressSample | undefined {
-	if (data === null || typeof data !== "object" || !("progress" in data)) return undefined;
-	const progress = data.progress;
-	if (progress === null || typeof progress !== "object") return undefined;
-	if (!("id" in progress) || typeof progress.id !== "string" || progress.id.length === 0) return undefined;
+ if (data === null || typeof data !== "object" || !("progress" in data)) return undefined;
+ const progress = data.progress;
+ if (progress === null || typeof progress !== "object") return undefined;
+ if (!("id" in progress) || typeof progress.id !== "string" || progress.id.length === 0) return undefined;
 
-	const tokens = "tokens" in progress && typeof progress.tokens === "number" ? progress.tokens : 0;
-	const lines =
-		"recentOutput" in progress && Array.isArray(progress.recentOutput)
-			? progress.recentOutput.filter(line => typeof line === "string")
-			: [];
-	const status = "status" in progress ? progress.status : undefined;
+ const tokens = "tokens" in progress && typeof progress.tokens === "number" ? progress.tokens : 0;
+ const lines =
+  "recentOutput" in progress && Array.isArray(progress.recentOutput)
+   ? progress.recentOutput.filter(line => typeof line === "string")
+   : [];
+ const status = "status" in progress ? progress.status : undefined;
 
-	return {
-		child: progress.id,
-		tokens,
-		output: lines.join("\n"),
-		terminal: status === "completed" || status === "failed" || status === "aborted",
-	};
+ return {
+  child: progress.id,
+  tokens,
+  output: lines.join("\n"),
+  terminal: status === "completed" || status === "failed" || status === "aborted",
+ };
 }
 
 interface ChildActivity {
-	tokens: number;
-	output: string;
-	/** When this child's last progress delta was observed. */
-	changedMs: number;
-	/** Whether it has already been reported. Reported at most once. */
-	flagged: boolean;
+ tokens: number;
+ output: string;
+ /** When this child's last progress delta was observed. */
+ changedMs: number;
+ /** Whether it has already been reported. Reported at most once. */
+ flagged: boolean;
+ report?: { bead: string; notice: string; commented: boolean };
 }
 
 const activity = new Map<string, ChildActivity>();
@@ -159,51 +184,42 @@ const activity = new Map<string, ChildActivity>();
  * threshold elapsed.
  */
 export function noteProgress(sample: ProgressSample, atMs: number): void {
-	if (sample.terminal) {
-		activity.delete(sample.child);
-		return;
-	}
-	const seen = activity.get(sample.child);
-	if (seen === undefined) {
-		activity.set(sample.child, {
-			tokens: sample.tokens,
-			output: sample.output,
-			changedMs: atMs,
-			flagged: false,
-		});
-		return;
-	}
-	if (seen.tokens === sample.tokens && seen.output === sample.output) return;
-	seen.tokens = sample.tokens;
-	seen.output = sample.output;
-	seen.changedMs = atMs;
+ if (sample.terminal) {
+  activity.delete(sample.child);
+  return;
+ }
+ const seen = activity.get(sample.child);
+ if (seen === undefined) {
+  activity.set(sample.child, {
+   tokens: sample.tokens,
+   output: sample.output,
+   changedMs: atMs,
+   flagged: false,
+  });
+  return;
+ }
+ if (seen.tokens === sample.tokens && seen.output === sample.output) return;
+ seen.tokens = sample.tokens;
+ seen.output = sample.output;
+ seen.changedMs = atMs;
 }
 
 /** A child that has gone silent, and for how long. */
 export interface StallFlag {
-	child: string;
-	silentMinutes: number;
+ child: string;
+ silentMinutes: number;
 }
 
-/**
- * Children whose last progress delta is older than `thresholdMs`, each returned
- * once. `atMs` is the caller's clock, so a sweep is exercised without waiting on
- * one.
- *
- * Flagging is sticky: the contract is one report per child. A child that resumes
- * and stalls again belongs to the patrol contract as a dead-claim candidate, not
- * to a second comment on the same bead.
- */
+/** Pending silent children. Persistence, not detection, makes a report sticky. */
 export function sweepStalls(atMs: number, thresholdMs: number): StallFlag[] {
-	const flagged: StallFlag[] = [];
-	for (const [child, state] of activity) {
-		if (state.flagged) continue;
-		const silentMs = atMs - state.changedMs;
-		if (silentMs < thresholdMs) continue;
-		state.flagged = true;
-		flagged.push({ child, silentMinutes: Math.round(silentMs / 60_000) });
-	}
-	return flagged;
+ const flagged: StallFlag[] = [];
+ for (const [child, state] of activity) {
+  if (state.flagged) continue;
+  const silentMs = atMs - state.changedMs;
+  if (silentMs < thresholdMs) continue;
+  flagged.push({ child, silentMinutes: Math.round(silentMs / 60_000) });
+ }
+ return flagged;
 }
 
 /**
@@ -216,20 +232,34 @@ export function sweepStalls(atMs: number, thresholdMs: number): StallFlag[] {
  * nothing to annotate, and the runtime already reports its exit.
  */
 async function reportStall(flag: StallFlag): Promise<void> {
-	const bead = await claimedBead(flag.child);
-	if (bead === null) return;
-	const notice = `STALL child ${flag.child} silent ${flag.silentMinutes}m on ${bead.id}`;
-	await bdRun(["comment", bead.id, notice]);
-	await bdRun([
-		"create",
-		notice,
-		"--ephemeral",
-		"--wisp-type",
-		"error",
-		"--deps",
-		`relates-to:${bead.id}`,
-		"--silent",
-	]);
+ const state = activity.get(flag.child);
+ if (state === undefined) return;
+ if (state.report === undefined) {
+  const bead = await claimedBead(flag.child);
+  if (bead === null || activity.get(flag.child) !== state) return;
+  state.report = {
+   bead: bead.id,
+   notice: `STALL child ${flag.child} silent ${flag.silentMinutes}m on ${bead.id}`,
+   commented: false,
+  };
+ }
+ const report = state.report;
+ if (!report.commented) {
+  const result = await bdRun(["comment", report.bead, report.notice]);
+  if (result?.code !== 0) return;
+  report.commented = true;
+ }
+ const result = await bdRun([
+  "create",
+  report.notice,
+  "--ephemeral",
+  "--wisp-type",
+  "error",
+  "--deps",
+  `relates-to:${report.bead}`,
+  "--silent",
+ ]);
+ if (result?.code === 0) state.flagged = true;
 }
 
 /**
@@ -237,17 +267,31 @@ async function reportStall(flag: StallFlag): Promise<void> {
  * (`bd.ts:59-62`): a sweep is its own dispatch, and a budget left exhausted by the
  * previous one would silently disable the watcher.
  */
+let sweepInFlight = false;
+
 async function sweep(pi: ExtensionAPI): Promise<void> {
-	const flagged = sweepStalls(Date.now(), stallMinutes() * 60_000);
-	if (flagged.length === 0) return;
-	resetReadBudget();
-	for (const flag of flagged) {
-		try {
-			await reportStall(flag);
-		} catch (error) {
-			logFailure(pi, "stall report", error);
-		}
-	}
+ resetReadBudget();
+ if (sweepInFlight) return;
+ sweepInFlight = true;
+ try {
+  for (const flag of sweepStalls(Date.now(), stallMinutes() * 60_000)) {
+   try {
+    await reportStall(flag);
+   } catch (error) {
+    logFailure(pi, "stall report", error);
+   }
+  }
+ } finally {
+  // Rotate the first pending child so repeated unavailable claims cannot
+  // monopolize every later sweep's read budget.
+  for (const [child, state] of activity) {
+   if (state.flagged) continue;
+   activity.delete(child);
+   activity.set(child, state);
+   break;
+  }
+  sweepInFlight = false;
+ }
 }
 
 // ============================================================================
@@ -256,14 +300,14 @@ async function sweep(pi: ExtensionAPI): Promise<void> {
 
 /** `bd` subcommands that change bead state. The ledger records only these. */
 const MUTATING_SUBCOMMANDS: Record<string, true> = {
-	update: true,
-	close: true,
-	create: true,
-	comment: true,
-	label: true,
-	dep: true,
-	reopen: true,
-	"set-state": true,
+ update: true,
+ close: true,
+ create: true,
+ comment: true,
+ label: true,
+ dep: true,
+ reopen: true,
+ "set-state": true,
 };
 
 /**
@@ -276,12 +320,12 @@ const MUTATING_SUBCOMMANDS: Record<string, true> = {
  * `echo bd update` — where `bd` is an argument, not the command — does not.
  */
 export function bdMutation(command: string): string | undefined {
-	for (const invocation of bdInvocations(command)) {
-		// `=== true`: a subcommand named `constructor` or `toString` would otherwise
-		// resolve through `Object.prototype` and be recorded as a bead mutation.
-		if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true) return invocation.subcommand;
-	}
-	return undefined;
+ for (const invocation of bdInvocations(command)) {
+  // `=== true`: a subcommand named `constructor` or `toString` would otherwise
+  // resolve through `Object.prototype` and be recorded as a bead mutation.
+  if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true) return invocation.subcommand;
+ }
+ return undefined;
 }
 
 let configuredAuditDir: string | undefined;
@@ -291,21 +335,21 @@ let configuredAuditDir: string | undefined;
  * epic's `metadata.artifacts_dir`; it is also the test seam.
  */
 export function setAuditDir(dir: string | undefined): void {
-	configuredAuditDir = dir;
+ configuredAuditDir = dir;
 }
 
 /** Where this session's ledger lives. */
 export function auditDir(cwd: string): string {
-	return configuredAuditDir ?? path.join(cwd, ".orchestration", "audit");
+ return configuredAuditDir ?? path.join(cwd, ".orchestration", "audit");
 }
 
 /** One line of the ledger. */
 export interface AuditEntry {
-	ts: string;
-	child: string;
-	/** The command line the child ran, verbatim — the provenance a reader needs. */
-	argv: string;
-	exitCode: number;
+ ts: string;
+ child: string;
+ /** The command line the child ran, verbatim — the provenance a reader needs. */
+ argv: string;
+ exitCode: number;
 }
 
 /**
@@ -327,11 +371,11 @@ const MAX_AUDIT_STEM = 200;
  * the name is an index, not the datum.
  */
 export function auditFileName(child: string): string | undefined {
-	const safe = child.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
-	if (safe.length === 0) return undefined;
-	// Trimmed from the tail, so neither containment rule can be reintroduced: the
-	// sanitiser has already removed every separator and every leading dot.
-	return `${safe.slice(0, MAX_AUDIT_STEM)}.bdlog`;
+ const safe = child.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "");
+ if (safe.length === 0) return undefined;
+ // Trimmed from the tail, so neither containment rule can be reintroduced: the
+ // sanitiser has already removed every separator and every leading dot.
+ return `${safe.slice(0, MAX_AUDIT_STEM)}.bdlog`;
 }
 
 /**
@@ -339,17 +383,17 @@ export function auditFileName(child: string): string | undefined {
  * writing their own files — or the same one — cannot interleave a partial line.
  */
 export async function appendAudit(dir: string, entry: AuditEntry): Promise<void> {
-	const name = auditFileName(entry.child);
-	if (name === undefined) return;
-	await fs.mkdir(dir, { recursive: true });
-	await fs.appendFile(path.join(dir, name), `${JSON.stringify(entry)}\n`, "utf8");
+ const name = auditFileName(entry.child);
+ if (name === undefined) return;
+ await fs.mkdir(dir, { recursive: true });
+ await fs.appendFile(path.join(dir, name), `${JSON.stringify(entry)}\n`, "utf8");
 }
 
 /** A bd mutation a child ran, as read off `task:subagent:event`. */
 export interface BdMutationEvent {
-	child: string;
-	command: string;
-	exitCode: number;
+ child: string;
+ command: string;
+ exitCode: number;
 }
 
 /**
@@ -358,13 +402,13 @@ export interface BdMutationEvent {
  * errored, which the ledger reports as 1 rather than as success.
  */
 function exitCodeOf(result: unknown, isError: boolean): number {
-	if (result !== null && typeof result === "object" && "details" in result) {
-		const details = result.details;
-		if (details !== null && typeof details === "object" && "exitCode" in details) {
-			if (typeof details.exitCode === "number") return details.exitCode;
-		}
-	}
-	return isError ? 1 : 0;
+ if (result !== null && typeof result === "object" && "details" in result) {
+  const details = result.details;
+  if (details !== null && typeof details === "object" && "exitCode" in details) {
+   if (typeof details.exitCode === "number") return details.exitCode;
+  }
+ }
+ return isError ? 1 : 0;
 }
 
 /**
@@ -389,9 +433,9 @@ const PENDING_LIMIT = 256;
 
 /** The child id a forwarded payload names, or `undefined` when it names none. */
 function childOf(data: unknown): string | undefined {
-	if (data === null || typeof data !== "object") return undefined;
-	if (!("id" in data) || typeof data.id !== "string" || data.id.length === 0) return undefined;
-	return data.id;
+ if (data === null || typeof data !== "object") return undefined;
+ if (!("id" in data) || typeof data.id !== "string" || data.id.length === 0) return undefined;
+ return data.id;
 }
 
 /**
@@ -404,48 +448,48 @@ function childOf(data: unknown): string | undefined {
  * value is that every line is a command a child actually ran.
  */
 export function bdMutationEvent(data: unknown): BdMutationEvent | undefined {
-	const child = childOf(data);
-	if (child === undefined || data === null || typeof data !== "object" || !("event" in data)) return undefined;
-	const event = data.event;
-	if (event === null || typeof event !== "object" || !("type" in event)) return undefined;
-	if (!("toolName" in event) || event.toolName !== "bash") return undefined;
-	if (!("toolCallId" in event) || typeof event.toolCallId !== "string") return undefined;
-	const key = `${child}\u0000${event.toolCallId}`;
+ const child = childOf(data);
+ if (child === undefined || data === null || typeof data !== "object" || !("event" in data)) return undefined;
+ const event = data.event;
+ if (event === null || typeof event !== "object" || !("type" in event)) return undefined;
+ if (!("toolName" in event) || event.toolName !== "bash") return undefined;
+ if (!("toolCallId" in event) || typeof event.toolCallId !== "string") return undefined;
+ const key = `${child}\u0000${event.toolCallId}`;
 
-	if (event.type === "tool_execution_start") {
-		if (!("args" in event) || event.args === null || typeof event.args !== "object") return undefined;
-		const args = event.args;
-		if (!("command" in args) || typeof args.command !== "string") return undefined;
-		if (bdMutation(args.command) === undefined) return undefined;
-		if (pendingBd.size >= PENDING_LIMIT) {
-			const oldest = pendingBd.keys().next();
-			if (!oldest.done) pendingBd.delete(oldest.value);
-		}
-		pendingBd.set(key, { child, command: args.command });
-		return undefined;
-	}
+ if (event.type === "tool_execution_start") {
+  if (!("args" in event) || event.args === null || typeof event.args !== "object") return undefined;
+  const args = event.args;
+  if (!("command" in args) || typeof args.command !== "string") return undefined;
+  if (bdMutation(args.command) === undefined) return undefined;
+  if (pendingBd.size >= PENDING_LIMIT) {
+   const oldest = pendingBd.keys().next();
+   if (!oldest.done) pendingBd.delete(oldest.value);
+  }
+  pendingBd.set(key, { child, command: args.command });
+  return undefined;
+ }
 
-	if (event.type !== "tool_execution_end") return undefined;
-	// Consumed either way, so a replayed end cannot double-count.
-	const pending = pendingBd.get(key);
-	pendingBd.delete(key);
-	const result = "result" in event ? event.result : undefined;
-	const isError = "isError" in event && event.isError === true;
-	const exitCode = exitCodeOf(result, isError);
+ if (event.type !== "tool_execution_end") return undefined;
+ // Consumed either way, so a replayed end cannot double-count.
+ const pending = pendingBd.get(key);
+ pendingBd.delete(key);
+ const result = "result" in event ? event.result : undefined;
+ const isError = "isError" in event && event.isError === true;
+ const exitCode = exitCodeOf(result, isError);
 
-	// Prefer the end event's own `args` when the runtime supplies them. The typed
-	// union omits the field, and the executor itself only probes for it
-	// (`task/executor.ts:1470-1471`), but a live run records commands through this
-	// path -- so it is read when present and correlated when not. Either shape alone
-	// would silently record nothing on the runtime that uses the other.
-	const own = "args" in event && event.args !== null && typeof event.args === "object" ? event.args : undefined;
-	if (own !== undefined && "command" in own && typeof own.command === "string") {
-		if (bdMutation(own.command) === undefined) return undefined;
-		return { child, command: own.command, exitCode };
-	}
+ // Prefer the end event's own `args` when the runtime supplies them. The typed
+ // union omits the field, and the executor itself only probes for it
+ // (`task/executor.ts:1470-1471`), but a live run records commands through this
+ // path -- so it is read when present and correlated when not. Either shape alone
+ // would silently record nothing on the runtime that uses the other.
+ const own = "args" in event && event.args !== null && typeof event.args === "object" ? event.args : undefined;
+ if (own !== undefined && "command" in own && typeof own.command === "string") {
+  if (bdMutation(own.command) === undefined) return undefined;
+  return { child, command: own.command, exitCode };
+ }
 
-	if (pending === undefined) return undefined;
-	return { child: pending.child, command: pending.command, exitCode };
+ if (pending === undefined) return undefined;
+ return { child: pending.child, command: pending.command, exitCode };
 }
 
 // ============================================================================
@@ -456,7 +500,7 @@ const degraded = new Set<string>();
 
 /** Every MCP server or language server that reported itself unhealthy, sorted. */
 export function degradedSet(): string[] {
-	return [...degraded].sort();
+ return [...degraded].sort();
 }
 
 /**
@@ -468,11 +512,11 @@ export function degradedSet(): string[] {
  * degradation, and warning about it would train the reader to ignore the warning.
  */
 export function noteMcpStatus(data: unknown): void {
-	if (data === null || typeof data !== "object" || !("type" in data)) return;
-	if (!("serverName" in data) || typeof data.serverName !== "string") return;
-	const item = `mcp:${data.serverName}`;
-	if (data.type === "failed") degraded.add(item);
-	else if (data.type === "connected") degraded.delete(item);
+ if (data === null || typeof data !== "object" || !("type" in data)) return;
+ if (!("serverName" in data) || typeof data.serverName !== "string") return;
+ const item = `mcp:${data.serverName}`;
+ if (data.type === "failed") degraded.add(item);
+ else if (data.type === "connected") degraded.delete(item);
 }
 
 /**
@@ -480,22 +524,22 @@ export function noteMcpStatus(data: unknown): void {
  * `failed` means startup itself never ran (`lsp/startup-events.ts:5-13`).
  */
 export function noteLspStartup(data: unknown): void {
-	if (data === null || typeof data !== "object" || !("type" in data)) return;
-	if (data.type === "failed") {
-		degraded.add("lsp:startup");
-		return;
-	}
-	if (data.type !== "completed") return;
-	if (!("servers" in data)) return;
-	const servers = data.servers;
-	if (!Array.isArray(servers)) return;
-	for (const server of servers) {
-		if (server === null || typeof server !== "object") continue;
-		if (!("name" in server) || typeof server.name !== "string") continue;
-		const item = `lsp:${server.name}`;
-		if ("status" in server && server.status === "error") degraded.add(item);
-		else degraded.delete(item);
-	}
+ if (data === null || typeof data !== "object" || !("type" in data)) return;
+ if (data.type === "failed") {
+  degraded.add("lsp:startup");
+  return;
+ }
+ if (data.type !== "completed") return;
+ if (!("servers" in data)) return;
+ const servers = data.servers;
+ if (!Array.isArray(servers)) return;
+ for (const server of servers) {
+  if (server === null || typeof server !== "object") continue;
+  if (!("name" in server) || typeof server.name !== "string") continue;
+  const item = `lsp:${server.name}`;
+  if ("status" in server && server.status === "error") degraded.add(item);
+  else degraded.delete(item);
+ }
 }
 
 /** How rarely the preflight warning repeats: one per wave, not one per spawn. */
@@ -512,13 +556,248 @@ let lastPreflightMs = Number.NEGATIVE_INFINITY;
  * warn.
  */
 async function warnPreflight(cwd: string, atMs: number): Promise<void> {
-	const items = degradedSet();
-	if (items.length === 0) return;
-	if (atMs - lastPreflightMs < PREFLIGHT_INTERVAL_MS) return;
-	const epic = await boundEpic(cwd);
-	if (epic === undefined) return;
-	lastPreflightMs = atMs;
-	await bdRun(["comment", epic, `WARN preflight: ${items.join(", ")} degraded`]);
+ const items = degradedSet();
+ if (items.length === 0) return;
+ if (atMs - lastPreflightMs < PREFLIGHT_INTERVAL_MS) return;
+ const epic = await boundEpic(cwd);
+ if (epic === undefined) return;
+ lastPreflightMs = atMs;
+ await bdRun(["comment", epic, `WARN preflight: ${items.join(", ")} degraded`]);
+}
+
+const AGENT_PREFLIGHT_TIMEOUT_MS = 10_000;
+
+function findingKey(finding: AgentDiscoveryFinding): string {
+ return `${finding.agent}\0${finding.message}\0${finding.path ?? ""}`;
+}
+
+interface SessionInitIdentity {
+ agent?: unknown;
+}
+
+function modelIdentity(model: unknown): string | undefined {
+ if (model === null || typeof model !== "object") return undefined;
+ const record = model as Record<string, unknown>;
+ return typeof record.provider === "string" && typeof record.id === "string"
+  ? `${record.provider}/${record.id}`
+  : undefined;
+}
+
+const FAILURE_VERBS: Record<string, true> = { BLOCKED: true, FAILED: true };
+const FAILURE_REPORT_INPUT_KEYS: Record<string, true> = { command: true, cwd: true, i: true, timeout: true };
+
+/** Unknown ownership, status, or comments never count as durable failure evidence. */
+async function hasMismatchFailureEvidence(claim: ClaimObservation): Promise<boolean> {
+ for (const beadId of claim.beadIds) {
+  const bead = await bdShow(beadId);
+  if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "blocked") return false;
+  const comments = await bdCommentsChecked(beadId);
+  if (comments === null || !comments.some(comment => FAILURE_VERBS[commentVerb(comment.text)] === true)) return false;
+ }
+ return true;
+}
+
+/**
+ * Allow only direct, pinned failure-report writes after fresh ownership reads.
+ * Wrappers, substitutions, alternate environments, background execution, and
+ * mutations of any bead outside this session's claim are refused.
+ */
+async function safeFailureReport(
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+ sourceCwd: string,
+): Promise<boolean> {
+ if (toolName !== "bash" || claim === undefined || claim.beadIds.length === 0) return false;
+ if (input === null || typeof input !== "object") return false;
+ const record = input as Record<string, unknown>;
+ if (Object.keys(record).some(key => FAILURE_REPORT_INPUT_KEYS[key] !== true)) return false;
+ if (Object.hasOwn(record, "cwd") && record.cwd !== sourceCwd) return false;
+ const beadsDir = process.env.BEADS_DIR;
+ if (beadsDir === undefined || !path.isAbsolute(beadsDir)) return false;
+
+ const command = record.command;
+ if (typeof command !== "string" || command.length === 0 || /[`$]/.test(command)) return false;
+ const comment = /^bd[ \t]+comment[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+'((?:BLOCKED|FAILED)[ \t]+[^'\r\n]+)'[ \t]*$/.exec(command);
+ const update = /^bd[ \t]+update[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+--status[ \t]+blocked[ \t]*$/.exec(command);
+ const beadId = comment?.[1] ?? update?.[1];
+ if (beadId === undefined || !claim.beadIds.includes(beadId)) return false;
+
+ const segments = effectiveSegments(command);
+ if (segments.length !== 1) return false;
+ const invocation = parseBdInvocation(segments[0]!);
+ if (invocation === null || invocation.assignments.size !== 0 || invocation.hasClaim || invocation.positionals[0] !== beadId) {
+  return false;
+ }
+ if (comment !== null && (invocation.subcommand !== "comment" || invocation.positionals.length < 2)) return false;
+ if (
+  update !== null &&
+  (invocation.subcommand !== "update" ||
+   invocation.positionals.length !== 2 ||
+   invocation.positionals[1] !== "blocked" ||
+   invocation.rest.length !== 4)
+ ) return false;
+
+ const bead = await bdShow(beadId);
+ if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "in_progress") return false;
+ if (comment !== null) return true;
+ const comments = await bdCommentsChecked(beadId);
+ return comments !== null && comments.some(entry => FAILURE_VERBS[commentVerb(entry.text)] === true);
+}
+
+async function allowMismatchTool(
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+ sourceCwd: string,
+): Promise<boolean> {
+ try {
+  if (await safeFailureReport(toolName, input, claim, sourceCwd)) return true;
+  if (toolName !== "yield") return false;
+  if (claim === undefined || claim.beadIds.length === 0) return true;
+  return await hasMismatchFailureEvidence(claim);
+ } catch {
+  return false;
+ }
+}
+
+function mismatchRefusal(reason: string): ToolCallEventResult {
+ return {
+  block: true,
+  reason: `${reason}. To preserve this claim for recovery, run exactly \`bd comment <claimed-id> 'BLOCKED <reason>'\` (or \`'FAILED <reason>'\`), then \`bd update <claimed-id> --status blocked\`. No wrappers, flags, environment changes, or other bead writes are allowed; the claim remains held.`,
+ };
+}
+
+/**
+ * Enforce the assignment contract inside spawned workers.
+ *
+ * Task and eval children use the same `tool_call` seam. The current model is
+ * checked on every call, so a later model switch cannot evade the contract.
+ * This seam runs before tools, not before the initial model invocation.
+ */
+export async function childAssignmentGate(
+ pi: ExtensionAPI,
+ ctx: ExtensionContext,
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+): Promise<ToolCallEventResult | undefined> {
+ if (sessionRole(pi) !== "worker") return undefined;
+ if (
+  ctx.sessionManager === undefined ||
+  typeof ctx.sessionManager.getEntries !== "function" ||
+  ctx.models === undefined ||
+  typeof ctx.models.resolve !== "function" ||
+  typeof ctx.models.current !== "function" ||
+  typeof ctx.getSystemPrompt !== "function"
+ ) return undefined;
+
+ const entries = ctx.sessionManager.getEntries();
+ let init: SessionInitIdentity | undefined;
+ for (let index = entries.length - 1; index >= 0; index -= 1) {
+  const entry = entries[index];
+  if (entry !== null && typeof entry === "object" && "type" in entry && entry.type === "session_init") {
+   init = entry as SessionInitIdentity;
+   break;
+  }
+ }
+ const namedAgent = typeof init?.agent === "string" && init.agent.length > 0 ? init.agent : undefined;
+ const namedContract = namedAgent === undefined ? undefined : coreContractForAgent(namedAgent);
+ if (namedAgent !== undefined && namedContract === undefined) return undefined;
+
+ const marker = ROLE_MARKER.exec(ctx.getSystemPrompt().join("\n"))?.[1];
+ const contract = namedContract ?? coreContractForRole(marker ?? "");
+ if (contract === undefined) return undefined;
+ const sourceAgent = namedAgent ?? `marker-only (${contract.role})`;
+
+ if (namedContract !== undefined && marker !== namedContract.role) {
+  const reason = `ORC assignment refused for ${sourceAgent}: expected ORC-ROLE ${namedContract.role}, actual ${marker ?? "missing"}; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+
+ let expectedIdentity: string | undefined;
+ let actualIdentity: string | undefined;
+ try {
+  expectedIdentity = modelIdentity(ctx.models.resolve(namedContract?.modelAlias ?? contract.modelAlias));
+  actualIdentity = modelIdentity(ctx.models.current());
+ } catch {
+  const reason = `ORC assignment refused for ${sourceAgent}: model evidence unavailable; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+ if (expectedIdentity === undefined || expectedIdentity !== actualIdentity) {
+  const reason = `ORC assignment refused for ${sourceAgent}: expected model ${expectedIdentity ?? contract.modelAlias}, actual ${actualIdentity ?? "unavailable"}; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+ return undefined;
+}
+function findingLine(finding: AgentDiscoveryFinding): string {
+ return `${finding.agent}: ${finding.message}${finding.path === undefined ? "" : ` (${finding.path})`}`;
+}
+
+/**
+ * Check core and explicitly requested agent definitions without changing spawn policy.
+ * When the runtime exposes effective roots, callers can pass them to the discovery
+ * helper; ExtensionContext currently exposes no roots field, so the watcher delegates
+ * to OMP's initialized discovery scope and otherwise reports what that scope resolves.
+ */
+export async function preflightAgents(
+ pi: ExtensionAPI,
+ ctx: AgentPreflightContext,
+ requested: readonly string[] = [],
+ reportedAgentFindings?: Set<string>,
+): Promise<AgentDiscoveryFinding[]> {
+ if (ctx.models === undefined) return [];
+ const settings = await readSettings(ctx.cwd);
+ const rawOverrides = settings["task.agentModelOverrides"];
+ const modelOverrides =
+  rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
+   ? (rawOverrides as Record<string, unknown>)
+   : {};
+ let rejectTimeout: (reason: Error) => void = () => { };
+ const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
+  rejectTimeout = reason => reject(reason);
+ });
+ const timer = ctx.setTimeout(() => rejectTimeout(new Error("agent discovery timed out")), AGENT_PREFLIGHT_TIMEOUT_MS);
+ try {
+  const findings = await Promise.race([discoverAgentFindings(ctx, requested, modelOverrides), timeout]).catch(
+   (error): AgentDiscoveryFinding[] => [{
+    agent: "discovery",
+    message: `unavailable: ${error instanceof Error ? error.message : String(error)}`,
+   }],
+  );
+  const fresh = findings.filter(finding => {
+   const key = findingKey(finding);
+   if (reportedAgentFindings?.has(key)) return false;
+   reportedAgentFindings?.add(key);
+   return true;
+  });
+  if (fresh.length > 0) {
+   pi.sendMessage({
+    customType: AGENT_PREFLIGHT_MESSAGE,
+    content: ["WARN agents: runtime discovery is incomplete or inconsistent.", ...fresh.map(finding => `- ${findingLine(finding)}`)].join("\n"),
+    display: true,
+   });
+  }
+  if (findings.length === 0) return findings;
+  const epic = await boundEpic(ctx.cwd);
+  if (epic !== undefined) {
+   const pending = findings.filter(finding => !reportedAgentFindings?.has(`epic:${epic}\0${findingKey(finding)}`));
+   if (pending.length > 0) {
+    const keys = pending.map(finding => `epic:${epic}\0${findingKey(finding)}`);
+    for (const key of keys) reportedAgentFindings?.add(key);
+    const result = await bdRun(["comment", epic, `WARN agents: ${pending.map(findingLine).join("; ")}`], undefined, ctx.cwd);
+    if (result?.code !== 0) {
+     for (const key of keys) reportedAgentFindings?.delete(key);
+    }
+   }
+  }
+  return findings;
+ } finally {
+  ctx.clearTimer(timer);
+ }
 }
 
 // ============================================================================
@@ -527,32 +806,41 @@ async function warnPreflight(cwd: string, atMs: number): Promise<void> {
 
 /** The goal fields an architect acts on. */
 interface GoalNotice {
-	id: string;
-	objective: string;
-	status: string;
+ id: string;
+ objective: string;
+ status: string;
 }
 
-let relayedGoal: string | undefined;
+interface GoalDelivery {
+ delivered: Set<string>;
+ complete: boolean;
+ notified: number;
+}
+interface GoalQueue {
+ latest: GoalNotice | null;
+ running: Promise<void> | undefined;
+ deliveries: Map<string, GoalDelivery>;
+}
+const goalQueues = new Map<string, GoalQueue>();
 
 /**
  * The epics of one run. A bound run reaches its epics three ways -- the run epic
- * itself, an epic parented under it, and an epic stamped `metadata.run_epic` (the
- * run-membership stamp) -- and an unbound marker reaches all of them, because there
- * is no run to filter by.
+ * itself, an epic parented under it, and an epic stamped `metadata.run_epic`.
+ * Without a positive binding there is no authorized write target.
  *
  * `metadata.origin` is the pre-split spelling of that stamp, still read so a run
  * already in flight keeps reaching its epics. Either key holds a run epic id here,
  * so the fallback cannot match an actor handle by accident.
  */
 export function runEpics(epics: readonly BdBead[], runId: string | undefined): BdBead[] {
-	if (runId === undefined) return [...epics];
-	return epics.filter(
-		epic =>
-			epic.id === runId ||
-			epic.parent === runId ||
-			metadataString(epic, "run_epic") === runId ||
-			metadataString(epic, "origin") === runId,
-	);
+ if (runId === undefined) return [];
+ return epics.filter(
+  epic =>
+   epic.id === runId ||
+   epic.parent === runId ||
+   metadataString(epic, "run_epic") === runId ||
+   metadataString(epic, "origin") === runId,
+ );
 }
 
 /**
@@ -560,36 +848,94 @@ export function runEpics(epics: readonly BdBead[], runId: string | undefined): B
  * architect reads the comment on wake, so the relay survives process death.
  *
  * `goal_updated` also fires for token accounting (`goals/runtime.ts:340-352`), so
- * the relay keys on what an architect would act on — id, status, objective — and
- * skips a repeat. The key is recorded before the writes: a re-entrant event during
- * them must not double-stamp, and a goal whose write failed relays again on its
- * next change.
+ * receipts belong to the current consecutive goal version and its bound run.
+ * One repository queue serializes versions and discards superseded work before
+ * its next write. The managed sweep retries the latest goal after failures or binding.
  *
  * The architecture doc's second step is a `hub` doorbell to live architects.
  * Extensions have no IRC API, so the live half is a one-line notice in the lead's
  * own transcript; the content is already durable on the beads.
  */
-async function relayGoal(pi: ExtensionAPI, cwd: string, goal: GoalNotice): Promise<void> {
-	const key = `${goal.id}\u0000${goal.status}\u0000${goal.objective}`;
-	if (key === relayedGoal) return;
-	relayedGoal = key;
+async function deliverGoal(
+ pi: ExtensionAPI,
+ cwd: string,
+ queue: GoalQueue,
+ goal: GoalNotice,
+ refresh: boolean,
+): Promise<void> {
+ resetReadBudget();
+ const runId = await boundEpic(cwd);
+ if (runId === undefined || queue.latest !== goal) return;
+ let delivery = queue.deliveries.get(runId);
+ if (delivery === undefined) {
+  delivery = { delivered: new Set(), complete: false, notified: 0 };
+  queue.deliveries.set(runId, delivery);
+ }
+ if (delivery.complete && !refresh) return;
+ const open = await bdList(
+  ["list", "--type", "epic", "--status", "open,in_progress", "--limit", "0", "--json"],
+  undefined,
+  cwd,
+ );
+ const targets = runEpics(open, runId);
+ if (targets.length === 0 || queue.latest !== goal) return;
+ delivery.complete = false;
+ for (const epic of targets) {
+  if (queue.latest !== goal) return;
+  if (delivery.delivered.has(epic.id)) continue;
+  const result = await bdRun(["comment", epic.id, `GOAL ${goal.status}: ${goal.objective}`], undefined, cwd);
+  if (result?.code === 0) delivery.delivered.add(epic.id);
+ }
+ if (queue.latest !== goal || !targets.every(epic => delivery.delivered.has(epic.id))) return;
+ delivery.complete = true;
+ if (delivery.notified === delivery.delivered.size) return;
+ delivery.notified = delivery.delivered.size;
+ pi.sendMessage(
+  {
+   customType: GOAL_RELAY_MESSAGE,
+   content: `GOAL ${goal.status} stamped on ${targets.map(epic => epic.id).join(", ")}`,
+   display: true,
+  },
+  { triggerTurn: false },
+ );
+}
 
-	resetReadBudget();
-	const open = await bdList(["list", "--type", "epic", "--status", "open,in_progress", "--json"]);
-	const targets = runEpics(open, await boundEpic(cwd));
-	if (targets.length === 0) return;
+async function retryGoal(pi: ExtensionAPI, cwd: string, refresh = false): Promise<void> {
+ resetReadBudget();
+ const queue = goalQueues.get(cwd);
+ if (queue === undefined) return;
+ if (queue.running !== undefined) return queue.running;
+ queue.running = (async () => {
+  while (queue.latest !== null) {
+   const goal = queue.latest;
+   await deliverGoal(pi, cwd, queue, goal, refresh);
+   if (queue.latest === goal) break;
+  }
+ })();
+ try {
+  await queue.running;
+ } finally {
+  queue.running = undefined;
+ }
+}
 
-	for (const epic of targets) {
-		await bdRun(["comment", epic.id, `GOAL ${goal.status}: ${goal.objective}`]);
-	}
-	pi.sendMessage(
-		{
-			customType: GOAL_RELAY_MESSAGE,
-			content: `GOAL ${goal.status} stamped on ${targets.map(epic => epic.id).join(", ")}`,
-			display: true,
-		},
-		{ triggerTurn: false },
-	);
+async function relayGoal(pi: ExtensionAPI, cwd: string, goal: GoalNotice | null): Promise<void> {
+ resetReadBudget();
+ let queue = goalQueues.get(cwd);
+ if (queue === undefined) {
+  queue = { latest: goal === null ? null : { ...goal }, running: undefined, deliveries: new Map() };
+  goalQueues.set(cwd, queue);
+ } else if (
+  goal === null ||
+  queue.latest === null ||
+  goal.id !== queue.latest.id ||
+  goal.status !== queue.latest.status ||
+  goal.objective !== queue.latest.objective
+ ) {
+  queue.latest = goal === null ? null : { ...goal };
+  queue.deliveries.clear();
+ }
+ await retryGoal(pi, cwd);
 }
 
 // ============================================================================
@@ -601,13 +947,14 @@ async function relayGoal(pi: ExtensionAPI, cwd: string, goal: GoalNotice): Promi
  * run is re-bound beneath a live session.
  */
 export function resetWatchers(): void {
-	activity.clear();
-	pendingBd.clear();
-	degraded.clear();
-	lastPreflightMs = Number.NEGATIVE_INFINITY;
-	relayedGoal = undefined;
-	configuredAuditDir = undefined;
-	settingsChecked = false;
+ activity.clear();
+ pendingBd.clear();
+ degraded.clear();
+ lastPreflightMs = Number.NEGATIVE_INFINITY;
+ for (const queue of goalQueues.values()) queue.latest = null;
+ goalQueues.clear();
+ configuredAuditDir = undefined;
+ settingsChecked = false;
 }
 
 // ============================================================================
@@ -615,7 +962,7 @@ export function resetWatchers(): void {
 // ============================================================================
 
 /**
- * The four session settings the integration model depends on, and what silently
+ * The session settings the integration model depends on, and what silently
  * happens when each is wrong.
  *
  * These were prose-only until an end-to-end run exposed the cost: under the
@@ -630,55 +977,63 @@ export function resetWatchers(): void {
  * could not read.
  */
 interface SettingRequirement {
-	key: string;
-	/** What the run needs, phrased for a human. */
-	want: string;
-	/** True when the observed value satisfies the requirement. */
-	satisfied: (value: unknown) => boolean;
-	/** What breaks while the setting deviates. */
-	consequence: string;
+ key: string;
+ /** What the run needs, phrased for a human. */
+ want: string;
+ /** True when the observed value satisfies the requirement. */
+ satisfied: (value: unknown) => boolean;
+ /** What breaks while the setting deviates. */
+ consequence: string;
 }
 
 const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
-	{
-		key: "task.isolation.mode",
-		want: "anything but none",
-		satisfied: value => typeof value === "string" && value !== "none",
-		consequence: "workers share the architect's tree, so two claims can edit one file",
-	},
-	{
-		key: "task.isolation.merge",
-		want: "branch",
-		satisfied: value => value === "branch",
-		consequence: "commits are replayed as a patch instead of captured as a branch, so no omp/task/<id> branch survives to integrate or to recover after a crash",
-	},
-	{
-		key: "task.isolation.apply",
-		want: "false",
-		satisfied: value => value === false,
-		consequence: "child work is merged into the spawning tree automatically, so the architect never owns integration",
-	},
-	{
-		key: "task.enableEffort",
-		want: "true",
-		satisfied: value => value === true,
-		consequence: "the per-spawn effort is silently ignored, so every agent runs at the session default",
-	},
-	{
-		key: "task.maxRecursionDepth",
-		want: "3 or more",
-		satisfied: value => typeof value === "number" && value >= 3,
-		consequence:
-			"a worker's helper sits at depth 3, so at the default 2 no worker can spawn librarian, scout, or operator",
-	},
+ {
+  key: "task.isolation.enabled",
+  want: "true",
+  satisfied: value => value === true,
+  consequence: "workers share the architect's tree, so two claims can edit one file",
+ },
+ {
+  key: "task.isolation.merge",
+  want: "branch",
+  satisfied: value => value === "branch",
+  consequence:
+   "commits are replayed as a patch instead of captured as a branch, so no omp/task/<id> branch survives to integrate or to recover after a crash",
+ },
+ {
+  key: "task.isolation.apply",
+  want: "false",
+  satisfied: value => value === false,
+  consequence: "child work is merged into the spawning tree automatically, so the architect never owns integration",
+ },
+ {
+  key: "task.enableEffort",
+  want: "true",
+  satisfied: value => value === true,
+  consequence: "the per-spawn effort is silently ignored, so every agent runs at the session default",
+ },
+ {
+  key: "task.maxRecursionDepth",
+  want: "3 or more",
+  satisfied: value => typeof value === "number" && value >= 3,
+  consequence:
+   "a worker's helper sits at depth 3, so at the default 2 no worker can spawn librarian, scout, or operator",
+ },
+ {
+  key: "bash.autoBackground.enabled",
+  want: "false",
+  satisfied: value => value === false,
+  consequence:
+   "slow claim commands can auto-background, so their completion bypasses the tool_result observer and the worker's claim is not adopted",
+ },
 ];
 
 /** One setting that deviates, named with what it should be and what that costs. */
 export interface SettingDeviation {
-	key: string;
-	observed: unknown;
-	want: string;
-	consequence: string;
+ key: string;
+ observed: unknown;
+ want: string;
+ consequence: string;
 }
 
 /**
@@ -686,129 +1041,51 @@ export interface SettingDeviation {
  * was unreadable and is skipped rather than reported.
  */
 export function settingsDeviations(observed: Readonly<Record<string, unknown>>): SettingDeviation[] {
-	const found: SettingDeviation[] = [];
-	for (const requirement of REQUIRED_SETTINGS) {
-		if (!(requirement.key in observed)) continue;
-		const value = observed[requirement.key];
-		if (requirement.satisfied(value)) continue;
-		found.push({
-			key: requirement.key,
-			observed: value,
-			want: requirement.want,
-			consequence: requirement.consequence,
-		});
-	}
-	return found;
+ const found: SettingDeviation[] = [];
+ for (const requirement of REQUIRED_SETTINGS) {
+  if (!(requirement.key in observed)) continue;
+  const value = observed[requirement.key];
+  if (requirement.satisfied(value)) continue;
+  found.push({
+   key: requirement.key,
+   observed: value,
+   want: requirement.want,
+   consequence: requirement.consequence,
+  });
+ }
+ return found;
 }
 
-/**
- * Read one setting through `omp config get --json`, or `undefined` when it could
- * not be read. A missing key prints guidance rather than JSON, which parses to
- * nothing and is therefore indistinguishable from an unavailable CLI -- correctly,
- * because neither is evidence of a deviation.
- */
-async function readSetting(key: string, cwd: string): Promise<unknown> {
-	const bin = process.env.OMP_BIN ?? "omp";
-	try {
-		const proc = Bun.spawn([bin, "config", "get", key, "--json"], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const timer = setTimeout(() => proc.kill(), 10_000);
-		try {
-			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-			if (code !== 0) return undefined;
-			const parsed: unknown = JSON.parse(stdout);
-			if (parsed === null || typeof parsed !== "object" || !("value" in parsed)) return undefined;
-			return parsed.value;
-		} finally {
-			clearTimeout(timer);
-		}
-	} catch {
-		return undefined;
-	}
+/** Read the supported effective-settings snapshot; unreadable values prove nothing. */
+async function readSettings(cwd: string): Promise<Record<string, unknown>> {
+ const bin = process.env.OMP_BIN ?? "omp";
+ try {
+  const proc = Bun.spawn([bin, "config", "list", "--json"], {
+   cwd,
+   stdout: "pipe",
+   stderr: "ignore",
+  });
+  const timer = setTimeout(() => proc.kill(), 10_000);
+  try {
+   const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+   if (code !== 0) return {};
+   const parsed: unknown = JSON.parse(stdout);
+   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+   const observed: Record<string, unknown> = {};
+   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles", "task.agentModelOverrides"]) {
+    const entry: unknown = (parsed as Record<string, unknown>)[key];
+    if (entry !== null && typeof entry === "object" && "value" in entry) observed[key] = entry.value;
+   }
+   return observed;
+  } finally {
+   clearTimeout(timer);
+  }
+ } catch {
+  return {};
+ }
 }
 
 let settingsChecked = false;
-
-/**
- * The value each project-ownable requirement should carry in `<run repo>/.omp/config.yml`.
- *
- * Only settings whose correct value is the same for every machine belong here. The
- * global config cannot be trusted to carry them -- a run can start on any machine, and
- * root config differing per machine is exactly why the project file exists. Storage
- * mode and `modelRoles` stay out: the first is a migration, not a value, and the
- * second names machine-specific model selectors nothing here can guess.
- */
-const OWNABLE_VALUES: Record<string, unknown> = {
-	"task.isolation.mode": "auto",
-	"task.isolation.merge": "branch",
-	"task.isolation.apply": false,
-	"task.enableEffort": true,
-	"task.maxRecursionDepth": 3,
-};
-
-/** Render a plain tree as YAML. Objects and scalars only -- all this file ever holds. */
-function renderYaml(node: Record<string, unknown>, indent = ""): string {
-	let out = "";
-	for (const [key, value] of Object.entries(node)) {
-		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-			out += `${indent}${key}:\n${renderYaml(value as Record<string, unknown>, `${indent}  `)}`;
-		} else {
-			out += `${indent}${key}: ${JSON.stringify(value)}\n`;
-		}
-	}
-	return out;
-}
-
-/**
- * Write the deviating project-ownable settings into `<run repo>/.omp/config.yml`.
- *
- * Settings are read once at process start, so this cannot repair the RUNNING session --
- * it makes the next start correct, and the preflight message says to restart. An
- * existing file is merged, not clobbered: unrelated keys survive, though comments do
- * not. A file that exists but does not parse is left alone entirely, because rewriting
- * a file we cannot read destroys whatever it held.
- *
- * Returns the file path when written, undefined when nothing was safe to write.
- */
-async function ensureProjectSettings(cwd: string, keys: readonly string[]): Promise<string | undefined> {
-	const ownable = keys.filter(key => key in OWNABLE_VALUES);
-	if (ownable.length === 0) return undefined;
-
-	const file = path.join(cwd, ".omp", "config.yml");
-	let root: Record<string, unknown> = {};
-	const existing = await fs.readFile(file, "utf8").catch(() => undefined);
-	if (existing !== undefined && existing.trim().length > 0) {
-		try {
-			const parsed: unknown = Bun.YAML.parse(existing);
-			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-			root = structuredClone(parsed) as Record<string, unknown>;
-		} catch {
-			return undefined;
-		}
-	}
-
-	for (const key of ownable) {
-		const segments = key.split(".");
-		let node = root;
-		for (const segment of segments.slice(0, -1)) {
-			const next = node[segment];
-			if (next === null || typeof next !== "object" || Array.isArray(next)) node[segment] = {};
-			node = node[segment] as Record<string, unknown>;
-		}
-		node[segments[segments.length - 1] as string] = OWNABLE_VALUES[key];
-	}
-
-	try {
-		await fs.mkdir(path.dirname(file), { recursive: true });
-		await fs.writeFile(file, renderYaml(root));
-		return file;
-	} catch {
-		return undefined;
-	}
-}
 
 /**
  * Report deviating settings once per session, on the notification surface and on
@@ -821,104 +1098,84 @@ async function ensureProjectSettings(cwd: string, keys: readonly string[]): Prom
  * whose owner cannot reach its configuration.
  */
 export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<SettingDeviation[]> {
-	if (settingsChecked) return [];
-	settingsChecked = true;
-	const observed: Record<string, unknown> = {};
-	for (const { key } of REQUIRED_SETTINGS) {
-		const value = await readSetting(key, cwd);
-		if (value !== undefined) observed[key] = value;
-	}
-	const deviations = settingsDeviations(observed);
-	const lines = deviations.map(
-		deviation =>
-			`${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`,
-	);
+ resetReadBudget();
+ if (settingsChecked) return [];
+ settingsChecked = true;
+ const observed = await readSettings(cwd);
+ const deviations = settingsDeviations(observed);
+ const lines = deviations.map(
+  deviation =>
+   `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`,
+ );
 
-	// The database check is independent of the settings: isolation working correctly
-	// is exactly what splits the database, so a run with a perfect settings block can
-	// still lose every claim.
-	//
-	// An unreadable mode is not evidence of isolation. `observed` holds only the keys
-	// that answered, so testing `!== "none"` would read a missing key as "isolating"
-	// and warn about a split database on a run that may have no isolation at all --
-	// the opposite of this function's rule of warning only about what it can prove.
-	const mode = observed["task.isolation.mode"];
-	const isolating = typeof mode === "string" && mode !== "none";
-	// A repository with no beads database has no claims to split, so the precondition
-	// does not apply and saying so is noise. Observed in the field: this fired in a
-	// repository that had never run `bd init`, where the advice was unactionable.
-	const tracked = await fs
-		.stat(path.join(cwd, ".beads"))
-		.then(entry => entry.isDirectory())
-		.catch(() => false);
-	// Under an embedded database the precondition is a pinned PATH, not a server. bd resolves
-	// by walking up from the working directory, `.beads/` is gitignored, so a clone or worktree
-	// arrives without one and the walk continues past the checkout. Measured on this host:
-	// `$HOME/.beads` exists, so the walk can end in a personal database that no run reads.
-	//
-	// An earlier version of this line demanded a per-project Dolt server instead. That server
-	// cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
-	// rather than from the port, so a removed pid file made every later call start a rival --
-	// nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
-	if (tracked && isolating && (process.env.BEADS_DIR ?? "") === "") {
-		lines.push(
-			"isolation is on and BEADS_DIR is unset, so an isolated worker resolves its own beads database rather than this run's. bd walks up from the working directory and `.beads/` is gitignored, so a clone or worktree arrives without one and the walk can end in a personal database. `/orchestrate-run` pins the run's path for this session and every child it spawns",
-		);
-	}
+ // The database check is independent of the settings: isolation working correctly
+ // is exactly what splits the database, so a run with a perfect settings block can
+ // still lose every claim.
+ //
+ // Only an observed true proves isolation is on; an unavailable setting
+ // cannot establish that this repository risks a split database.
+ const isolating = observed["task.isolation.enabled"] === true;
+ // Probe through bd itself instead of looking only for cwd/.beads. Linked worktrees share the
+ // primary checkout's database and intentionally have no local .beads directory.
+ // Under an embedded database the precondition is a pinned path, not a server. A copied
+ // checkout can resolve a private or unrelated ancestor database because `.beads/` is
+ // gitignored. A linked worktree resolves the primary checkout's database but still needs
+ // the pin so every child inherits the same answer.
+ //
+ // The pin is applied here rather than demanded of the operator. `ensureBeadsPath` asks bd
+ // for the active database, accepts the checkout or its Git-shared primary database, rejects
+ // unrelated external databases, and exports the canonical path. Only refusal merits a line.
+ //
+ // An earlier version of this block demanded a per-project Dolt server instead. That server
+ // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
+ // rather than from the port, so a removed pid file made every later call start a rival --
+ // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
+ if (isolating && (process.env.BEADS_DIR ?? "") === "") {
+  const pinned = await ensureBeadsPath(cwd);
+  if (!pinned.ok) {
+   lines.push(
+    `isolation is on and BEADS_DIR could not be pinned, so an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+   );
+  }
+ }
 
-	// `orc-reviewer` names `@reviewer`, which is NOT one of OMP's ten built-in roles. An
-	// alias OMP cannot resolve returns undefined with NO warning and falls back to the
-	// session default, so an unconfigured consumer would silently run its reviewer on the
-	// author's own model -- losing the family separation the role exists to provide.
-	//
-	// Announced here because a prerequisite that fails silently is the defect this whole
-	// preflight exists to prevent. `test/declared-surface.json` holds the same list, and
-	// the suite asserts the two agree, so neither can drift alone.
-	//
-	// An UNREADABLE setting is skipped, matching this function's rule of warning only
-	// about what it can prove. An empty object is not unreadable: it proves the role is
-	// absent, which is exactly the case worth warning about.
-	const roles = await readSetting("modelRoles", cwd);
-	if (typeof roles === "object" && roles !== null) {
-		for (const role of DECLARED_MODEL_ROLES) {
-			if (Object.hasOwn(roles, role)) continue;
-			lines.push(
-				`modelRoles.${role} is not configured, so \`@${role}\` resolves to nothing and the agent naming it silently runs the session default -- add it, or accept that a critic shares the family it judges`,
-			);
-		}
-	}
+ // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
+ // may fall back to the session model or fail selection. Preflight checks that the
+ // selection exists, not whether author and reviewer use different model families.
+ //
+ // An UNREADABLE setting is skipped, matching this function's rule of warning only
+ // about what it can prove. An empty object is not unreadable: it proves the role is
+ // absent, which is exactly the case worth warning about.
+ const roles = observed.modelRoles;
+ if (typeof roles === "object" && roles !== null) {
+  for (const role of DECLARED_MODEL_ROLES) {
+   if (Object.hasOwn(roles, role)) continue;
+   lines.push(
+    `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
+   );
+  }
+ }
 
-	if (lines.length === 0) return deviations;
+ if (lines.length === 0) return deviations;
 
-	// Ensure, not merely warn: the project-ownable values are written into the run
-	// repository's own `.omp/config.yml`, because the global config differs per machine
-	// and a run can start on any of them. Settings load at process start, so the write
-	// repairs the NEXT session; the message says to restart rather than pretending the
-	// running one was fixed.
-	const written = await ensureProjectSettings(
-		cwd,
-		deviations.map(deviation => deviation.key),
-	);
-	const tail =
-		written === undefined
-			? "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable."
-			: `The project-ownable settings above were written to ${written} (existing keys kept, comments not preserved). Restart the run to load them; the rest need your hands.`;
+ const tail =
+  "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.";
 
-	pi.sendMessage({
-		customType: SETTINGS_PREFLIGHT_MESSAGE,
-		content: [
-			"WARN settings: this run's coordination contract is not fully in force.",
-			...lines.map(line => `- ${line}`),
-			tail,
-		].join("\n"),
-		display: true,
-	});
+ pi.sendMessage({
+  customType: SETTINGS_PREFLIGHT_MESSAGE,
+  content: [
+   "WARN settings: this run's coordination contract is not fully in force.",
+   ...lines.map(line => `- ${line}`),
+   tail,
+  ].join("\n"),
+  display: true,
+ });
 
-	const epic = await boundEpic(cwd);
-	if (epic !== undefined) {
-		await bdRun(["comment", epic, `WARN settings: ${lines.join("; ")}`], undefined, cwd);
-	}
-	return deviations;
+ const epic = await boundEpic(cwd);
+ if (epic !== undefined) {
+  await bdRun(["comment", epic, `WARN settings: ${lines.join("; ")}`], undefined, cwd);
+ }
+ return deviations;
 }
 
 /**
@@ -928,84 +1185,122 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  * the two extension-event handlers are `pi.on` registrations, so importing this
  * module has no observable effect.
  */
-export function registerWatchers(pi: ExtensionAPI): void {
-	pi.on("session_start", async (_event, ctx) => {
-		const cwd = ctx.cwd;
+export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createClaimState()): void {
+ // Lifecycle handlers can run after construction's async scope has ended.
+ const runInDiscoveryScope = AsyncLocalStorage.snapshot();
+ let reportedAgentFindings = new Set<string>();
+ let dispose = () => { };
+ pi.on("session_start", async (_event, ctx) => {
+  dispose();
+  reportedAgentFindings = new Set<string>();
+  const unsubscribers: Array<() => void> = [];
+  dispose = () => {
+   for (const unsubscribe of unsubscribers) unsubscribe();
+  };
+  const cwd = ctx.cwd;
+  // W1. `progress.id` names the child; `Date.now()` is the only clock the
+  // live watcher needs, and the sweep takes its own so it can be exercised.
+  unsubscribers.push(
+   pi.events.on(PROGRESS_CHANNEL, data => {
+    const sample = progressSample(data);
+    if (sample !== undefined) noteProgress(sample, Date.now());
+   }),
+  );
+  // Returning the promise is deliberate: the managed timer contains a
+  // rejection only when it can see one (`managed-timers.ts:66-75`).
+  const timer = ctx.setInterval(async () => {
+   await sweep(pi);
+   if (sessionRole(pi) === "lead") {
+    await retryGoal(pi, cwd, true).catch(error => logFailure(pi, "goal retry", error));
+   }
+  }, SWEEP_MS);
+  unsubscribers.push(() => ctx.clearTimer(timer));
 
-		// W1. `progress.id` names the child; `Date.now()` is the only clock the
-		// live watcher needs, and the sweep takes its own so it can be exercised.
-		pi.events.on(PROGRESS_CHANNEL, data => {
-			const sample = progressSample(data);
-			if (sample !== undefined) noteProgress(sample, Date.now());
-		});
-		// Returning the promise is deliberate: the managed timer contains a
-		// rejection only when it can see one (`managed-timers.ts:66-75`).
-		ctx.setInterval(() => sweep(pi), SWEEP_MS);
+  // W5. The isolation contract is a session setting, so it is checked once, in
+  // the session that spawns. A worker inherits whatever the lead was given and
+  // cannot change it, so warning there would only duplicate the notice.
+  //
+  // Checked at start only where a run is already active: the contract governs
+  // orchestrated runs, and a repository that merely tracks work in beads has no
+  // claims to split until one starts. `/orchestrate-run` runs the settings check
+  // at activation, and the `task` handler below checks agents at spawn, so a
+  // session that never orchestrates hears nothing.
+  if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
+   preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
+   runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
+    logFailure(pi, "agent discovery preflight", error),
+   );
+  }
+  // W2. Passive provenance of every child's bead mutations. A bus handler is
+  // handed no context, so the ledger is rooted at the session's cwd as it was
+  // at start; a run that relocates names its directory through `setAuditDir`,
+  // which is why the path is resolved per write rather than captured here.
+  unsubscribers.push(
+   pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
+    const mutation = bdMutationEvent(data);
+    if (mutation === undefined) return;
+    try {
+     await appendAudit(auditDir(cwd), {
+      ts: new Date().toISOString(),
+      child: mutation.child,
+      argv: mutation.command,
+      exitCode: mutation.exitCode,
+     });
+    } catch (error) {
+     logFailure(pi, "audit ledger", error);
+    }
+   }),
+  );
 
-		// W5. The isolation contract is a session setting, so it is checked once, in
-		// the session that spawns. A worker inherits whatever the lead was given and
-		// cannot change it, so warning there would only duplicate the notice.
-		if (sessionRole(pi) === "lead") {
-			preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
-		}
+  // W3, first half: watch what degrades.
+  unsubscribers.push(pi.events.on(MCP_STATUS_CHANNEL, noteMcpStatus));
+  unsubscribers.push(pi.events.on(LSP_STARTUP_CHANNEL, noteLspStartup));
+ });
+ pi.on("session_shutdown", () => dispose());
 
-		// W2. Passive provenance of every child's bead mutations. A bus handler is
-		// handed no context, so the ledger is rooted at the session's cwd as it was
-		// at start; a run that relocates names its directory through `setAuditDir`,
-		// which is why the path is resolved per write rather than captured here.
-		pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
-			const mutation = bdMutationEvent(data);
-			if (mutation === undefined) return;
-			try {
-				await appendAudit(auditDir(cwd), {
-					ts: new Date().toISOString(),
-					child: mutation.child,
-					argv: mutation.command,
-					exitCode: mutation.exitCode,
-				});
-			} catch (error) {
-				logFailure(pi, "audit ledger", error);
-			}
-		});
+ /**
+  * W3, second half: enforce core assignments before observing `task` spawns.
+  * Warning dedupe never weakens refusal: a known bad core request blocks every
+  * invocation, while the narrow durable failure path preserves its claim.
+  */
+ pi.on("tool_call", async (event, ctx) => {
+  try {
+   resetReadBudget();
+   const assignment = await childAssignmentGate(pi, ctx, event.toolName, event.input, claims.observedClaim());
+   if (assignment) return assignment;
+   if (event.toolName !== "task") return undefined;
+   const requested = requestedAgentNames(event.input);
+   const findings = await runInDiscoveryScope(() =>
+    preflightAgents(pi, ctx, requested, reportedAgentFindings),
+   );
+   const requestedCoreFindings = findings.filter(
+    finding => requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined,
+   );
+   await warnPreflight(ctx.cwd, Date.now());
+   if (requestedCoreFindings.length > 0) {
+    return {
+     block: true,
+     reason: `requested core assignment refused: ${requestedCoreFindings.map(findingLine).join("; ")}`,
+    };
+   }
+  } catch (error) {
+   logFailure(pi, "preflight warning", error);
+  }
+  return undefined;
+ });
 
-		// W3, first half: watch what degrades.
-		pi.events.on(MCP_STATUS_CHANNEL, noteMcpStatus);
-		pi.events.on(LSP_STARTUP_CHANNEL, noteLspStartup);
-	});
-
-	/**
-	 * W3, second half: observe `task` spawns.
-	 *
-	 * A handler of its own, separate from the gate dispatcher: every registered
-	 * handler runs (`extensions/runner.ts:1462-1470`), and this one returns nothing
-	 * on every path, so a degraded dependency can never become a reason a wave does
-	 * not launch.
-	 */
-	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName !== "task") return undefined;
-		try {
-			resetReadBudget();
-			await warnPreflight(ctx.cwd, Date.now());
-		} catch (error) {
-			logFailure(pi, "preflight warning", error);
-		}
-		return undefined;
-	});
-
-	/**
-	 * W4. `goal_updated` fires only in the goal-owning session — subagents have no
-	 * `goal` tool — and the role guard states that rather than relying on it.
-	 */
-	pi.on("goal_updated", async (event, ctx) => {
-		if (sessionRole(pi) !== "lead") return;
-		const goal = event.goal;
-		// A cleared goal names no objective, so there is nothing to relay. A
-		// dropped or completed one still carries both and relays like any other.
-		if (goal === null) return;
-		try {
-			await relayGoal(pi, ctx.cwd, goal);
-		} catch (error) {
-			logFailure(pi, "goal relay", error);
-		}
-	});
+ /**
+  * W4. `goal_updated` fires only in the goal-owning session — subagents have no
+  * `goal` tool — and the role guard states that rather than relying on it.
+  */
+ pi.on("goal_updated", async (event, ctx) => {
+  if (sessionRole(pi) !== "lead") return;
+  const goal = event.goal;
+  // Clearing also cancels the latest pending relay and its timer retries.
+  try {
+   await relayGoal(pi, ctx.cwd, goal);
+  } catch (error) {
+   logFailure(pi, "goal relay", error);
+  }
+ });
 }

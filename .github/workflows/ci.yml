@@ -10,11 +10,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # v1.23.0
+        if: github.event_name == 'pull_request'
+
+      - name: Install agnix
+        if: github.event_name == 'pull_request'
+        env:
+          BINSTALL_DISABLE_TELEMETRY: "true"
+        run: cargo binstall agnix-cli@0.52.2 --no-confirm
+
+      - name: Agnix staged-hook behavior
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/test-agnix-hook.py
+
+      - name: Agentic staged check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          index_file="$(mktemp)"
+          trap 'rm -f "$index_file"' EXIT
+          cp "$(git rev-parse --git-path index)" "$index_file"
+          export GIT_INDEX_FILE="$index_file"
+          git read-tree HEAD
+          export AGNIX_DIFF_BASE="$BASE_SHA"
+          scripts/check-agnix-staged.sh
 
       - run: bun install --frozen-lockfile
 
@@ -35,20 +61,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
       # uvx is not preinstalled on GitHub runners.
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.0.1
 
-      # `_test_*.py` matches neither of pytest's default collection patterns, so a
-      # `pytest <dir>` invocation here collects nothing and passes vacuously. The one
-      # surviving script suite is stdlib unittest; run it as the module it is.
-      - name: Script tests
+      - name: Install Vale
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v3.17.1 --repo errata-ai/vale --pattern 'vale_3.17.1_Linux_64-bit.tar.gz' --dir "$RUNNER_TEMP/vale"
+          tar -xzf "$RUNNER_TEMP/vale/vale_3.17.1_Linux_64-bit.tar.gz" -C "$RUNNER_TEMP/vale"
+          echo "$RUNNER_TEMP/vale" >> "$GITHUB_PATH"
+
+      # `_test_*.py` matches neither of pytest's default collection patterns.
+      # Run the stdlib unittest scripts directly.
+      - name: Worktree cleanup tests
         run: python3 skills/orchestrate/scripts/_test_worktree_sweep.py
 
+      - name: Prose checker regression
+        run: uvx --from slopvac==1.0.1 python scripts/_test_prose_gate.py
+
       - name: Prose gate
-        run: uvx slopvac README.md skills/orchestrate/SKILL.md --profile normal
+        run: uvx --from slopvac==1.0.1 python scripts/prose-gate.py README.md skills/orchestrate/SKILL.md --profile normal

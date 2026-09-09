@@ -10,11 +10,12 @@
  * The seven role contracts move across as data; only the evaluator changes language.
  */
 
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdComments, bdLinked, bdRun, bdShow, commentVerb, metadataString } from "../bd";
-import { observedClaim } from "../claim-state";
+import { type BdBead, bdCommentsChecked, bdLinkedChecked, bdShow, commentVerb, metadataString } from "../bd";
+import { type ClaimObservation, type ClaimState } from "../claim-state";
 import { beadRouting, orcRole } from "../identity";
 
 import architect from "../contracts/architect.json";
@@ -25,27 +26,27 @@ import reviewer from "../contracts/reviewer.json";
 import shepherd from "../contracts/shepherd.json";
 
 interface CompletionCheck {
-	check: string;
-	require: string;
-	when?: string | string[];
+ check: string;
+ require: string;
+ when?: string | string[];
 }
 
 interface Contract {
-	agent?: string;
-	completion?: CompletionCheck[];
-	authority?: { deny_states?: string[]; deny_metadata?: string[] };
-	escape?: { state?: string; require?: string };
-	pause?: string[];
-	bounce?: { max_attempts?: number };
+ agent?: string;
+ completion?: CompletionCheck[];
+ authority?: { deny_states?: string[]; deny_metadata?: string[] };
+ escape?: { state?: string; require?: string };
+ pause?: string[];
+ bounce?: { max_attempts?: number };
 }
 
 const CONTRACTS: Record<string, Contract> = {
-	architect,
-	implementer,
-	researcher,
-	reviewer,
-	shepherd,
-	generic,
+ architect,
+ implementer,
+ researcher,
+ reviewer,
+ shepherd,
+ generic,
 };
 
 /**
@@ -74,30 +75,30 @@ const CONTRACTS: Record<string, Contract> = {
  * would bounce every worker.
  */
 const ORCHESTRATOR_ANCHORS: Record<string, true> = {
-	actor: true,
-	artifacts_dir: true,
-	base_ref: true,
-	base_sha: true,
-	branch: true,
-	complexity_tier: true,
-	execution_agent: true,
-	execution_dispatch: true,
-	execution_kind: true,
-	execution_task_kind: true,
-	lease_token: true,
-	origin: true,
-	origin_actor: true,
-	origin_bead: true,
-	run_epic: true,
-	runtime_context: true,
-	runtime_handle: true,
-	scope: true,
-	worktree: true,
+ actor: true,
+ artifacts_dir: true,
+ base_ref: true,
+ base_sha: true,
+ branch: true,
+ complexity_tier: true,
+ execution_agent: true,
+ execution_dispatch: true,
+ execution_kind: true,
+ execution_task_kind: true,
+ lease_token: true,
+ origin: true,
+ origin_actor: true,
+ origin_bead: true,
+ run_epic: true,
+ runtime_context: true,
+ runtime_handle: true,
+ scope: true,
+ worktree: true,
 };
 
 interface Failure {
-	check: string;
-	detail: string;
+ check: string;
+ detail: string;
 }
 
 /**
@@ -108,105 +109,178 @@ interface Failure {
  * the derivation v19's evaluator added.
  */
 export function resourceKind(bead: BdBead): string | undefined {
-	const declared = metadataString(bead, "execution_kind");
-	if (declared !== undefined) return declared;
-	if (metadataString(bead, "worktree") !== undefined) return "git";
-	if (metadataString(bead, "artifacts_dir") !== undefined) return "artifact";
-	return undefined;
+ const declared = metadataString(bead, "execution_kind");
+ if (declared !== undefined) return declared;
+ if (bead.wisp_type === "escalation") return "escalation";
+ if (bead.wisp_type === "review") return "review";
+ if (metadataString(bead, "worktree") !== undefined) return "git";
+ if (metadataString(bead, "artifacts_dir") !== undefined) return "artifact";
+ return undefined;
 }
 
 export function applies(check: CompletionCheck, kind: string | undefined): boolean {
-	if (check.when === undefined) return true;
-	const wanted = Array.isArray(check.when) ? check.when : [check.when];
-	return kind !== undefined && wanted.includes(kind);
+ if (check.when === undefined) return true;
+ const wanted = Array.isArray(check.when) ? check.when : [check.when];
+ return kind !== undefined && wanted.includes(kind);
 }
 
 /** State a predicate may need, fetched once per evaluation. */
 export interface Evidence {
-	bead: BdBead;
-	verbs: string[];
-	linkedVerbs: string[];
+ bead: BdBead;
+ verbs: string[];
+ linkedVerbs: string[];
+ openEscalation?: boolean;
+ artifactContained?: boolean;
 }
 
-/**
- * Evaluate one `require` predicate.
- *
- * An unrecognised form returns `true`, exactly as `rules-eval.py` did: a contract
- * naming a predicate this evaluator does not implement must not fail every exit.
- */
+const SUPPORTED_KINDS: Record<string, readonly string[]> = {
+ architect: ["git", "artifact", "comment", "external"],
+ implementer: ["git", "artifact", "comment", "external"],
+ researcher: ["artifact", "comment", "external", "escalation"],
+ reviewer: ["review", "git", "artifact", "comment", "external"],
+ shepherd: ["git"],
+ generic: ["git", "artifact", "comment", "external"],
+};
+
+export function completionKindSupported(role: string, bead: BdBead): boolean {
+ const kind = resourceKind(bead);
+ if (!Object.hasOwn(SUPPORTED_KINDS, role)) return false;
+ if (kind === undefined) return role === "reviewer" || role === "shepherd" || role === "generic";
+ return SUPPORTED_KINDS[role]!.includes(kind);
+}
+
+export function linkedEvidenceDirection(bead: BdBead): "up" | "down" {
+ return bead.ephemeral === true || bead.wisp_type !== undefined || resourceKind(bead) === "escalation" ? "down" : "up";
+}
+
+export function isOpenEscalation(bead: BdBead): boolean {
+ return bead.wisp_type === "escalation"
+  && ["open", "in_progress", "blocked", "deferred"].includes((bead.status ?? "").toLowerCase());
+}
+
+export function contractPaused(contract: { pause?: string[] }, evidence: Evidence): boolean {
+ return contract.pause?.includes("open-escalation-wisp-linked-to-node") === true
+  && evidence.openEscalation === true;
+}
+
+/** Evaluate one supported `require` predicate; unknown predicates fail closed. */
 export function satisfies(predicate: string, evidence: Evidence): boolean {
-	const { bead, verbs, linkedVerbs } = evidence;
-	const trimmed = predicate.trim();
+ const { bead, verbs, linkedVerbs } = evidence;
+ const trimmed = predicate.trim();
 
-	const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
-	if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
+ const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
+ if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
 
-	if (trimmed === "assignee cleared") {
-		return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
-	}
+ if (trimmed === "assignee cleared") {
+  return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
+ }
 
-	if (trimmed === "artifact.output_ref contained") {
-		const output = metadataString(bead, "output_ref");
-		const artifacts = metadataString(bead, "artifacts_dir");
-		if (output === undefined || artifacts === undefined) return false;
-		if (!path.isAbsolute(output) || !path.isAbsolute(artifacts)) return false;
-		const inside = output.startsWith(`${artifacts}${path.sep}`);
-		const worktree = metadataString(bead, "worktree");
-		const underWorktree = worktree !== undefined && output.startsWith(`${worktree}${path.sep}`);
-		return inside && output !== artifacts && !underWorktree;
-	}
+ if (trimmed === "artifact.output_ref contained") {
+  return evidence.artifactContained === true;
+ }
 
-	const labelMatch = /^label\s*~\s*(.+)$/.exec(trimmed);
-	if (labelMatch?.[1] !== undefined) {
-		let pattern: RegExp;
-		try {
-			pattern = new RegExp(labelMatch[1].replace(/^["']|["']$/g, ""));
-		} catch {
-			// An uncompilable pattern counts as unmet, matching the Python's
-			// fail-closed handling for a malformed label regex.
-			return false;
-		}
-		return (bead.labels ?? []).some(label => pattern.test(label));
-	}
+ const labelMatch = /^label\s*~\s*(.+)$/.exec(trimmed);
+ if (labelMatch?.[1] !== undefined) {
+  let pattern: RegExp;
+  try {
+   pattern = new RegExp(labelMatch[1].replace(/^["']|["']$/g, ""));
+  } catch {
+   // An uncompilable pattern counts as unmet, matching the Python's
+   // fail-closed handling for a malformed label regex.
+   return false;
+  }
+  return (bead.labels ?? []).some(label => pattern.test(label));
+ }
 
-	const verbMatch = /^(linked\.)?comment\.verb\s+in\s*\[([^\]]*)\]$/.exec(trimmed);
-	if (verbMatch !== null) {
-		const wanted = (verbMatch[2] ?? "")
-			.split(",")
-			.map(entry => entry.trim().toUpperCase())
-			.filter(entry => entry.length > 0);
-		const pool = verbMatch[1] === undefined ? verbs : linkedVerbs;
-		return pool.some(verb => wanted.includes(verb));
-	}
+ const verbMatch = /^(linked\.)?comment\.verb\s+in\s*\[([^\]]*)\]$/.exec(trimmed);
+ if (verbMatch !== null) {
+  const wanted = (verbMatch[2] ?? "")
+   .split(",")
+   .map(entry => entry.trim().toUpperCase())
+   .filter(entry => entry.length > 0);
+  const pool = verbMatch[1] === undefined ? verbs : linkedVerbs;
+  return pool.some(verb => wanted.includes(verb));
+ }
 
-	return true;
+ return false;
 }
 
-/** Gather the comment verbs a contract may test, on the bead and on its linked wisps. */
-async function collectEvidence(bead: BdBead): Promise<Evidence> {
-	const verbs = (await bdComments(bead.id)).map(comment => commentVerb(comment.text));
-	const linkedVerbs: string[] = [];
-	for (const type of ["relates-to", "replies-to"]) {
-		for (const linkedId of await bdLinked(bead.id, type)) {
-			for (const comment of await bdComments(linkedId)) {
-				linkedVerbs.push(commentVerb(comment.text));
-			}
-		}
-	}
-	return { bead, verbs, linkedVerbs };
+/** Null is incomplete evidence, never proof of a failed completion contract. */
+export async function collectExitEvidence(bead: BdBead): Promise<Evidence | null> {
+ const comments = await bdCommentsChecked(bead.id);
+ if (comments === null) return null;
+ const verbs = comments.map(comment => commentVerb(comment.text));
+ const linkedVerbs: string[] = [];
+ let openEscalation = false;
+ const direction = linkedEvidenceDirection(bead);
+ const visited = new Set<string>();
+ for (const type of ["relates-to", "replies-to"]) {
+  const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
+  if (linked === null) return null;
+  for (const linkedId of linked) {
+   if (visited.has(linkedId)) continue;
+   visited.add(linkedId);
+   const linkedComments = await bdCommentsChecked(linkedId);
+   if (linkedComments === null) return null;
+   const linkedBead = await bdShow(linkedId);
+   if (linkedBead === null) return null;
+   const version = ["head_sha", "review_round"].map(key => {
+    const value = bead.metadata?.[key] ?? linkedBead.metadata?.[key];
+    return { key, value: typeof value === "number" || typeof value === "string" ? String(value) : undefined };
+   });
+   for (const comment of linkedComments) {
+    const tokens = comment.text.split(/\s+/);
+    if (version.every(({ key, value }) => value === undefined || tokens.includes(`${key}=${value}`))) {
+     linkedVerbs.push(commentVerb(comment.text));
+    }
+   }
+   if (direction === "up") openEscalation ||= isOpenEscalation(linkedBead);
+  }
+ }
+ let artifactContained = false;
+ if (resourceKind(bead) === "artifact") {
+  const output = metadataString(bead, "output_ref");
+  const artifacts = metadataString(bead, "artifacts_dir");
+  const worktree = metadataString(bead, "worktree");
+  if (output !== undefined && artifacts !== undefined && path.isAbsolute(output) && path.isAbsolute(artifacts)) {
+   try {
+    const resolvedOutput = await realpath(output);
+    const resolvedArtifacts = await realpath(artifacts);
+    const relative = path.relative(resolvedArtifacts, resolvedOutput);
+    artifactContained = relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    if (worktree !== undefined) {
+     const resolvedWorktree = await realpath(worktree);
+     const fromWorktree = path.relative(resolvedWorktree, resolvedOutput);
+     if (fromWorktree === "" || (fromWorktree !== ".." && !fromWorktree.startsWith(`..${path.sep}`) && !path.isAbsolute(fromWorktree))) {
+      artifactContained = false;
+     }
+    }
+   } catch {
+    artifactContained = false;
+   }
+  }
+ }
+ return { bead, verbs, linkedVerbs, openEscalation, artifactContained };
 }
 
-/**
- * Whether this session has already been told it holds no claim. One reminder is the
- * whole budget: a revived worker whose claim was made in a previous process has no
- * observed claim through no fault of its own, and trapping it would cost the run
- * more than the silent exit costs.
- */
-let unclaimedReminded = false;
+interface ExitGuardState {
+ unclaimedReminded: boolean;
+ refusalClaim: ClaimObservation | undefined;
+ refusalCount: number;
+}
 
-/** Test seam, and the correct reset when a session is replaced. */
-export function resetUnclaimedReminder(): void {
-	unclaimedReminded = false;
+/** Create an exit guard with reminder and refusal budgets private to one factory invocation. */
+export function createExitGuard(claims: ClaimState): (ctx: ExtensionContext, input?: Record<string, unknown>) => Promise<ToolCallEventResult | undefined> {
+ const state: ExitGuardState = { unclaimedReminded: false, refusalClaim: undefined, refusalCount: 0 };
+ return async (ctx, input) => {
+  const claim = claims.observedClaim();
+  if (claim === undefined || claim.beadIds.length === 0) return await gateUnclaimedExit(state, ctx, input);
+  for (const beadId of claim.beadIds) {
+   const result = await gateClaimedExit(state, ctx, claim, beadId);
+   if (result !== undefined) return result;
+  }
+  return undefined;
+ };
 }
 
 /**
@@ -234,26 +308,23 @@ const CONTENTION_EVIDENCE = /error\s*1213|40001|serialization failure/i;
  * false empty queue.
  */
 async function gateUnclaimedExit(
-	ctx: ExtensionContext,
-	input: Record<string, unknown> | undefined,
+ state: ExitGuardState,
+ ctx: ExtensionContext,
+ input: Record<string, unknown> | undefined,
 ): Promise<ToolCallEventResult | undefined> {
-	// No marker means a contract-free helper or the lead: neither pulls work.
-	if (orcRole(ctx) === undefined) return undefined;
-	if (unclaimedReminded) return undefined;
+ if (orcRole(ctx) === undefined) return undefined;
+ if (state.unclaimedReminded) return undefined;
 
-	const payload = input === undefined ? "" : JSON.stringify(input);
-	// `NO_WORK` is the declared empty-queue exit, wherever the payload carries it.
-	if (payload.includes("NO_WORK")) return undefined;
-	// Contention is the other claimless exit the protocol defines, and the quoted error
-	// is what separates it from an invented one.
-	if (CONTENTION_EVIDENCE.test(payload)) return undefined;
+ const payload = input === undefined ? "" : JSON.stringify(input);
+ if (payload.includes("NO_WORK")) return undefined;
+ if (CONTENTION_EVIDENCE.test(payload)) return undefined;
 
-	unclaimedReminded = true;
-	return {
-		block: true,
-		reason:
-			"You are exiting without ever claiming a bead. Work is pulled, not invented: run your role's `bd ready ... --claim` and deliver the bead you get. Two exits need no claim, and the pull result decides which. Empty result -- report NO_WORK. Claim error naming Error 1213, 40001, or serialization failure -- retry the identical pull, at most three times. Then quote that error here. Never report NO_WORK for a race you lost: the queue was not empty. Uncommitted work under no claim reaches no branch and no bead.",
-	};
+ state.unclaimedReminded = true;
+ return {
+  block: true,
+  reason:
+   "You are exiting without ever claiming a bead. Work is pulled, not invented: run your role's `bd ready ... --claim` and deliver the bead you get. Two exits need no claim, and the pull result decides which. Empty result -- report NO_WORK. Claim error naming Error 1213, 40001, or serialization failure -- retry the identical pull, at most three times. Then quote that error here. Never report NO_WORK for a race you lost: the queue was not empty. Uncommitted work under no claim reaches no branch and no bead.",
+ };
 }
 
 /**
@@ -263,114 +334,106 @@ async function gateUnclaimedExit(
  * session holding no claim is handled by {@link gateUnclaimedExit} instead, because
  * every check here hangs off a bead.
  */
-export async function gateExitContract(
-	ctx: ExtensionContext,
-	input?: Record<string, unknown>,
+
+async function gateClaimedExit(
+ state: ExitGuardState,
+ ctx: ExtensionContext,
+ claim: ClaimObservation,
+ beadId: string,
 ): Promise<ToolCallEventResult | undefined> {
-	const claim = observedClaim();
-	const beadId = claim?.beadIds[0];
-	if (beadId === undefined) return await gateUnclaimedExit(ctx, input);
 
-	const bead = await bdShow(beadId);
-	if (bead === null) return undefined;
+ const bead = await bdShow(beadId);
+ if (bead === null) return undefined;
+ if (bead.assignee && bead.assignee !== claim?.actor) return undefined;
 
-	const routing = beadRouting(bead);
-	const role = orcRole(ctx) ?? routing?.role ?? "generic";
-	// `Object.hasOwn`, not a plain index: `CONTRACTS` is an object literal, so an inherited
-	// key ("constructor", "toString") resolved to a truthy prototype member. The
-	// `?? CONTRACTS.generic` fallback never fired, `contract.completion ?? []` read as an
-	// empty check list, and the exit passed with its contract wholly unevaluated.
-	//
-	// Both producers of `role` now return a closed union, so no prototype name can reach
-	// here: `orcRole` filters the prompt marker, and `beadRouting` resolves through two
-	// own-property tables. The guard stays because the fallback is what makes a claim
-	// always judged, and that must hold on this line alone.
-	const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
-	if (contract === undefined) return undefined;
+ const routing = beadRouting(bead);
+ const role = orcRole(ctx) ?? routing?.role ?? "generic";
+ // `Object.hasOwn`, not a plain index: `CONTRACTS` is an object literal, so an inherited
+ // key ("constructor", "toString") resolved to a truthy prototype member. The
+ // `?? CONTRACTS.generic` fallback never fired, `contract.completion ?? []` read as an
+ // empty check list, and the exit passed with its contract wholly unevaluated.
+ //
+ // Both producers of `role` now return a closed union, so no prototype name can reach
+ // here: `orcRole` filters the prompt marker, and `beadRouting` resolves through two
+ // own-property tables. The guard stays because the fallback is what makes a claim
+ // always judged, and that must hold on this line alone.
+ const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
+ if (contract === undefined) return undefined;
 
-	const evidence = await collectEvidence(bead);
-	const status = (bead.status ?? "").toLowerCase();
+ const evidence = await collectExitEvidence(bead);
+ if (evidence === null) return undefined;
+ const status = (bead.status ?? "").toLowerCase();
 
-	// Escape first: a genuine failure declared as such is a valid exit, not a
-	// contract breach.
-	if (contract.escape?.state !== undefined && status === contract.escape.state) {
-		if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence)) {
-			return undefined;
-		}
-	}
+ // Escape first: a genuine failure declared as such is a valid exit, not a
+ // contract breach.
+ if (contract.escape?.state !== undefined && status === contract.escape.state) {
+  if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence)) {
+   return undefined;
+  }
+ }
 
-	const kind = resourceKind(bead);
-	const failures: Failure[] = [];
+ const kind = resourceKind(bead);
+ const failures: Failure[] = [];
+ if (!completionKindSupported(role, bead)) {
+  failures.push({ check: "execution-kind", detail: `unsupported or missing execution kind: ${kind ?? "unknown"}` });
+ }
+ const paused = contractPaused(contract, evidence);
 
-	for (const check of contract.completion ?? []) {
-		if (!applies(check, kind)) continue;
-		if (!satisfies(check.require, evidence)) {
-			failures.push({ check: check.check, detail: `unsatisfied: ${check.require}` });
-		}
-	}
+ for (const check of contract.completion ?? []) {
+  if (paused) continue;
+  if (!applies(check, kind)) continue;
+  if (!satisfies(check.require, evidence)) {
+   failures.push({ check: check.check, detail: `unsatisfied: ${check.require}` });
+  }
+ }
 
-	// Lower-cased exactly like `status` above. Every `deny_states` entry is a lowercase
-	// state name, and case is not contractual for either carrier of the state -- but only
-	// `status` was folded, so a `state:CLOSED` label walked past the same denial that
-	// `status: "CLOSED"` was caught by.
-	const stateLabels = (bead.labels ?? [])
-		.filter(label => label.startsWith("state:"))
-		.map(label => label.slice("state:".length).toLowerCase());
-	for (const denied of contract.authority?.deny_states ?? []) {
-		if (status === denied || stateLabels.includes(denied)) {
-			failures.push({ check: "state-authority", detail: `status=${denied} set by a role forbidden to set it` });
-		}
-	}
+ // Lower-cased exactly like `status` above. Every `deny_states` entry is a lowercase
+ // state name, and case is not contractual for either carrier of the state -- but only
+ // `status` was folded, so a `state:CLOSED` label walked past the same denial that
+ // `status: "CLOSED"` was caught by.
+ const stateLabels = (bead.labels ?? [])
+  .filter(label => label.startsWith("state:"))
+  .map(label => label.slice("state:".length).toLowerCase());
+ for (const denied of contract.authority?.deny_states ?? []) {
+  if (status === denied || stateLabels.includes(denied)) {
+   failures.push({ check: "state-authority", detail: `status=${denied} set by a role forbidden to set it` });
+  }
+ }
 
-	for (const denied of contract.authority?.deny_metadata ?? []) {
-		// `=== true`, same reason: an anchor list is a boolean table, and a `deny_metadata`
-		// key naming a prototype member would silently skip the denial it declares.
-		if (ORCHESTRATOR_ANCHORS[denied] === true) continue;
-		if (metadataString(bead, denied) !== undefined) {
-			failures.push({
-				check: "metadata-authority",
-				detail: `metadata.${denied} is set and this role may not own it; unset it or escalate`,
-			});
-		}
-	}
+ for (const denied of contract.authority?.deny_metadata ?? []) {
+  // `=== true`, same reason: an anchor list is a boolean table, and a `deny_metadata`
+  // key naming a prototype member would silently skip the denial it declares.
+  if (ORCHESTRATOR_ANCHORS[denied] === true) continue;
+  if (metadataString(bead, denied) !== undefined) {
+   failures.push({
+    check: "metadata-authority",
+    detail: `metadata.${denied} is set and this role may not own it; unset it or escalate`,
+   });
+  }
+ }
 
-	if (failures.length === 0) return undefined;
+ if (failures.length === 0) return undefined;
 
-	// Bounce budget: after enough attempts the bead is released for redispatch and
-	// the exit is allowed, so a worker cannot be trapped against a contract it
-	// cannot satisfy.
-	const attempts = Number(metadataString(bead, "stop_attempts") ?? "0") + 1;
-	const maxAttempts = contract.bounce?.max_attempts ?? 3;
+ // Refusals belong to this activation, not to mutable shared bead metadata.
+ if (state.refusalClaim !== claim) {
+  state.refusalClaim = claim;
+  state.refusalCount = 0;
+ }
+ const attempts = ++state.refusalCount;
+ const maxAttempts = contract.bounce?.max_attempts ?? 3;
+ if (attempts >= maxAttempts) return undefined;
 
-	if (attempts >= maxAttempts) {
-		await bdRun(["comment", beadId, `BOUNCE agent=${role} attempt=${attempts}`]);
-		if (status === "closed") await bdRun(["reopen", beadId, "--reason", "contract bounce"]);
-		await bdRun([
-			"update",
-			beadId,
-			"--assignee",
-			"",
-			"--status",
-			"open",
-			"--metadata",
-			JSON.stringify({ stop_attempts: 0, review_round: 0 }),
-		]);
-		return undefined;
-	}
-
-	await bdRun(["update", beadId, "--metadata", JSON.stringify({ stop_attempts: attempts })]);
-
-	return {
-		block: true,
-		reason: JSON.stringify({
-			bead: beadId,
-			agent: role,
-			attempt: attempts,
-			// Which carrier routed the bead, and only when it was the legacy one. A worker
-			// reads this verdict, so a bead still routed by label says so where the failure
-			// is already being read, rather than in a log nobody opens.
-			...(routing?.from === "legacy-label" ? { routing: routing.spelling } : {}),
-			failed_checks: failures,
-		}),
-	};
+ return {
+  block: true,
+  reason: JSON.stringify({
+   bead: beadId,
+   agent: role,
+   attempt: attempts,
+   // Which carrier routed the bead, and only when it was the legacy one. A worker
+   // reads this verdict, so a bead still routed by label says so where the failure
+   // is already being read, rather than in a log nobody opens.
+   ...(routing?.from === "legacy-label" ? { routing: routing.spelling } : {}),
+   failed_checks: failures,
+  }),
+ };
 }
