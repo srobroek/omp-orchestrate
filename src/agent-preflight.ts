@@ -1,5 +1,4 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
@@ -93,14 +92,13 @@ export function agentDiscoveryFindings(
  return findings;
 }
 
-/** Discover through OMP's loader; explicit roots are threaded when the caller has them, otherwise initialized discovery context applies. */
+/** Discover through OMP's loader in the active discovery scope. */
 export async function discoverAgentFindings(
  ctx: Pick<ExtensionContext, "cwd"> & Partial<Pick<ExtensionContext, "models">>,
  requested: readonly string[] = [],
- extensionRoots?: EffectiveExtensionRoots,
  modelOverrides: Readonly<Record<string, unknown>> = {},
 ): Promise<AgentDiscoveryFinding[]> {
- const { agents } = await discoverAgents(ctx.cwd, undefined, extensionRoots);
+ const { agents } = await discoverAgents(ctx.cwd);
  const resolveModel =
   typeof ctx.models?.resolve === "function" ? (spec: string) => ctx.models!.resolve(spec) : undefined;
  return agentDiscoveryFindings(agents, requested, resolveModel, modelOverrides);

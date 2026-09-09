@@ -29,7 +29,6 @@ interface BdWorld {
 let world: BdWorld = { claimed: [], wisps: [], stamped: [], linked: [], comments: {} };
 
 function listFor(args: string[]): BdBead[] | null {
- if (args[0] === "mol") return world.wisps;
  if (args[0] === "dep") return world.linked;
  if (args.includes("--metadata-field")) return world.stamped;
  if (args.includes("--assignee")) return world.claimed;
@@ -40,6 +39,10 @@ const bdSpies = [
  spyOn(realBd, "bdListChecked").mockImplementation(async (args: string[]): Promise<BdBead[] | null> => {
   ran.push(args);
   return listFor(args);
+ }),
+ spyOn(realBd, "bdWispListChecked").mockImplementation(async (): Promise<BdBead[] | null> => {
+  ran.push(["mol", "wisp", "list", "--json"]);
+  return world.wisps;
  }),
  spyOn(realBd, "bdRun").mockImplementation(async (args: string[]): Promise<BdResult | null> => {
   ran.push(args);

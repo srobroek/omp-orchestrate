@@ -574,7 +574,7 @@ describe("G2 effective bash cwd and edit modes", () => {
  });
 
  test("checks sloppy edit targets instead of compatibility path hints", async () => {
-  const input = `<SM:EDIT path="${foreign}/x.ts">\n<SM:FIND>\nold\n</SM:FIND>\n<SM:PUT>\nnew\n</SM:PUT>\n</SM:EDIT>`;
+  const input = `§${foreign}/x.ts\n«\nold\n»\nnew`;
   expect((await gateWorktreeScope(ctxAt(owned), "edit", { input, path: "src/api.ts" }))?.block).toBe(true);
   expect(await gateWorktreeScope(ctxAt(owned), "edit", {
    input: input.replace(`${foreign}/x.ts`, "src/api.ts"),
