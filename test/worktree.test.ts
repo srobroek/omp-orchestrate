@@ -503,6 +503,49 @@ describe("G2 standalone ownership controls", () => {
   expect((await fromBash(owned, `BD_ACTOR=${actor} bd update ${BEAD} --status open --assignee ""`))?.block).toBe(true);
  });
 
+ test("allows the observed actor to recover a closed claim in two steps", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/api/**"] } };
+
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`)).toBeUndefined();
+  beads[BEAD]!.status = "open";
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd claim ${BEAD}`)).toBeUndefined();
+  beads[BEAD]!.status = "in_progress";
+  listSpy.mockResolvedValueOnce([
+   { id: "orc-other", status: "in_progress", assignee: foreignActor, metadata: { scope: ["src/api/**"] } },
+  ]);
+  expect((await fromBash(owned, "touch src/api.ts"))?.block).toBe(true);
+ });
+
+ test.each([
+  ["reopen missing", "reopen", undefined],
+  ["reopen unassigned", "reopen", { status: "closed" }],
+  ["reopen foreign owner", "reopen", { status: "closed", assignee: foreignActor }],
+  ["reopen wrong status", "reopen", { status: "open", assignee: actor }],
+  ["claim missing", "claim", undefined],
+  ["claim unassigned", "claim", { status: "open" }],
+  ["claim foreign owner", "claim", { status: "open", assignee: foreignActor }],
+  ["claim wrong status", "claim", { status: "in_progress", assignee: actor }],
+ ] as const)("refuses %s", async (_label, operation, bead) => {
+  if (bead === undefined) delete beads[BEAD];
+  else beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned } };
+
+  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd ${operation} ${BEAD}`))?.block).toBe(true);
+ });
+
+ test.each([
+  ["a foreign actor", "closed", `BEADS_ACTOR=${foreignActor} bd reopen ${BEAD}`],
+  ["a wrapped reopen", "closed", `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`],
+  ["a compound reopen", "closed", `BEADS_ACTOR=${actor} bd reopen ${BEAD}; true`],
+  ["a foreign actor reclaim", "open", `BEADS_ACTOR=${foreignActor} bd claim ${BEAD}`],
+  ["a wrapped reclaim", "open", `BEADS_ACTOR=${actor} sh -c 'bd claim ${BEAD}'`],
+  ["a compound reclaim", "open", `BEADS_ACTOR=${actor} bd claim ${BEAD}; true`],
+  ["a foreign bead", "closed", `BEADS_ACTOR=${actor} bd reopen orc-foreign`],
+ ])("refuses recovery through %s", async (_label, status, command) => {
+  beads[BEAD] = { id: BEAD, status, assignee: actor, metadata: { worktree: owned } };
+
+  expect((await fromBash(owned, command))?.block).toBe(true);
+ });
+
  test.each([
   ["after reassignment", { status: "closed", assignee: foreignActor }],
   ["when the bead is missing", undefined],

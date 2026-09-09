@@ -6,7 +6,7 @@
  * their effective cwd; their arbitrary redirections are not parsed.
  * Product mutations require every observed bead to remain in_progress and assigned
  * to this session's actor. Missing, unreadable, or stale beads fail closed for those
- * mutations; narrowly recognized Beads control reads retain their safe behavior.
+ * mutations; narrowly recognized Beads controls retain their safe behavior.
  * Uninspectable edit payloads are refused rather than silently reduced to a cwd-only check.
  */
 
@@ -256,9 +256,9 @@ function isControlCommand(command: string): boolean {
 
 /**
  * A deliberately narrow escape from a scope conflict, not a shell safety parser.
- * Only literal standalone Beads reads and own-claim comment/release forms qualify.
+ * Only literal standalone Beads reads and own-claim comment/release/recovery forms qualify.
  */
-type ConflictControl = "read" | "write" | "release" | "deny";
+type ConflictControl = "read" | "write" | "release" | "reopen" | "claim" | "deny";
 
 function conflictControl(input: Record<string, unknown>, actor: string, beadId: string): ConflictControl | undefined {
  const command = input.command;
@@ -310,7 +310,14 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  if ((operation === "list" || operation === "blocked" || operation === "status") && tokens.length === 0) {
   return trustedEnvironment ? "read" : undefined;
  }
- if (operation !== "comment" && operation !== "comments" && operation !== "update") return undefined;
+ if (operation !== "comment" && operation !== "comments" && operation !== "update" && operation !== "reopen" && operation !== "claim") return undefined;
+ if (operation === "reopen" || operation === "claim") {
+  if (tokens.length === 1 && tokens[0] === beadId && trustedEnvironment) {
+   const inheritedActor = process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
+   if (hasExplicitActor || inheritedActor === actor) return operation === "reopen" ? "reopen" : "claim";
+  }
+  return undefined;
+ }
  if (operation === "comments" && tokens[0] === "add") tokens.shift();
  if (tokens[0] !== beadId) return undefined;
  if (!trustedEnvironment) return undefined;
@@ -358,6 +365,12 @@ export async function gateWorktreeScope(
     reason: `claimed bead '${beadId}' is no longer in_progress and assigned to '${claim.actor}'; refresh ownership before mutating product files`,
    };
   }
+  if (control === "reopen" && (bead?.status !== "closed" || bead.assignee !== claim.actor)) {
+   return { block: true, reason: `cannot reopen claimed bead '${beadId}' unless it is closed and assigned to '${claim.actor}'` };
+  }
+  if (control === "claim" && (bead?.status !== "open" || bead.assignee !== claim.actor)) {
+   return { block: true, reason: `cannot reclaim claimed bead '${beadId}' unless it is open and assigned to '${claim.actor}'` };
+  }
   if (control === "release" && (
    bead === null ||
    (bead.status === "in_progress" && bead.assignee !== claim.actor) ||
@@ -402,12 +415,12 @@ export async function gateWorktreeScope(
  // beads could possibly make.
  const scoped: { beadId: string; worktree: string; globs: string[] }[] = [];
  for (const { beadId, bead, control } of beadViews) {
-  const ownsControl = control === "read" || control === "write" || control === "release";
+  const ownsControl = control === "read" || control === "write" || control === "release" || control === "reopen" || control === "claim";
   if (!ownsControl) {
    const conflict = await scopeConflict(bead);
    if (conflict) return conflict;
   }
-  // For a permitted control read, an unreadable bead names no tree, and a bead that
+  // For a permitted control, an unreadable bead names no tree, and a bead that
   // declares none leaves nothing to compare. `metadata.scope` is repo-relative and
   // needs that tree as its base, so both comparisons stop here.
   const declaredTree = metadataString(bead, "worktree");
