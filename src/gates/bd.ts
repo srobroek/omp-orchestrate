@@ -207,40 +207,48 @@ const ADMIN_SUBCOMMANDS: Record<string, true> = {
  */
 const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
-/**
- * Read actions of the grouped subcommands, matched on the token after the group:
- * `gate list`, `dep tree`, `kv get`, `label list`, `epic list`, `swarm status`.
- */
-const READ_ACTIONS: Record<string, true> = {
-	get: true,
-	list: true,
-	show: true,
-	status: true,
-	tree: true,
+/** Grouped subcommands whose first positional selects a read. */
+const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
+	audit: { list: true, show: true },
+	comments: { list: true, show: true },
+	dep: { cycles: true, list: true, tree: true },
+	epic: { status: true },
+	formula: { list: true, show: true },
+	gate: { discover: true, list: true, show: true },
+	kv: { get: true, list: true },
+	label: { list: true, "list-all": true, show: true },
+	mol: {
+		current: true,
+		"last-activity": true,
+		list: true,
+		progress: true,
+		ready: true,
+		seed: true,
+		show: true,
+		stale: true,
+	},
+	"merge-slot": { check: true },
+	swarm: { list: true, status: true, validate: true },
+	todo: { list: true },
 };
 
-/**
- * Write actions of the grouped subcommands. These outrank the exemption table, because a
- * group can read by default and still carry a writing action: `comments` alone prints an
- * issue's comments and exits 0 under `BD_READONLY=1`, while `comments add` refuses.
- * `gate create`, `dep add`, `kv set`, and `label add` were each confirmed to refuse the
- * same way.
- */
-const WRITE_ACTIONS: Record<string, true> = {
-	add: true,
-	append: true,
-	claim: true,
-	close: true,
-	create: true,
-	delete: true,
-	edit: true,
-	release: true,
-	remove: true,
-	resolve: true,
-	rm: true,
-	set: true,
-	update: true,
+/** Grouped subcommands whose first positional selects a write. */
+const GROUP_WRITE_ACTIONS: Record<string, Record<string, true>> = {
+	audit: { label: true, record: true },
+	comments: { add: true },
+	dep: { add: true, relate: true, remove: true, unrelate: true },
+	epic: { "close-eligible": true },
+	gate: { "add-waiter": true, check: true, create: true, resolve: true },
+	kv: { append: true, delete: true, rm: true, set: true, update: true },
+	label: { add: true, propagate: true, remove: true },
+	mol: { bond: true, burn: true, distill: true, pour: true, squash: true },
+	"merge-slot": { acquire: true, create: true, release: true },
+	swarm: { create: true },
+	todo: { add: true, done: true },
 };
+
+const MOL_WISP_READS: Record<string, true> = { list: true };
+const MOL_WISP_WRITES: Record<string, true> = { create: true, gc: true };
 
 /** The identity carriers, either of which attributes the write. */
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
@@ -262,6 +270,7 @@ const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
  */
 function writesBeads(invocation: BdInvocation): boolean {
 	if (invocation.hasClaim) return invocation.subcommand !== "ready";
+	if (invocation.rest.includes("--help") || invocation.rest.includes("-h")) return false;
 
 	const { subcommand } = invocation;
 	// A bare `bd`, or a first positional that is really a redirection: both print help.
@@ -269,8 +278,19 @@ function writesBeads(invocation: BdInvocation): boolean {
 	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;
 
 	const action = invocation.positionals[0] ?? "";
-	if (WRITE_ACTIONS[action] === true) return true;
-	if (READ_ACTIONS[action] === true) return false;
+	if (subcommand === "mol" && action === "wisp") {
+		if (invocation.rest.includes("--dry-run")) return false;
+		const wispAction = invocation.positionals[1];
+		if (wispAction === undefined) return false;
+		if (MOL_WISP_READS[wispAction] === true) return false;
+		if (MOL_WISP_WRITES[wispAction] === true) return true;
+		return true;
+	}
+	if (subcommand === "mol" && invocation.rest.includes("--dry-run")) return false;
+	if (subcommand === "dep" && invocation.rest.includes("--blocks")) return true;
+	if (GROUP_WRITE_ACTIONS[subcommand]?.[action] === true) return true;
+	if (GROUP_READ_ACTIONS[subcommand]?.[action] === true) return false;
+	if (GROUP_READ_ACTIONS[subcommand] !== undefined || GROUP_WRITE_ACTIONS[subcommand] !== undefined) return false;
 	return READ_SUBCOMMANDS[subcommand] !== true;
 }
 
