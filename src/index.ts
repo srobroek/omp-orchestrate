@@ -73,7 +73,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     // `bd show` and `bd list`. It takes `pi` because its findings are notices
     // rather than refusals, and a notice leaves through `sendMessage` rather than
     // through the return value.
-    const discipline = await gateBdDiscipline(pi, ctx, input);
+    const discipline = await gateBdDiscipline(pi, ctx, input, event.toolCallId);
     if (discipline) return discipline;
 
     // Also before G5: a refused multi-bead claim must not be recorded, or G2
