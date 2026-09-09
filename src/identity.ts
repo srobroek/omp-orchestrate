@@ -86,10 +86,10 @@ export function orcRole(ctx: ExtensionContext): OrcRole | undefined {
  *
  * The lead is excluded because it creates the run epic and the whole task DAG.
  * Every `orc-*` role is excluded because each one writes beads to satisfy its own
- * exit contract — `reviewer.rules.json` requires `linked.comment.verb in [REVIEW,
- * BLOCKED]`, `researcher.rules.json` requires a `REPORTED` comment plus
- * `metadata.output_ref`, and `shepherd.rules.json` requires
- * `comment.verb in [LANDED, BOUNCED, IDLE, BLOCKED]`. Since `BD_READONLY=1` blocks
+ * exit contract — `reviewer.json` requires `linked.comment.verb in [REVIEW,
+ * BLOCKED]`, `researcher.json` requires a `REPORTED` comment plus
+ * `metadata.output_ref`, and `shepherd.json` requires
+ * `comment.verb in [LANDED, BOUNCED, CONFLICT, IDLE, BLOCKED]`. Since `BD_READONLY=1` blocks
  * `bd comment`, sandboxing any of them would make their contracts unsatisfiable and
  * every worker would bounce.
  */

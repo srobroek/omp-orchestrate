@@ -24,13 +24,31 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type AgentDiscoveryFinding, discoverAgentFindings, requestedAgentNames } from "./agent-preflight";
-import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
+import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import {
+ coreContractForAgent,
+ coreContractForRole,
+ ROLE_MARKER,
+ type AgentDiscoveryFinding,
+ discoverAgentFindings,
+ requestedAgentNames,
+} from "./agent-preflight";
+import {
+ type BdBead,
+ bdCommentsChecked,
+ bdList,
+ bdRun,
+ bdShow,
+ claimedBead,
+ commentVerb,
+ metadataString,
+ resetReadBudget,
+} from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
 import { ensureBeadsPath } from "./beads-mode";
-import { bdInvocations } from "./shell";
+import { createClaimState, type ClaimObservation, type ClaimState } from "./claim-state";
+import { bdInvocations, effectiveSegments, parseBdInvocation } from "./shell";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
  Partial<Pick<ExtensionContext, "models">>;
 
@@ -553,6 +571,168 @@ function findingKey(finding: AgentDiscoveryFinding): string {
  return `${finding.agent}\0${finding.message}\0${finding.path ?? ""}`;
 }
 
+interface SessionInitIdentity {
+ agent?: unknown;
+}
+
+function modelIdentity(model: unknown): string | undefined {
+ if (model === null || typeof model !== "object") return undefined;
+ const record = model as Record<string, unknown>;
+ return typeof record.provider === "string" && typeof record.id === "string"
+  ? `${record.provider}/${record.id}`
+  : undefined;
+}
+
+const FAILURE_VERBS: Record<string, true> = { BLOCKED: true, FAILED: true };
+const FAILURE_REPORT_INPUT_KEYS: Record<string, true> = { command: true, cwd: true, i: true, timeout: true };
+
+/** Unknown ownership, status, or comments never count as durable failure evidence. */
+async function hasMismatchFailureEvidence(claim: ClaimObservation): Promise<boolean> {
+ for (const beadId of claim.beadIds) {
+  const bead = await bdShow(beadId);
+  if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "blocked") return false;
+  const comments = await bdCommentsChecked(beadId);
+  if (comments === null || !comments.some(comment => FAILURE_VERBS[commentVerb(comment.text)] === true)) return false;
+ }
+ return true;
+}
+
+/**
+ * Allow only direct, pinned failure-report writes after fresh ownership reads.
+ * Wrappers, substitutions, alternate environments, background execution, and
+ * mutations of any bead outside this session's claim are refused.
+ */
+async function safeFailureReport(
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+ sourceCwd: string,
+): Promise<boolean> {
+ if (toolName !== "bash" || claim === undefined || claim.beadIds.length === 0) return false;
+ if (input === null || typeof input !== "object") return false;
+ const record = input as Record<string, unknown>;
+ if (Object.keys(record).some(key => FAILURE_REPORT_INPUT_KEYS[key] !== true)) return false;
+ if (Object.hasOwn(record, "cwd") && record.cwd !== sourceCwd) return false;
+ const beadsDir = process.env.BEADS_DIR;
+ if (beadsDir === undefined || !path.isAbsolute(beadsDir)) return false;
+
+ const command = record.command;
+ if (typeof command !== "string" || command.length === 0 || /[`$]/.test(command)) return false;
+ const comment = /^bd[ \t]+comment[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+'((?:BLOCKED|FAILED)[ \t]+[^'\r\n]+)'[ \t]*$/.exec(command);
+ const update = /^bd[ \t]+update[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+--status[ \t]+blocked[ \t]*$/.exec(command);
+ const beadId = comment?.[1] ?? update?.[1];
+ if (beadId === undefined || !claim.beadIds.includes(beadId)) return false;
+
+ const segments = effectiveSegments(command);
+ if (segments.length !== 1) return false;
+ const invocation = parseBdInvocation(segments[0]!);
+ if (invocation === null || invocation.assignments.size !== 0 || invocation.hasClaim || invocation.positionals[0] !== beadId) {
+  return false;
+ }
+ if (comment !== null && (invocation.subcommand !== "comment" || invocation.positionals.length < 2)) return false;
+ if (
+  update !== null &&
+  (invocation.subcommand !== "update" ||
+   invocation.positionals.length !== 2 ||
+   invocation.positionals[1] !== "blocked" ||
+   invocation.rest.length !== 4)
+ ) return false;
+
+ const bead = await bdShow(beadId);
+ if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "in_progress") return false;
+ if (comment !== null) return true;
+ const comments = await bdCommentsChecked(beadId);
+ return comments !== null && comments.some(entry => FAILURE_VERBS[commentVerb(entry.text)] === true);
+}
+
+async function allowMismatchTool(
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+ sourceCwd: string,
+): Promise<boolean> {
+ try {
+  if (await safeFailureReport(toolName, input, claim, sourceCwd)) return true;
+  if (toolName !== "yield") return false;
+  if (claim === undefined || claim.beadIds.length === 0) return true;
+  return await hasMismatchFailureEvidence(claim);
+ } catch {
+  return false;
+ }
+}
+
+function mismatchRefusal(reason: string): ToolCallEventResult {
+ return {
+  block: true,
+  reason: `${reason}. To preserve this claim for recovery, run exactly \`bd comment <claimed-id> 'BLOCKED <reason>'\` (or \`'FAILED <reason>'\`), then \`bd update <claimed-id> --status blocked\`. No wrappers, flags, environment changes, or other bead writes are allowed; the claim remains held.`,
+ };
+}
+
+/**
+ * Enforce the assignment contract inside spawned workers.
+ *
+ * Task and eval children use the same `tool_call` seam. The current model is
+ * checked on every call, so a later model switch cannot evade the contract.
+ * This seam runs before tools, not before the initial model invocation.
+ */
+export async function childAssignmentGate(
+ pi: ExtensionAPI,
+ ctx: ExtensionContext,
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+): Promise<ToolCallEventResult | undefined> {
+ if (sessionRole(pi) !== "worker") return undefined;
+ if (
+  ctx.sessionManager === undefined ||
+  typeof ctx.sessionManager.getEntries !== "function" ||
+  ctx.models === undefined ||
+  typeof ctx.models.resolve !== "function" ||
+  typeof ctx.models.current !== "function" ||
+  typeof ctx.getSystemPrompt !== "function"
+ ) return undefined;
+
+ const entries = ctx.sessionManager.getEntries();
+ let init: SessionInitIdentity | undefined;
+ for (let index = entries.length - 1; index >= 0; index -= 1) {
+  const entry = entries[index];
+  if (entry !== null && typeof entry === "object" && "type" in entry && entry.type === "session_init") {
+   init = entry as SessionInitIdentity;
+   break;
+  }
+ }
+ const namedAgent = typeof init?.agent === "string" && init.agent.length > 0 ? init.agent : undefined;
+ const namedContract = namedAgent === undefined ? undefined : coreContractForAgent(namedAgent);
+ if (namedAgent !== undefined && namedContract === undefined) return undefined;
+
+ const marker = ROLE_MARKER.exec(ctx.getSystemPrompt().join("\n"))?.[1];
+ const contract = namedContract ?? coreContractForRole(marker ?? "");
+ if (contract === undefined) return undefined;
+ const sourceAgent = namedAgent ?? `marker-only (${contract.role})`;
+
+ if (namedContract !== undefined && marker !== namedContract.role) {
+  const reason = `ORC assignment refused for ${sourceAgent}: expected ORC-ROLE ${namedContract.role}, actual ${marker ?? "missing"}; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+
+ let expectedIdentity: string | undefined;
+ let actualIdentity: string | undefined;
+ try {
+  expectedIdentity = modelIdentity(ctx.models.resolve(namedContract?.modelAlias ?? contract.modelAlias));
+  actualIdentity = modelIdentity(ctx.models.current());
+ } catch {
+  const reason = `ORC assignment refused for ${sourceAgent}: model evidence unavailable; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+ if (expectedIdentity === undefined || expectedIdentity !== actualIdentity) {
+  const reason = `ORC assignment refused for ${sourceAgent}: expected model ${expectedIdentity ?? contract.modelAlias}, actual ${actualIdentity ?? "unavailable"}; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+ return undefined;
+}
 function findingLine(finding: AgentDiscoveryFinding): string {
  return `${finding.agent}: ${finding.message}${finding.path === undefined ? "" : ` (${finding.path})`}`;
 }
@@ -1005,7 +1185,7 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  * the two extension-event handlers are `pi.on` registrations, so importing this
  * module has no observable effect.
  */
-export function registerWatchers(pi: ExtensionAPI): void {
+export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createClaimState()): void {
  // Lifecycle handlers can run after construction's async scope has ended.
  const runInDiscoveryScope = AsyncLocalStorage.snapshot();
  let reportedAgentFindings = new Set<string>();
@@ -1079,22 +1259,34 @@ export function registerWatchers(pi: ExtensionAPI): void {
  pi.on("session_shutdown", () => dispose());
 
  /**
-  * W3, second half: observe `task` spawns.
-  *
-  * A handler of its own, separate from the gate dispatcher: every registered
-  * handler runs (`extensions/runner.ts:1462-1470`), and this one returns nothing
-  * on every path, so a degraded dependency can never become a reason a wave does
-  * not launch.
+  * W3, second half: enforce core assignments before observing `task` spawns.
+  * Warning dedupe never weakens refusal: a known bad core request blocks every
+  * invocation, while the narrow durable failure path preserves its claim.
   */
  pi.on("tool_call", async (event, ctx) => {
-  if (event.toolName !== "task") return undefined;
   try {
    resetReadBudget();
-   await runInDiscoveryScope(() => preflightAgents(pi, ctx, requestedAgentNames(event.input), reportedAgentFindings));
+   const assignment = await childAssignmentGate(pi, ctx, event.toolName, event.input, claims.observedClaim());
+   if (assignment) return assignment;
+   if (event.toolName !== "task") return undefined;
+   const requested = requestedAgentNames(event.input);
+   const findings = await runInDiscoveryScope(() =>
+    preflightAgents(pi, ctx, requested, reportedAgentFindings),
+   );
+   const requestedCoreFindings = findings.filter(
+    finding => requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined,
+   );
    await warnPreflight(ctx.cwd, Date.now());
+   if (requestedCoreFindings.length > 0) {
+    return {
+     block: true,
+     reason: `requested core assignment refused: ${requestedCoreFindings.map(findingLine).join("; ")}`,
+    };
+   }
   } catch (error) {
    logFailure(pi, "preflight warning", error);
   }
+  return undefined;
  });
 
  /**
