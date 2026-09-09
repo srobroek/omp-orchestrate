@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.8](https://github.com/srobroek/omp-orchestrate/compare/v0.3.7...v0.3.8) (2026-09-09)
+
+
+### Bug Fixes
+
+* count completed bot review fixes correctly ([#77](https://github.com/srobroek/omp-orchestrate/issues/77)) ([abc6b7d](https://github.com/srobroek/omp-orchestrate/commit/abc6b7dd6c41afe2a86e58c64fbf9ff2a93832e4))
+
 ## [0.3.7](https://github.com/srobroek/omp-orchestrate/compare/v0.3.6...v0.3.7) (2026-09-09)
 
 
