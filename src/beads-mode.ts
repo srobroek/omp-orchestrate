@@ -50,12 +50,19 @@ async function sharedCheckoutBeadsDir(cwd: string): Promise<string | null> {
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
 	try {
-		const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--git-common-dir"], {
-			env,
-			timeout: 1500,
-			maxBuffer: 16 * 1024,
-		});
-		const commonDir = path.resolve(cwd, stdout.trim());
+		const { stdout } = await execFileAsync(
+			"git",
+			["-C", cwd, "rev-parse", "--git-common-dir", "--is-bare-repository"],
+			{
+				env,
+				timeout: 1500,
+				maxBuffer: 16 * 1024,
+			},
+		);
+		const [commonDirAnswer, bareAnswer] = stdout.trim().split("\n");
+		if (commonDirAnswer === undefined || bareAnswer !== "false") return null;
+		const commonDir = path.resolve(cwd, commonDirAnswer);
+		if (path.basename(commonDir) !== ".git") return null;
 		return path.join(path.dirname(commonDir), ".beads");
 	} catch {
 		return null;

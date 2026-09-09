@@ -89,6 +89,30 @@ exit 0`);
 		expect(process.env.BEADS_DIR).toBe(primaryBeads);
 	});
 
+	test("a worktree attached to a bare repository cannot adopt an ancestor database", async () => {
+		const source = path.join(dir, "source");
+		const bare = path.join(dir, "remote.git");
+		const worktree = path.join(dir, "bare-linked");
+		await fs.mkdir(source);
+		await execFileAsync("git", ["init", source]);
+		await execFileAsync("git", ["-C", source, "config", "user.email", "test@example.com"]);
+		await execFileAsync("git", ["-C", source, "config", "user.name", "Test"]);
+		await execFileAsync("git", ["-C", source, "commit", "--allow-empty", "-m", "init"]);
+		await execFileAsync("git", ["clone", "--bare", source, bare]);
+		await execFileAsync("git", ["--git-dir", bare, "worktree", "add", "-b", "linked", worktree]);
+		const ancestorBeads = path.join(dir, ".beads");
+		await fs.mkdir(ancestorBeads);
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "${ancestorBeads}"
+exit 0`);
+
+		const result = await ensureBeadsPath(worktree);
+
+		expect(result.ok).toBe(false);
+		expect(result.ok === false && result.reason).toContain("does not belong to this checkout");
+		expect(process.env.BEADS_DIR).toBeUndefined();
+	});
+
 	test("an inherited BEADS_DIR is left exactly as it arrived", async () => {
 		// The run resolved it; re-resolving inside an isolated checkout would replace a correct
 		// value with a local one, which is the whole failure this module exists to prevent.
