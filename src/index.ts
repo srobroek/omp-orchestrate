@@ -92,10 +92,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     if (scope) return scope;
    }
 
-   // Last, and only for `bash`: a revision rather than a refusal, built through the
-   // one shared builder so a second environment gate can contribute to the same
-   // result without a handler returning two of them.
-   if (event.toolName === "bash") return reviseBashEnv(input, { ...beadWriteFreeEnv(pi, ctx) });
+   // Last, and only for `bash`: G1 asynchronously checks the process-local pin and
+   // active-run marker before the shared builder adds its environment revision. A
+   // missing or invalid marker fails open, while blocking gates above still win.
+   if (event.toolName === "bash") return reviseBashEnv(input, { ...(await beadWriteFreeEnv(pi, ctx)) });
 
    return undefined;
   } catch (error) {

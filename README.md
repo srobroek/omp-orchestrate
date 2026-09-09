@@ -91,7 +91,8 @@ The extension registers a single `tool_call` handler with seven checks. They cat
 protocol mistakes but cannot enforce transactional isolation. G6 delivers notices.
 Unavailable evidence and bounded exit paths can fail open without accepting the work.
 
-- **G1 (`bash`):** imposes `BD_READONLY=1` to block bead writes from sessions without a contract.
+- **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` only when the top-level OMP process has a non-empty absolute `BEADS_DIR` pin from `ensureBeadsPath`. The session checkout or pinned repository must also have a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
+  G1 checks the session checkout first, then the pinned repository. This preserves linked-worktree runs whose shared `.beads` lives in the primary checkout.
 - **G2 (`bash`, `edit`, `write`):** blocks edits outside the worktree named by the claimed bead.
 - **G3 (`bash`):** blocks mutating `git worktree` commands and `gh pr checkout` because they bypass Worktrunk.
   Inspection remains allowed.
@@ -110,9 +111,10 @@ Unavailable evidence and bounded exit paths can fail open without accepting the 
 Before a command runs, four TTSR rules in `rules/` check its arguments for protocol slips.
 Each rule is advisory or tool-only, never a security boundary.
 
-The run pins one absolute `BEADS_DIR` to its embedded database.
-Each copied checkout inherits that pin. Discovering a local database does not share state.
-G6 and G7 check Beads discipline during a run.
+The run pins one absolute `BEADS_DIR` to its embedded database. G1 uses that process-local
+pin and a valid marker in the session checkout or pinned repository before sandboxing a
+generic helper. Each copied checkout inherits the pin. Discovering a local database does
+not share state. G6 and G7 check Beads discipline during a run.
 
 The host has a separate regex engine. Python accepting a pattern does not prove the
 host accepts it. After editing a rule, run `sh scripts/validate-rules.sh`.

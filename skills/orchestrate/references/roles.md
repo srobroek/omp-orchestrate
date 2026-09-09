@@ -34,21 +34,35 @@ escalates hard cases per spawn with `effort`.
 mid-epic; the Worktrunk branch and the bead state are what carry the domain, so the
 replacement resumes the same tree.
 
-## What replaced the scribe and the advisor
+## Architect rollover
 
-Neither is an agent. Both duties survive; neither costs a spawn.
+The global subagent wall-clock cap is 30 minutes. A timeout is a process boundary, not an epic failure. When an architect times out and its epic remains open, the lead reads the epic, feature worktree, latest durable comments, terminal receipts, captures, and unresolved claims. The lead then starts one replacement `orc-architect` for the same epic and worktree with a handover containing:
+
+- the epic id and pinned `BEADS_DIR`;
+- the feature worktree and current head;
+- completed worker receipts and integrated captures;
+- unresolved claims, blockers, and recovery ownership;
+- the next safe action.
+
+Do not relay stale chat history or infer missing state. If durable evidence is incomplete, enter lifecycle recovery before restart. Repeat rollover only while the epic remains actionable and each outgoing architect has recorded progress or a concrete blocker.
+
+## What replaced the scribe and continuous advisors
+
+Neither is a spawned agent. The duties survive without a per-turn reviewer on every worker.
 
 - **The scribe's ledger duty** is `orc_run_status` plus `/orchestrate-status`, and the
   provenance half is the extension's passive audit ledger
   (`<artifacts_dir>/audit/<child-id>.bdlog`, one line per child `bd` mutation). There is no
   ledger wisp to drain and no report agent to activate.
-- **The advisor is OMP's native watchdog**, bound to the architect by frontmatter
-  `advisor: true`. It reviews transcript deltas in band and can never block a call, which is
-  exactly the advisory role a spawned advisor approximated at the cost of a session.
-- **Escalation that once went to an advisor routes to `role=researcher`.** The researcher's
-  contract is a durable `ADVICE` comment on the bead, read-only. Never spawn an advisor, and
-  never answer your own escalation.
-- **Product intent was never an advisor's to decide.** It is an `ASK` wisp plus a human gate.
+- **Architects use the single native triage advisor.** The advisor is `@smol:low`,
+  reports one actionable finding per update and loads one playbook on demand.
+  Implementers, researchers, reviewers and shepherds remain advisor-free.
+- **Integrated work still gets one independent `orc-reviewer` wisp.** Add another
+  specialist only for a material risk or project policy; never dispatch a fixed roster.
+- **Design or debug uncertainty routes to `role=researcher`.** The researcher's contract is
+  one durable `ADVICE` comment on the bead. Never answer your own escalation.
+- **Product intent is an `ASK` wisp plus a human gate.** Neither a reviewer nor researcher
+  may decide it.
 
 ## Capabilities and access
 
