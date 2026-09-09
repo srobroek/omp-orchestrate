@@ -30,9 +30,9 @@ For review bots, first collect every configured bot's actionable findings. Use
 the GitHub review-thread node id as each issue identity; without a thread, use
 the review URL plus a stable bot/path/location/finding fingerprint. The round
 key combines the sorted issue identities with `head_sha`. A new push produces
-a new round key, while `metadata.bot_issue_attempts` separately counts whether
-the same material issue survived prior fixed heads. A newly discovered issue
-starts at one and does not inherit the PR's total round count.
+a new round key, while `metadata.bot_issue_attempts` counts completed fixes
+for the same material issue across prior heads. A newly discovered issue starts
+at zero and does not inherit the PR's total round count.
 
 On a concurrent creation race keep the OLDEST open fix bead and close the later
 one as its duplicate.
