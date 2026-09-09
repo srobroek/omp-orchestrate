@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.2](https://github.com/srobroek/omp-orchestrate/compare/v0.3.1...v0.3.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* parse textual edit targets through the locked API ([287bce9](https://github.com/srobroek/omp-orchestrate/commit/287bce93ad86c935c4dc4db3aae3a9501ac4106c))
+* parse wisp envelopes and resolve edit targets ([76df661](https://github.com/srobroek/omp-orchestrate/commit/76df66148589ed8a03c6523a87a38a6902ec66ab))
+* parse wisp envelopes and resolve edit targets ([dbdf9d6](https://github.com/srobroek/omp-orchestrate/commit/dbdf9d6a3ba145ce3bb3a7b47bf68407d96570a5))
+
 ## [0.3.1](https://github.com/srobroek/omp-orchestrate/compare/v0.3.0...v0.3.1) (2026-09-09)
 
 
