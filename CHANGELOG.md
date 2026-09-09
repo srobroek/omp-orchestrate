@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.7](https://github.com/srobroek/omp-orchestrate/compare/v0.3.6...v0.3.7) (2026-09-09)
+
+
+### Features
+
+* add bounded automated review remediation ([#76](https://github.com/srobroek/omp-orchestrate/issues/76)) ([5273291](https://github.com/srobroek/omp-orchestrate/commit/5273291bda0177902c6d13a586af9ccf82593045))
+
+
+### Bug Fixes
+
+* allow owned closed claims to reopen ([#74](https://github.com/srobroek/omp-orchestrate/issues/74)) ([2c57696](https://github.com/srobroek/omp-orchestrate/commit/2c5769614054be0fdd17e32d572983b42c1e8063))
+* arbitrate actor notices with beads ([#72](https://github.com/srobroek/omp-orchestrate/issues/72)) ([9a290ec](https://github.com/srobroek/omp-orchestrate/commit/9a290ec49710b761eb2765571b67cae06a195202))
+
 ## [0.3.6](https://github.com/srobroek/omp-orchestrate/compare/v0.3.5...v0.3.6) (2026-09-09)
 
 
