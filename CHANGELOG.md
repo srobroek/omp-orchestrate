@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.3](https://github.com/srobroek/omp-orchestrate/compare/v0.3.2...v0.3.3) (2026-09-09)
+
+
+### Features
+
+* supervise workers and roll architects ([6f2398f](https://github.com/srobroek/omp-orchestrate/commit/6f2398ffdc51a25297b40147d19611aedd306ca3))
+* supervise workers and roll architects ([54b8ba6](https://github.com/srobroek/omp-orchestrate/commit/54b8ba65c42352e4d770cc708b5b06453c020234))
+
+
+### Bug Fixes
+
+* bind architect metadata to returned worktree ([2d088b5](https://github.com/srobroek/omp-orchestrate/commit/2d088b5b58d563ddb0fe8b0822525228130e1912))
+* bind recovery supervision to live runs ([f50940c](https://github.com/srobroek/omp-orchestrate/commit/f50940cd019ca5cb616608bba42d95c60df13935))
+* bind recovery supervision to live runs ([6b8b08a](https://github.com/srobroek/omp-orchestrate/commit/6b8b08a300246d78a78afa3c41e9c429bc0d6104))
+* confine isolated workers to native worktree roots ([6e2dfed](https://github.com/srobroek/omp-orchestrate/commit/6e2dfed6ef4c37024d84e30f772e8bd233f4911d))
+* enforce checkout and claim ownership per session ([1bf5300](https://github.com/srobroek/omp-orchestrate/commit/1bf5300877be2e3a9a9015fcfb24842b5222009c))
+* enforce core agent assignment contracts ([f06c23d](https://github.com/srobroek/omp-orchestrate/commit/f06c23d573e1b3660a6c3116735f0c0c6383574a))
+* enforce core agent assignment contracts ([fb04b7d](https://github.com/srobroek/omp-orchestrate/commit/fb04b7d41947ee4bc2ef2c9a2650750c64cc5ae9))
+* enforce fresh ownership and recover spaced worktrees ([73159e7](https://github.com/srobroek/omp-orchestrate/commit/73159e7a794fdb7b0a2370476e214d97b6ad08df))
+* follow live session cwd in supervision ([f829399](https://github.com/srobroek/omp-orchestrate/commit/f829399a57e3ed555d45203c56e64737fa151eb6))
+* harden assignment recovery checks ([4f4ea3d](https://github.com/srobroek/omp-orchestrate/commit/4f4ea3db1c36a3069f11786d801d543f4c475390))
+* resolve run marker from session checkout ([00f8470](https://github.com/srobroek/omp-orchestrate/commit/00f8470a24bf8adae528e9a478a374b42a5bc9ac))
+* scope helper readonly mode to active runs ([a0ffa53](https://github.com/srobroek/omp-orchestrate/commit/a0ffa53a41160a666d2e7adc3c77f21a267d6323))
+* scope helper readonly mode to active runs ([14351a2](https://github.com/srobroek/omp-orchestrate/commit/14351a293113c3d74068aaf7240a0e3ad56c0618))
+
 ## [0.3.2](https://github.com/srobroek/omp-orchestrate/compare/v0.3.1...v0.3.2) (2026-09-09)
 
 
