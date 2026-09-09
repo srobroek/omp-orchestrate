@@ -121,7 +121,7 @@ async function gateChain(
  }
  // Mirrors `index.ts`: the environment gate contributes to one revision.
  if (toolName === "bash") {
-  return reviseBashEnv(input, { ...beadWriteFreeEnv(WORKER, ctx) });
+  return reviseBashEnv(input, { ...(await beadWriteFreeEnv(WORKER, ctx)) });
  }
  return undefined;
 }
@@ -490,10 +490,16 @@ describe("G1 refuses nothing", () => {
   }
  });
 
- test("a contract-free helper is revised, never refused", async () => {
-  const result = await bash("bd update orc-1 --status closed", ctxAt(owned, null));
-
-  expect(result?.block).toBeUndefined();
-  expect(result?.input?.env).toEqual({ BD_READONLY: "1" });
+ test("a contract-free helper without an active pinned run fails open", async () => {
+  const priorBeadsDir = process.env.BEADS_DIR;
+  delete process.env.BEADS_DIR;
+  try {
+   const result = await bash("bd update orc-1 --status closed", ctxAt(owned, null));
+   expect(result?.block).toBeUndefined();
+   expect(result?.input?.env).toBeUndefined();
+  } finally {
+   if (priorBeadsDir === undefined) delete process.env.BEADS_DIR;
+   else process.env.BEADS_DIR = priorBeadsDir;
+  }
  });
 });
