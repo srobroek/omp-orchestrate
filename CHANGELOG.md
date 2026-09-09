@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/omp-orchestrate/compare/v0.3.0...v0.3.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* contain activation-hook failures in /orchestrate-run ([#54](https://github.com/srobroek/omp-orchestrate/issues/54)) ([f95e006](https://github.com/srobroek/omp-orchestrate/commit/f95e006dc36b24d4269be3ad20861f578de32503))
+* pin beads across linked worktrees ([#55](https://github.com/srobroek/omp-orchestrate/issues/55)) ([600bc5b](https://github.com/srobroek/omp-orchestrate/commit/600bc5b35ca45f7f6b344f572a714c56863c56b0))
+* preflight only orchestrated runs, and pin BEADS_DIR instead of asking ([#52](https://github.com/srobroek/omp-orchestrate/issues/52)) ([20ff941](https://github.com/srobroek/omp-orchestrate/commit/20ff9412e72b94348b6bb165bec607770da27033))
+
 ## [0.3.0](https://github.com/srobroek/omp-orchestrate/compare/v0.2.4...v0.3.0) (2026-09-08)
 
 
