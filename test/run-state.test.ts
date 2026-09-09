@@ -3,7 +3,8 @@ import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as supervision from "../src/supervision";
-import { activateRun, bindRun, markerPath, readActiveRun } from "../src/run-state";
+import { activateRun, bindRun, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockResolvedValue(undefined);
 afterAll(() => patrolSpy.mockRestore());
@@ -249,5 +250,71 @@ describe("bindRun", () => {
 	test("refuses to retarget a legacy raw-string marker", async () => {
 		await seed("orc-legacy\n");
 		await expect(bindRun(cwd, "orc-new")).rejects.toThrow(/already bound to orc-legacy/);
+	});
+});
+
+describe("registerRunCommands", () => {
+	type Handler = (args: string, ctx: unknown) => Promise<void>;
+
+	function rig(onActivate?: (cwd: string) => Promise<unknown>) {
+		const handlers = new Map<string, Handler>();
+		const notices: Array<[string, string]> = [];
+		const pi = {
+			registerCommand: (name: string, spec: { handler: Handler }) => {
+				handlers.set(name, spec.handler);
+			},
+		} as unknown as ExtensionAPI;
+		registerRunCommands(pi, onActivate);
+		const ctx = {
+			sessionManager: { getCwd: () => cwd, getSessionId: () => "session-t" },
+			ui: { notify: (text: string, level: string) => notices.push([level, text]) },
+		};
+		const run = handlers.get("orchestrate-run");
+		if (run === undefined) throw new Error("orchestrate-run not registered");
+		return { run: () => run("", ctx), notices };
+	}
+
+	beforeEach(() => {
+		// An inherited pin is accepted as-is, which keeps bd out of these tests.
+		process.env.BEADS_DIR = join(cwd, ".beads");
+	});
+	afterEach(() => {
+		delete process.env.BEADS_DIR;
+	});
+
+	test("/orchestrate-run calls the activation hook once, after the marker exists", async () => {
+		const seen: Array<string | null> = [];
+		const { run, notices } = rig(async hookCwd => {
+			seen.push((await readActiveRun(hookCwd))?.run_id ?? null);
+		});
+		await run();
+		expect(seen).toEqual(["pending"]);
+		expect(notices.map(([level]) => level)).toEqual(["info"]);
+	});
+
+	test("a failing hook is reported as a readiness failure, not a failed activation", async () => {
+		const { run, notices } = rig(async () => {
+			throw new Error("omp config unreadable");
+		});
+		await run();
+		expect((await readActiveRun(cwd))?.run_id).toBe("pending");
+		expect(notices.at(-1)).toEqual(["warning", "orchestrate run active; readiness check failed: omp config unreadable"]);
+	});
+
+	test("the hook does not run when activation fails", async () => {
+		await seed('{"run_id":"orc-existing","schema_version":1}\n');
+		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const readSpy = spyOn(fs, "readFile").mockRejectedValue(denied);
+		let calls = 0;
+		try {
+			const { run, notices } = rig(async () => {
+				calls += 1;
+			});
+			await run();
+			expect(notices.at(-1)?.[0]).toBe("error");
+		} finally {
+			readSpy.mockRestore();
+		}
+		expect(calls).toBe(0);
 	});
 });
