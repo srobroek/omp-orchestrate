@@ -20,7 +20,7 @@ import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
-import { readActiveRun, registerRunCommands } from "./run-state";
+import { isBoundRunActive, readActiveRun, registerRunCommands } from "./run-state";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerConflictProbe } from "./tools/conflict-probe";
@@ -43,7 +43,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerRunStatus(pi);
  registerBotReviewProbe(pi);
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus.
- registerSupervision(pi);
+ registerSupervision(pi, isBoundRunActive);
  registerWatchers(pi, claims);
 
  /**

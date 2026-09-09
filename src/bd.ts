@@ -181,10 +181,10 @@ function asBead(value: unknown): BdBead | null {
  * `bd show --json` returns a single-element array, so both an array and a bare
  * object are accepted.
  */
-export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdBead | null> {
- const payload = await readJson(["show", id, "--json"], timeoutMs);
- if (Array.isArray(payload)) return asBead(payload[0]);
- return asBead(payload);
+export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead | null> {
+	const payload = await readJson(["show", id, "--json"], timeoutMs, cwd);
+	if (Array.isArray(payload)) return asBead(payload[0]);
+	return asBead(payload);
 }
 
 /** Beads matching a caller-supplied query. The caller passes its own `--json`. */
@@ -192,16 +192,19 @@ export async function bdList(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd
  return (await bdListChecked(args, timeoutMs, cwd)) ?? [];
 }
 
+function asBeadArray(payload: unknown): BdBead[] | null {
+	if (!Array.isArray(payload)) return null;
+	const beads: BdBead[] = [];
+	for (const entry of payload) {
+		const bead = asBead(entry);
+		if (!bead) return null;
+		beads.push(bead);
+	}
+	return beads;
+}
+
 export async function bdListChecked(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
- const payload = await readJson(args, timeoutMs, cwd);
- if (!Array.isArray(payload)) return null;
- const beads: BdBead[] = [];
- for (const entry of payload) {
-  const bead = asBead(entry);
-  if (!bead) return null;
-  beads.push(bead);
- }
- return beads;
+	return asBeadArray(await readJson(args, timeoutMs, cwd));
 }
 
 /**

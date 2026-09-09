@@ -74,7 +74,7 @@ describe("extension factory", () => {
 		const { pi, seen } = recordingApi();
 		ompOrchestrate(pi);
 		expect([...new Set(seen.events)].sort()).toEqual(
-			["tool_call", "session_start", "goal_updated", "tool_result", "session_shutdown"].sort(),
+			["tool_call", "session_start", "session_switch", "session_branch", "goal_updated", "tool_result", "session_shutdown"].sort(),
 		);
 	});
 

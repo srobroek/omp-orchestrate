@@ -5,7 +5,7 @@
  * S2 creates a run-derived patrol id, relying on database id uniqueness.
  */
 
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdListChecked, bdRun, bdWispListChecked, resetReadBudget } from "./bd";
 import architect from "./contracts/architect.json";
 import generic from "./contracts/generic.json";
@@ -307,74 +307,92 @@ export async function ensurePatrolWisp(epicId: string, cwd?: string): Promise<vo
  }
 }
 
-/**
- * Bind the reaper to the lifecycle bus.
- *
- * Subscription happens inside `session_start` because `ctx` is where the repository
- * the captured branches live in comes from, and because a subscription taken at load
- * time would outlive nothing useful. The channel only fires in a session that spawns,
- * so this is inert in a worker rather than conditional on one.
- */
-export function registerSupervision(pi: ExtensionAPI): void {
- let subscribed = false;
+/** Bind the reaper to the lifecycle bus for repositories with an active run. */
+export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) => Promise<boolean>): void {
+	let context: ExtensionContext | undefined;
+	let unsubscribe: (() => void) | undefined;
 
- pi.on("session_start", (_event, ctx) => {
-  // `session_start` fires again on a switch or a branch; a second subscription
-  // would reap every child exit twice.
-  if (subscribed) return;
-  subscribed = true;
-  // The reap's promise is handed back rather than discarded: `EventBus.on`
-  // awaits a handler and logs a rejection, and `emit` never waits on that, so
-  // returning it costs the emitter nothing and keeps a fault visible.
-  pi.events.on("task:subagent:lifecycle", data => handleLifecycle(pi, data, ctx.cwd));
- });
+	const bindSession = (ctx: ExtensionContext): void => {
+		context = ctx;
+		unsubscribe ??= pi.events.on("task:subagent:lifecycle", data => {
+			// The session manager owns cwd. `/move` mutates it without another
+			// `session_start`, while switch and branch events may supply a new context.
+			const currentCwd = context?.sessionManager.getCwd();
+			if (currentCwd === undefined) return;
+			return handleLifecycle(pi, data, currentCwd, isRunBound);
+		});
+	};
+
+	pi.on("session_start", (_event, ctx) => bindSession(ctx));
+	pi.on("session_switch", (_event, ctx) => bindSession(ctx));
+	pi.on("session_branch", (_event, ctx) => bindSession(ctx));
+	pi.on("session_shutdown", () => {
+		unsubscribe?.();
+		unsubscribe = undefined;
+		context = undefined;
+	});
 }
 
 /** Reap one bus payload, reporting what it did and swallowing what it could not. */
-async function handleLifecycle(pi: ExtensionAPI, data: unknown, cwd: string): Promise<void> {
- const child = asLifecycle(data);
- if (child === null) return;
- try {
-  const outcome = await reapChild(child, { cwd });
-  if (outcome.discoveryUnknown) pi.logger.warn("orchestrate recovery candidate discovery incomplete", { child: child.id });
-  for (const reaped of outcome.reaped) {
-   pi.logger.info("orchestrate recovery observation", {
-    child: child.id,
-    bead: reaped.bead,
-    case: reaped.case,
-    branch: outcome.branch,
-    failures: reaped.failures,
-    recovery: reaped.recovery,
-    branchState: outcome.branchState,
-   });
-   if (reaped.recovery !== "not-needed") {
-    pi.sendMessage({
-     customType: "orchestrate-recovery-needed",
-     content: `Recovery observation for ${reaped.bead}, child ${child.id}: ${reaped.case}; NOTE ${reaped.recovery}; branch=${outcome.branch ?? outcome.branchState ?? "unknown"}. No claim or metadata changed. Architect: inspect current bead and branch evidence; establish an exclusive recovery window excluding all dispatch/claim writers before any recovery mutation. Paused work must wait for escalation resolution. Failed NOTE persistence requires explicit reconciliation; this is not a recovery success.`,
-     display: true,
-    }, { triggerTurn: false });
-   }
-  }
-  if (outcome.discoveryUnknown) {
-   pi.sendMessage({
-    customType: "orchestrate-recovery-needed",
-    content: `Recovery discovery for child ${child.id} is incomplete. Architect: explicitly reconcile ordinary and ephemeral claims after storage is readable; nothing was released. Establish an exclusive recovery window before any mutation.`,
-    display: true,
-   }, { triggerTurn: false });
-  }
- } catch (error) {
-  // The bus contains a rejected handler but reports it as an anonymous event
-  // error; naming the reaper is what makes a silent reclamation diagnosable.
-  pi.logger.error("orchestrate reaper failed open", {
-   child: child.id,
-   error: error instanceof Error ? error.message : String(error),
-  });
-  pi.sendMessage({
-   customType: "orchestrate-recovery-needed",
-   content: `Recovery observation failed for child ${child.id}. Architect must explicitly reconcile its claims and evidence; no automatic recovery is confirmed. Exclude all claim/dispatch writers before any recovery mutation.`,
-   display: true,
-  }, { triggerTurn: false });
- }
+async function handleLifecycle(
+	pi: ExtensionAPI,
+	data: unknown,
+	cwd: string,
+	isRunBound: (cwd: string) => Promise<boolean>,
+): Promise<void> {
+	const child = asLifecycle(data);
+	if (child === null || TERMINAL[child.status] !== true) return;
+	resetReadBudget();
+	try {
+		if (!await isRunBound(cwd)) return;
+	} catch (error) {
+		pi.logger.error("orchestrate run liveness check unavailable; recovery skipped", {
+			child: child.id,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return;
+	}
+	try {
+		const outcome = await reapChild(child, { cwd });
+		if (outcome.discoveryUnknown) pi.logger.warn("orchestrate recovery candidate discovery incomplete", { child: child.id });
+		for (const reaped of outcome.reaped) {
+			pi.logger.info("orchestrate recovery observation", {
+				child: child.id,
+				bead: reaped.bead,
+				case: reaped.case,
+				branch: outcome.branch,
+				failures: reaped.failures,
+				recovery: reaped.recovery,
+				branchState: outcome.branchState,
+			});
+			if (reaped.recovery !== "not-needed") {
+				pi.sendMessage({
+					customType: "orchestrate-recovery-needed",
+					content: `Recovery observation for ${reaped.bead}, child ${child.id}: ${reaped.case}; NOTE ${reaped.recovery}; branch=${outcome.branch ?? outcome.branchState ?? "unknown"}. No claim or metadata changed. Architect: inspect current bead and branch evidence; establish an exclusive recovery window excluding all dispatch/claim writers before any recovery mutation. Paused work must wait for escalation resolution. Failed NOTE persistence requires explicit reconciliation; this is not a recovery success.`,
+					display: true,
+				}, { triggerTurn: false });
+			}
+		}
+		if (outcome.discoveryUnknown) {
+			pi.sendMessage({
+				customType: "orchestrate-recovery-needed",
+				content: `Recovery discovery for child ${child.id} is incomplete. Architect: explicitly reconcile ordinary and ephemeral claims after storage is readable; nothing was released. Establish an exclusive recovery window before any mutation.`,
+				display: true,
+			}, { triggerTurn: false });
+		}
+	} catch (error) {
+		// The bus contains a rejected handler but reports it as an anonymous event
+		// error; naming the reaper is what makes a silent reclamation diagnosable.
+		pi.logger.error("orchestrate reaper failed open", {
+			child: child.id,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		pi.sendMessage({
+			customType: "orchestrate-recovery-needed",
+			content: `Recovery observation failed for child ${child.id}. Architect must explicitly reconcile its claims and evidence; no automatic recovery is confirmed. Exclude all claim/dispatch writers before any recovery mutation.`,
+			display: true,
+		}, { triggerTurn: false });
+	}
 }
 
 /** The lifecycle payload narrowed to the fields this module reads. */

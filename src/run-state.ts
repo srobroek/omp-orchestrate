@@ -3,9 +3,9 @@
  * and which run bead that run answers to.
  *
  * Replaces the marker halves of `orchestrator-run-activate.py` and
- * `orchestrate_run_marker.py`. Liveness (`bd show` on the run bead) is not here:
- * the gates that need it own that probe, and marker presence must stay cheap
- * enough to sit in front of every gated call.
+ * `orchestrate_run_marker.py`. Marker reads stay cheap enough for every gated
+ * call; `isBoundRunActive` owns the explicit Beads liveness probe used only by
+ * child supervision.
  *
  * Two properties the scripts established and this keeps:
  *
@@ -27,7 +27,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ensureBeadsPath } from "./beads-mode";
-import { resetReadBudget } from "./bd";
+import { bdShow, resetReadBudget } from "./bd";
 import { ensurePatrolWisp } from "./supervision";
 
 /**
@@ -137,6 +137,34 @@ export async function readActiveRunStrict(cwd: string): Promise<ActiveRun | null
  const state: ActiveRun = { schema_version: 1, run_id: record.run_id };
  if (typeof record.session_id === "string") state.session_id = record.session_id;
  return state;
+}
+
+const ACTIVE_RUN_STATUSES: Record<string, true> = {
+	open: true,
+	in_progress: true,
+	blocked: true,
+	deferred: true,
+};
+
+/**
+ * Verify that the bound run still authorises child supervision.
+ *
+ * A missing or pending marker is an ordinary inactive repository. Once a run id
+ * is bound, only a positively observed Beads status establishes supervision.
+ * Unreadable, malformed, missing, and unknown authority remains unavailable so
+ * callers cannot mistake uncertainty for an inactive or closed run.
+ */
+export async function isBoundRunActive(cwd: string): Promise<boolean> {
+	const marker = await readActiveRunStrict(cwd);
+	if (marker === null || marker.run_id === PENDING) return false;
+	const run = await bdShow(marker.run_id, undefined, cwd);
+	if (run === null || typeof run.status !== "string") {
+		throw new Error(`run liveness unavailable: bound run ${marker.run_id} status could not be verified`);
+	}
+	const status = run.status.toLowerCase();
+	if (status === "closed") return false;
+	if (ACTIVE_RUN_STATUSES[status] === true) return true;
+	throw new Error(`run liveness unavailable: bound run ${marker.run_id} has unknown status ${JSON.stringify(run.status)}`);
 }
 
 /** Write the marker atomically, leaving no temporary behind on either path. */
