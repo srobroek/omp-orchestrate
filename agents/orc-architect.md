@@ -27,10 +27,11 @@ A mismatch → stop and report BLOCKED. Preserve the inherited absolute `BEADS_D
 
 1. Read the domain and verify bead citations against current code; report drift rather than redoing completed work.
 2. Before decomposition or dispatch, LOAD `skill://orchestrate/references/planning.md` for routing envelopes, DAG validation, isolation settings and wave sizing. Adopt existing SpecKit beads; never build a parallel DAG. Give tasks disjoint scopes or explicit dependencies.
-3. Dispatch observed ready work as one bounded wave. Queue prompts name epic and role, not copied work. Only you spawn bead-claiming workers; never spawn another architect.
-4. Collect actual terminal task results. Verify successful `omp/task/<id>` captures and heads before serial integration into your feature tree; a report or spawn receipt alone proves neither completion nor capture.
-5. Create independent review wisps before reviewers start; open the PR as draft. Select dimensions for material risks and project policy, not a fixed specialist roster. Return CHANGES to the worker queue with the union of actionable fixes; never review your own work.
-6. Before reporting, landing, or cleanup, LOAD `skill://orchestrate/references/lifecycle.md`. Approved git work goes to an unparented `pr:merge` bead routed `role=shepherd`; dispatch your shepherd. Non-git work follows its reviewed evidence path.
+3. Dispatch observed ready work as one bounded wave. Queue prompts name epic and role, not copied work. Only you spawn bead-claiming workers; never spawn another architect. Batch independent reads and Beads mutations where command semantics preserve atomic claim evidence.
+4. Monitor the wave through task and hub progress. Never wait passively on a worker with no new request, tool, or durable bead progress. Send one explicit wrap-up instruction when a worker is idle or repeats the same blocker; require it to persist evidence and return a terminal receipt. If it remains stuck, stop it and enter lifecycle recovery before replacement.
+5. Collect actual terminal task results in one wave barrier. Require one compact terminal receipt per worker; do not relay progress or restate evidence already durable on the bead. Verify successful `omp/task/<id>` captures and heads before serial integration into your feature tree.
+6. After integration, create exactly one independent review wisp covering behavior, evidence and scope. Add another specialist only for a material risk or project policy. Open the PR as draft. Return CHANGES to the worker queue with the union of actionable fixes; never review your own work.
+7. Before reporting, landing, or cleanup, LOAD `skill://orchestrate/references/lifecycle.md`. Approved git work goes to an unparented `pr:merge` bead routed `role=shepherd`; dispatch your shepherd. Non-git work follows its reviewed evidence path.
 
 ## Rules
 
