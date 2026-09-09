@@ -31,7 +31,7 @@ const MINUTE = 60_000;
 
 let cwd: string;
 
-const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "OMP_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET"] as const;
+const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "OMP_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET", "ORC_TEST_BD_WHERE", "BEADS_DIR"] as const;
 
 beforeEach(async () => {
 	cwd = join(tmpdir(), `orc-watchers-${Math.random().toString(36).slice(2)}`);
@@ -251,23 +251,37 @@ describe("W5 shared-database precondition", () => {
 		delete process.env.BEADS_DIR;
 	});
 
-	test("isolation with no pinned path is reported", async () => {
+	test("isolation with no pinned path pins the database bd resolves", async () => {
 		// The failure this replaces a server with. bd resolves by walking up from the working
 		// directory, `.beads/` is gitignored, so a clone or worktree arrives without one and the
-		// walk continues past the checkout. Measured on this host: `$HOME/.beads` exists.
+		// walk continues past the checkout. The preflight pins the answer bd gives from the
+		// checkout itself, so every child inherits it; nothing is asked of the operator.
 		await stubOmp(true);
+		await fakeBd();
 		await mkdir(join(cwd, ".beads"), { recursive: true });
-		delete process.env.BEADS_DIR;
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
+		expect(process.env.BEADS_DIR).toBe(join(cwd, ".beads"));
+		expect((await bdCalls()).map(call => call[0])).toContain("where");
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
+	});
+
+	test("a pin bd refuses is reported with bd's reason", async () => {
+		await stubOmp(true);
+		await fakeBd();
+		process.env.ORC_TEST_BD_FAIL = "where";
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(process.env.BEADS_DIR).toBeUndefined();
 		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("BEADS_DIR is unset");
-		expect(notice).toContain("/orchestrate-run");
+		expect(notice).toContain("BEADS_DIR could not be pinned");
+		expect(notice).toContain("bd could not locate a beads database");
 		// The old remedies are gone with the server they served.
 		expect(notice).not.toContain("bd init --server");
 		expect(notice).not.toContain("per-project Dolt server");
-		expect(notice).not.toContain("bd -C");
 	});
 
 	test("a pinned path silences it", async () => {
@@ -614,6 +628,7 @@ async function fakeBd(): Promise<string> {
 			'const args = process.argv.slice(2);',
 			'appendFileSync(process.env.ORC_TEST_BD_LOG, ">>>\\n" + args.join("\\n") + "\\n");',
 			'if (args[0] === process.env.ORC_TEST_BD_FAIL && (!process.env.ORC_TEST_BD_TARGET || args[1] === process.env.ORC_TEST_BD_TARGET)) process.exit(1);',
+			'if (args[0] === "where") console.log(process.env.ORC_TEST_BD_WHERE);',
 			'if (args[0] === "list") {',
 			'  const beads = JSON.parse(process.env.ORC_TEST_BD_LIST);',
 			'  const index = args.indexOf("--assignee");',
@@ -629,6 +644,7 @@ async function fakeBd(): Promise<string> {
 	process.env.BD_BIN = bin;
 	process.env.ORC_TEST_BD_LOG = join(cwd, "bd.log");
 	process.env.ORC_TEST_BD_LIST = "[]";
+	process.env.ORC_TEST_BD_WHERE = join(cwd, ".beads");
 	return bin;
 }
 
@@ -769,6 +785,19 @@ describe("registerWatchers", () => {
 		expect(comments[0]?.[1]).toBe("bd-1");
 		expect(comments[0]?.[2]).toContain("orc-architect");
 		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
+		await rig.fire("session_shutdown", {});
+	});
+
+	test("a session with no active run starts silently", async () => {
+		// Every lead session in every repository that tracks work in beads used to hear
+		// the contract warnings at start, orchestrated or not. The contract governs runs.
+		await fakeBd();
+		await stubSettings({ "task.isolation.enabled": true });
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		const rig = harness(undefined, true);
+		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+		await rig.fire("session_start", {});
+		expect(rig.messages).toEqual([]);
 		await rig.fire("session_shutdown", {});
 	});
 

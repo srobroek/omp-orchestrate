@@ -231,8 +231,12 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
  * tests can import the marker functions without touching the registry.
  *
  * `orchestrate-status` is registered by the entry point, not here.
+ *
+ * `onActivate` runs after the marker is written and the database is pinned. The
+ * settings preflight lives in `watchers.ts`, which imports this module, so the
+ * hook is injected rather than imported.
  */
-export function registerRunCommands(pi: ExtensionAPI): void {
+export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string) => Promise<unknown>): void {
  pi.registerCommand("orchestrate-run", {
   description: "Activate orchestrate run enforcement in this repository",
   handler: async (_args, ctx) => {
@@ -258,7 +262,9 @@ export function registerRunCommands(pi: ExtensionAPI): void {
    } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
+    return;
    }
+   await onActivate?.(cwd);
   },
  });
 

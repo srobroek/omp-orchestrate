@@ -29,6 +29,7 @@ import { type AgentDiscoveryFinding, discoverAgentFindings, requestedAgentNames 
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
+import { ensureBeadsPath } from "./beads-mode";
 import { bdInvocations } from "./shell";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
  Partial<Pick<ExtensionContext, "models">>;
@@ -946,14 +947,22 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  // arrives without one and the walk continues past the checkout. Measured on this host:
  // `$HOME/.beads` exists, so the walk can end in a personal database that no run reads.
  //
- // An earlier version of this line demanded a per-project Dolt server instead. That server
+ // The pin is applied here rather than demanded of the operator: `ensureBeadsPath` asks bd
+ // for the database this directory already resolves to, refuses one outside the checkout,
+ // and exports it, so every later bd call and every child inherits the same answer. Only a
+ // refusal is worth a line, and the line then carries bd's own reason.
+ //
+ // An earlier version of this block demanded a per-project Dolt server instead. That server
  // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
  // rather than from the port, so a removed pid file made every later call start a rival --
  // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
  if (tracked && isolating && (process.env.BEADS_DIR ?? "") === "") {
-  lines.push(
-   "isolation is on and BEADS_DIR is unset, so an isolated worker resolves its own beads database rather than this run's. bd walks up from the working directory and `.beads/` is gitignored, so a clone or worktree arrives without one and the walk can end in a personal database. `/orchestrate-run` pins the run's path for this session and every child it spawns",
-  );
+  const pinned = await ensureBeadsPath(cwd);
+  if (!pinned.ok) {
+   lines.push(
+    `isolation is on and BEADS_DIR could not be pinned, so an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+   );
+  }
  }
 
  // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
@@ -1036,7 +1045,13 @@ export function registerWatchers(pi: ExtensionAPI): void {
   // W5. The isolation contract is a session setting, so it is checked once, in
   // the session that spawns. A worker inherits whatever the lead was given and
   // cannot change it, so warning there would only duplicate the notice.
-  if (sessionRole(pi) === "lead") {
+  //
+  // Checked at start only where a run is already active: the contract governs
+  // orchestrated runs, and a repository that merely tracks work in beads has no
+  // claims to split until one starts. `/orchestrate-run` runs the settings check
+  // at activation, and the `task` handler below checks agents at spawn, so a
+  // session that never orchestrates hears nothing.
+  if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
     logFailure(pi, "agent discovery preflight", error),
