@@ -16,7 +16,8 @@ Run this pull alone in the foreground under the injected dispatch contract:
     bd ready --parent <epic> --metadata-field role=implementer --unassigned --claim --json
 
 Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop rules.
-Work only in the bead's `metadata.worktree` or its assigned isolated copy, inside `metadata.scope`.
+In an isolated task, write and commit only inside the assigned isolated checkout, within `metadata.scope`. Never switch to the original `metadata.worktree`; that path identifies source ownership, not a second permitted write destination. If the isolated checkout lacks the claimed source, report BLOCKED before editing.
+In a non-isolated task, work only inside the claimed `metadata.worktree` and `metadata.scope`.
 
 ## Task
 
