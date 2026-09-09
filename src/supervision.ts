@@ -5,7 +5,7 @@
  * S2 creates a run-derived patrol id, relying on database id uniqueness.
  */
 
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdListChecked, bdRun, bdWispListChecked, resetReadBudget } from "./bd";
 import architect from "./contracts/architect.json";
 import generic from "./contracts/generic.json";
@@ -309,23 +309,27 @@ export async function ensurePatrolWisp(epicId: string, cwd?: string): Promise<vo
 
 /** Bind the reaper to the lifecycle bus for repositories with an active run. */
 export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) => Promise<boolean>): void {
-	let cwd: string | undefined;
+	let context: ExtensionContext | undefined;
 	let unsubscribe: (() => void) | undefined;
 
-	pi.on("session_start", (_event, ctx) => {
-		cwd = ctx.cwd;
-		// `session_start` fires again on a switch or branch. Keep one listener and
-		// let it read the current cwd rather than capturing a stale repository.
+	const bindSession = (ctx: ExtensionContext): void => {
+		context = ctx;
 		unsubscribe ??= pi.events.on("task:subagent:lifecycle", data => {
-			const currentCwd = cwd;
+			// The session manager owns cwd. `/move` mutates it without another
+			// `session_start`, while switch and branch events may supply a new context.
+			const currentCwd = context?.sessionManager.getCwd();
 			if (currentCwd === undefined) return;
 			return handleLifecycle(pi, data, currentCwd, isRunBound);
 		});
-	});
+	};
+
+	pi.on("session_start", (_event, ctx) => bindSession(ctx));
+	pi.on("session_switch", (_event, ctx) => bindSession(ctx));
+	pi.on("session_branch", (_event, ctx) => bindSession(ctx));
 	pi.on("session_shutdown", () => {
 		unsubscribe?.();
 		unsubscribe = undefined;
-		cwd = undefined;
+		context = undefined;
 	});
 }
 

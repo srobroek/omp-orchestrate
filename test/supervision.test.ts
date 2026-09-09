@@ -256,6 +256,10 @@ async function markerBound(cwd: string): Promise<boolean> {
  return marker !== null && marker.run_id !== "pending";
 }
 
+function contextAt(getCwd: () => string): ExtensionContext {
+ return { sessionManager: { getCwd } } as unknown as ExtensionContext;
+}
+
 /** Collect what `registerSupervision` subscribes, without an OMP session. */
 function recordingApi(): {
  pi: ExtensionAPI;
@@ -266,6 +270,8 @@ function recordingApi(): {
  messages: string[];
  errors: string[];
  sessionStart: (ctx: ExtensionContext) => void;
+ sessionSwitch: (ctx: ExtensionContext) => void;
+ sessionBranch: (ctx: ExtensionContext) => void;
  sessionShutdown: () => void;
  deliver: (payload: unknown) => Promise<void>;
 } {
@@ -275,6 +281,11 @@ function recordingApi(): {
  const errors: string[] = [];
  const handlers: { event: string; handler: (event: unknown, ctx: ExtensionContext) => unknown }[] = [];
  const listeners = new Set<(data: unknown) => unknown>();
+ const emitSession = (event: string, ctx: ExtensionContext): void => {
+  for (const entry of handlers) {
+   if (entry.event === event) void entry.handler({}, ctx);
+  }
+ };
  const stub = {
   sendMessage: (message: { content: string }) => { messages.push(message.content); },
   on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
@@ -301,16 +312,10 @@ function recordingApi(): {
   channels,
   messages,
   errors,
-  sessionStart: ctx => {
-   for (const entry of handlers) {
-    if (entry.event === "session_start") void entry.handler({}, ctx);
-   }
-  },
-  sessionShutdown: () => {
-   for (const entry of handlers) {
-    if (entry.event === "session_shutdown") void entry.handler({}, {} as ExtensionContext);
-   }
-  },
+  sessionStart: ctx => emitSession("session_start", ctx),
+  sessionSwitch: ctx => emitSession("session_switch", ctx),
+  sessionBranch: ctx => emitSession("session_branch", ctx),
+  sessionShutdown: () => emitSession("session_shutdown", {} as ExtensionContext),
   deliver: async payload => {
    for (const listener of listeners) await listener(payload);
   },
@@ -318,7 +323,7 @@ function recordingApi(): {
 }
 
 describe("registerSupervision", () => {
- const ctx = { cwd: "/repo" } as unknown as ExtensionContext;
+ const ctx = contextAt(() => "/repo");
  const bound = async () => true;
 
  test("unbound and pending markers skip discovery and notices", async () => {
@@ -330,9 +335,9 @@ describe("registerSupervision", () => {
    const api = recordingApi();
    registerSupervision(api.pi, markerBound);
 
-   api.sessionStart({ cwd: noRun } as ExtensionContext);
+   api.sessionStart(contextAt(() => noRun));
    await api.deliver({ id: "impl-7", status: "failed" });
-   api.sessionStart({ cwd: pending } as ExtensionContext);
+   api.sessionSwitch(contextAt(() => pending));
    await api.deliver({ id: "impl-7", status: "failed" });
 
    expect(ran).toEqual([]);
@@ -359,23 +364,30 @@ describe("registerSupervision", () => {
   expect(api.messages.some(message => message.includes("explicitly reconcile"))).toBe(true);
  });
 
- test("switching from bound to unbound cwd stops old repository processing", async () => {
+ test("reads live cwd and follows session switch and branch contexts", async () => {
   const oldCwd = "/bound-repository";
-  const newCwd = "/unbound-repository";
+  const movedCwd = "/moved-repository";
+  const switchedCwd = "/switched-repository";
+  const branchedCwd = "/branched-repository";
+  let currentCwd = oldCwd;
   const checked: string[] = [];
   const api = recordingApi();
   registerSupervision(api.pi, async cwd => {
    checked.push(cwd);
    return cwd === oldCwd;
   });
-  api.sessionStart({ cwd: oldCwd } as ExtensionContext);
+  api.sessionStart(contextAt(() => currentCwd));
   await api.deliver({ id: "impl-7", status: "failed" });
   expect(ran.length).toBeGreaterThan(0);
 
   ran = [];
-  api.sessionStart({ cwd: newCwd } as ExtensionContext);
+  currentCwd = movedCwd;
   await api.deliver({ id: "impl-7", status: "failed" });
-  expect(checked).toEqual([oldCwd, newCwd]);
+  api.sessionSwitch(contextAt(() => switchedCwd));
+  await api.deliver({ id: "impl-7", status: "failed" });
+  api.sessionBranch(contextAt(() => branchedCwd));
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(checked).toEqual([oldCwd, movedCwd, switchedCwd, branchedCwd]);
   expect(ran).toEqual([]);
   expect(api.messages).toEqual([]);
  });
@@ -405,7 +417,7 @@ describe("registerSupervision", () => {
  test("subscribes the lifecycle channel once, inside session_start", () => {
   const api = recordingApi();
   registerSupervision(api.pi, bound);
-  expect(api.events).toEqual(["session_start", "session_shutdown"]);
+  expect(api.events).toEqual(["session_start", "session_switch", "session_branch", "session_shutdown"]);
   expect(api.channels).toEqual([]);
 
   api.sessionStart(ctx);
@@ -423,7 +435,7 @@ describe("registerSupervision", () => {
 
   api.sessionStart(ctx);
   await api.deliver({ id: "impl-7", status: "failed" });
-  expect(ran.some(args => args[0] === "mol")).toBe(true);
+  expect(ran.filter(args => args[0] === "mol")).toHaveLength(1);
   expect(api.channels).toEqual(["task:subagent:lifecycle", "task:subagent:lifecycle"]);
  });
 

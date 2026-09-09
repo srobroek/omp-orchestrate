@@ -186,14 +186,15 @@ describe("isBoundRunActive", () => {
 
 	test("requires a known run status and passes the repository cwd", async () => {
 		await seed('{"schema_version": 1, "run_id": "orc-7"}');
-		const show = spyOn(bd, "bdShow").mockResolvedValue({ id: "orc-7", status: "in_progress" });
+		const show = spyOn(bd, "bdShow").mockResolvedValue({ id: "orc-7", status: "open" });
 		try {
-			expect(await isBoundRunActive(cwd)).toBe(true);
+			for (const status of ["open", "in_progress", "blocked", "deferred"]) {
+				show.mockResolvedValue({ id: "orc-7", status });
+				expect(await isBoundRunActive(cwd)).toBe(true);
+			}
 			expect(show).toHaveBeenCalledWith("orc-7", undefined, cwd);
 			show.mockResolvedValue({ id: "orc-7", status: "closed" });
 			expect(await isBoundRunActive(cwd)).toBe(false);
-			show.mockResolvedValue({ id: "orc-7", status: "deferred" });
-			expect(await isBoundRunActive(cwd)).toBe(true);
 		} finally {
 			show.mockRestore();
 		}
