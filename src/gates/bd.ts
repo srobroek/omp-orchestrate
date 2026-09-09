@@ -265,7 +265,16 @@ const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
  * exempt: `bd show` yields `metadata.actor` before the claim.
  */
 function writesBeads(invocation: BdInvocation): boolean {
-	if (invocation.rest.includes("--help") || invocation.rest.includes("-h")) return false;
+	let hasHelp = false;
+	let hasDryRun = false;
+	let hasBlocks = false;
+	for (const token of invocation.rest) {
+		if (token === "--") break;
+		if (token === "--help" || token === "-h") hasHelp = true;
+		if (token === "--dry-run") hasDryRun = true;
+		if (token === "--blocks") hasBlocks = true;
+	}
+	if (hasHelp) return false;
 	if (invocation.hasClaim) return invocation.subcommand !== "ready";
 
 	const { subcommand } = invocation;
@@ -278,13 +287,13 @@ function writesBeads(invocation: BdInvocation): boolean {
 	if (subcommand === "comments") return action === "add";
 	if (subcommand === "mol" && action === "wisp") {
 		// Dry-run is inherited by proto creation, `create`, and `gc`; all are previews.
-		if (invocation.rest.includes("--dry-run")) return false;
+		if (hasDryRun) return false;
 		const wispAction = invocation.positionals[1];
-		if (wispAction === undefined || MOL_WISP_READS[wispAction] === true) return false;
+		if (wispAction !== undefined && MOL_WISP_READS[wispAction] === true) return false;
 		return true;
 	}
-	if (subcommand === "mol" && action === "pour" && invocation.rest.includes("--dry-run")) return false;
-	if (subcommand === "dep" && invocation.rest.includes("--blocks")) return true;
+	if (subcommand === "mol" && action === "pour" && hasDryRun) return false;
+	if (subcommand === "dep" && hasBlocks) return true;
 	if (GROUP_WRITE_ACTIONS[subcommand]?.[action] === true) return true;
 	if (GROUP_READ_ACTIONS[subcommand]?.[action] === true) return false;
 	if ((GROUP_READ_ACTIONS[subcommand] !== undefined || GROUP_WRITE_ACTIONS[subcommand] !== undefined) && action === "") {

@@ -134,7 +134,7 @@ describe("the identity notice", () => {
 		["mol pour preview", "bd mol pour formula --dry-run"],
 		["mol wisp preview", "bd mol wisp formula --dry-run"],
 		["mol wisp list", "bd mol wisp list"],
-		["bare mol wisp help", "bd mol wisp"],
+		["mol wisp help", "bd mol wisp --help"],
 		["formula list", "bd formula list"],
 		["formula show", "bd formula show mol-review"],
 		["epic status", "bd epic status epic-1"],
@@ -160,6 +160,7 @@ describe("the identity notice", () => {
 
 	test.each([
 		["mol pour", "bd mol pour formula"],
+		["bare mol wisp", "bd mol wisp"],
 		["mol wisp proto", "bd mol wisp beads-release"],
 		["mol wisp create", "bd mol wisp create formula"],
 		["mol wisp gc", "bd mol wisp gc"],
@@ -184,6 +185,14 @@ describe("the identity notice", () => {
 
 	test("keeps claim help non-mutating", () => {
 		expect(actorNotice(only("bd update orc-1 --claim --help"))).toBeUndefined();
+	});
+
+	test.each([
+		["help after option terminator", "bd create -- --help"],
+		["wisp dry-run after option terminator", "bd mol wisp beads-release -- --dry-run"],
+		["pour dry-run after option terminator", "bd mol pour formula -- --dry-run"],
+	])("does not treat positional %s as a control flag", (_label, command) => {
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
 
 	test("accepts an identity set through the bash call's own env", () => {
