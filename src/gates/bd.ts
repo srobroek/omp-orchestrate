@@ -40,6 +40,33 @@ import { readActiveRun } from "../run-state";
 import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
 
 /**
+ * Process-wide seam owned by the beads actor gate. G6 claims a tool-call id only after
+ * delivering its richer run-scoped actor notice; the beads tool_result adapter consumes
+ * that id and omits its generic advisory. A missing registry keeps G6's historical fallback.
+ */
+export const ACTOR_NOTICE_ARBITER = Symbol.for(
+	"com.srobroek.beads.actor-notice-arbiter.v1",
+);
+
+interface ActorNoticeArbiter {
+	handledToolCalls: Set<string>;
+}
+
+/** Read the beads-owned registry without creating one; installation proves the adapter exists. */
+function actorNoticeArbiter(): ActorNoticeArbiter | undefined {
+	const candidate: unknown = Reflect.get(globalThis, ACTOR_NOTICE_ARBITER);
+	if (
+		candidate === null ||
+		typeof candidate !== "object" ||
+		!("handledToolCalls" in candidate)
+	) {
+		return undefined;
+	}
+	const handledToolCalls = candidate.handledToolCalls;
+	return handledToolCalls instanceof Set ? { handledToolCalls } : undefined;
+}
+
+/**
  * One finding on one parsed invocation: what to say, or `undefined` for silence.
  *
  * `env` is the `bash` call's own `env` parameter, unvalidated as the tool delivers it. It
@@ -315,6 +342,9 @@ function writesBeads(invocation: BdInvocation): boolean {
 	if (invocation.hasClaim) return invocation.subcommand !== "ready";
 
 	const { subcommand } = invocation;
+	if (subcommand === "duplicates") {
+		return invocation.rest.includes("--auto-merge") && !invocation.rest.includes("--dry-run");
+	}
 	// A bare `bd`, or a first positional that is really a redirection: both print help.
 	if (!SUBCOMMAND.test(subcommand)) return false;
 	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;
@@ -370,17 +400,26 @@ function envCarriesActor(env: unknown): boolean {
  * An assignment with an empty value is no identity. The regex silently agreed by
  * accident -- it required `\w+=\S+` and so never matched `BEADS_ACTOR= bd ...` at all.
  */
+function invocationCarriesActor(
+	invocation: BdInvocation,
+	env: unknown,
+): boolean {
+	if (ACTOR_VARS.some(variable => (invocation.assignments.get(variable) ?? "").length > 0)) {
+		return true;
+	}
+	return envCarriesActor(env);
+}
+
 export const actorNotice: BdCheck = (invocation, env) => {
 	if (!writesBeads(invocation)) return undefined;
-	if (ACTOR_VARS.some(variable => (invocation.assignments.get(variable) ?? "").length > 0)) return undefined;
-	if (envCarriesActor(env)) return undefined;
+	if (invocationCarriesActor(invocation, env)) return undefined;
 
 	const { name } = operation(invocation);
 	const written = invocation.hasClaim ? `${name} --claim` : name;
 	return (
 		`WARN bd identity: 'bd ${written}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` +
-		`attributed to nobody. Prefix the command with both, set to the claimed bead's metadata.actor: ` +
-		`'BEADS_ACTOR=<actor> BD_ACTOR=<actor> bd ${name} ...'.`
+		`attributed to nobody. Prefix the command with either variable, set to the claimed bead's metadata.actor: ` +
+		`'BEADS_ACTOR=<actor> bd ${name} ...'.`
 	);
 };
 
@@ -607,6 +646,7 @@ export async function gateBdDiscipline(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	input: Record<string, unknown>,
+	toolCallId: string,
 ): Promise<ToolCallEventResult | undefined> {
 	const command = input.command;
 	if (typeof command !== "string" || command.length === 0) return undefined;
@@ -618,12 +658,21 @@ export async function gateBdDiscipline(
 	const run = await readActiveRun(ctx.cwd).catch(() => null);
 	if (run === null) return undefined;
 
+	const arbiter = actorNoticeArbiter();
+	const beadsWillBlockClaim = arbiter !== undefined && invocations.some(
+		invocation =>
+			(invocation.subcommand === "claim" || invocation.hasClaim) &&
+			!invocationCarriesActor(invocation, input.env),
+	);
 	const notices: string[] = [];
+	let deliveredActorNotice = false;
 	for (const invocation of invocations) {
 		for (const notice of NOTICES) {
+			if (notice === actorNotice && beadsWillBlockClaim) continue;
 			const text = notice(invocation, input.env);
-			// Deduped: a chain of three unattributed mutations says it once.
-			if (text !== undefined && !notices.includes(text)) notices.push(text);
+			if (text === undefined || notices.includes(text)) continue;
+			notices.push(text);
+			if (notice === actorNotice) deliveredActorNotice = true;
 		}
 	}
 	if (notices.length > 0) {
@@ -636,6 +685,7 @@ export async function gateBdDiscipline(
 			},
 			{ deliverAs: "steer" },
 		);
+		if (deliveredActorNotice) arbiter?.handledToolCalls.add(toolCallId);
 	}
 	return undefined;
 }

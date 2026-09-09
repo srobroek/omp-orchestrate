@@ -1,11 +1,12 @@
 /** G6: bd notices and run-scoped delivery through the gate entry point. */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
+	ACTOR_NOTICE_ARBITER,
 	actorNotice,
 	BD_NOTICE_MESSAGE,
 	bugRouteNotice,
@@ -96,6 +97,7 @@ describe("the identity notice", () => {
 		// the exemption: `bd comments` prints, `bd comments add` writes.
 		["gate create", "bd gate create g-1"],
 		["kv set", "bd kv set k v"],
+		["duplicates auto-merge", "bd duplicates --auto-merge"],
 	])("fires on %s", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
@@ -108,6 +110,8 @@ describe("the identity notice", () => {
 		["dep tree", "bd dep tree orc-7"],
 		["label list", "bd label list orc-7"],
 		["kv get", "bd kv get somekey"],
+		["duplicates", "bd duplicates"],
+		["duplicates dry run", "bd duplicates --auto-merge --dry-run"],
 		// Store administration has no bead to attribute.
 		["init", "bd init --quiet"],
 		["setup", "bd setup codex --check"],
@@ -455,9 +459,17 @@ afterAll(async () => {
 	await fs.rm(root, { recursive: true, force: true });
 });
 
-async function gateInput(input: Record<string, unknown>, cwd: string = inRun): Promise<Outcome> {
+afterEach(() => {
+	Reflect.deleteProperty(globalThis, ACTOR_NOTICE_ARBITER);
+});
+
+async function gateInput(
+	input: Record<string, unknown>,
+	cwd: string = inRun,
+	toolCallId: string = "tool-call",
+): Promise<Outcome> {
 	sent = [];
-	const result = await gateBdDiscipline(pi, ctxAt(cwd), input);
+	const result = await gateBdDiscipline(pi, ctxAt(cwd), input, toolCallId);
 	return {
 		block: result?.block === true ? result.reason : undefined,
 		notices: sent.flatMap(entry => String(entry.message.content).split("\n")),
@@ -469,6 +481,12 @@ function gate(command: unknown, cwd: string = inRun): Promise<Outcome> {
 }
 
 const SILENT: Outcome = { block: undefined, notices: [] };
+
+function installActorNoticeArbiter(): Set<string> {
+	const handledToolCalls = new Set<string>();
+	Reflect.set(globalThis, ACTOR_NOTICE_ARBITER, { handledToolCalls });
+	return handledToolCalls;
+}
 
 /** One defect per notice, checked both inside and outside a run. */
 const THREE_DEFECTS: [string, string, string][] = [
@@ -509,6 +527,23 @@ describe("G6 inside a run", () => {
 		const outcome = await gate(command);
 		expect(outcome.block).toBeUndefined();
 		expect(outcome.notices.filter(line => line.startsWith(prefix))).toHaveLength(1);
+	});
+
+	test("claims actor-notice delivery for the beads tool-result adapter", async () => {
+		const handled = installActorNoticeArbiter();
+		const outcome = await gateInput({ command: "bd close orc-1" }, inRun, "mutation-1");
+		expect(outcome.notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
+		expect(handled.has("mutation-1")).toBe(true);
+	});
+
+	test.each([
+		["update --claim", "bd update orc-1 --claim"],
+		["top-level claim", "bd claim orc-1"],
+	])("leaves unattributed %s to the beads blocking gate", async (_label, command) => {
+		const handled = installActorNoticeArbiter();
+		const outcome = await gateInput({ command }, inRun, `claim-${_label}`);
+		expect(outcome).toEqual(SILENT);
+		expect(handled.has(`claim-${_label}`)).toBe(false);
 	});
 
 	test("reads a bare-id marker as a run", async () => {
