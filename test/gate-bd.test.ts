@@ -123,6 +123,7 @@ describe("the identity notice", () => {
 	});
 
 	test.each([
+		["mol list", "bd mol list"],
 		["mol help", "bd mol --help"],
 		["mol show", "bd mol show mol-1"],
 		["mol current", "bd mol current mol-1"],
@@ -140,15 +141,18 @@ describe("the identity notice", () => {
 		["epic status", "bd epic status epic-1"],
 		["merge-slot check", "bd merge-slot check"],
 		["swarm list", "bd swarm list"],
-		["swarm status", "bd swarm status"],
+		["swarm status", "bd swarm status epic-1"],
 		["swarm validate", "bd swarm validate epic-1"],
 		["dep cycles", "bd dep cycles"],
 		["dep list", "bd dep list orc-1"],
 		["dep tree", "bd dep tree orc-1"],
+		["dep help", "bd dep --help"],
 		["label list", "bd label list orc-1"],
 		["label list-all", "bd label list-all"],
 		["kv get", "bd kv get somekey"],
 		["kv list", "bd kv list"],
+		["audit list", "bd audit list"],
+		["audit help", "bd audit --help"],
 		["gate discover", "bd gate discover --type gh:run"],
 		["gate list", "bd gate list"],
 		["gate show", "bd gate show gate-1"],
@@ -175,6 +179,7 @@ describe("the identity notice", () => {
 		["label propagate", "bd label propagate orc-1 kind:design"],
 		["kv clear", "bd kv clear key"],
 		["audit label", "bd audit label event-1 keep"],
+		["audit record", "bd audit record --kind tool_call"],
 		["gate check", "bd gate check"],
 		["todo done", "bd todo done todo-1"],
 		["comments add", "bd comments add orc-1 REPORTED"],
@@ -194,7 +199,6 @@ describe("the identity notice", () => {
 	])("does not treat positional %s as a control flag", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
-
 	test("accepts an identity set through the bash call's own env", () => {
 		expect(actorNotice(only("bd close orc-1"), { BEADS_ACTOR: "impl" })).toBeUndefined();
 		expect(actorNotice(only("bd close orc-1"), { BD_ACTOR: "impl" })).toBeUndefined();

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/srobroek/omp-orchestrate/compare/v0.3.4...v0.3.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* classify grouped bd reads before actor warnings ([#69](https://github.com/srobroek/omp-orchestrate/issues/69)) ([b9119d4](https://github.com/srobroek/omp-orchestrate/commit/b9119d4f8b81590450761afccf866ee01f49956b))
+
 ## [0.3.4](https://github.com/srobroek/omp-orchestrate/compare/v0.3.3...v0.3.4) (2026-09-09)
 
 

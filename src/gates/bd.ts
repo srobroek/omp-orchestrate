@@ -209,16 +209,19 @@ const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
 /** Grouped subcommands whose first positional selects a read. */
 const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
+	audit: { list: true, show: true },
+	comments: { list: true, show: true },
+	dep: { cycles: true, list: true, tree: true },
 	epic: { status: true },
 	formula: { list: true, show: true },
-	dep: { cycles: true, list: true, tree: true },
 	gate: { discover: true, list: true, show: true },
 	kv: { get: true, list: true },
-	label: { list: true, "list-all": true },
+	label: { list: true, "list-all": true, show: true },
 	"merge-slot": { check: true },
 	mol: {
 		current: true,
 		"last-activity": true,
+		list: true,
 		progress: true,
 		ready: true,
 		seed: true,
@@ -232,19 +235,21 @@ const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
 /** Grouped subcommands whose first positional selects a write. */
 const GROUP_WRITE_ACTIONS: Record<string, Record<string, true>> = {
 	audit: { label: true, record: true },
+	comments: { add: true },
+	dep: { add: true, relate: true, remove: true, unrelate: true },
 	epic: { "close-eligible": true },
 	formula: { convert: true },
-	dep: { add: true, relate: true, remove: true, unrelate: true },
 	gate: { "add-waiter": true, check: true, create: true, resolve: true },
-	kv: { clear: true, set: true },
+	kv: { append: true, clear: true, delete: true, rm: true, set: true, update: true },
 	label: { add: true, propagate: true, remove: true },
-	"merge-slot": { acquire: true, create: true, release: true },
 	mol: { bond: true, burn: true, distill: true, pour: true, squash: true },
+	"merge-slot": { acquire: true, create: true, release: true },
 	swarm: { create: true },
 	todo: { add: true, done: true },
 };
 
 const MOL_WISP_READS: Record<string, true> = { list: true };
+const MOL_WISP_WRITES: Record<string, true> = { create: true, gc: true };
 
 /** The identity carriers, either of which attributes the write. */
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
@@ -290,6 +295,7 @@ function writesBeads(invocation: BdInvocation): boolean {
 		if (hasDryRun) return false;
 		const wispAction = invocation.positionals[1];
 		if (wispAction !== undefined && MOL_WISP_READS[wispAction] === true) return false;
+		if (wispAction !== undefined && MOL_WISP_WRITES[wispAction] === true) return true;
 		return true;
 	}
 	if (subcommand === "mol" && action === "pour" && hasDryRun) return false;
