@@ -264,7 +264,14 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
     ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
     return;
    }
-   await onActivate?.(cwd);
+   // The run is active by now, whatever the hook does; a failing readiness check
+   // must not read as a failed activation.
+   try {
+    await onActivate?.(cwd);
+   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`orchestrate run active; readiness check failed: ${reason}`, "warning");
+   }
   },
  });
 
