@@ -195,18 +195,82 @@ When re-entry changes the discovery root, use the supported rooted lead CLI and
 preserve the loaded native agent's role and spawn policy:
 
 ```sh
-BEADS_DIR=<absolute-beads-dir> \
-ORCHESTRATE_MARKER_FILE=<absolute-marker-file> \
-omp --cwd <canonical-worktree> --config <run-overlay> --print \
+BEADS_DIR="<absolute-beads-dir>" \
+ORCHESTRATE_MARKER_FILE="<absolute-marker-file>" \
+omp --cwd "<canonical-worktree>" --config "<run-overlay>" --print \
   "Lead: dispatch the loaded native orc-architect for the bound epic; preserve its role and spawn policy; collect and return the actual terminal result." </dev/null
 ```
 
-Pass `--config <run-overlay>` when re-entry changes discovery root; otherwise retain
+Pass `--config "<run-overlay>"` when re-entry changes discovery root; otherwise retain
 the active run configuration. A supervised PTY is also valid for `--print`; closed
 stdin prevents a hanging process. Collect the actual result before replacement.
 Keep experiment-only isolation enablement in the run overlay. Do not silently
 override the user's project or global isolation preference.
-Recovery preserves dirty resumed trees and requires the exclusive recovery procedure
-before another writer starts. A missing Git object is a distinct setup failure:
-inspect the actual source root and object or capture evidence; cwd correction alone
-does not prove the object exists or dispatch succeeded.
+
+### Canonical checkout recovery
+
+Recovery is one ordered operation inside an explicit exclusive claim/dispatch/branch-writer
+window. Stop every claim writer, dispatch writer, and branch writer before entering it;
+do not release a retained claim merely to relocate a session. First collect the prior
+actor's terminal result, capture, dirty delta, branch, comments, and audit evidence and
+preserve every one of those anchors throughout recovery.
+
+1. Inventory the exact owning epic's current metadata and every Worktrunk checkout:
+
+   ```sh
+   bd show "<epic>" --json
+   wt list --format=json
+   ```
+
+   Record the stamped `metadata.branch` and `metadata.worktree`, the owning epic id,
+   and the checkout's returned branch/path. Do not infer a path from a branch name or
+   accept a path from a different bead.
+2. If the stamped path exists, preserve it exactly, including an accepted dirty
+   resumed checkout; inspect its status and evidence, and never reset, clean, or
+   replace it merely to make recovery look fresh.
+3. If the stamped path is missing, keep the claim and evidence in place, verify the
+   branch and source-root Git object/capture independently, and recreate only the
+   missing checkout from the actual source root:
+
+   ```sh
+   wt -C "<source-root>" switch "<branch>" --no-cd --format=json
+   ```
+
+   Use the returned JSON `path` as `<canonical-worktree>` for every subsequent command.
+   Do not derive it from `<branch>`, reuse stale metadata, or treat a missing Git object
+   as a cwd problem.
+4. At that returned or preserved canonical path, read the WT bead binding:
+
+   ```sh
+   wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
+   ```
+
+   Reject an unresolved read or a binding naming another bead/epic (a foreign WT
+   binding). An absent binding is acceptable only for the newly recreated checkout
+   whose branch ownership was independently verified; it must be stamped before
+   re-entry.
+5. Stamp both sides of the binding for the exact owning epic, without changing its
+   assignee, status, claim, branch, or evidence:
+
+   ```sh
+   bd update "<epic>" --metadata '{"worktree":"<canonical-worktree>","branch":"<branch>"}'
+   wt -C "<canonical-worktree>" config state vars set bead="<epic>" --branch "<branch>"
+   ```
+
+6. Read both authoritative records back and require exact equality before any actor
+   re-entry or dispatch:
+
+   ```sh
+   bd show "<epic>" --json
+   wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
+   ```
+
+   The bead's `metadata.worktree` must equal the returned canonical path, its branch
+   must equal the inventoried branch, and the WT `bead` value must equal the owning
+   epic id. A mismatch, stale value, foreign binding, or unresolved read is BLOCKED;
+   retain the claim, checkout, captures, and terminal evidence for explicit recovery.
+7. Only after those equality checks pass, re-enter the loaded architect through the
+   rooted `omp --cwd "<canonical-worktree>" --config "<run-overlay>"` procedure above.
+   A missing Git object, missing commit/capture, or source-root failure remains a
+   separate setup failure and must be reported with its own evidence; cwd correction
+   never proves the object exists or that dispatch succeeded.

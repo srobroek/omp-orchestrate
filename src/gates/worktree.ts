@@ -4,8 +4,10 @@
  * Checks containment in the claimed checkout (or the current isolated Git root),
  * then the union of claimed repo-relative scopes. Shell commands are checked at
  * their effective cwd; their arbitrary redirections are not parsed.
- * Unavailable Beads/filesystem evidence fails open. Uninspectable edit payloads
- * are refused rather than silently reduced to a cwd-only check.
+ * Product mutations require every observed bead to remain in_progress and assigned
+ * to this session's actor. Missing, unreadable, or stale beads fail closed for those
+ * mutations; narrowly recognized Beads control reads retain their safe behavior.
+ * Uninspectable edit payloads are refused rather than silently reduced to a cwd-only check.
  */
 
 import path from "node:path";
@@ -18,6 +20,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { editInspect } from "@oh-my-pi/pi-natives";
 import { bdShow, metadataRecord, metadataString } from "../bd";
+import type { BdBead } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
 import { scopeConflict } from "./claim";
@@ -174,6 +177,24 @@ function declaredTargets(toolName: string, input: Record<string, unknown>): stri
  const args = textual ? { input: raw } : { ...input, path: input.path ?? input._path };
  const modes = textual ? ["hashline", "apply_patch", "sloppy"] : ["replace", "patch"];
  const targets = new Set<string>();
+ if (textual) {
+  for (const match of raw.matchAll(/^\*{3}\s+(?:Add|Update|Delete) File:\s*(.+)$/gim)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^\*{3}\s+Move to:\s*(.+)$/gim)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^§(?!\*)\s*(\S.*)$/gm)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^\[([^\]\n]+)\]$/gm)) {
+   const target = match[1]?.replace(/#[0-9a-f]{4}$/i, "").trim();
+   if (target) targets.add(target);
+  }
+ }
  try {
   const json = JSON.stringify(args);
   for (const mode of modes) {
@@ -185,7 +206,7 @@ function declaredTargets(toolName: string, input: Record<string, unknown>): stri
    }
   }
  } catch {
-  return undefined;
+  // Native inspection is optional for incomplete payloads; header parsing still applies.
  }
  return targets.size > 0 ? [...targets] : undefined;
 }
@@ -294,6 +315,22 @@ export async function gateWorktreeScope(
  const claim = claims.observedClaim();
  if (!claim || claim.beadIds.length === 0) return undefined;
 
+ const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(input, claim.actor, beadId) : undefined);
+ const hasControl = controls.some(control => control !== undefined);
+ const beadViews: { beadId: string; bead: BdBead | null; control: "read" | "write" | undefined }[] = [];
+ for (const [index, beadId] of claim.beadIds.entries()) {
+  const bead = await bdShow(beadId);
+  const control = controls[index];
+  const checkFreshness = !hasControl || control === "write";
+  if (checkFreshness && (bead?.status !== "in_progress" || bead.assignee !== claim.actor)) {
+   return {
+    block: true,
+    reason: `claimed bead '${beadId}' is no longer in_progress and assigned to '${claim.actor}'; refresh ownership before mutating product files`,
+   };
+  }
+  beadViews.push({ beadId, bead, control });
+ }
+
  const sessionCwd = await realpathOrUndefined(ctx.cwd);
  if (sessionCwd === undefined) return undefined;
  let executionCwd = ctx.cwd;
@@ -327,17 +364,15 @@ export async function gateWorktreeScope(
  // beads could possibly make.
  const scoped: { beadId: string; worktree: string; globs: string[] }[] = [];
 
- for (const beadId of claim.beadIds) {
-  const bead = await bdShow(beadId);
-  const control = toolName === "bash" ? conflictControl(input, claim.actor, beadId) : undefined;
-  const ownsControl = control === "read" || (control === "write" && bead?.assignee === claim.actor && bead.status === "in_progress");
+ for (const { beadId, bead, control } of beadViews) {
+  const ownsControl = control === "read" || control === "write";
   if (!ownsControl) {
    const conflict = await scopeConflict(bead);
    if (conflict) return conflict;
   }
-  // Fail open: an unreadable bead names no tree, and a bead that declares none
-  // leaves nothing to compare. `metadata.scope` is repo-relative and needs that
-  // tree as its base, so both comparisons stop here.
+  // For a permitted control read, an unreadable bead names no tree, and a bead that
+  // declares none leaves nothing to compare. `metadata.scope` is repo-relative and
+  // needs that tree as its base, so both comparisons stop here.
   const declaredTree = metadataString(bead, "worktree");
   if (declaredTree === undefined) continue;
 

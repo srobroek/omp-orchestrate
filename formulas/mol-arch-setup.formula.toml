@@ -25,11 +25,11 @@ type = "task"
 priority = 1
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C {{repo}} switch --create {{branch}} --no-cd --format=json -y
+wt -C "{{repo}}" switch --create "{{branch}}" --no-cd --format=json -y
 
 Use the returned absolute `path` as <worktree> in the remaining steps; do not
 derive it from the branch name. Read its existing binding with
-`wt -C <worktree> step eval '{{ vars.bead }}' --format json` before stamping it.
+`wt -C "<worktree>" step eval '{{ vars.bead }}' --format json` before stamping it.
 Refuse a binding naming another bead or an unresolved read; an absent binding
 is expected only for a newly created worktree.
 
@@ -44,11 +44,11 @@ type = "task"
 needs = ["create-worktree"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C <worktree> config state vars set bead={{owner_bead}} --branch {{branch}}
+wt -C "<worktree>" config state vars set bead="{{owner_bead}}" --branch "{{branch}}"
 
 Then read it back:
 
-wt -C <worktree> step eval '{{ vars.bead }}' --format json
+wt -C "<worktree>" step eval '{{ vars.bead }}' --format json
 
 The result must be {{owner_bead}}. This pair -- the bead var on the path and
 metadata.worktree on the bead (stamp-owner) -- is the whole binding. It records
@@ -69,7 +69,7 @@ type = "task"
 needs = ["bind-vars"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-For a fresh setup, `git -C <worktree> status --porcelain` must print nothing,
+For a fresh setup, `git -C "<worktree>" status --porcelain` must print nothing,
 and the path must be writable. A resumed tree may be dirty: preserve and inspect
 its existing changes and accepted delta; do not reset or clean it merely to
 make recovery look fresh. A dirty fresh setup mixes someone else's work into
@@ -84,7 +84,7 @@ needs = ["bind-vars"]
 condition = "{{copies_ignored}}"
 labels = ["arch-setup", "phase:provision"]
 description = """
-wt -C {{repo}} step copy-ignored --require-include <worktree>
+wt -C "{{repo}}" step copy-ignored --require-include "<worktree>"
 
 Skip only when the build genuinely needs no untracked inputs. A missing .env or
 target/ becomes a build failure attributed to the work rather than to setup.
@@ -97,7 +97,7 @@ type = "task"
 needs = ["verify-writable"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-bd update {{owner_bead}} --metadata '{"worktree":"<abs path>","branch":"{{branch}}"}'
+bd update "{{owner_bead}}" --metadata '{"worktree":"<abs path>","branch":"{{branch}}"}'
 
 Metadata, not a label: exactly one worktree may be true per bead, and this single
 value is what the architect claiming {{owner_bead}} reads to find its tree. Two
@@ -117,7 +117,7 @@ fresh setup is clean (or resumed dirty state is preserved and inspected),
 ignored inputs are present, and metadata.worktree is stamped. The lead now launches
 the native architect with its actual session cwd at this canonical worktree. Only
 then may the architect pull work under {{owner_bead}}:
-`bd ready --parent {{owner_bead}} --metadata-field role=<role> --unassigned --claim --json`.
+`bd ready --parent "{{owner_bead}}" --metadata-field role=<role> --unassigned --claim --json`.
 Use role=implementer for implementation and role=architect for child epics;
 reviewer and researcher pulls also require `--include-ephemeral`. Shepherds
 instead pull `bd ready --metadata-field role=shepherd --unassigned --claim --json`

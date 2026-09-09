@@ -151,10 +151,10 @@ afterAll(async () => {
 beforeEach(() => {
  claims = createClaimState();
  beads = {
-  [BEAD]: { id: BEAD, labels: ["orc-node", "agent:implementer"], metadata: { worktree: owned } },
-  [SECOND]: { id: SECOND, labels: ["orc-node", "agent:implementer"], metadata: { worktree: foreign } },
-  [SAME_TREE]: { id: SAME_TREE, labels: ["orc-node", "agent:implementer"], metadata: { worktree: owned } },
-  [FOREIGN_BEAD]: { id: FOREIGN_BEAD, labels: ["orc-node", "agent:reviewer"], metadata: { worktree: owned } },
+  [BEAD]: { id: BEAD, status: "in_progress", assignee: ACTOR, labels: ["orc-node", "agent:implementer"], metadata: { worktree: owned } },
+  [SECOND]: { id: SECOND, status: "in_progress", assignee: ACTOR, labels: ["orc-node", "agent:implementer"], metadata: { worktree: foreign } },
+  [SAME_TREE]: { id: SAME_TREE, status: "in_progress", assignee: ACTOR, labels: ["orc-node", "agent:implementer"], metadata: { worktree: owned } },
+  [FOREIGN_BEAD]: { id: FOREIGN_BEAD, status: "open", labels: ["orc-node", "agent:reviewer"], metadata: { worktree: owned } },
  };
  inFlight = [];
  shown = [];
@@ -162,6 +162,13 @@ beforeEach(() => {
  process.env.OMP_WORKTREE_DIR = path.join(root, "no-such-isolation-base");
  claims.recordClaim({ actor: ACTOR, beadIds: [BEAD] });
 });
+/** Arrange the bead state a new claim observes before Beads applies it. */
+function releaseBead(beadId: string): void {
+ const bead = beads[beadId];
+ if (bead === undefined) return;
+ bead.status = "open";
+ delete bead.assignee;
+}
 
 
 
@@ -311,6 +318,7 @@ function claimShapes(beadId: string): [string, string][] {
 describe("G5 refuses a claim routed to another role", () => {
  beforeEach(() => { claims = createClaimState(); });
  test.each(claimShapes(FOREIGN_BEAD))("refuses it %s", async (_label, command) => {
+  releaseBead(FOREIGN_BEAD);
   const result = await bash(command);
 
   expect(result?.block).toBe(true);
@@ -332,6 +340,7 @@ describe("G5 refuses a claim routed to another role", () => {
 
 describe("G5 leaves a claim of this session's own bead alone", () => {
  test.each(claimShapes(BEAD))("allows it %s", async (_label, command) => {
+  releaseBead(BEAD);
   claims = createClaimState();
   expect(await bash(command)).toBeUndefined();
  });
@@ -346,6 +355,7 @@ describe("G5 leaves a claim of this session's own bead alone", () => {
  });
 
  test("allows a fresh acquisition from this session's role queue", async () => {
+  releaseBead(BEAD);
   claims = createClaimState();
   expect(await bash("bd ready --metadata-field role=implementer --unassigned --claim --json")).toBeUndefined();
  });
@@ -362,6 +372,8 @@ describe("G5 multi-bead claims", () => {
   ["the foreign bead named second", `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${FOREIGN_BEAD} --claim`],
   ["the foreign bead named first", `BEADS_ACTOR=${ACTOR} bd update ${FOREIGN_BEAD} ${BEAD} --claim`],
  ])("refuses a multi-bead claim smuggling another role's bead, with %s", async (_label, command) => {
+  releaseBead(BEAD);
+  releaseBead(FOREIGN_BEAD);
   // G5 also enforces one acquisition target when invoked without G7.
   const result = await gateClaimEligibility(claims, ctxAt(owned), { command });
 
@@ -369,6 +381,8 @@ describe("G5 multi-bead claims", () => {
  });
 
  test("G5 refuses two beads even when their roles and worktrees match", async () => {
+  releaseBead(BEAD);
+  releaseBead(SAME_TREE);
   const command = `BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SAME_TREE} --claim`;
   expect((await gateClaimEligibility(claims, ctxAt(owned), { command }))?.block).toBe(true);
  });
@@ -444,7 +458,7 @@ describe("G2 mutations against the claimed tree", () => {
   // through the filesystem before being compared against `metadata.worktree` and
   // then `metadata.scope`. The bead declares both, which is what the last row
   // needs — it never leaves the tree, so only the scope globs can refuse it.
-  beads[BEAD] = { id: BEAD, labels: ["agent:implementer"], metadata: { worktree: owned, scope: ["src/api/**"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: ACTOR, labels: ["agent:implementer"], metadata: { worktree: owned, scope: ["src/api/**"] } };
 
   const result = await gateChain(ctxAt(owned), tool, input());
 
@@ -460,7 +474,7 @@ describe("G2 mutations against the claimed tree", () => {
   // `edit`; `bash` keeps the cwd comparison every command inherits, plus G3's
   // refusal of any checkout the tree does not own. A redirect parser would refuse
   // honest commands more often than it caught this one.
-  beads[BEAD] = { id: BEAD, labels: ["agent:implementer"], metadata: { worktree: owned, scope: ["src/api/**"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: ACTOR, labels: ["agent:implementer"], metadata: { worktree: owned, scope: ["src/api/**"] } };
 
   expect(await gateChain(ctxAt(owned), "bash", { command: "echo x > ../foreign/src/api.ts" })).toBeUndefined();
  });

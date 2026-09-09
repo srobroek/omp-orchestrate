@@ -582,7 +582,7 @@ export async function preflightAgents(
  });
  const timer = ctx.setTimeout(() => rejectTimeout(new Error("agent discovery timed out")), AGENT_PREFLIGHT_TIMEOUT_MS);
  try {
-  const findings = await Promise.race([discoverAgentFindings(ctx, requested, undefined, modelOverrides), timeout]).catch(
+  const findings = await Promise.race([discoverAgentFindings(ctx, requested, modelOverrides), timeout]).catch(
    (error): AgentDiscoveryFinding[] => [{
     agent: "discovery",
     message: `unavailable: ${error instanceof Error ? error.message : String(error)}`,

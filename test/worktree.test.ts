@@ -71,7 +71,8 @@ function writing(target: string, cwd = owned): Verdict {
 
 /** The gate as `src/index.ts` calls it for an `edit` patch against one file. */
 function editing(target: string, cwd = owned): Verdict {
- return gateWorktreeScope(claims, ctxAt(cwd), "edit", { input: `[${target}#A1B2]\nPUT 1.=1:\n+x` });
+ const input = `§${target}\n«\nold\n»\nnew`;
+ return gateWorktreeScope(claims, ctxAt(cwd), "edit", { input });
 }
 
 beforeAll(async () => {
@@ -98,7 +99,7 @@ afterAll(async () => {
 
 beforeEach(() => {
  claims = createClaimState();
- beads = { [BEAD]: { id: BEAD, metadata: { worktree: owned } } };
+ beads = { [BEAD]: { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned } } };
  // Disable isolated-root discovery outside the isolation-specific cases.
  process.env.OMP_WORKTREE_DIR = path.join(root, "no-such-isolation-base");
  claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD] });
@@ -176,7 +177,7 @@ describe("G2 outside the claimed tree", () => {
  });
 
  test("refuses when any one of several claimed beads names another tree", async () => {
-  beads["orc-43"] = { id: "orc-43", metadata: { worktree: foreign } };
+  beads["orc-43"] = { id: "orc-43", status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: foreign } };
   claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   const result = await fromBash(owned);
@@ -305,11 +306,11 @@ describe("G2 target paths that escape the claimed tree", () => {
 
 describe("G2 metadata.scope territory", () => {
  beforeEach(() => {
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: ["src/api/**"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api/**"] } };
  });
 
  test.each(["src/**", "/src/**"])("scope %s grants matching writes and detects a competing owner", async scope => {
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: [scope] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: [scope] } };
   expect(await writing("src/api.ts")).toBeUndefined();
   expect((await writing("docs/api.ts"))?.block).toBe(true);
   listSpy.mockResolvedValueOnce([
@@ -319,7 +320,7 @@ describe("G2 metadata.scope territory", () => {
  });
 
  test.each(["", "/"])("whole-tree scope %j grants in-tree writes but not escapes", async scope => {
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: [scope] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: [scope] } };
   expect(await writing("docs/api.ts")).toBeUndefined();
   expect((await writing("../foreign/src/api.ts"))?.reason).toContain("metadata.worktree");
   listSpy.mockResolvedValueOnce([
@@ -355,12 +356,12 @@ describe("G2 metadata.scope territory", () => {
  test("allows a wildcard-free glob to grant its whole subtree", async () => {
   // `scopesOverlap` treats a wildcard-free scope as owning that path outright, so
   // `src/api` must grant the files under it or the scope grants nothing at all.
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: ["src/api"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api"] } };
   expect(await writing("src/api/deep/handler.ts")).toBeUndefined();
  });
 
  test("allows any of several declared globs to name the target", async () => {
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: ["docs/**", "src/deep/**"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["docs/**", "src/deep/**"] } };
   expect(await writing("src/deep/api.ts")).toBeUndefined();
  });
 
@@ -378,7 +379,7 @@ describe("G2 metadata.scope territory", () => {
 
  test("reads the JSON-array-in-a-string form of scope", async () => {
   // `scopeOf` accepts it because some producers stamp metadata that way.
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: JSON.stringify(["src/api/**"]) } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: JSON.stringify(["src/api/**"]) } };
   expect((await writing("src/other/api.ts"))?.block).toBe(true);
  });
 
@@ -399,7 +400,7 @@ describe("G2 metadata.scope territory", () => {
   // Territory is a union across claimed beads. G5 keeps claimed beads' globs
   // disjoint, so intersecting them would leave a worker holding two of them with
   // nowhere legal to write at all.
-  beads["orc-43"] = { id: "orc-43", metadata: { worktree: owned, scope: ["src/deep/**"] } };
+  beads["orc-43"] = { id: "orc-43", status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/deep/**"] } };
   claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   expect(await writing("src/api/handler.ts")).toBeUndefined();
@@ -407,7 +408,7 @@ describe("G2 metadata.scope territory", () => {
  });
 
  test("refuses a target neither claimed bead's scope names, listing both", async () => {
-  beads["orc-43"] = { id: "orc-43", metadata: { worktree: owned, scope: ["src/deep/**"] } };
+  beads["orc-43"] = { id: "orc-43", status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/deep/**"] } };
   claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   const result = await writing("src/other/handler.ts");
@@ -423,11 +424,59 @@ describe("G2 metadata.scope territory", () => {
   // bead declaring no scope is an unknown territory, not an unlimited one: treating
   // the silence as a grant would let one scope-less bead in a claim switch the
   // comparison off entirely, so the union is over the beads that actually spoke.
-  beads["orc-43"] = { id: "orc-43", metadata: { worktree: owned } };
+  beads["orc-43"] = { id: "orc-43", status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned } };
   claims.recordClaim({ actor: "orc-impl-1", beadIds: [BEAD, "orc-43"] });
 
   expect(await writing("src/api/handler.ts")).toBeUndefined();
   expect((await writing("src/other/handler.ts"))?.block).toBe(true);
+ });
+});
+
+describe("G2 ownership freshness", () => {
+ const actor = "orc-impl-1";
+ const successor = "orc-successor";
+
+ beforeEach(() => {
+  beads[BEAD] = {
+   id: BEAD,
+   status: "in_progress",
+   assignee: successor,
+   metadata: { worktree: owned, scope: ["src/**"] },
+  };
+ });
+
+ test.each([
+  ["write", () => writing("src/api.ts")],
+  ["edit", () => editing(path.join(owned, "src", "api.ts"))],
+  ["bash", () => fromBash(owned, "touch src/api.ts")],
+ ])("rejects the superseded actor's ordinary %s mutation", async (_tool, mutate) => {
+  const result = await mutate();
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("in_progress");
+  expect(result?.reason).toContain(BEAD);
+ });
+
+ test("allows the currently assigned actor to mutate the same scope", async () => {
+  beads[BEAD]!.assignee = actor;
+
+  expect(await writing("src/api.ts")).toBeUndefined();
+  expect(await editing(path.join(owned, "src", "api.ts"))).toBeUndefined();
+  expect(await fromBash(owned, "touch src/api.ts")).toBeUndefined();
+ });
+
+ test.each([
+  ["released", { status: "open", assignee: actor }],
+  ["reassigned", { status: "in_progress", assignee: successor }],
+  ["unreadable", undefined],
+ ])("rejects ordinary mutation with %s ownership evidence", async (_state, bead) => {
+  if (bead === undefined) delete beads[BEAD];
+  else beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned, scope: ["src/**"] } };
+
+  expect((await writing("src/api.ts"))?.block).toBe(true);
+ });
+
+ test("keeps a recognized Beads read control path safe after reassignment", async () => {
+  expect(await fromBash(owned, `bd show ${BEAD} --json`)).toBeUndefined();
  });
 });
 
@@ -439,15 +488,15 @@ describe("G2 fail-open", () => {
  });
 
  test("a bead declaring no worktree allows the mutation", async () => {
-  beads[BEAD] = { id: BEAD, metadata: {} };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: {} };
   expect(await fromBash(foreign)).toBeUndefined();
   expect(await writing(path.join(foreign, "src", "api.ts"))).toBeUndefined();
  });
 
- test("an unreadable bead allows the mutation", async () => {
+ test("an unreadable bead blocks product mutation", async () => {
   beads = {};
-  expect(await fromBash(foreign)).toBeUndefined();
-  expect(await writing(path.join(foreign, "src", "api.ts"))).toBeUndefined();
+  expect((await fromBash(foreign))?.block).toBe(true);
+  expect((await writing(path.join(foreign, "src", "api.ts")))?.block).toBe(true);
  });
 
  test("a bead declaring no scope allows any target inside the tree", async () => {
@@ -479,7 +528,7 @@ describe("G2 fail-open", () => {
  });
 
  test("a declared worktree that does not exist allows the mutation", async () => {
-  beads[BEAD] = { id: BEAD, metadata: { worktree: path.join(root, "never-created") } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: path.join(root, "never-created") } };
   expect(await fromBash(foreign)).toBeUndefined();
   expect(await writing(path.join(foreign, "src", "api.ts"))).toBeUndefined();
  });
@@ -491,6 +540,8 @@ describe("G2 fail-open", () => {
  test("JSON-string metadata enforces the same containment and scope as object metadata", async () => {
   beads[BEAD] = {
    id: BEAD,
+   status: "in_progress",
+   assignee: "orc-impl-1",
    metadata: JSON.stringify({ worktree: owned, scope: ["src/api/**"] }) as unknown as Record<string, unknown>,
   };
   expect((await fromBash(foreign))?.block).toBe(true);
@@ -515,7 +566,7 @@ describe("G2 fail-open", () => {
 describe("G2 isolated checkout containment", () => {
  beforeEach(() => {
   process.env.OMP_WORKTREE_DIR = isolationBase;
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: ["src/api/**"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api/**"] } };
  });
 
  test("allows only the current Git root, not its shared parent", async () => {
@@ -576,7 +627,7 @@ describe("G2 effective bash cwd and edit modes", () => {
  });
 
  test("checks sloppy edit targets instead of compatibility path hints", async () => {
-  const input = `<SM:EDIT path="${foreign}/x.ts">\n<SM:FIND>\nold\n</SM:FIND>\n<SM:PUT>\nnew\n</SM:PUT>\n</SM:EDIT>`;
+  const input = `§${foreign}/x.ts\n«\nold\n»\nnew`;
   expect((await gateWorktreeScope(claims, ctxAt(owned), "edit", { input, path: "src/api.ts" }))?.block).toBe(true);
   expect(await gateWorktreeScope(claims, ctxAt(owned), "edit", {
    input: input.replace(`${foreign}/x.ts`, "src/api.ts"),
@@ -584,7 +635,7 @@ describe("G2 effective bash cwd and edit modes", () => {
  });
 
  test("blocks work when the acquired queue candidate overlaps an active claim", async () => {
-  beads[BEAD] = { id: BEAD, metadata: { worktree: owned, scope: ["src/api/**"] } };
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api/**"] } };
   listSpy.mockResolvedValueOnce([{ id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["src/api/**"] } }]);
   expect((await writing("src/api/x.ts"))?.reason).toContain("scope conflict");
  });
