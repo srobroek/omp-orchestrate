@@ -44,7 +44,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerBotReviewProbe(pi);
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus.
  registerSupervision(pi);
- registerWatchers(pi);
+ registerWatchers(pi, claims);
 
  /**
   * One handler for every gate, dispatching on tool name.
