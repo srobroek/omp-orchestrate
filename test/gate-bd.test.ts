@@ -204,6 +204,8 @@ describe("the identity notice", () => {
 		["separate long help", "bd update orc-1 --description --help"],
 		["separate short help", "bd update orc-1 --notes -h"],
 		["inline long help", "bd update orc-1 --description=--help"],
+		["close reason", "bd close orc-1 --reason --help"],
+		["audit kind", "bd audit record --kind --help"],
 	])("does not treat %s option data as help", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});

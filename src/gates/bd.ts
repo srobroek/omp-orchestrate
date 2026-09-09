@@ -37,7 +37,7 @@ import { commentVerb } from "../bd";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
 import { readActiveRun } from "../run-state";
-import { type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
+import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
 
 /**
  * One finding on one parsed invocation: what to say, or `undefined` for silence.
@@ -207,46 +207,25 @@ const ADMIN_SUBCOMMANDS: Record<string, true> = {
  */
 const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
-/** Options whose following token is data, even when that data resembles another option. */
-const VALUE_FLAGS: Record<string, true> = {
-	"-C": true,
-	"--directory": true,
-	"--actor": true,
-	"--db": true,
-	"--dolt-auto-commit": true,
-	"--acceptance": true,
-	"--add-label": true,
-	"--append-notes": true,
-	"-a": true,
-	"--assignee": true,
-	"--await-id": true,
-	"--body-file": true,
-	"--defer": true,
-	"-d": true,
-	"--description": true,
-	"--design": true,
-	"--design-file": true,
-	"--due": true,
-	"-e": true,
-	"--estimate": true,
-	"--external-ref": true,
-	"--metadata": true,
-	"--notes": true,
-	"--parent": true,
-	"-p": true,
-	"--priority": true,
-	"--remove-label": true,
-	"--session": true,
-	"--set-labels": true,
-	"--set-metadata": true,
-	"--spec-id": true,
-	"-s": true,
-	"--status": true,
-	"--title": true,
-	"-t": true,
-	"--type": true,
-	"--unset-metadata": true,
+/** Flags proven not to consume a following token; unknown flags fail closed as value-taking. */
+const BOOLEAN_FLAGS: Record<string, true> = {
+	"--claim": true,
+	"--claim-next": true,
+	"--continue": true,
+	"--force": true,
+	"--global": true,
+	"--ignore-schema-skew": true,
+	"--json": true,
+	"--no-auto": true,
+	"--quiet": true,
+	"--readonly": true,
+	"--sandbox": true,
+	"--silent": true,
+	"--suggest-next": true,
+	"--unassigned": true,
+	"--verbose": true,
 };
+
 
 /** Grouped subcommands whose first positional selects a read. */
 const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
@@ -322,13 +301,14 @@ function writesBeads(invocation: BdInvocation): boolean {
 			continue;
 		}
 		const { flag, inline } = splitFlag(token);
-		if (VALUE_FLAGS[flag] === true) {
+		if (BD_VALUE_FLAGS[flag] === true) {
 			skipValue = inline === undefined;
 			continue;
 		}
 		if (token === "--help" || token === "-h") hasHelp = true;
-		if (token === "--dry-run") hasDryRun = true;
-		if (token === "--blocks") hasBlocks = true;
+		else if (token === "--dry-run") hasDryRun = true;
+		else if (token === "--blocks") hasBlocks = true;
+		else if (inline === undefined && token.startsWith("-") && BOOLEAN_FLAGS[flag] !== true) skipValue = true;
 	}
 	if (hasHelp) return false;
 	if (invocation.hasClaim) return invocation.subcommand !== "ready";

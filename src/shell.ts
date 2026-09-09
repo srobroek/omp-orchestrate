@@ -12,13 +12,18 @@
  * invokes `bd` — without interpreting quoted payload text as syntax.
  */
 
-/** Global `bd` flags that consume the following token. */
-const VALUE_FLAGS: Record<string, true> = {
- "-C": true,
- "--actor": true,
- "--db": true,
- "--directory": true,
- "--dolt-auto-commit": true,
+/** `bd` flags that consume the following token, shared by parsing and policy gates. */
+export const BD_VALUE_FLAGS: Record<string, true> = {
+ "-C": true, "--directory": true, "--actor": true, "--db": true, "--dolt-auto-commit": true, "--profile": true,
+ "--acceptance": true, "--add-label": true, "--append-notes": true, "-a": true, "--assignee": true, "--await-id": true,
+ "--body-file": true, "--defer": true, "-d": true, "--description": true, "--design": true, "--design-file": true,
+ "--due": true, "-e": true, "--estimate": true, "--external-ref": true, "--metadata": true, "--notes": true,
+ "--parent": true, "-p": true, "--priority": true, "--remove-label": true, "--session": true, "--set-labels": true,
+ "--set-metadata": true, "--spec-id": true, "-s": true, "--status": true, "--title": true, "-t": true,
+ "--type": true, "--unset-metadata": true, "--reason": true, "--reason-file": true, "--kind": true,
+ "--id": true, "--labels": true, "--deps": true, "--wisp-type": true, "--metadata-field": true,
+ "--label": true, "--label-any": true, "--limit": true, "--direction": true, "--sort": true,
+ "--order": true, "--format": true,
 };
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -403,7 +408,7 @@ export function parseBdInvocation(segment: string[]): BdInvocation | null {
   // otherwise resolve truthy here, and the parser would swallow the *following*
   // positional as its operand -- dropping the real bead id and leaving the claim
   // gate nothing to check.
-  if (VALUE_FLAGS[token] === true) {
+  if (BD_VALUE_FLAGS[token] === true) {
    skip = true;
    continue;
   }
