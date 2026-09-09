@@ -332,6 +332,13 @@ describe("runtime discovery preflight", () => {
   expect(findings).toEqual([]);
  });
 
+ test.each(["inh", "inher", "xhig"])("accepts runtime thinking abbreviation %s", suffix => {
+  const agents = KNOWN_ROLES.map(role =>
+   definition(`orc-${role}`, role, role === "architect" ? `@plan:${suffix}` : coreContractForAgent(`orc-${role}`)!.modelAlias),
+  );
+  expect(agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }))).toEqual([]);
+ });
+
  test("rejects a valid alternate alias override on architect", () => {
   const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
   const findings = agentDiscoveryFindings(

@@ -639,7 +639,7 @@ async function safeFailureReport(
  ) return false;
 
  const bead = await bdShow(beadId);
- if (bead?.id !== beadId || bead.assignee !== claim.actor) return false;
+ if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "in_progress") return false;
  if (comment !== null) return true;
  const comments = await bdCommentsChecked(beadId);
  return comments !== null && comments.some(entry => FAILURE_VERBS[commentVerb(entry.text)] === true);

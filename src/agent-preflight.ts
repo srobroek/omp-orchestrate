@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 
@@ -52,13 +53,12 @@ function modelAlias(model: string): string | undefined {
  return /^(@[^:]+)(?::[^:]+)?$/.exec(model.trim())?.[1];
 }
 
-const CORE_THINKING_SUFFIX = /^(?:auto|inherit|in|off|of|minimal|minim|mini|min|mi|low|lo|medium|mediu|medi|med|me|high|hi|xhigh|xhi|xh|max|ma)$/;
 
 function coreModelAlias(model: string): string | undefined {
  const match = /^(@[^:,\s]+)(?::([^:,\s]+))?$/.exec(model.trim());
  if (match === null) return undefined;
  const suffix = match[2];
- return suffix === undefined || CORE_THINKING_SUFFIX.test(suffix) ? match[1] : undefined;
+ return suffix === undefined || parseConfiguredThinkingLevel(suffix) !== undefined ? match[1] : undefined;
 }
 
 export function coreContractForAgent(name: string): CoreAgentContract | undefined {

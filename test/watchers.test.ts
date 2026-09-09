@@ -901,7 +901,13 @@ describe("assignment enforcement", () => {
 
 		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
 		bd.resetReadBudget();
-		for (let read = 0; read < 8; read += 1) await bd.bdShow("bd-claim");
+		let exhausted = false;
+		for (let read = 0; read < 50; read += 1) {
+			if ((await bd.bdShow("bd-claim")) !== null) continue;
+			exhausted = true;
+			break;
+		}
+		expect(exhausted).toBe(true);
 		expect(await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'FAILED assignment mismatch'" } })).toEqual([undefined]);
 		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
 
@@ -945,6 +951,8 @@ describe("assignment enforcement", () => {
 
 		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "different-worker" }]);
 		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'BLOCKED stale owner'" } }))[0]).toMatchObject({ block: true });
+		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "closed", assignee: "worker-1" }]);
+		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'BLOCKED terminal claim'" } }))[0]).toMatchObject({ block: true });
 	});
 
 	test("does not consume its way past mismatch refusal and fails closed on unreadable evidence", async () => {
