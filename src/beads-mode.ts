@@ -1,5 +1,10 @@
+import fs from "node:fs/promises";
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import { bdRun } from "./bd";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Point every client at the run's beads database.
@@ -9,11 +14,11 @@ import { bdRun } from "./bd";
  * version required a per-project Dolt server, and the server was the wrong instrument for
  * the problem it was bought for -- see the history note below.
  *
- * What actually needs solving is narrower. bd resolves its database by walking up from the
- * working directory, so a worker in an isolated checkout resolves to whatever `.beads` it
- * finds there. `.beads/` is gitignored, so a clone and a worktree both arrive without one,
- * and the walk continues past the checkout. Measured on this host: `$HOME/.beads` exists, so
- * the walk can end in a personal database that no run reads.
+ * What actually needs solving is narrower. A copied checkout can resolve a private or
+ * unrelated ancestor database because `.beads/` is gitignored. A linked Git worktree
+ * resolves the primary checkout's database, but still needs the same explicit pin so every
+ * child process uses that answer. Measured on this host: `$HOME/.beads` exists, so an
+ * unvalidated walk can end in a personal database that no run reads.
  *
  * `BEADS_DIR` closes that. Measured: from a directory holding no `.beads/` at all,
  * `BEADS_DIR=<run>/.beads bd list` listed the run's beads, and two concurrent writers from
@@ -30,11 +35,31 @@ import { bdRun } from "./bd";
  * which broke the Dolt sync that had worked under embedded mode. Embedded plus `BEADS_DIR`
  * gives the same guarantee -- one database, shared by every client -- and spawns nothing.
  */
-export type BeadsReadiness = { ok: true; note?: string } | { ok: false; reason: string };
+export type BeadsReadiness = { ok: true; tracked?: boolean; note?: string } | { ok: false; reason: string };
 
 function firstLine(text: string | undefined): string {
 	const line = (text ?? "").split("\n").find(entry => entry.trim().length > 0);
 	return line === undefined ? "no output" : line.trim();
+}
+
+async function canonicalPath(value: string): Promise<string> {
+	return fs.realpath(value).catch(() => path.resolve(value));
+}
+
+async function sharedCheckoutBeadsDir(cwd: string): Promise<string | null> {
+	const env = { ...process.env };
+	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+	try {
+		const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--git-common-dir"], {
+			env,
+			timeout: 1500,
+			maxBuffer: 16 * 1024,
+		});
+		const commonDir = path.resolve(cwd, stdout.trim());
+		return path.join(path.dirname(commonDir), ".beads");
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -56,23 +81,33 @@ export async function ensureBeadsPath(cwd: string): Promise<BeadsReadiness> {
 		return { ok: false, reason: "bd could not be run, so the run's database cannot be located" };
 	}
 	if (where.code !== 0) {
-		return { ok: false, reason: `bd could not locate a beads database: ${firstLine(where.stderr || where.stdout)}` };
+		const detail = firstLine(where.stderr || where.stdout);
+		if (/no active beads workspace found|no beads database found/i.test(detail)) return { ok: true, tracked: false };
+		return { ok: false, reason: `bd could not locate a beads database: ${detail}` };
 	}
 	const resolved = firstLine(where.stdout);
 	if (!path.isAbsolute(resolved)) {
 		return { ok: false, reason: `\`bd where\` answered "${resolved}", which is not an absolute path` };
 	}
 
-	// A resolution that landed outside the checkout is the walk-up hazard, not a database. It
-	// is refused rather than adopted, because writing a run's beads into a personal database
-	// is silent and unrecoverable by anyone else.
-	if (!resolved.startsWith(`${cwd}${path.sep}`) && resolved !== cwd) {
+	// A linked worktree legitimately resolves the primary checkout's `.beads`, beside Git's
+	// shared common directory. Accept that exact path as the same repository, while retaining
+	// cwd containment for ordinary checkouts and refusing unrelated ancestor/home databases.
+	const sharedBeads = await sharedCheckoutBeadsDir(cwd);
+	const [canonicalResolved, canonicalCwd, canonicalSharedBeads] = await Promise.all([
+		canonicalPath(resolved),
+		canonicalPath(cwd),
+		sharedBeads === null ? Promise.resolve(null) : canonicalPath(sharedBeads),
+	]);
+	const insideCheckout =
+		canonicalResolved === canonicalCwd || canonicalResolved.startsWith(`${canonicalCwd}${path.sep}`);
+	if (!insideCheckout && canonicalResolved !== canonicalSharedBeads) {
 		return {
 			ok: false,
-			reason: `bd resolved its database to ${resolved}, which is outside this checkout (${cwd}). bd walks up from the working directory and \`.beads/\` is gitignored, so an isolated checkout can resolve to a personal database instead of the run's. Set BEADS_DIR to the run's \`.beads\` before starting work here.`,
+			reason: `bd resolved its database to ${resolved}, which does not belong to this checkout (${cwd}). Set BEADS_DIR to the run's .beads before starting work here.`,
 		};
 	}
 
-	process.env.BEADS_DIR = resolved;
+	process.env.BEADS_DIR = canonicalResolved;
 	return { ok: true, note: `pointed this session at the run's database at ${resolved}` };
 }

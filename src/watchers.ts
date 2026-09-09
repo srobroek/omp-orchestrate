@@ -935,28 +935,22 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  // Only an observed true proves isolation is on; an unavailable setting
  // cannot establish that this repository risks a split database.
  const isolating = observed["task.isolation.enabled"] === true;
- // A repository with no beads database has no claims to split, so the precondition
- // does not apply and saying so is noise. Observed in the field: this fired in a
- // repository that had never run `bd init`, where the advice was unactionable.
- const tracked = await fs
-  .stat(path.join(cwd, ".beads"))
-  .then(entry => entry.isDirectory())
-  .catch(() => false);
- // Under an embedded database the precondition is a pinned PATH, not a server. bd resolves
- // by walking up from the working directory, `.beads/` is gitignored, so a clone or worktree
- // arrives without one and the walk continues past the checkout. Measured on this host:
- // `$HOME/.beads` exists, so the walk can end in a personal database that no run reads.
+ // Probe through bd itself instead of looking only for cwd/.beads. Linked worktrees share the
+ // primary checkout's database and intentionally have no local .beads directory.
+ // Under an embedded database the precondition is a pinned path, not a server. A copied
+ // checkout can resolve a private or unrelated ancestor database because `.beads/` is
+ // gitignored. A linked worktree resolves the primary checkout's database but still needs
+ // the pin so every child inherits the same answer.
  //
- // The pin is applied here rather than demanded of the operator: `ensureBeadsPath` asks bd
- // for the database this directory already resolves to, refuses one outside the checkout,
- // and exports it, so every later bd call and every child inherits the same answer. Only a
- // refusal is worth a line, and the line then carries bd's own reason.
+ // The pin is applied here rather than demanded of the operator. `ensureBeadsPath` asks bd
+ // for the active database, accepts the checkout or its Git-shared primary database, rejects
+ // unrelated external databases, and exports the canonical path. Only refusal merits a line.
  //
  // An earlier version of this block demanded a per-project Dolt server instead. That server
  // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
  // rather than from the port, so a removed pid file made every later call start a rival --
  // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
- if (tracked && isolating && (process.env.BEADS_DIR ?? "") === "") {
+ if (isolating && (process.env.BEADS_DIR ?? "") === "") {
   const pinned = await ensureBeadsPath(cwd);
   if (!pinned.ok) {
    lines.push(
