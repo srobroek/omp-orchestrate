@@ -342,6 +342,9 @@ function writesBeads(invocation: BdInvocation): boolean {
 	if (invocation.hasClaim) return invocation.subcommand !== "ready";
 
 	const { subcommand } = invocation;
+	if (subcommand === "duplicates") {
+		return invocation.rest.includes("--auto-merge") && !invocation.rest.includes("--dry-run");
+	}
 	// A bare `bd`, or a first positional that is really a redirection: both print help.
 	if (!SUBCOMMAND.test(subcommand)) return false;
 	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;

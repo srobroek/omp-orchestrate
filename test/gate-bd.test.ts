@@ -97,6 +97,7 @@ describe("the identity notice", () => {
 		// the exemption: `bd comments` prints, `bd comments add` writes.
 		["gate create", "bd gate create g-1"],
 		["kv set", "bd kv set k v"],
+		["duplicates auto-merge", "bd duplicates --auto-merge"],
 	])("fires on %s", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
@@ -109,6 +110,8 @@ describe("the identity notice", () => {
 		["dep tree", "bd dep tree orc-7"],
 		["label list", "bd label list orc-7"],
 		["kv get", "bd kv get somekey"],
+		["duplicates", "bd duplicates"],
+		["duplicates dry run", "bd duplicates --auto-merge --dry-run"],
 		// Store administration has no bead to attribute.
 		["init", "bd init --quiet"],
 		["setup", "bd setup codex --check"],
