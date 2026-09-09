@@ -32,8 +32,8 @@ const UNATTRIBUTED = [
 	"bd label add orc-1 kind:design",
 	"bd dep add orc-1 orc-2",
 	"bd set-state orc-1 review",
-	"bd gate orc-1 --pass",
-	"bd audit orc-1 --note x",
+	"bd gate resolve gate-1",
+	"bd audit record --kind tool_call",
 ];
 
 describe("the identity notice", () => {
@@ -120,6 +120,53 @@ describe("the identity notice", () => {
 		["a redirection where a subcommand would be", "bd 2>&1 | head -20"],
 	])("leaves %s alone", (_label, command) => {
 		expect(actorNotice(only(command))).toBeUndefined();
+	});
+
+	test.each([
+		["mol help", "bd mol --help"],
+		["mol show", "bd mol show mol-1"],
+		["mol current", "bd mol current mol-1"],
+		["mol progress", "bd mol progress mol-1"],
+		["mol ready", "bd mol ready"],
+		["mol stale", "bd mol stale"],
+		["mol last-activity", "bd mol last-activity mol-1"],
+		["mol seed", "bd mol seed formula"],
+		["mol pour preview", "bd mol pour formula --dry-run"],
+		["mol wisp preview", "bd mol wisp formula --dry-run"],
+		["mol wisp list", "bd mol wisp list"],
+		["dep cycles", "bd dep cycles"],
+		["dep list", "bd dep list orc-1"],
+		["dep tree", "bd dep tree orc-1"],
+		["label list", "bd label list orc-1"],
+		["label list-all", "bd label list-all"],
+		["kv get", "bd kv get somekey"],
+		["kv list", "bd kv list"],
+		["gate discover", "bd gate discover --type gh:run"],
+		["gate list", "bd gate list"],
+		["gate show", "bd gate show gate-1"],
+		["todo list", "bd todo list"],
+		["comments list", "bd comments orc-1"],
+	])("leaves grouped read %s alone", (_label, command) => {
+		expect(actorNotice(only(command))).toBeUndefined();
+	});
+
+	test.each([
+		["mol pour", "bd mol pour formula"],
+		["mol wisp proto", "bd mol wisp beads-release"],
+		["bare mol wisp", "bd mol wisp"],
+		["mol wisp create", "bd mol wisp create formula"],
+		["mol wisp gc", "bd mol wisp gc"],
+		["dep --blocks", "bd dep orc-1 --blocks orc-2"],
+		["dep remove", "bd dep remove orc-1 orc-2"],
+		["label propagate", "bd label propagate orc-1 kind:design"],
+		["kv clear", "bd kv clear key"],
+		["audit label", "bd audit label event-1 keep"],
+		["gate check", "bd gate check"],
+		["todo done", "bd todo done todo-1"],
+		["comments add", "bd comments add orc-1 REPORTED"],
+		["unknown grouped action", "bd gate frobnicate"],
+	])("fires on grouped write %s", (_label, command) => {
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
 
 	test("accepts an identity set through the bash call's own env", () => {
