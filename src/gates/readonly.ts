@@ -39,11 +39,11 @@ const BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"] as
 /**
  * Return the G1 environment addition for a generic helper in an active run.
  *
- * `ensureBeadsPath` is the only writer of the canonical pin during activation;
- * here we require the resulting process-local value to be non-empty and absolute
- * before deriving the repository root. `readActiveRun` owns marker parsing and
- * validation, and returns `null` for absence, malformed content, or unreadable
- * authority, so every uncertain case fails open.
+ * `ensureBeadsPath` supplies a non-empty absolute process-local pin. The active
+ * marker normally belongs to the session checkout, while a linked worktree may
+ * share the primary checkout's `.beads`; check both roots without treating either
+ * as mutation authority. `readActiveRunStrict` rejects malformed authority, so
+ * every uncertain candidate fails open.
  */
 export async function beadWriteFreeEnv(
 	pi: ExtensionAPI,
@@ -54,13 +54,14 @@ export async function beadWriteFreeEnv(
 	const beadsDir = process.env.BEADS_DIR;
 	if (beadsDir === undefined || beadsDir.length === 0 || !path.isAbsolute(beadsDir)) return undefined;
 
-	try {
-		return (await readActiveRunStrict(path.dirname(beadsDir))) === null ? undefined : { BD_READONLY: "1" };
-	} catch {
-		// Marker reads are already fail-open, but keep this boundary defensive if
-		// path or filesystem behaviour changes underneath the gate.
-		return undefined;
+	for (const root of new Set([ctx.cwd, path.dirname(beadsDir)])) {
+		try {
+			if ((await readActiveRunStrict(root)) !== null) return { BD_READONLY: "1" };
+		} catch {
+			// An unreadable or malformed candidate is not positive run authority.
+		}
 	}
+	return undefined;
 }
 
 /**

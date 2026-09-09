@@ -138,6 +138,24 @@ describe("G1 bead-write-free sandbox", () => {
 		}
 	});
 
+	test("uses the session marker when a linked worktree shares the primary BEADS_DIR", async () => {
+		const primary = await mkdtemp(join(tmpdir(), "orc-g1-primary-"));
+		const linked = await mkdtemp(join(tmpdir(), "orc-g1-linked-"));
+		try {
+			process.env.BEADS_DIR = join(primary, ".beads");
+			await mkdir(join(linked, ".orchestration"), { recursive: true });
+			await writeFile(markerPath(linked), JSON.stringify({ schema_version: 1, run_id: "orc-g1" }));
+			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", linked), { command: "bd update x" })).toEqual({
+				input: { command: "bd update x", env: { BD_READONLY: "1" } },
+			});
+		} finally {
+			await Promise.all([
+				rm(primary, { recursive: true, force: true }),
+				rm(linked, { recursive: true, force: true }),
+			]);
+		}
+	});
+
 	test("preserves a contract-bound orc writer with an active marker", async () => {
 		const { root } = await activeRun();
 		try {
