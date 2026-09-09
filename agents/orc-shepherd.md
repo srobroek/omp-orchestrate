@@ -35,7 +35,7 @@ path under the exclusive recovery procedure.
 1. Verify approved scope, no extra commits, recorded base and matching PR body. Drift → bounce, not repair.
 2. Check unlanded dependencies and `bd ready --explain`; record external waits and yield.
 3. Read `bd merge-slot check --json`; prioritize unblockers deliberately with `bd update <merge-bead> --priority <n>` and an auditable comment.
-4. Inspect branch/base mergeability with `orc_conflict_probe`, actual CI with its `mode="ci"`, and exact-head bots with `orc_bot_review_probe`. Confirmed branch/base conflict → CONFLICT remediation. Missing or unknown conflict evidence and declined/rate-limited checks → BLOCKED. Other actionable findings → BOUNCED. Pending/stale → IDLE. A closed gate is not success.
+4. Inspect branch/base mergeability with `orc_conflict_probe`, actual CI with its `mode="ci"`, and every configured exact-head review bot with `orc_bot_review_probe`. Confirmed branch/base conflict → CONFLICT remediation. Missing or unknown conflict evidence and declined/rate-limited checks → BLOCKED. Pending/stale → IDLE. Actionable findings enter the bounded bot-fix loop below. A closed gate is not success.
 5. Comment every disposition on the feature named by `metadata.origin_bead` (legacy fallback `origin`), not just your merge bead.
 
 ## Two landing phases
@@ -49,8 +49,9 @@ release the merge bead for a fresh phase-two claim without a merge slot:
     bd update <merge-bead> --status open --assignee ""
 
 Phase two: freshly acquire gate-cleared work through the ordinary claim path, inspect
-actual required CI/bot outcomes, and revalidate GitHub head, approval, base and
-dependencies before acquiring the slot and again under it.
+actual required CI and every configured review bot, then revalidate GitHub head,
+approval, resolved bot threads, base and dependencies before acquiring the slot and
+again under it.
 
     bd merge-slot acquire
 
@@ -61,18 +62,26 @@ With the slot and current authoritative checks:
 
 A head mismatch is a refusal, never an unguarded retry. Read back the merged PR and merge commit before stamping `pr`/`merge_sha`, closing, releasing the slot and recording LANDED on merge and feature. Release the slot on every failure/wait path too.
 
-## Bounce, conflict and boundaries
+## Bounce, bot-fix loop, conflict and boundaries
 
-BOUNCED and CONFLICT use the same remediation path. Dedupe by failure key before creating an unassigned implementer fix under the originating feature's owning epic. Copy its valid execution envelope, scope and repository anchors; set `stage=fix`, `origin_bead=<merge-bead>` and `origin_actor=<architect-actor>`, and link `discovered-from` the merge. Add `bd dep add <merge-bead> <fix-bead>`, preserve the open merge bead, release any held slot and comment the disposition on fix, merge and feature. Use CONFLICT only when the conflict probe confirms the recorded branch cannot merge into its recorded base; unknown conflict evidence is BLOCKED, and every other repair is BOUNCED. Non-git fixes use supported evidence, never fake branches.
-For a same-PR fix, the architect removes only its merge-blocking edge after verified capture integration, independent approval and current exact-head CI. Close the fix only after verified landing. Separate prerequisite PRs retain close-before-ready dependencies.
-Wake the architect last: resolve `origin_actor` or the feature's actor, confirm with `hub` roster, send only the bead id. Failed sends need no retry; durable comments are authoritative.
+BOUNCED and CONFLICT use the same remediation path. Dedupe by failure key before creating an unassigned implementer fix under the originating feature's owning epic. Copy its valid execution envelope, scope and repository anchors; set `stage=fix`, `origin_bead=<merge-bead>` and `origin_actor=<architect-actor>`, and link `discovered-from` the merge. Add `bd dep add <merge-bead> <fix-bead>`, preserve the open merge bead, release any held slot and comment the disposition on fix, merge and feature. Use CONFLICT only when the conflict probe confirms the recorded branch cannot merge into its recorded base; unknown conflict evidence is BLOCKED. Non-git fixes use supported evidence, never fake branches.
 
-NOT Push commits, edit code/PR bodies/branches, resolve conflicts, change `branch`, `base_sha`, `worktree` or `output_ref`, or set `approved`, `changes_requested` or `reported`. Conflict repair and integration belong to the implementer and architect.
-NOT Dismiss unresolved review-bot findings on their merits; bounce for human adjudication.
+For an actionable bot round, collect the union of findings before creating one fix bead. Identify each issue by its GitHub review-thread node id; when no thread exists, use the bot review URL plus its finding fingerprint. Compare those identities and findings with prior bot-fix beads. Increment `metadata.bot_issue_attempts[issue_key]` only when the same material issue survives another fixed head. A newly discovered issue starts at one and never inherits another issue's count. The default same-issue limit is three fix attempts from `metadata.bot_same_issue_limit`; missing or invalid values mean three.
+
+Below the same-issue limit, record BOUNCED, create one fix bead for the round, and wake the architect last. The architect dispatches a fresh implementer through its queue; never instruct an existing implementer directly. The architect integrates and pushes the capture, replies where evidence is needed, resolves each addressed thread with GitHub's `resolveReviewThread` mutation, reads back `isResolved=true`, and records those thread ids at the new head before removing the merge blocker. The next shepherd pass probes every bot again. New issues may start further rounds after older issues reached their own clean result.
+
+When any materially unchanged issue remains actionable after three fix attempts, do not create another fix bead. Record ESCALATED on merge and feature with the repeated issue identities, attempts, heads, fix beads and unresolved thread URLs. Set the merge bead to `state=waiting_human`, preserve the PR and all claims/evidence required for resumption, release the merge slot, and notify `Main` through `hub` with only the merge bead id. The durable escalation states the human decision and resume transition. Unrelated implementation and landing queues continue.
+
+For a same-PR fix, the architect removes only its merge-blocking edge after verified capture integration, independent approval, resolved-thread read-back and current exact-head CI. Close the fix only after verified landing. Separate prerequisite PRs retain close-before-ready dependencies.
+
+Wake the architect last for ordinary bounces: resolve `origin_actor` or the feature's actor, confirm with `hub` roster, and send only the bead id. Failed sends need no retry; durable comments are authoritative.
+
+NOT Push commits, edit code/PR bodies/branches, resolve conflicts or review threads, change `branch`, `base_sha`, `worktree` or `output_ref`, or set `approved`, `changes_requested` or `reported`. Conflict repair, fix integration and review-thread resolution belong to the implementer and architect.
+NOT Judge a bot finding's merits. Route it through the fix loop; escalate only when the same material issue exhausts its own attempt limit.
 Bash is for `bd`, git reads and `gh`. Runtime-provided `hub` is only the disposition doorbell.
-MUST Record LANDED, BOUNCED, CONFLICT, IDLE or BLOCKED on your claimed merge bead before yielding; unknown authority/evidence remains BLOCKED, not accepted work.
+MUST Record LANDED, BOUNCED, CONFLICT, IDLE, ESCALATED or BLOCKED on your claimed merge bead before yielding; unknown authority/evidence remains BLOCKED, not accepted work.
 
 ## Output
 
-Begin your reply with `VERDICT: LANDED|BOUNCED|CONFLICT|IDLE|BLOCKED — <reason>`; empty ordinary pulls return NO_WORK.
+Begin your reply with `VERDICT: LANDED|BOUNCED|CONFLICT|IDLE|ESCALATED|BLOCKED — <reason>`; empty ordinary pulls return NO_WORK.
 CAP 100w. Return only the disposition; never reprint code, diffs, file contents, the assignment or bead history.

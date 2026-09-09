@@ -91,8 +91,12 @@ back to the linked node for each missing field. Omit a token only when neither
 endpoint carries it. The orchestrator observes those comments without relaying
 findings, and the shepherd never judges them.
 
-The union of current-head/current-round verdicts decides the route: all approve
-and the PR may be made ready; any verdict=changes routes through fix-round.
+The union of current-head/current-round human and automated verdicts decides the
+route. Collect every configured review bot before routing one fix bead. Bot issue
+attempts are per material issue, keyed by review-thread node id or, without a
+thread, a stable finding fingerprint. New issues begin at one regardless of prior
+PR rounds. Any finding below its same-issue limit routes through fix-round; one
+that remains after its own limit routes to ESCALATED and `waiting_human` instead.
 Only after every dimension reports changes or approval, and only when changes
 are required, restore {{node_bead}} to its implementer queue: preserve the owning
 epic and scope, set status=open with an empty assignee, and let a fresh implementer
@@ -109,14 +113,15 @@ labels = ["land", "phase:review", "route:changes-requested"]
 description = """
 An implementer pulls the reopened {{node_bead}} using
 `bd ready --parent <epic> --metadata-field role=implementer --unassigned --claim --json`,
-reads all review dimensions, and resolves their union rather than only the first.
+reads the union of findings, and resolves the whole round rather than only the first.
 It records evidence for rejected findings and applies accepted fixes.
 
 The replacement works in isolation, never the feature worktree, and never pushes.
-OMP 18.1.14 captures commits plus remaining working-tree delta only on a
-successful child result; failed or aborted work may not survive. The architect
-collects the actual capture, integrates it, and pushes. A new head restarts
-collect-verdicts: every verdict must match the new head.
+OMP captures commits plus remaining working-tree delta only on a successful child
+result; failed or aborted work may not survive. The architect collects the actual
+capture, integrates and pushes it, replies where evidence is required, resolves each
+addressed GitHub review thread through `resolveReviewThread`, and reads back
+`isResolved=true`. Record those thread ids at the new head before review restarts.
 """
 
 [[steps]]
@@ -127,10 +132,11 @@ needs = ["collect-verdicts", "fix-round"]
 labels = ["land", "phase:stage"]
 description = """
 The last approving reviewer closes the final review wisp and makes the PR ready.
-`collect-verdicts` is named here unconditionally on purpose -- with fix-round
-alone this step would lose its only edge when no fix round runs and become ready
-in parallel with the first step, marking an unreviewed PR ready with no error
-reported anywhere.
+Before readiness, require current-head bot verdicts and read-back that every
+addressed automated-review thread is `isResolved=true`. `collect-verdicts` is
+named here unconditionally on purpose -- with fix-round alone this step would
+lose its only edge when no fix round runs and become ready in parallel with the
+first step, marking an unreviewed PR ready with no error reported anywhere.
 
 Ready is the signal the shepherd's eligibility probe waits for. Until this step
 runs, the draft state holds the merge.

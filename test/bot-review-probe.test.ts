@@ -19,6 +19,7 @@ import {
  type BotReviewDetails,
  type BotReviewVerdict,
  classifyBotReviews,
+ DEFAULT_BOTS,
  configuredSlugs,
  EXIT_ACTIONABLE,
  EXIT_DECLINED,
@@ -28,6 +29,7 @@ import {
  type Exec,
  type ExecResult,
  fetchBotReviewEvidence,
+ ghReviewThreadsArgv,
  ghApiArgv,
  ghTimeoutMs,
  parsePrRef,
@@ -48,13 +50,28 @@ type Row = Record<string, unknown>;
 function review(over: Row = {}): Row {
  return { login: CODERABBIT, state: "COMMENTED", body: "", commit: HEAD, url: "u", at: "x", ...over };
 }
-
 function comment(over: Row = {}): Row {
- return { login: CODERABBIT, path: "a.py", line: 12, commit: HEAD, url: "c", ...over };
+ return { login: CODERABBIT, path: "a.py", line: 12, commit: HEAD, url: "c", body: "fix", threadId: "PRRT_1", resolved: false, outdated: false, ...over };
 }
 
 function payload(over: Row = {}): Row {
  return { checks: [], reviews: [], comments: [], notices: [], ...over };
+}
+
+function threadPages(nodes: Row[] = []): unknown[] {
+ return [{ data: { repository: { pullRequest: { reviewThreads: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } } } }];
+}
+
+function thread(over: Row = {}): Row {
+ return {
+  id: "PRRT_1",
+  isResolved: false,
+  isOutdated: false,
+  comments: {
+   nodes: [{ author: { login: CODERABBIT }, path: "src/a.ts", originalLine: 9, commit: { oid: HEAD }, url: "https://c/1", body: "fix" }],
+  },
+  ...over,
+ };
 }
 
 const NOW = new Date("2026-07-30T12:00:00Z");
@@ -173,7 +190,7 @@ describe("verdicts", () => {
   expect(result.verdict).toBe("actionable");
   expect(result.code).toBe(EXIT_ACTIONABLE);
   expect(result.findings.actionable).toBe(2);
-  expect(result.findings.files).toEqual(["a.py:12 c1"]);
+  expect(result.findings.files).toEqual(["thread=PRRT_1 a.py:12 c1"]);
   expect(result.findings.summary).toBe("u2");
  });
 
@@ -287,13 +304,19 @@ describe("slug matching", () => {
   expect(classify(data, { bots: "greptile-apps" }).verdict).toBe("actionable");
  });
 
- test("a bot without an adapter reports state only", () => {
-  // No count parser: a COMMENTED round is a wait, not a silent pass.
-  const data = payload({
+ test("a bot without an adapter uses exact-head inline comments", () => {
+  const withFinding = payload({
    checks: [{ name: "Greptile Review", status: "COMPLETED" }],
-   reviews: [review({ login: "greptile-apps[bot]", body: "Actionable comments posted: 2" })],
+   reviews: [review({ login: "greptile-apps[bot]", body: "review complete" })],
+   comments: [comment({ login: "greptile-apps[bot]" })],
   });
-  expect(classify(data, { bots: "greptile-apps" }).verdict).toBe("pending");
+  expect(classify(withFinding, { bots: "greptile-apps" }).verdict).toBe("actionable");
+
+  const clean = payload({
+   checks: [{ name: "Greptile Review", status: "COMPLETED" }],
+   reviews: [review({ login: "greptile-apps[bot]", body: "review complete" })],
+  });
+  expect(classify(clean, { bots: "greptile-apps" }).verdict).toBe("clean");
  });
 
  test("the adapter is reused for a slug variant", () => {
@@ -314,6 +337,14 @@ describe("slug matching", () => {
   const result = classify(data, { bots: "coderabbitai, greptile-apps" });
   expect(result.verdict).toBe("clean");
   expect(result.findings.bots).toBe("coderabbitai,greptile-apps");
+ });
+
+ test("defaults cover the supported automated reviewers", () => {
+  expect(configuredSlugs(undefined, {})).toEqual(DEFAULT_BOTS.split(","));
+  expect(DEFAULT_BOTS).toContain("coderabbitai");
+  expect(DEFAULT_BOTS).toContain("chatgpt-codex-connector");
+  expect(DEFAULT_BOTS).toContain("copilot-pull-request-reviewer");
+  expect(DEFAULT_BOTS).toContain("greptile-apps");
  });
 });
 
@@ -518,7 +549,7 @@ describe("rendering and exit codes", () => {
   expect(result.code).toBe(EXIT_ACTIONABLE);
   const text = renderBotReview(result);
   expect(text).toContain("BOT_REVIEW actionable");
-  expect(text).toContain("COMMENT a.py:12 c1");
+  expect(text).toContain("COMMENT thread=PRRT_1 a.py:12 c1");
   expect(text).toContain("check=CodeRabbit/completed");
  });
 
@@ -552,11 +583,11 @@ describe("configured slugs", () => {
 
  test("the default applies with no environment", () => {
   const slugs = configuredSlugs(undefined, {});
-  expect(slugs).toEqual(["coderabbitai"]);
+  expect(slugs).toEqual(DEFAULT_BOTS.split(","));
   const data = payload({ checks: [{ name: "CodeRabbit", status: "IN_PROGRESS" }] });
   const result = classifyBotReviews(data, { head: HEAD, slugs, now: NOW });
   expect(result.code).toBe(EXIT_WAITING);
-  expect(renderBotReview(result)).toContain("bots=coderabbitai");
+  expect(renderBotReview(result)).toContain(`bots=${DEFAULT_BOTS}`);
  });
 
  test("an explicit list wins over the environment, and is normalised", () => {
@@ -655,7 +686,7 @@ const REPO = "acme/widgets";
 const PR = "7";
 const VIEW = prViewArgv(REPO, PR).join(" ");
 const REVIEWS = ghApiArgv(`repos/${REPO}/pulls/${PR}/reviews`).join(" ");
-const REVIEW_COMMENTS = ghApiArgv(`repos/${REPO}/pulls/${PR}/comments`).join(" ");
+const THREADS = ghReviewThreadsArgv(REPO, PR)!.join(" ");
 const ISSUE_COMMENTS = ghApiArgv(`repos/${REPO}/issues/${PR}/comments`).join(" ");
 
 /** A transcript where every read answers, with the reviews page the caller supplies. */
@@ -663,7 +694,7 @@ function reads(over: Record<string, ExecResult | null> = {}): Record<string, Exe
  return {
   [VIEW]: ok({ headRefOid: HEAD, statusCheckRollup: [{ name: "CodeRabbit", status: "COMPLETED" }] }),
   [REVIEWS]: ok([[]]),
-  [REVIEW_COMMENTS]: ok([[]]),
+  [THREADS]: ok(threadPages()),
   [ISSUE_COMMENTS]: ok([[]]),
   ...over,
  };
@@ -693,6 +724,15 @@ describe("argument vectors", () => {
   ]);
  });
 
+ test("review threads use paginated GraphQL with typed variables", () => {
+  const argv = ghReviewThreadsArgv(REPO, PR);
+  expect(argv?.slice(0, 5)).toEqual(["gh", "api", "graphql", "--paginate", "--slurp"]);
+  expect(argv).toContain("owner=acme");
+  expect(argv).toContain("name=widgets");
+  expect(argv).toContain("number=7");
+  expect(ghReviewThreadsArgv("not-a-repo", PR)).toBeNull();
+ });
+
  test("the per-read bound defaults to five seconds and honours the override", () => {
   expect(ghTimeoutMs({})).toBe(5_000);
   expect(ghTimeoutMs({ PR_SHEPHERD_GH_TIMEOUT: "30" })).toBe(30_000);
@@ -710,9 +750,9 @@ describe("fetch", () => {
   const result = await fetchBotReviewEvidence(REPO, PR, { exec });
 
   expect(result.ok).toBe(true);
-  const paginated = calls.filter((argv) => argv[1] === "api");
-  expect(paginated).toHaveLength(3);
-  expect(paginated.every((argv) => argv.includes("--paginate") && argv.includes("--slurp"))).toBe(true);
+  const restReads = calls.filter((argv) => argv[1] === "api" && argv[2] !== "graphql");
+  expect(restReads).toHaveLength(2);
+  expect(restReads.every((argv) => argv.includes("--paginate") && argv.includes("--slurp"))).toBe(true);
   if (!result.ok) return;
   expect(result.payload.reviews).toHaveLength(1);
   expect(result.payload.head).toBe(HEAD);
@@ -733,9 +773,9 @@ describe("fetch", () => {
       },
      ],
     ]),
-    [REVIEW_COMMENTS]: ok([
-     [{ user: { login: CODERABBIT }, path: "src/a.ts", original_line: 9, commit_id: HEAD, html_url: "https://c/1" }],
-    ]),
+    [THREADS]: ok(threadPages([
+     thread(),
+    ])),
     [ISSUE_COMMENTS]: ok([[{ user: { login: CODERABBIT }, body: LIMIT_BODY, created_at: POSTED }]]),
    }),
   );
@@ -751,8 +791,7 @@ describe("fetch", () => {
    url: "https://r/1",
    at: "2026-07-30T11:50:00Z",
   });
-  // `line` is absent on an outdated comment, so `original_line` carries the position.
-  expect(fetched.payload.comments[0]?.line).toBe(9);
+  expect(fetched.payload.comments[0]).toMatchObject({ threadId: "PRRT_1", line: 9, resolved: false });
   expect(fetched.payload.notices[0]?.at).toBe(POSTED);
 
   const result = classifyBotReviews(fetched.payload, {
@@ -761,7 +800,25 @@ describe("fetch", () => {
    now: NOW,
   });
   expect(result.verdict).toBe("actionable");
-  expect(result.findings.files).toEqual(["src/a.ts:9 https://c/1"]);
+  expect(result.findings.files).toEqual(["thread=PRRT_1 src/a.ts:9 https://c/1"]);
+ });
+
+ test("a resolved same-head generic thread is clean", async () => {
+  const generic = "chatgpt-codex-connector[bot]";
+  const { exec } = transcript(reads({
+   [REVIEWS]: ok([[{ user: { login: generic }, state: "COMMENTED", body: "review complete", commit_id: HEAD, html_url: "https://r/codex", submitted_at: POSTED }]]),
+   [THREADS]: ok(threadPages([thread({
+    id: "PRRT_CODEX",
+    isResolved: true,
+    comments: { nodes: [{ author: { login: generic }, path: "src/a.ts", line: 9, commit: { oid: HEAD }, url: "https://c/codex", body: "fix" }] },
+   })])),
+  }));
+  const fetched = await fetchBotReviewEvidence(REPO, PR, { exec });
+  expect(fetched.ok).toBe(true);
+  if (!fetched.ok) return;
+  const result = classifyBotReviews(fetched.payload, { head: HEAD, slugs: configuredSlugs("chatgpt-codex-connector", {}), now: NOW });
+  expect(result.verdict).toBe("clean");
+  expect(result.findings.files).toEqual([]);
  });
 
  test("a head-less view is refused, never read as an absent review", async () => {
@@ -954,7 +1011,7 @@ describe("registerBotReviewProbe", () => {
   expect(text).toContain("BOT_REVIEW actionable");
   expect(text).toContain('adapters: coderabbitai=CodeRabbit summary line "Actionable comments posted: N"');
   expect(text).toContain("never to be treated as clean");
-  expect(calls.map((argv) => argv.join(" "))).toEqual([VIEW, REVIEWS, REVIEW_COMMENTS, ISSUE_COMMENTS]);
+  expect(calls.map((argv) => argv.join(" "))).toEqual([VIEW, REVIEWS, THREADS, ISSUE_COMMENTS]);
  });
 
  test("classifies against the head the reads returned, so an older round stays stale", async () => {
@@ -1039,7 +1096,7 @@ describe("bounded bot evidence reads", () => {
   const fetching = fetchBotReviewEvidence(REPO, PR, { exec });
   try {
    await firstReadStarted;
-   expect(started).toEqual([VIEW, REVIEWS, REVIEW_COMMENTS, ISSUE_COMMENTS]);
+   expect(started).toEqual([VIEW, REVIEWS, THREADS, ISSUE_COMMENTS]);
    expect(completed).toEqual([VIEW]);
   } finally {
    release();
@@ -1048,7 +1105,7 @@ describe("bounded bot evidence reads", () => {
   expect((await fetching).ok).toBe(true);
  });
 
- test.each([REVIEWS, REVIEW_COMMENTS, ISSUE_COMMENTS])(
+ test.each([REVIEWS, THREADS, ISSUE_COMMENTS])(
   "an unavailable concurrent component stays unknown: %s",
   async (failed) => {
    const { exec } = transcript(reads({ [failed]: null }));
