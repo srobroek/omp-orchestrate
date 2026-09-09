@@ -207,6 +207,47 @@ const ADMIN_SUBCOMMANDS: Record<string, true> = {
  */
 const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
+/** Options whose following token is data, even when that data resembles another option. */
+const VALUE_FLAGS: Record<string, true> = {
+	"-C": true,
+	"--directory": true,
+	"--actor": true,
+	"--db": true,
+	"--dolt-auto-commit": true,
+	"--acceptance": true,
+	"--add-label": true,
+	"--append-notes": true,
+	"-a": true,
+	"--assignee": true,
+	"--await-id": true,
+	"--body-file": true,
+	"--defer": true,
+	"-d": true,
+	"--description": true,
+	"--design": true,
+	"--design-file": true,
+	"--due": true,
+	"-e": true,
+	"--estimate": true,
+	"--external-ref": true,
+	"--metadata": true,
+	"--notes": true,
+	"--parent": true,
+	"-p": true,
+	"--priority": true,
+	"--remove-label": true,
+	"--session": true,
+	"--set-labels": true,
+	"--set-metadata": true,
+	"--spec-id": true,
+	"-s": true,
+	"--status": true,
+	"--title": true,
+	"-t": true,
+	"--type": true,
+	"--unset-metadata": true,
+};
+
 /** Grouped subcommands whose first positional selects a read. */
 const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
 	audit: { list: true, show: true },
@@ -273,8 +314,18 @@ function writesBeads(invocation: BdInvocation): boolean {
 	let hasHelp = false;
 	let hasDryRun = false;
 	let hasBlocks = false;
+	let skipValue = false;
 	for (const token of invocation.rest) {
 		if (token === "--") break;
+		if (skipValue) {
+			skipValue = false;
+			continue;
+		}
+		const { flag, inline } = splitFlag(token);
+		if (VALUE_FLAGS[flag] === true) {
+			skipValue = inline === undefined;
+			continue;
+		}
 		if (token === "--help" || token === "-h") hasHelp = true;
 		if (token === "--dry-run") hasDryRun = true;
 		if (token === "--blocks") hasBlocks = true;

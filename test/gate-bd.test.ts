@@ -199,6 +199,18 @@ describe("the identity notice", () => {
 	])("does not treat positional %s as a control flag", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
+
+	test.each([
+		["separate long help", "bd update orc-1 --description --help"],
+		["separate short help", "bd update orc-1 --notes -h"],
+		["inline long help", "bd update orc-1 --description=--help"],
+	])("does not treat %s option data as help", (_label, command) => {
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
+	});
+
+	test("keeps a genuine update help call non-mutating", () => {
+		expect(actorNotice(only("bd update orc-1 --help"))).toBeUndefined();
+	});
 	test("accepts an identity set through the bash call's own env", () => {
 		expect(actorNotice(only("bd close orc-1"), { BEADS_ACTOR: "impl" })).toBeUndefined();
 		expect(actorNotice(only("bd close orc-1"), { BD_ACTOR: "impl" })).toBeUndefined();
