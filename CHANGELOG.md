@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/srobroek/omp-orchestrate/compare/v0.3.3...v0.3.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* authorize terminal releases and preserve literal setup values ([#65](https://github.com/srobroek/omp-orchestrate/issues/65)) ([3457ee7](https://github.com/srobroek/omp-orchestrate/commit/3457ee7788bad9661ab4d6b3563d4ae4f56788fe))
+
 ## [0.3.3](https://github.com/srobroek/omp-orchestrate/compare/v0.3.2...v0.3.3) (2026-09-09)
 
 
