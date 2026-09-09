@@ -2,15 +2,13 @@
 
 Two actors own two different plans, and neither does the other's job.
 
-- **The lead** owns which epics exist, who owns them, and what "done" means for the run. It
-  never reads domain code to decide that.
+- **The lead** owns which epics exist, who owns them, and what "done" means for the run.
 - **The architect** owns the decomposition inside its epic: features, tasks, scopes,
   dependencies. It reads the domain, because that is the part that cannot be delegated
   upward.
 
-Owning a plan means owning the decisions and the graph, not doing the deep reading. Push
-codebase exploration and any large planning pass to a read-only agent and keep only its
-conclusions.
+Do small factual checks directly. Delegate a bounded investigation when its read set or
+independent slices justify a separate context; retain ownership of decisions and the graph.
 
 ## Decide the planning system
 
@@ -23,9 +21,8 @@ conclusions.
   `ASK` wisps. `speckit-verify` and `speckit-sync` keep their own agents, and `specs/*/tasks.md`
   belongs to the conductor -- writes to it are denied.
 - **No framework:** build the default DAG below.
-- **Work spanning more than three tasks with cross-cutting deps, or an unfamiliar
-  subsystem:** delegate one deep planning pass to a read-only agent before committing the
-  decomposition. You still own the final graph.
+- **Unfamiliar subsystem or unresolved cross-cutting dependencies:** investigate the gap
+  before committing the graph. A helper is optional, not a task-count-triggered planning phase.
 
 Never build a second graph beside one that exists. There is no in-memory ledger, no JSON
 plan, and no `graph.py`: the epic and its dependency edges ARE the DAG.
@@ -85,7 +82,7 @@ empty commit.
 
 ## Dispatch ready work
 
-Dispatch is a pull, and the `role` key is the whole route. There is no activation message.
+Ordinary dispatch is a pull, and the `role` key is the whole route. There is no activation message.
 
 **Queue (the default).** Leave the bead unassigned with one `role=<role>` key. A worker
 claims the first ready bead in its queue atomically:
@@ -103,13 +100,10 @@ empty result, and the loser retries the identical pull -- `references/dispatch-c
 holds the signatures and the retry budget. One activation owns at most one bead and cannot
 claim another until the first is terminal.
 
-**Directed (the exception).** A bead with an assignee is invisible to every `--unassigned`
-pull, so it goes only to that actor and must be spawned deliberately. Confirm its
-`execution_task_kind`, `execution_kind`, and `scope` are compatible with that actor first;
-an incompatible directed assignment stays pinned and unclaimed rather than being silently
-rerouted. Automatic correction may update evidence-backed envelope fields only. It never
-changes an assignee: that needs an explicit release or a recovery under the contracts in
-`references/lifecycle.md`.
+**No directed preassignment.** A bead with an assignee is invisible to every
+`--unassigned` pull. Spawning that actor does not make the role's pull acquire it.
+Leave new work unassigned; an existing assignment needs explicit release or recovery
+under `references/lifecycle.md`, never automatic assignee correction.
 
 While a bead stays unassigned, the architect that owns the epic may stamp, change, or drop
 its `role` key (`--set-metadata role=<role>`, `--unset-metadata role`). No other role may:
@@ -130,11 +124,6 @@ waiter and yield, or retry later. Order follows successful acquisition, not a FI
 The shepherd conflict-guards every integration with `orc_conflict_probe`. The graph expresses
 dependencies, not integration sequence.
 
-For GitHub-backed runs, `release-queue-watch` priority affects which eligible PR readiness
-hint arrives first. It does not rewrite the DAG and does not reserve the merge slot. Only an
-exact existing approved bead is admitted; after admission, the slot waiters remain the
-integration order. See `references/queue-watcher.md`.
-
 ## Scope hygiene
 
 Scope choice decides whether beads can run concurrently.
@@ -153,22 +142,135 @@ catches the honest mistake, not a substitute for disjoint globs.
 
 ## Concurrency
 
-`task.maxConcurrency` is the ceiling, and it counts live agents rather than CPU. Count every
-one of these:
+`task.maxConcurrency` is a per-spawner ceiling, not a run-wide budget. Each architect
+can admit its own full wave, including reviewers, researchers and helpers. The lead
+must coordinate aggregate wave widths across architects when provider, context or
+disk limits require a run-wide cap. Reported workers exit rather than waiting for review.
+Three limits matter:
 
-- each architect
-- each worker in a wave, including one still waiting for its review
-- each reviewer and researcher
-- the shepherd
-- each helper inside an architect's await
-
-Nothing in a run is CPU-bound. Three limits matter:
-
-- **Provider rate limit.** While requests are accepted and the lead's context has room, a
-  wider wave is free. On the first rejection, narrow it.
+- **Provider rate limit.** Narrow aggregate waves when requests are rejected.
 - **Lead context.** Every wave you observe costs the lead tokens it never gets back.
 - **Disk.** Every isolated worker copy carries its own build artifacts. If disk is tight,
   narrow the wave again.
 
 Wave sizing is the architect's judgement: a wave that finishes early is cheap to respawn, and
 one sized past the cap simply idles against it.
+
+## Runtime dispatch settings
+
+Before the first wave, require these effective settings; fix deviations and restart or
+obtain explicit acceptance of the reported limitations. Preflight never rewrites config.
+Claim foreground observation remains mandatory even if a settings warning is accepted.
+
+| Setting | Value |
+|---|---|
+| `task.isolation.enabled` | `true` |
+| `task.isolation.merge` | `branch` |
+| `task.isolation.apply` | `false` |
+| `task.enableEffort` | `true` for per-entry effort |
+| `task.maxRecursionDepth` | `3` for worker helpers; each spawner also needs its explicit allowlist |
+| `bash.autoBackground.enabled` | `false` |
+| `BEADS_DIR` | the same absolute embedded run database in every child |
+
+Architects use persistent Worktrunk feature trees, not isolated spawns. Worker entry:
+
+```
+{ name: "<CamelCase>", agent: "orc-implementer", task: "<epic id + queue, not the work>", isolated: true }
+```
+
+Use per-entry `effort: "lo" | "med" | "hi"` for the actual slice. Use `outputSchema`
+with `schemaMode: "strict"` for shape checking; it does not prove semantic acceptance.
+Collect terminal results, not job receipts, before consuming captures or resuming writes.
+MCP/LSP degradation is recorded as `WARN preflight` on the epic; it does not hold a wave.
+
+## Architect runtime entry and recovery
+
+Start the architect in the canonical Worktrunk root derived from the session before
+claiming or dispatching. Non-isolated children inherit the parent session's cwd;
+isolated children run in a runtime-created copy snapshotted from that cwd.
+`metadata.worktree` routes queue ownership and scope; it never switches cwd.
+Verify the architect session root matches before any write or dispatch.
+
+When re-entry changes the discovery root, use the supported rooted lead CLI and
+preserve the loaded native agent's role and spawn policy:
+
+```sh
+BEADS_DIR="<absolute-beads-dir>" \
+ORCHESTRATE_MARKER_FILE="<absolute-marker-file>" \
+omp --cwd "<canonical-worktree>" --config "<run-overlay>" --print \
+  "Lead: dispatch the loaded native orc-architect for the bound epic; preserve its role and spawn policy; collect and return the actual terminal result." </dev/null
+```
+
+Pass `--config "<run-overlay>"` when re-entry changes discovery root; otherwise retain
+the active run configuration. A supervised PTY is also valid for `--print`; closed
+stdin prevents a hanging process. Collect the actual result before replacement.
+Keep experiment-only isolation enablement in the run overlay. Do not silently
+override the user's project or global isolation preference.
+
+### Canonical checkout recovery
+
+Recovery is one ordered operation inside an explicit exclusive claim/dispatch/branch-writer
+window. Stop every claim writer, dispatch writer, and branch writer before entering it;
+do not release a retained claim merely to relocate a session. First collect the prior
+actor's terminal result, capture, dirty delta, branch, comments, and audit evidence and
+preserve every one of those anchors throughout recovery.
+
+1. Inventory the exact owning epic's current metadata and every Worktrunk checkout:
+
+   ```sh
+   bd show "<epic>" --json
+   wt list --format=json
+   ```
+
+   Record the stamped `metadata.branch` and `metadata.worktree`, the owning epic id,
+   and the checkout's returned branch/path. Do not infer a path from a branch name or
+   accept a path from a different bead.
+2. If the stamped path exists, preserve it exactly, including an accepted dirty
+   resumed checkout; inspect its status and evidence, and never reset, clean, or
+   replace it merely to make recovery look fresh.
+3. If the stamped path is missing, keep the claim and evidence in place, verify the
+   branch and source-root Git object/capture independently, and recreate only the
+   missing checkout from the actual source root:
+
+   ```sh
+   wt -C "<source-root>" switch "<branch>" --no-cd --format=json
+   ```
+
+   Use the returned JSON `path` as `<canonical-worktree>` for every subsequent command.
+   Do not derive it from `<branch>`, reuse stale metadata, or treat a missing Git object
+   as a cwd problem.
+4. At that returned or preserved canonical path, read the WT bead binding:
+
+   ```sh
+   wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
+   ```
+
+   Reject an unresolved read or a binding naming another bead/epic (a foreign WT
+   binding). An absent binding is acceptable only for the newly recreated checkout
+   whose branch ownership was independently verified; it must be stamped before
+   re-entry.
+5. Stamp both sides of the binding for the exact owning epic, without changing its
+   assignee, status, claim, branch, or evidence:
+
+   ```sh
+   bd update "<epic>" --metadata '{"worktree":"<canonical-worktree>","branch":"<branch>"}'
+   wt -C "<canonical-worktree>" config state vars set bead="<epic>" --branch "<branch>"
+   ```
+
+6. Read both authoritative records back and require exact equality before any actor
+   re-entry or dispatch:
+
+   ```sh
+   bd show "<epic>" --json
+   wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
+   ```
+
+   The bead's `metadata.worktree` must equal the returned canonical path, its branch
+   must equal the inventoried branch, and the WT `bead` value must equal the owning
+   epic id. A mismatch, stale value, foreign binding, or unresolved read is BLOCKED;
+   retain the claim, checkout, captures, and terminal evidence for explicit recovery.
+7. Only after those equality checks pass, re-enter the loaded architect through the
+   rooted `omp --cwd "<canonical-worktree>" --config "<run-overlay>"` procedure above.
+   A missing Git object, missing commit/capture, or source-root failure remains a
+   separate setup failure and must be reported with its own evidence; cwd correction
+   never proves the object exists or that dispatch succeeded.

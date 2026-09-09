@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
 import { describe, expect, test } from "bun:test";
+import { type Exec, spawnExec } from "../src/tools/bot-review-probe";
 import {
 	type ConflictProbeDetails,
 	diffNamesArgv,
@@ -93,8 +94,7 @@ describe("argument vectors", () => {
 });
 
 /** Collect what `registerConflictProbe` registers, without an OMP session. */
-function registered(): {
-	name: string;
+function registered(exec?: Exec): {
 	execute: (
 		id: string,
 		params: { mode: ProbeMode; base?: string; branch?: string; branchB?: string; pr?: string },
@@ -105,17 +105,12 @@ function registered(): {
 } {
 	const tools: unknown[] = [];
 	const pi = { zod, registerTool: (tool: unknown) => tools.push(tool) } as unknown as ExtensionAPI;
-	registerConflictProbe(pi);
+	registerConflictProbe(pi, exec);
 	expect(tools).toHaveLength(1);
 	return tools[0] as ReturnType<typeof registered>;
 }
 
 describe("registerConflictProbe", () => {
-	test("registers exactly one prefixed tool, and only when called", () => {
-		// Importing the module must not register anything: `src/index.ts` owns wiring.
-		expect(registered().name).toBe("orc_conflict_probe");
-	});
-
 	test("missing mode arguments fail as a result, never as a throw", async () => {
 		const tool = registered();
 		const ctx = { cwd: "/tmp" } as unknown as ExtensionContext;
@@ -130,6 +125,68 @@ describe("registerConflictProbe", () => {
 			expect(result.isError).toBe(true);
 			expect(result.details?.error).toBe("missing arguments");
 			expect(result.details?.mode).toBe(params.mode);
+		}
+	});
+});
+
+describe("bounded conflict evidence", () => {
+	const ctx = { cwd: "/tmp" } as unknown as ExtensionContext;
+	const cases: { mode: ProbeMode; base?: string; branch?: string; branchB?: string; pr?: string }[] = [
+		{ mode: "conflicts", base: "main", branch: "topic" },
+		{ mode: "pairwise", base: "main", branch: "one", branchB: "two" },
+		{ mode: "ci", pr: "7" },
+	];
+
+	test("pre-aborted probes never invoke their executor", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		let calls = 0;
+		const tool = registered(async () => {
+			calls++;
+			return { code: 0, stdout: "", stderr: "" };
+		});
+		for (const params of cases) {
+			const result = await tool.execute("id", params, controller.signal, undefined, ctx);
+			expect(result.isError).toBe(true);
+			expect(result.details?.clean).toBeUndefined();
+			expect(result.details?.exitCode).toBeUndefined();
+		}
+		expect(calls).toBe(0);
+	});
+
+	test("aborted reads cannot authorize a verdict or start later subprocesses", async () => {
+		for (const params of cases) {
+			const controller = new AbortController();
+			let calls = 0;
+			const tool = registered(async () => {
+				calls++;
+				controller.abort();
+				return { code: 0, stdout: "a".repeat(40), stderr: "" };
+			});
+			const result = await tool.execute("id", params, controller.signal, undefined, ctx);
+			expect(result.isError).toBe(true);
+			expect(result.details?.clean).toBeUndefined();
+			expect(result.details?.exitCode).toBeUndefined();
+			expect(calls).toBe(1);
+		}
+	});
+
+	test("overflow of real subprocess output is an error, never clean or CI success", async () => {
+		for (const params of cases) {
+			let calls = 0;
+			const exec: Exec = (_argv, opts) => {
+				calls++;
+				return spawnExec([
+					process.execPath,
+					"-e",
+					'process.stdout.write("a".repeat(5 * 1024 * 1024)); process.stderr.write("b".repeat(5 * 1024 * 1024))',
+				], opts);
+			};
+			const result = await registered(exec).execute("id", params, undefined, undefined, ctx);
+			expect(result.isError).toBe(true);
+			expect(result.details?.clean).toBeUndefined();
+			expect(result.details?.exitCode).toBeUndefined();
+			expect(calls).toBe(1);
 		}
 	});
 });

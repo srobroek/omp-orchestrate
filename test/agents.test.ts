@@ -1,13 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolveExplicitModelRole } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
+import {
+ CORE_AGENT_CONTRACTS,
+ agentDiscoveryFindings,
+ coreContractForAgent,
+ discoverAgentFindings,
+ requestedAgentNames,
+} from "../src/agent-preflight";
 import declared from "./declared-surface.json";
+import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const AGENTS_DIR = join(ROOT, "agents");
@@ -37,14 +47,11 @@ const declaredPluginAgents: Record<string, string[]> = declared.pluginAgents.byP
 const text = new Map(files.map(file => [file, readFileSync(join(AGENTS_DIR, file), "utf8")]));
 
 const parsed = new Map<string, AgentDefinition>(
-	files.map(file => [file, parseAgent(join(AGENTS_DIR, file), text.get(file) ?? "", "project")]),
+ files.map(file => [file, parseAgent(join(AGENTS_DIR, file), text.get(file) ?? "", "project")]),
 );
 
 const rawFrontmatter = new Map<string, Record<string, unknown>>(
-	files.map(file => [
-		file,
-		parseFrontmatter(text.get(file) ?? "", { location: file, level: "fatal" }).frontmatter,
-	]),
+ files.map(file => [file, parseFrontmatter(text.get(file) ?? "", { location: file, level: "fatal" }).frontmatter]),
 );
 
 /**
@@ -68,9 +75,9 @@ const hasPluginSurface = discovered.agents.some(agent => agent.source !== "bundl
 
 /** Every name granted by any allowlist in this repo. A wildcard grants the whole universe. */
 const grantOf = (file: string): string[] => {
-	const spawns = parsed.get(file)?.spawns;
-	if (spawns === undefined) return [];
-	return spawns === "*" ? [...new Set([...hermetic, ...resolvedPath.keys()])] : spawns;
+ const spawns = parsed.get(file)?.spawns;
+ if (spawns === undefined) return [];
+ return spawns === "*" ? [...new Set([...hermetic, ...resolvedPath.keys()])] : spawns;
 };
 const granted = [...new Set(files.flatMap(grantOf))].sort();
 
@@ -83,9 +90,9 @@ const granted = [...new Set(files.flatMap(grantOf))].sort();
  */
 const NON_ROLE_CONTRACTS: Record<string, true> = { generic: true, grammar: true };
 const contractRoles = readdirSync(CONTRACTS_DIR)
-	.filter(name => name.endsWith(".json"))
-	.map(name => name.slice(0, -".json".length))
-	.filter(name => NON_ROLE_CONTRACTS[name] !== true);
+ .filter(name => name.endsWith(".json"))
+ .map(name => name.slice(0, -".json".length))
+ .filter(name => NON_ROLE_CONTRACTS[name] !== true);
 
 /**
  * The marker, not the name, decides: `orcRole` reads it from the rendered system prompt to
@@ -94,11 +101,11 @@ const contractRoles = readdirSync(CONTRACTS_DIR)
  */
 const ROLE_MARKER = /^ORC-ROLE:[ \t]*([a-z][a-z-]*)[ \t]*$/m;
 const claimsBeads = (agent: AgentDefinition): boolean => {
-	const role = ROLE_MARKER.exec(agent.systemPrompt)?.[1];
-	return role !== undefined && contractRoles.includes(role);
+ const role = ROLE_MARKER.exec(agent.systemPrompt)?.[1];
+ return role !== undefined && contractRoles.includes(role);
 };
 const claiming = new Set(
-	[...bundled, ...parsed.values(), ...discovered.agents].filter(claimsBeads).map(agent => agent.name),
+ [...bundled, ...parsed.values(), ...discovered.agents].filter(claimsBeads).map(agent => agent.name),
 );
 
 /**
@@ -107,10 +114,10 @@ const claiming = new Set(
  * and fail everywhere else, which is the opposite of what a role check is for.
  */
 const declaredRoleLookup = {
-	getModelRole: (role: string): string | undefined => (declaredModelRoles.includes(role) ? "declared" : undefined),
+ getModelRole: (role: string): string | undefined => (declaredModelRoles.includes(role) ? "declared" : undefined),
 };
 const roleOf = (agent: AgentDefinition | undefined): string | undefined =>
-	resolveExplicitModelRole(agent?.model, declaredRoleLookup);
+ resolveExplicitModelRole(agent?.model, declaredRoleLookup);
 
 /**
  * The role marker is load-bearing, not documentation: `orcRole` reads it to decide
@@ -119,175 +126,318 @@ const roleOf = (agent: AgentDefinition | undefined): string | undefined =>
  * attempts fails. Catch that here rather than at run time.
  */
 describe("agent definitions", () => {
-	test("all five roles are present and no extras", () => {
-		expect(files.sort()).toEqual(KNOWN_ROLES.map(role => `orc-${role}.md`).sort());
-	});
+ test("all five roles are present and no extras", () => {
+  expect(files.sort()).toEqual(KNOWN_ROLES.map(role => `orc-${role}.md`).sort());
+ });
 
-	for (const file of files) {
-		const body = text.get(file) ?? "";
-		const role = file.replace(/^orc-|\.md$/g, "");
+ for (const file of files) {
+  const role = file.replace(/^orc-|\.md$/g, "");
 
-		describe(file, () => {
-			test("declares a marker naming its own known role", () => {
-				const match = ROLE_MARKER.exec(parsed.get(file)?.systemPrompt ?? "");
-				expect(match?.[1]).toBe(role);
-			});
+  describe(file, () => {
+   test("declares a marker naming its own known role", () => {
+    const match = ROLE_MARKER.exec(parsed.get(file)?.systemPrompt ?? "");
+    expect(match?.[1]).toBe(role);
+   });
 
-			test("frontmatter names the agent after its role", () => {
-				expect(parsed.get(file)?.name).toBe(`orc-${role}`);
-			});
+   test("frontmatter names the agent after its role", () => {
+    expect(parsed.get(file)?.name).toBe(`orc-${role}`);
+   });
+  });
+ }
 
-			test("declares no thinking-level, since the role carries the tier", () => {
-				expect(parsed.get(file)?.thinkingLevel).toBeUndefined();
-			});
+ /**
+  * A granted name that resolves to nothing is the defect this pair exists for: the
+  * allowlist reads as a capability, the spawn fails, and three prose files can describe
+  * the cheap path while it stays unreachable.
+  *
+  * Split hermetic from live deliberately. Resolution is machine state -- a name provided
+  * by a sibling plugin resolves only where that plugin is installed -- so the hermetic
+  * half compares the unresolved remainder against the declared dependency list, in both
+  * directions. A typo is undeclared and fails. A dependency that is no longer granted is
+  * declared for nothing and fails too.
+  */
+ test("every granted name resolves in the hermetic universe or is a declared dependency", () => {
+  const needsPlugin = granted.filter(name => !hermetic.has(name));
+  expect(needsPlugin).toEqual(Object.values(declaredPluginAgents).flat().sort());
+ });
 
-			test("carries no Claude or Codex harness residue", () => {
-				for (const pattern of [
-					/SubagentStart/,
-					/SubagentStop/,
-					/UserPromptSubmit/,
-					/PreToolUse/,
-					/SendMessage/,
-					/\$CLAUDE_PROJECT_DIR/,
-					/permissionMode/,
-					/worktrunk-writer/,
-				]) {
-					expect(body).not.toMatch(pattern);
-				}
-			});
+ test.skipIf(!hasPluginSurface)("every declared dependency resolves inside the package that declares it", () => {
+  const misplaced = Object.entries(declaredPluginAgents).flatMap(([pkg, names]) => {
+   const short = pkg.split("/").at(-1);
+   const inPkg = (path: string) => path.includes(`/${short}/`) || path.includes(`___${short}___`);
+   // A package with no resolved agent at all is not installed. Its declared names
+   // are future prerequisites, tolerated while unresolved -- a spawn before install
+   // fails loudly with Unknown agent, so nothing silently degrades. A declared name
+   // resolving from some OTHER package is a stale or shadowed declaration and fails.
+   const installed = [...resolvedPath.values()].some(path => path !== undefined && inPkg(path));
+   return names
+    .filter(name => {
+     const path = resolvedPath.get(name);
+     if (path === undefined) return installed;
+     return !inPkg(path);
+    })
+    .map(name => `${pkg}: ${name} -> ${resolvedPath.get(name) ?? "unresolved"}`);
+  });
+  expect(misplaced).toEqual([]);
+ });
 
-			test("tells the agent to pull its own work", () => {
-				expect(parsed.get(file)?.systemPrompt).toContain("--unassigned --claim --json");
-			});
-		});
-	}
+ /**
+  * An alias naming no configured role resolves to `model: undefined`, with no warning,
+  * and the session default is used instead. So `@fast-coder` reads as a tier and buys
+  * nothing. `resolveExplicitModelRole` is the resolver's own alias reader; the lookup it
+  * gets here reports this repo's declaration rather than the machine's settings, so the
+  * answer is the same on every box.
+  */
+ test("every model alias resolves to a built-in role or one this repo declares", () => {
+  const unresolved = [...parsed.entries()]
+   .filter(([, agent]) => roleOf(agent) === undefined)
+   .map(([file, agent]) => `${file}: ${JSON.stringify(agent.model)}`);
+  expect(unresolved).toEqual([]);
+ });
 
-	/**
-	 * A granted name that resolves to nothing is the defect this pair exists for: the
-	 * allowlist reads as a capability, the spawn fails, and three prose files can describe
-	 * the cheap path while it stays unreachable.
-	 *
-	 * Split hermetic from live deliberately. Resolution is machine state -- a name provided
-	 * by a sibling plugin resolves only where that plugin is installed -- so the hermetic
-	 * half compares the unresolved remainder against the declared dependency list, in both
-	 * directions. A typo is undeclared and fails. A dependency that is no longer granted is
-	 * declared for nothing and fails too.
-	 */
-	test("every granted name resolves in the hermetic universe or is a declared dependency", () => {
-		const needsPlugin = granted.filter(name => !hermetic.has(name));
-		expect(needsPlugin).toEqual(Object.values(declaredPluginAgents).flat().sort());
-	});
+ test("every declared model role is named by an agent and is not already built in", () => {
+  const named = new Set([...parsed.values()].map(roleOf));
+  expect(declaredModelRoles.filter(role => !named.has(role))).toEqual([]);
+  expect(declaredModelRoles.filter(role => (MODEL_ROLE_IDS as string[]).includes(role))).toEqual([]);
+ });
 
-	test.skipIf(!hasPluginSurface)("every declared dependency resolves inside the package that declares it", () => {
-		const misplaced = Object.entries(declaredPluginAgents).flatMap(([pkg, names]) => {
-			const short = pkg.split("/").at(-1);
-			const inPkg = (path: string) => path.includes(`/${short}/`) || path.includes(`___${short}___`);
-			// A package with no resolved agent at all is not installed. Its declared names
-			// are future prerequisites, tolerated while unresolved -- a spawn before install
-			// fails loudly with Unknown agent, so nothing silently degrades. A declared name
-			// resolving from some OTHER package is a stale or shadowed declaration and fails.
-			const installed = [...resolvedPath.values()].some(path => path !== undefined && inPkg(path));
-			return names
-				.filter(name => {
-					const path = resolvedPath.get(name);
-					if (path === undefined) return installed;
-					return !inPkg(path);
-				})
-				.map(name => `${pkg}: ${name} -> ${resolvedPath.get(name) ?? "unresolved"}`);
-		});
-		expect(misplaced).toEqual([]);
-	});
+ /**
+  * The invariant is not "one file may spawn". It is that only the architect may spawn a
+  * role that CLAIMS a bead, because a claim is what the queue and the exit gate depend
+  * on. A worker may spawn helpers, which claim nothing.
+  */
+ test("only the architect may spawn a bead-claiming role", () => {
+  // Two independent sources must agree, or this passes by finding nothing to forbid.
+  // Comparing `claiming` against the contracts it was derived FROM is vacuous: delete
+  // a contract and the role drops out of both sides. The agent files are the third
+  // party -- a marker with no contract means the exit gate judges that agent against
+  // `generic` and its own completion checks never run.
+  const marked = [...parsed.values()].map(agent => ROLE_MARKER.exec(agent.systemPrompt)?.[1]);
+  expect(marked.filter(role => role !== undefined && !contractRoles.includes(role))).toEqual([]);
+  expect([...claiming].sort()).toEqual(contractRoles.map(role => `orc-${role}`).sort());
 
-	/**
-	 * An alias naming no configured role resolves to `model: undefined`, with no warning,
-	 * and the session default is used instead. So `@fast-coder` reads as a tier and buys
-	 * nothing. `resolveExplicitModelRole` is the resolver's own alias reader; the lookup it
-	 * gets here reports this repo's declaration rather than the machine's settings, so the
-	 * answer is the same on every box.
-	 */
-	test("every model alias resolves to a built-in role or one this repo declares", () => {
-		const unresolved = [...parsed.entries()]
-			.filter(([, agent]) => roleOf(agent) === undefined)
-			.map(([file, agent]) => `${file}: ${JSON.stringify(agent.model)}`);
-		expect(unresolved).toEqual([]);
-	});
+  // A wildcard grants every agent OMP can resolve, claiming roles included, so no
+  // role holds one -- not even the architect, whose allowlist is enumerated.
+  expect(files.filter(file => parsed.get(file)?.spawns === "*")).toEqual([]);
 
-	test("every declared model role is named by an agent and is not already built in", () => {
-		const named = new Set([...parsed.values()].map(roleOf));
-		expect(declaredModelRoles.filter(role => !named.has(role))).toEqual([]);
-		expect(declaredModelRoles.filter(role => (MODEL_ROLE_IDS as string[]).includes(role))).toEqual([]);
-	});
+  // The architect must hold the grant, or the ladder has no rung below it.
+  expect(grantOf("orc-architect.md").filter(name => claiming.has(name)).length).toBeGreaterThan(0);
 
-	/**
-	 * The invariant is not "one file may spawn". It is that only the architect may spawn a
-	 * role that CLAIMS a bead, because a claim is what the queue and the exit gate depend
-	 * on. A worker may spawn helpers, which claim nothing.
-	 */
-	test("only the architect may spawn a bead-claiming role", () => {
-		// Two independent sources must agree, or this passes by finding nothing to forbid.
-		// Comparing `claiming` against the contracts it was derived FROM is vacuous: delete
-		// a contract and the role drops out of both sides. The agent files are the third
-		// party -- a marker with no contract means the exit gate judges that agent against
-		// `generic` and its own completion checks never run.
-		const marked = [...parsed.values()].map(agent => ROLE_MARKER.exec(agent.systemPrompt)?.[1]);
-		expect(marked.filter(role => role !== undefined && !contractRoles.includes(role))).toEqual([]);
-		expect([...claiming].sort()).toEqual(contractRoles.map(role => `orc-${role}`).sort());
+  for (const file of files.filter(name => name !== "orc-architect.md")) {
+   const held = grantOf(file).filter(name => claiming.has(name));
+   expect({ file, claiming: held }).toEqual({ file, claiming: [] });
+  }
+ });
 
-		// A wildcard grants every agent OMP can resolve, claiming roles included, so no
-		// role holds one -- not even the architect, whose allowlist is enumerated.
-		expect(files.filter(file => parsed.get(file)?.spawns === "*")).toEqual([]);
+ /**
+  * An absent key is not a weaker allowlist, it is a denial: the executor normalises an
+  * unset `spawns` to "none" before the spawn policy is consulted, so the permissive
+  * default for an unset value is unreachable. An empty key would be the reverse -- a
+  * file that reads as a grant and denies anyway.
+  *
+  * One assertion covers four regressions: a leaf that grows an allowlist, a leaf that
+  * grows one implicitly by adding `task` to `tools:`, a spawner that loses its key, and
+  * either of them writing the key with nothing after it.
+  */
+ test("only the declared spawn roles hold an allowlist, and an absent key is the denial", () => {
+  expect(declaredSpawnRoles.filter(role => !files.includes(`orc-${role}.md`))).toEqual([]);
 
-		// The architect must hold the grant, or the ladder has no rung below it.
-		expect(grantOf("orc-architect.md").filter(name => claiming.has(name)).length).toBeGreaterThan(0);
+  for (const file of files) {
+   const role = file.replace(/^orc-|\.md$/g, "");
+   const maySpawn = declaredSpawnRoles.includes(role);
+   const spawns = parsed.get(file)?.spawns;
+   const declaresKey = Object.hasOwn(rawFrontmatter.get(file) ?? {}, "spawns");
+   // `spawns !== undefined`, not a non-empty array: `tools: ..., task` infers the
+   // wildcard, which is a grant that no array test would see.
+   expect({ file, declaresKey, grants: spawns !== undefined }).toEqual({
+    file,
+    declaresKey: maySpawn,
+    grants: maySpawn,
+   });
+  }
+ });
 
-		for (const file of files.filter(name => name !== "orc-architect.md")) {
-			const held = grantOf(file).filter(name => claiming.has(name));
-			expect({ file, claiming: held }).toEqual({ file, claiming: [] });
-		}
-	});
+ test("non-writing roles omit edit and write but keep bash", () => {
+  for (const role of ["reviewer", "researcher", "shepherd"]) {
+   const tools = parsed.get(`orc-${role}.md`)?.tools ?? [];
+   expect(tools.length).toBeGreaterThan(0);
+   expect(tools).not.toContain("edit");
+   expect(tools).not.toContain("write");
+   // bash stays: reading requires bd and git.
+   expect(tools).toContain("bash");
+  }
+ });
+});
 
-	/**
-	 * An absent key is not a weaker allowlist, it is a denial: the executor normalises an
-	 * unset `spawns` to "none" before the spawn policy is consulted, so the permissive
-	 * default for an unset value is unreachable. An empty key would be the reverse -- a
-	 * file that reads as a grant and denies anyway.
-	 *
-	 * One assertion covers four regressions: a leaf that grows an allowlist, a leaf that
-	 * grows one implicitly by adding `task` to `tools:`, a spawner that loses its key, and
-	 * either of them writing the key with nothing after it.
-	 */
-	test("only the declared spawn roles hold an allowlist, and an absent key is the denial", () => {
-		expect(declaredSpawnRoles.filter(role => !files.includes(`orc-${role}.md`))).toEqual([]);
+describe("runtime discovery preflight", () => {
+ const definition = (
+  name: string,
+  role: string,
+  model = coreContractForAgent(name)?.modelAlias ?? "@task:medium",
+  filePath = `/tmp/${name}.md`,
+ ): AgentDefinition =>
+  parseAgent(
+   filePath,
+   `---\nname: ${name}\ndescription: test agent\nmodel: "${model}"\n---\nORC-ROLE: ${role}\n`,
+   "project",
+  );
 
-		for (const file of files) {
-			const role = file.replace(/^orc-|\.md$/g, "");
-			const maySpawn = declaredSpawnRoles.includes(role);
-			const spawns = parsed.get(file)?.spawns;
-			const declaresKey = Object.hasOwn(rawFrontmatter.get(file) ?? {}, "spawns");
-			// `spawns !== undefined`, not a non-empty array: `tools: ..., task` infers the
-			// wildcard, which is a grant that no array test would see.
-			expect({ file, declaresKey, grants: spawns !== undefined }).toEqual({
-				file,
-				declaresKey: maySpawn,
-				grants: maySpawn,
-			});
-		}
-	});
+ test("reports missing requested agents and role overrides with source paths", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  agents[2] = definition("orc-reviewer", "researcher", "@task:medium", "/override/agents/orc-reviewer.md");
+  const findings = agentDiscoveryFindings(agents, ["operator"], spec => (spec === "@task:medium" ? {} : undefined));
 
-	test("non-writing roles omit edit and write but keep bash", () => {
-		for (const role of ["reviewer", "researcher", "shepherd"]) {
-			const tools = parsed.get(`orc-${role}.md`)?.tools ?? [];
-			expect(tools.length).toBeGreaterThan(0);
-			expect(tools).not.toContain("edit");
-			expect(tools).not.toContain("write");
-			// bash stays: reading requires bd and git.
-			expect(tools).toContain("bash");
-		}
-	});
+  expect(findings).toContainEqual({ agent: "operator", message: "requested agent is not discoverable" });
+  expect(findings).toContainEqual({
+   agent: "orc-reviewer",
+   message: "resolved override declares ORC-ROLE researcher; expected reviewer",
+   path: "/override/agents/orc-reviewer.md",
+  });
+ });
 
-	test("writing roles omit tools entirely, taking the full default set", () => {
-		for (const role of ["architect", "implementer"]) {
-			expect(parsed.get(`orc-${role}.md`)?.tools).toBeUndefined();
-		}
-	});
+ test("valid overrides do not hide invalid core definitions", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role, "@missing:high"));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   spec =>
+    resolveExplicitModelRole([spec], {
+     getModelRole: role => ((MODEL_ROLE_IDS as string[]).includes(role) ? role : undefined),
+    })
+     ? {}
+     : undefined,
+   { "orc-reviewer": "@task:medium" },
+  );
+
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-architect", message: 'model alias "@missing" does not resolve' }),
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-reviewer", message: 'model alias "@missing" does not resolve' }),
+  );
+  expect(findings.some(finding => finding.agent === "orc-reviewer" && finding.message.includes('"@task"'))).toBe(false);
+ });
+
+ test("accepts each core role's required alias with OMP selector forms", () => {
+  expect(Object.keys(CORE_AGENT_CONTRACTS).sort()).toEqual(KNOWN_ROLES.map(role => `orc-${role}`).sort());
+  const agents = KNOWN_ROLES.map(role =>
+   definition(`orc-${role}`, role, `${coreContractForAgent(`orc-${role}`)!.modelAlias}:high`),
+  );
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   () => ({ provider: "test", id: "model" }),
+   { "orc-architect": ["@plan", "@plan:high"], "orc-implementer": "@task, @task:high" },
+  );
+  expect(findings).toEqual([]);
+ });
+
+ test.each(["inh", "inher", "xhig"])("accepts runtime thinking abbreviation %s", suffix => {
+  const agents = KNOWN_ROLES.map(role =>
+   definition(`orc-${role}`, role, role === "architect" ? `@plan:${suffix}` : coreContractForAgent(`orc-${role}`)!.modelAlias),
+  );
+  expect(agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }))).toEqual([]);
+ });
+
+ test("rejects a valid alternate alias override on architect", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   () => ({ provider: "test", id: "model" }),
+   { "orc-architect": "@smol:high" },
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({
+    agent: "orc-architect",
+    message: 'effective model must use @plan; received "@smol:high"',
+   }),
+  );
+ });
+
+ test.each([
+  ["wrong valid alias", "orc-architect", "architect", "@smol"],
+  ["wrong valid alias", "orc-reviewer", "reviewer", "@task"],
+  ["raw selector", "orc-reviewer", "reviewer", "openai/gpt-5"],
+  ["mixed fallback aliases", "orc-implementer", "implementer", "@task,@smol"],
+  ["malformed thinking suffix", "orc-architect", "architect", "@plan:bogus"],
+ ])("%s is rejected for a core agent", (_label, name, role, model) => {
+  const agents = KNOWN_ROLES.map(currentRole => definition(`orc-${currentRole}`, currentRole));
+  const index = agents.findIndex(agent => agent.name === name);
+  agents[index] = definition(name, role, model);
+  const findings = agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }));
+  expect(findings.some(finding => finding.agent === name && finding.message.includes("must use"))).toBe(true);
+ });
+
+ test.each([
+  ["empty override", ""],
+  ["empty array", []],
+  ["non-string array member", ["@reviewer", 42]],
+ ])("rejects a %s", (_label, value) => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   () => ({ provider: "test", id: "model" }),
+   { "orc-reviewer": value },
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-reviewer", message: "effective model selector is missing or malformed" }),
+  );
+ });
+
+ test("rejects a core definition with no model selector", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  const index = agents.findIndex(agent => agent.name === "orc-reviewer");
+  agents[index] = parseAgent(
+   "/tmp/orc-reviewer-missing-model.md",
+   "---\nname: orc-reviewer\ndescription: missing model\n---\nORC-ROLE: reviewer\n",
+   "project",
+  );
+  const findings = agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }));
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-reviewer", message: "effective model selector is missing or malformed" }),
+  );
+ });
+
+ test("keeps helper alias resolution checks and prototype-key inputs harmless", () => {
+  const agents = [...KNOWN_ROLES.map(role => definition(`orc-${role}`, role)), definition("constructor", "helper", "@missing")];
+  const findings = agentDiscoveryFindings(
+   agents,
+   ["constructor"],
+   spec => (spec === "@missing" ? undefined : {}),
+   { constructor: "@missing" },
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "constructor", message: 'model alias "@missing" does not resolve' }),
+  );
+ });
+
+ test("reads task names from flat and batch requests", () => {
+  expect(requestedAgentNames({ agent: " operator ", tasks: [{ agent: "scout" }, { agent: "operator" }] })).toEqual([
+   "operator",
+   "scout",
+  ]);
+ });
+
+ test("discovers an agent from an explicit extension root", async () => {
+  const root = mkdtempSync(join(tmpdir(), "orc-agent-root-"));
+  const agentsDir = join(root, "agents");
+  mkdirSync(agentsDir);
+  writeFileSync(
+   join(agentsDir, "orc-helper.md"),
+   '---\nname: orc-helper\ndescription: explicit helper\nmodel: "@task"\n---\nA helper.\n',
+  );
+  try {
+   const runInSessionScope = withOmpExtensionRootScope([root], "explicit-only", () => AsyncLocalStorage.snapshot());
+   const findings = await runInSessionScope(() => discoverAgentFindings({ cwd: ROOT }, ["orc-helper"]));
+   expect(
+    findings.some(
+     finding => finding.agent === "orc-helper" && finding.message === "requested agent is not discoverable",
+    ),
+   ).toBe(false);
+  } finally {
+   rmSync(root, { recursive: true, force: true });
+  }
+ });
 });

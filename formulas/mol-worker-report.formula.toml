@@ -8,7 +8,7 @@ description = "the bead being reported"
 
 [vars.evidence]
 default = "git"
-description = "git (commit; the branch is captured), artifact (write a file and cite it), or none"
+description = "git (local commit; capture follows successful result), artifact (write a file and cite it), or none"
 
 [vars.spawned_children]
 default = "false"
@@ -35,12 +35,11 @@ needs = ["self-verify"]
 condition = "{{spawned_children}}"
 labels = ["report", "phase:exit"]
 description = """
-bd list --parent {{bead}} --status in_progress --json must be empty before you
-produce evidence. If a child is still writing, let it finish and re-run
-verification.
-
-Reporting while a child still writes means committing a partial tree, and the
-lost half is invisible: the parent's own review sees consistent-looking code.
+Collect each delegated job's final result and confirm no child still writes
+before producing evidence. An unassigned reported child may remain in_progress
+pending review/integration; status alone is not liveness. Integrate successful
+isolated child results where required, then re-run verification. Missing or failed
+results require an explicit disposition, never a success report over partial work.
 """
 
 [[steps]]
@@ -52,13 +51,15 @@ condition = "{{evidence}} == git"
 labels = ["report", "phase:exit"]
 description = """
 Commit inside the isolated workspace you were given -- the session cwd, never
-the architect's feature worktree. Your commits are captured on an
-`omp/task/<id>` branch automatically (`task.isolation.apply: false`), so there
-is nothing to push and no branch to create: do not push, and do not merge.
+the architect's feature worktree. Do not push or merge. With
+`task.isolation.apply: false`, OMP 18.1.14 captures commits AND remaining
+working-tree delta on an `omp/task/<id>` branch after a successful child result.
+Local commits are useful evidence, not a durable failure checkpoint: failed or
+aborted isolated work may not survive cleanup.
 
-Uncommitted work is not captured. The branch is the only thing that survives
-this session, and the architect integrates it -- cite the branch name in the
-outcome comment so integration has a target.
+Cite the local SHA and expected branch in the outcome, distinguishing them from
+confirmed parent-side capture. The parent must collect the successful task result
+and verify its actual branch/head before integrating.
 """
 
 [[steps]]
@@ -74,38 +75,29 @@ description = "Write one file under the stamped artifacts dir and record its pat
 id = "stamp-outcome"
 title = "record the outcome on {{bead}}"
 type = "task"
-needs = ["self-verify", "commit-push", "write-artifact"]
+needs = ["self-verify", "children-reported", "commit-push", "write-artifact"]
 labels = ["report", "phase:exit"]
 description = """
 One comment carrying the verdict, the evidence pointer (sha or artifact path),
 and anything left undone. Set the state label; do not invent a status bd cannot
 hold.
+
+If this work revealed a reusable lesson, update an existing memory or record a
+new one here. Skip memory work when the bead already contains the useful outcome.
+Do not create a separate step or memory merely to log completion.
 """
 
 [[steps]]
-id = "capture-lesson"
-title = "persist any durable lesson from {{bead}}"
+id = "release-yield"
+title = "release {{bead}} and yield the report"
 type = "task"
 needs = ["stamp-outcome"]
 labels = ["report", "phase:exit"]
 description = """
-Only for something a future run would otherwise rediscover -- not a work log,
-not what the bead already records. Decide against existing memory first:
-
-- an existing memory is now WRONG: bd remember "<lesson>" --key <existing-key>,
-  which overwrites in place
-- an existing memory is OBSOLETE: bd forget <existing-key>
-- neither: bd remember "<lesson>" --key <new-slug>
-"""
-
-[[steps]]
-id = "await-review"
-title = "hand {{bead}} to review and idle"
-type = "task"
-needs = ["capture-lesson"]
-labels = ["report", "phase:exit"]
-description = """
-Reported work is review's to move. Do not claim more work to fill review
-latency: idle until review returns a verdict or the run ends. A worker that
-recycles here burns the context its own bounce-back needs.
+Finish the role's evidence and handoff stamps, set state:reported for completed
+work, and clear the assignee with `bd update {{bead}} --assignee ""`.
+Leave reported work in_progress for review and integration; do not close it
+prematurely. Yield the result and exit, without claiming more work or idling for
+review. A later worker pulls any reopened fix from the durable role queue and
+reads the bead's evidence; bounce-back does not depend on this session surviving.
 """

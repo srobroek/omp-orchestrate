@@ -71,34 +71,13 @@ describe("satisfies", () => {
 		expect(satisfies("linked.comment.verb in [REVIEW]", evidence({}, ["REVIEW"], []))).toBe(false);
 	});
 
-	test("artifact.output_ref contained demands an absolute path under artifacts_dir", () => {
-		const ok = { metadata: { output_ref: "/runs/a/report.md", artifacts_dir: "/runs/a" } };
-		expect(satisfies("artifact.output_ref contained", evidence(ok))).toBe(true);
-
-		// Equal to the dir, outside it, relative, or inside the worktree: all unmet.
-		expect(
-			satisfies("artifact.output_ref contained", evidence({ metadata: { output_ref: "/runs/a", artifacts_dir: "/runs/a" } })),
-		).toBe(false);
-		expect(
-			satisfies(
-				"artifact.output_ref contained",
-				evidence({ metadata: { output_ref: "/elsewhere/r.md", artifacts_dir: "/runs/a" } }),
-			),
-		).toBe(false);
-		expect(
-			satisfies("artifact.output_ref contained", evidence({ metadata: { output_ref: "r.md", artifacts_dir: "/runs/a" } })),
-		).toBe(false);
-		expect(
-			satisfies(
-				"artifact.output_ref contained",
-				evidence({ metadata: { output_ref: "/wt/f/r.md", artifacts_dir: "/wt", worktree: "/wt" } }),
-			),
-		).toBe(false);
+	test("artifact containment requires positive filesystem evidence", () => {
+		const candidate = evidence({ metadata: { output_ref: "/runs/a/report.md", artifacts_dir: "/runs/a" } });
+		expect(satisfies("artifact.output_ref contained", candidate)).toBe(false);
+		expect(satisfies("artifact.output_ref contained", { ...candidate, artifactContained: true })).toBe(true);
 	});
 
-	test("an unrecognised predicate passes", () => {
-		// Matches rules-eval.py: a contract naming a predicate this evaluator does
-		// not implement must not fail every exit.
-		expect(satisfies("some.future.predicate == 3", evidence({}))).toBe(true);
+	test("an unrecognised predicate fails closed", () => {
+		expect(satisfies("some.future.predicate == 3", evidence({}))).toBe(false);
 	});
 });

@@ -31,15 +31,26 @@ never stored as a bead state.
 |---|---|
 | `pending → ready` | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` reports the bead, no gate is open, and its routing envelope is complete |
 | `ready → working` | a worker pulls it: `bd ready … --claim` returns the bead, atomically and first-wins, and the worker adopts what it was given |
-| `working → reported` | the worker delivers the evidence its `execution_kind` requires, adds the next role's label, clears its assignee, and comments `REPORTED`. Its commits are already captured on `omp/task/<id>` |
-| `reported → in_review` | the architect integrates the captured branch, then creates every review-wisp shell before any reviewer starts |
+| `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git), handoff, release and `REPORTED`. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
+| `reported → in_review` | the architect collects the successful terminal task result, verifies the captured branch and head, integrates it, then creates review-wisp shells. A pre-yield report alone is not capture proof |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with `ADVICE` |
-| `changes_requested → working` | the bead returns to its queue with every `REVIEW verdict=changes` item attached; the next puller applies them |
+| `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
 | `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead; the shepherd claims it, proves CI and the bot round, serializes on the merge slot, merges, stamps, releases, closes |
 | `approved → dismissed` | non-git evidence only: the architect records the accepted evidence, sets `state=dismissed`, and closes |
 | `waiting_human` | an agent raised `ASK`. The question is recorded on the bead and the bead is held. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
 | `waiting_gate` | only an external machine gate remains (CI, a release workflow, a bot round). The bead is parked with the awaited identifier and a resume instruction, and nobody polls it |
 | `failed` | unrecoverable: `state:failed` plus status `blocked`, with the error recorded and surfaced |
+
+Review and escalation evidence is version-bound when either endpoint names a version.
+Stamp `head_sha=<value>` and `review_round=<value>` on linked-node `REVIEW`/`ADVICE`
+comments using the claimed wisp's fields, falling back per field to the linked node.
+Omit a token only when neither endpoint carries it.
+
+An answered escalation ends only after the researcher verifies both `ADVICE` writes,
+closes and releases its wisp, then notifies the architect. The architect collects
+the paused worker's actual terminal result and any successful capture. Resuming
+unfinished work requires exclusive-window reconciliation of its retained claim;
+neither a ping nor wisp closure automatically requeues it.
 
 ## Completion paths
 
@@ -53,10 +64,48 @@ technical.
 | `comment` | bead comment or audit-event ref, verification, independent evidence review | architect closes as `dismissed` |
 | `external` | resource identity, read-back or before/after evidence, verification, independent evidence review | architect closes as `dismissed` |
 
+A same-PR merge fix stays nonterminal until actual landing. After verifying captured
+fix integration, independent approval and CI at the current exact PR head, the
+architect removes only the merge-to-fix `blocks` edge, preserving provenance.
+The shepherd can then land and close the fix with verified merge evidence. A
+separate prerequisite PR retains its normal close-before-ready dependency.
+
 Tracked documentation and configuration changes use `git`. Research, analysis, read-only
 review, and external operations may use non-git evidence, and follow the same claim, report,
 independent review, fix, approval, and closure states. Non-git work never creates an empty
 commit, a placeholder branch, or a fake merge requirement.
+
+### Review and merge handoff
+
+After verifying terminal capture and integrating branches, the architect creates all
+required review-wisp shells before dispatch and opens the draft PR. Choose dimensions
+for material risks and project policy, not a mandatory specialist roster. Reviewers
+remain independent. The final approving reviewer closes the final wisp and makes the PR ready.
+
+For CHANGES, follow `mol-land-branch`'s `collect-verdicts` route:
+
+1. Collect every required dimension's verdict at the current head and review round.
+   Any `changes` verdict requires a fix round; preserve the union of actionable findings.
+2. Collect the prior writer's terminal result and preserve its capture and evidence
+   anchors. A live writer cannot hand its node to a replacement. An unresolved retained
+   claim requires the exclusive recovery procedure below before any release or reopen.
+3. Preserve the owning epic, scope and implementer route. Re-read current ownership;
+   with the prior writer terminal and its claim released, set the node to `status=open`
+   with an empty assignee: `bd update <node> --status open --assignee ""`.
+4. Dispatch a fresh implementer to pull its queue, never activate it with a bead-id
+   message. A changed head starts a new review round.
+
+`changes_requested` records the review disposition, not readiness to claim.
+Its mapped `in_progress` status stays out of `bd ready` until the explicit reopen.
+
+Create the merge bead with label `pr:merge`, metadata `role=shepherd`, and no parent.
+Do not use type `merge-request`: it is a ready-filter alias, not a creatable type.
+Stamp `repo`, `branch`, `base_sha`, `origin_bead` and `integration_owner=orchestrate`.
+When transferring ownership for the same repository/PR, `origin_bead` names the source
+node or its explicit parent; preserve that parent in ownership snapshots. Source
+approval does not transfer. After the shepherd verifies the PR/head,
+stamp the merge's own `pr` and `head_sha`; its own approval, `in_progress` state and
+exact head govern dispatch.
 
 ## Persistence classes
 
@@ -66,16 +115,15 @@ commit, a placeholder branch, or a fake merge requirement.
 | Domain | architect | one epic, one Worktrunk feature branch; replaceable mid-epic, because the tree and the beads carry the domain |
 | Landing | shepherd | one merge bead, two phases across the CI gate; the second phase is a fresh spawn, not a wait |
 | Task-scoped | implementer, reviewer, researcher | claim one bead or wisp, report there, release, exit. Respawn reads the bead, its comments, and its linked wisps |
-| Untracked | helper | lives only inside the architect's blocking await; its outcome is promoted to a comment before its trace wisp can be compacted |
+| Untracked | helper | runs inside its spawner's awaited job; architect outcomes are promoted to feature comments before trace compaction. A task receipt is not completion; the parent must collect the terminal result before mutating a shared checkout |
 
 An isolated worker gets no wake when it finishes: nobody sends to it, and a replacement pulls
 the bead instead. A non-isolated architect parks after `task.agentIdleTtlMs` and *is* revived
 by a `hub` send.
 
-A `BOUNCE` comment invalidates that attempt. Repair the durable envelope -- the bead's
-scope, evidence requirement, or dependency -- and let a fresh worker pull it. Never continue
-the bounced session, never hand it the contract data it failed to produce, and never accept
-its later evidence.
+An exit allowed after the local refusal budget is not accepted work and does not release
+the claim. Inspect the terminal result and durable evidence; reconcile unresolved
+ownership through the exclusive recovery procedure before any replacement can claim.
 
 ## Wakes and messages
 
@@ -112,20 +160,31 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    binding from `/orchestrate-status`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
    the actor in `assignee`, the location in `metadata.worktree`/`branch`, and the
-   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`;
-   a recorded branch with no worktree is recovered by `wt switch <branch> --no-cd
-   --format=json`, and the bead is updated when Worktrunk returns a different path.
-3. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
+   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`.
+3. If a stamped path is missing or the runtime root mismatches, execute
+   `planning.md`'s **Canonical checkout recovery** in one explicit exclusive
+   claim/dispatch/branch-writer window. Inventory the owning epic's stamped branch/path
+   and WT rows first; preserve an existing dirty resumed checkout, captures, terminal
+   results, and all evidence. Recreate only a missing checkout with
+   `wt -C "<source-root>" switch "<branch>" --no-cd --format=json`, use its returned JSON
+   `path` as the canonical worktree, and reject an unresolved or foreign WT bead binding.
+   A missing Git object or capture is a separate setup failure, not cwd repair.
+4. While that same window remains held, stamp the updated `metadata.worktree` and WT
+   `bead` binding for the exact owning epic, read both back, and require equality before
+   actor re-entry. Do not release a retained claim merely to relocate; a mismatch
+   preserves the claim, checkout, capture, terminal result, and evidence for recovery.
+   Re-enter only through the rooted `omp --cwd "<canonical-worktree>" --config
+   "<run-overlay>"` procedure in `planning.md`, with the same absolute
+   `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`.
+5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
-4. Run `bd merge-slot check`. Never infer a dead holder from age or from a recycled shepherd.
-   Resume the landing transaction, or use its evidence-gated recovery path after proving the
-   exact actor lease is dead.
-5. Drain the patrol wisp for each epic (below) before dispatching anything new.
-6. For GitHub-backed runs, restart the release watcher with `--slots=1` and replay
-   unacknowledged records first: `orc_resolve_queue_dispatch` with a `bd list --json`
-   snapshot and `replayUnacknowledged`. Only a matching ack suppresses a replay. See
-   `references/queue-watcher.md`.
+6. Run `bd merge-slot check`. Never infer a dead holder from age or from a recycled
+   shepherd. Resume the landing transaction, or use its evidence-gated recovery path after
+   proving the exact actor lease is dead.
+7. Drain the patrol wisp for each epic (below) before dispatching anything new.
+   Replacement requires the same exclusive recovery procedure; it never starts by
+   releasing a retained claim just to re-enter the runtime.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
 replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
@@ -143,44 +202,37 @@ exit gate uses* against live bead state:
 
 | Case | Condition | Action |
 |---|---|---|
-| clean exit | `completed`, contract re-check passes, claim released | stamp `metadata.branch` if a captured branch exists; nothing else |
-| semantic incompletion | `completed` but the bead is still claimed, or the contract re-check fails | treat as a bounce: `RECLAIM` comment naming the failed checks, assignee cleared, status `open`, `recovered_branch` stamped if commits exist |
-| technical death, work exists | `failed`/`aborted` with commits on the branch | `RECLAIM` + unclaim + `recovered_branch`; the branch is the surviving evidence, and the next claimant's bead says to resume from it |
-| technical death, no work | `failed`/`aborted`, no commits | `RECLAIM` + unclaim; nothing to recover |
+| clean exit | `completed`, contract re-check passes, claim released | observe capture; no automatic branch metadata writes |
+| paused writer | positively open linked escalation | preserve the claim; architect reconciles resumption after the escalation closes |
+| semantic incompletion | `completed` but contract incomplete or ownership unresolved | append `NOTE recovery needed` with observations; no owner, status or metadata changes |
+| technical death or unknown evidence | `failed`/`aborted`, or failed evidence read | append recovery-needed `NOTE`; branch observed, absent or unknown is reported distinctly. Absence is not proof of no work |
 
-`completed` from the runtime means only "yielded successfully". The contract re-check is what
-upgrades it to "work accepted", and it is also what catches the two paths that skip `yield`
-entirely: the exit gate's bounce force-allow, and an abort.
+`completed` means successful task termination, not accepted work. Parent-side capture
+exists only after successful completion and can include uncommitted delta. Failed isolated
+runs may lose local commits and uncommitted work. The reaper reports, never reclaims.
 
-**Patrol wisps** cover what the reaper cannot: those subscriptions die with the process. One
-patrol wisp per epic is created at run start
-(`bd create --ephemeral --wisp-type patrol --deps relates-to:<epic>`) and is the durable
-marker that reconciliation is owed. Its contract: run the reaper's sweep from bead state
-alone -- cross-check every `in_progress` assignee under the epic against the live roster and
-apply the table above -- run the merge-completeness scan, then re-arm. Draining it is the
-first duty of the next session or architect to open. Wisps carry no per-wisp TTL; compaction
-removes them by policy, so a patrol persists as a restart marker rather than expiring by
-surprise.
+**Patrol wisps** cover process death. The extension creates the deterministic
+`<epic-id>-patrol` id and verifies its type, ephemeral flag and epic link. Concurrent
+creation shares that identity. A closed or mismatched record requires architect
+reconciliation, never an automatic replacement generation.
+The next architect inspects ownership and evidence, runs the merge-completeness scan,
+and explicitly reconciles the patrol. Inspection does not authorize claim mutation.
 
 **Merge-completeness scan.** Integration is cherry-pick, so ancestry proves nothing and
 patch-id containment is the primitive:
 
 | Scan result | Bead state | Verdict |
 |---|---|---|
-| all `-` | terminal | integrated -- delete the branch, stamp `integrated=true` |
+| all `-` | terminal | cleanup candidate; only explicit exclusive-window cleanup may delete and stamp integration |
 | all `-` | open | integrated early -- flag it; the bead belongs in reported or review |
 | any `+` | open / `in_progress` | pending integration -- the architect's duty; teardown blocks on it |
 | any `+` | closed | inconsistency: closed but unmerged. Comment, treat as a reopen candidate, and surface it in `/orchestrate-status` |
 
-The scan runs on each child terminal event, in the architect's `integrate-branches` teardown
-step (the epic must scan clean before `commit-work`), in the patrol contract, and in
-`/orchestrate-status`. Branch deletion happens only on the all-`-` plus terminal row:
-cleanup is proof-gated, never time-gated.
-
-**`bd stale` plus a human gate** is the backstop, not the mechanism. Deterministic code
-records, comments, unclaims, and deletes only proven-integrated branches. It never
-auto-commits a dirty worktree, never discards WIP, and never force-deletes an unscanned
-branch -- those are agent decisions through `mol-dead-claim-recovery`.
+The architect runs the scan before teardown and during patrol reconciliation.
+The observer never stamps integration or deletes branches. Before explicit cleanup,
+stop every claim, dispatch and branch writer, re-read terminal state and patch
+containment, then mutate within that exclusive window. If exclusivity cannot be
+established, preserve the branch and report unresolved cleanup.
 
 ## Dead-claim recovery
 
@@ -191,13 +243,21 @@ timestamp is old.
 1. Read the bead, its comments, the audit trail (`.beads/interactions.jsonl` plus
    `<artifacts_dir>/audit/<child-id>.bdlog`), the actor handle, the branch or worktree, and
    the last verification evidence.
-2. Try to resume the actor. Clear ownership only when the runtime reports the handle stopped
-   or absent, the actor explicitly releases it, or the user confirms the session is dead.
-   Record that evidence before mutating anything.
+2. Establish holder death, then an exclusive recovery window: all claim, dispatch and
+   branch writers must be stopped. A fresh read or human confirmation alone is not
+   exclusion. Re-read owner, status and branch evidence inside that window.
+   If checkout or runtime-root repair is needed, run `planning.md`'s **Canonical
+   checkout recovery** in this same window before any release or reopen: inventory the
+   stamped branch/path and WT rows, preserve dirty trees and all terminal/capture evidence,
+   recreate only a missing checkout with `wt -C "<source-root>" switch "<branch>" --no-cd
+   --format=json`, use its returned path, reject foreign bindings, stamp both the owning
+   epic's `metadata.worktree` and WT `bead`, and read both back for exact equality. Do not
+   release a retained claim merely to relocate; a missing Git object remains a separate
+   failure.
 3. Preserve the worktree, the captured branch, artifacts, comments, and external resource
    references. Do not sweep them during recovery.
-4. Record the recovery with a bead comment and an `orc.recover` audit event. There is no
-   `bd unclaim`; release and reopen with:
+4. Only while that exclusive window remains held, record the recovery with a bead comment
+   and `orc.recover` audit event, then release and reopen:
 
 ```
 bd update <bead> --assignee "" --status open
@@ -208,9 +268,9 @@ bd set-state <bead> state=pending --reason "dead claim verified; redispatch"
    never a worker -- and leave the bead unassigned. The next worker claims it atomically and
    inherits every preserved anchor, including `recovered_branch`.
 
-If holder death is uncertain, keep the assignment and record a revisit trigger. That safe
-default is what stops two workers from mutating one scope. A contested claim runs
-`mol-dead-claim-recovery`, whose `confirm-dead` step is a human gate.
+If holder death or exclusivity is uncertain, preserve the assignment and every branch,
+report recovery unresolved, and record a revisit trigger. Do not execute a blind release.
+A contested claim runs `mol-dead-claim-recovery`; its human gate does not replace exclusion.
 
 ## Failure propagation
 
@@ -227,11 +287,13 @@ source of truth.
 
 - **Architect:** replace it between waves, never mid-integration. The feature branch and the
   bead state carry the domain.
-- **Shepherd:** it is already two ephemeral phases. Restart from the merge bead after the
-  slot is released, never during a landing transaction.
-- **Workers:** never resumed. A dead worker's bead is reclaimed and pulled again.
-- **Standalone `pr-shepherd`:** repository-global recovery and queue drain only, when no run
-  shepherd owns the landing.
+- **Shepherd:** it is already two ephemeral phases, but each phase claims only the ordinary
+  merge bead; gate creation/discovery and the merge slot are separate controls, not wisp
+  claims. Restart from the merge bead after the slot is released, never during a landing
+  transaction.
+- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
+  recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
+  ephemeral ownership separately and releases each through its own path.
 
 ## Human-in-the-loop and safe autonomy
 
@@ -279,10 +341,12 @@ Nobody polls it and nobody holds a session open for it.
 
 Park the bead instead. Record what is awaited with `bd set-state <bead> state=waiting_gate
 --reason "<what is awaited and how to resume>"`, add `bd gate create --type=gh:run --blocks
-<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR
-merge, then continue unrelated beads from `bd ready`. When nothing else is ready and only
-external waits remain, write the run report and exit; the gate bead and the next pass own
-the wait. `bd gate check` plus `bd ready --gated` is how the cleared gate re-enters the run.
+<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR,
+then release the phase-one claim with `bd update <bead> --status open --assignee ""`. Continue
+unrelated beads from `bd ready`. When nothing else is ready and only external waits remain,
+write the run report and exit; the gate bead and the next pass own the wait. `bd gate check`
+plus `bd ready --gated` is how the cleared gate is discovered, after which ordinary
+`bd ready --claim` acquires the reopened bead.
 
 Two campaign runs violated this on their final release bead: each polled a release workflow
 and a package-executing reviewer until the stream aborted, leaving that bead `in_progress`
@@ -318,9 +382,9 @@ or rewrite its terminal evidence.
 
 ## Incidental bug beads
 
-A worker that trips over a pre-existing defect outside its scope fixes it in passing when
-trivial, and otherwise files one bug bead. Filing is a record, not self-dispatch: the worker
-keeps its own scope, its own evidence, and its own bead.
+A worker never fixes a pre-existing defect outside its claimed scope, even when trivial.
+It files one routed bug bead and keeps its own scope, evidence and bead. The architect
+adopts the bug or transfers it to the owning epic; it never leaves the bug ownerless.
 
 Such a bead enters the run routed, or it does not enter it at all. Every queue pulls with
 `--parent <epic>` plus `--metadata-field role=<role>`. An unparented or unrouted bug bead is
@@ -423,12 +487,9 @@ An open incidental bug bead never blocks close-out. It is open, unassigned, and 
 makes it ready. A ready bead is never stranded, never `in_progress`, and never `blocked`. Those
 are the conditions that gate reads.
 
-The architect hands it off three ways:
-
-- adopt it into the current decomposition.
-- reparent it to the epic that owns that code.
-- park it with `bd update <bug> --status deferred`, and name it by id in the run report.
-  `deferred` keeps it out of `bd ready`, while its parent keeps it findable.
+The architect either adopts the bug into its decomposition or reparents it to the epic
+that owns the code. If no owner exists, the discovering architect adopts it. Deferral
+is not a third, ownerless disposition.
 
 `bd list --type bug` audits every incidental bug at any time, without touching a queue.
 
@@ -438,8 +499,8 @@ Three kinds of tree exist, and only one of them is swept:
 
 - **Isolated worker copies** are runtime-owned. They are created and removed by OMP, and
   nothing in this package touches them.
-- **Captured branches** (`omp/task/*`) are deleted only when `git cherry` proves every commit
-  is already integrated and the bead is terminal. An unscanned branch is never force-deleted.
+- **Captured branches** (`omp/task/*`) are explicit cleanup candidates only after patch
+  containment, terminal state and the exclusive-window conditions above are established.
 - **Worktrunk feature worktrees** are inspected with `wt list` and removed with `wt remove`,
   through `scripts/worktree-sweep.sh`. Raw `git worktree` lifecycle commands are denied.
 

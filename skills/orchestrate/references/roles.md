@@ -1,15 +1,13 @@
 # Roles, models, escalation
 
 Five agents ship: `orc-architect`, `orc-implementer`, `orc-reviewer`, `orc-researcher`,
-`orc-shepherd`. Each names one OMP model role and sets no thinking level, so the tier
-travels with the role rather than the file. Tune them by editing `modelRoles` in your own
-configuration, and never write a raw provider selector into an agent.
+`orc-shepherd`. Each names one OMP model role. Tune model selection through `modelRoles`,
+not raw provider selectors in agent files. Each role inherits its configured thinking level.
 
-`orc-reviewer` names `@reviewer`, which OMP does not ship. `@slow` and `@plan` are the
-authoring tier, so neither keeps a critic out of the family it judges. Configure
-`modelRoles.reviewer` before a run. OMP resolves an unconfigured alias to nothing and falls
-back to the session default without warning, so the settings preflight reports an absent
-one.
+`orc-reviewer` names `@reviewer`, which OMP does not ship. Configure
+`modelRoles.reviewer` before a run. The verdict comes from a separate agent;
+model-family separation requires an explicit model choice. An unresolved role can fall back
+to the session model or fail selection; preflight reports it before dispatch.
 
 Escalation is per-spawn `effort`, not a second agent. There is no deep variant of any role.
 
@@ -18,52 +16,75 @@ Escalation is per-spawn `effort`, not a second agent. There is no deep variant o
 | Lead | you (this session) | session model | whole run | the primary checkout | never claims anything |
 | Architect | `orc-architect` | `@plan` | long-lived, parked between waves, revivable | its Worktrunk feature worktree; **not** isolated | one epic, pulled |
 | Implementer | `orc-implementer` | `@task` | ephemeral, one bead | an isolated copy; commits captured on `omp/task/<id>` | one task bead, pulled |
-| Reviewer | `orc-reviewer` | `@task` | ephemeral, one verdict | read-only, no checkout of its own | one review wisp, pulled |
-| Researcher | `orc-researcher` | `@smol` | ephemeral, one answer | read-only, no checkout of its own | one escalation wisp or research bead, pulled |
-| Shepherd | `orc-shepherd` | `@task` | ephemeral, two phases across the CI gate | no content tree; PR and merge state only | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
-| Helper | `scout`, or another non-claiming child its spawner's allowlist names | inherited | ephemeral, inside the architect's own await | the architect's checkout | nothing -- traced by a wisp, never claims |
+| Reviewer | `orc-reviewer` | `@reviewer` | ephemeral, one verdict | inspects the captured branch or feature tree without editing code; dispatch determines checkout isolation | one review wisp, pulled |
+| Researcher | `orc-researcher` | `@smol` | ephemeral, one answer | reads assigned sources without editing code; dispatch determines checkout isolation | one escalation wisp or research bead, pulled |
+| Shepherd | `orc-shepherd` | `@task` | ephemeral, two phases across the CI gate | PR and merge state only; no content edits | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
+| Helper | `scout`, or another non-claiming child its spawner's allowlist names | its loaded definition | ephemeral, inside its spawner's await | its spawner's checkout; mutation only when explicitly scoped and granted | nothing -- architect helpers are traced by a wisp; worker factual lookups return directly |
 
-The reviewer is `@task` rather than the cheap tier on purpose: a reviewer cannot be weaker
-than the work it is evaluating. The researcher is cheap because its output is a digest with
-citations, and its hard cases escalate by `effort`.
+The lead prepares and binds the unassigned architect epic before launching the native
+architect. The architect must start in its canonical owned Worktrunk feature worktree
+before it claims the epic or dispatches any child. Non-isolated children inherit their
+parent session's `cwd`; isolated children run in runtime-created copies snapshotted from
+that parent-session `cwd`. The detailed session-cwd prerequisite and supported CLI re-entry
+path are in `planning.md`.
+The reviewer uses the configured `@reviewer` role. The researcher uses `@smol` and
+escalates hard cases per spawn with `effort`.
 
 "Long-lived" does not mean one never-restarted process. An architect may be replaced
 mid-epic; the Worktrunk branch and the bead state are what carry the domain, so the
 replacement resumes the same tree.
 
-## What replaced the scribe and the advisor
+## Architect rollover
 
-Neither is an agent. Both duties survive; neither costs a spawn.
+The global subagent wall-clock cap is 30 minutes. A timeout is a process boundary, not an epic failure. When an architect times out and its epic remains open, the lead reads the epic, feature worktree, latest durable comments, terminal receipts, captures, and unresolved claims. The lead then starts one replacement `orc-architect` for the same epic and worktree with a handover containing:
+
+- the epic id and pinned `BEADS_DIR`;
+- the feature worktree and current head;
+- completed worker receipts and integrated captures;
+- unresolved claims, blockers, and recovery ownership;
+- the next safe action.
+
+Do not relay stale chat history or infer missing state. If durable evidence is incomplete, enter lifecycle recovery before restart. Repeat rollover only while the epic remains actionable and each outgoing architect has recorded progress or a concrete blocker.
+
+## What replaced the scribe and continuous advisors
+
+Neither is a spawned agent. The duties survive without a per-turn reviewer on every worker.
 
 - **The scribe's ledger duty** is `orc_run_status` plus `/orchestrate-status`, and the
   provenance half is the extension's passive audit ledger
   (`<artifacts_dir>/audit/<child-id>.bdlog`, one line per child `bd` mutation). There is no
   ledger wisp to drain and no report agent to activate.
-- **The advisor is OMP's native watchdog**, bound to the architect by frontmatter
-  `advisor: true`. It reviews transcript deltas in band and can never block a call, which is
-  exactly the advisory role a spawned advisor approximated at the cost of a session.
-- **Escalation that once went to an advisor routes to `role=researcher`.** The researcher's
-  contract is a durable `ADVICE` comment on the bead, read-only. Never spawn an advisor, and
-  never answer your own escalation.
-- **Product intent was never an advisor's to decide.** It is an `ASK` wisp plus a human gate.
+- **Architects use the single native triage advisor.** The advisor is `@smol:low`,
+  reports one actionable finding per update and loads one playbook on demand.
+  Implementers, researchers, reviewers and shepherds remain advisor-free.
+- **Integrated work still gets one independent `orc-reviewer` wisp.** Add another
+  specialist only for a material risk or project policy; never dispatch a fixed roster.
+- **Design or debug uncertainty routes to `role=researcher`.** The researcher's contract is
+  one durable `ADVICE` comment on the bead. Never answer your own escalation.
+- **Product intent is an `ASK` wisp plus a human gate.** Neither a reviewer nor researcher
+  may decide it.
 
 ## Capabilities and access
 
 | Role | Writes | Spawns | Notes |
 |---|---|---|---|
-| Lead | run epics, their metadata, wakes | architects | coordination, `bd`, the `orc_*` tools, the slash commands. Never code, never content |
-| Architect | its feature tree, commits, draft PR, decomposition beads | exactly the names in its own `spawns:` allowlist | **sole mutator** of its feature worktree; integrates captured task branches by explicit cherry-pick; never merges a PR |
-| Implementer | code inside `metadata.scope`, in its isolated copy | nothing today | it declares no `spawns:`, which the runtime reads as spawning disabled. The librarian shortcut below needs `spawns: librarian` declared on the agent before it works at all |
-| Reviewer | comments and verdicts | nothing | reads the captured branch or the feature tree; "read-only" is enforced by its agent definition omitting `edit` and `write`, not by sandboxing `bd` -- it must write its own verdict |
+| Lead | run epics, their metadata, wakes | architects | coordination and bounded factual inspection; delegates implementation and substantive domain investigation |
+| Architect | its feature tree, commits, draft PR, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-tree mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures; never merges a PR |
+| Implementer | code inside `metadata.scope`, in its isolated copy | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
+| Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree; omits `edit` and `write`, but retains `bash` for verdicts and reading git, so no-code-edit is also a prose contract |
 | Researcher | comments (`ADVICE`), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
 | Shepherd | PR state, `pr` and `merge_sha`, fix beads, merge-slot | nothing | the only role that may merge; never edits or pushes content |
-| Helper | files in the architect's checkout | nothing | no bead, no commit, no PR, no worktree. Its outcome is promoted to a comment on the feature bead before its trace wisp can be compacted |
+| Helper | only explicitly scoped files in its spawner's checkout when write-capable | only its own allowlist within the depth limit | no bead, no commit, no PR, no worktree. An architect's helper outcome is promoted to a feature comment before its trace wisp can be compacted |
 
-Inside a declared `tools:` list, omitting a tool denies it, which is what the reviewer row
-rests on. One exception is silent. The runtime force-adds `hub` to every agent that declares
-such a list, so `orc-reviewer` and `orc-shepherd` hold it although neither names it. Every
-role can ping, and every role can be pinged. An agent declaring no `tools:` key inherits
-everything instead.
+`tools:` restricts built-in tools, not every execution path. The parser adds `yield`;
+child execution adds `hub` and grants `task` only when spawn policy and depth allow it.
+Extension-registered tools and configured MCP tools can remain available outside that list.
+No `tools:` key means inherited tools. Bash, GitHub and eval-capable tools can mutate state
+without `edit` or `write`; no-code-edit rules are behavioral contracts, not a sandbox.
+
+The shepherd explicitly requests its conflict/CI and bot-review probes plus `hub`.
+The extension must register those probes. Missing probes require BLOCKED, not a shell
+substitute that skips their evidence checks.
 
 A declaration guarantees nothing about which definition answers to a name. Discovery resolves
 a bare name in order, and a marketplace plugin claims it before a bundled agent. Bundled
@@ -74,11 +95,10 @@ install can change what it grants with no edit to these files.
 Only the architect spawns a role that claims beads. Two independent conditions gate any
 spawn, and the allowlist is the binding one:
 
-1. **The agent declares an explicit `spawns:` allowlist.** An agent with no `spawns:` key
-   spawns nothing, at any depth. The runtime infers a permissive `*` only for an agent whose
-   `tools:` list includes `task`, and an absent key is normalised to "none" before the spawn
-   policy is consulted -- so the permissive-looking default for an unset value is
-   unreachable, and a missing allowlist reads as a hard refusal rather than as freedom.
+1. **The agent declares an explicit `spawns:` allowlist.** Package agents without a
+   grant spawn nothing. Do not grant `*` or add `task` to a non-spawning role's tools.
+   Native preflight enforces the resolved names for both `task` and eval child APIs;
+   a disallowed child is rejected before model execution.
 2. **The depth ladder allows the child.** `lead(0) → architect(1) → worker(2) → leaf(3)`, so
    a worker's helper needs `task.maxRecursionDepth: 3`. At the default 2 the
    lead-architect-worker chain has already spent the ladder.
@@ -91,10 +111,10 @@ refused for depth. A bead-claiming role spawned by a worker stays a design error
 
 | Situation | Do this |
 |---|---|
-| The work deserves a bead, review, and a captured branch | create the task bead with `role=implementer` and dispatch a wave |
-| A read-only sweep or a mechanical rename, too small for a bead's round trip | spawn a helper your own `spawns:` allowlist names -- `scout` for reading -- inside your own await, traced by a `ping` wisp |
-| A question about the codebase, not a change to it | route it to `role=researcher` rather than reading it yourself |
-| An external library's real behaviour, rather than this codebase's | spawn `librarian` and read its structured return: no bead, no wisp, no consent. Needs `librarian` in the spawning agent's own `spawns:` allowlist |
+| The work deserves a bead, review, and a captured branch | create the task bead routed to `role=implementer` and dispatch a wave |
+| A bounded sweep or mechanical operation that saves substantial context/execution | optionally spawn an allowlisted helper only after the architect session is rooted in its canonical checkout; trace architect helpers with a wisp, and await the terminal result before resuming writes |
+| A design or debug question that needs judgment, not a factual lookup | route it to `role=researcher` rather than deciding it yourself |
+| A small repository or external-library fact | read it directly; use `scout` only for a substantial bounded lookup. Worker factual returns need no bead, wisp or consent; external briefs require package/version and primary-source citations |
 | A verdict on work that reported | create the review wisp with `role=reviewer`; never review what you wrote |
 | A landing unit is approved | create the merge bead and spawn the shepherd |
 
@@ -102,75 +122,86 @@ A read-only node goes to the researcher rather than the architect in the first p
 pure analysis the reading *is* the reasoning, so a delegating layer only adds a hop and
 re-reads context the analyst already holds.
 
-## Research escalation: four hops
+## Research escalation: four steps
 
-A worker cannot spawn a role that claims beads, so a researcher reaches it through its
-architect. Four hops, each owned by exactly one actor:
+A worker cannot spawn a bead-claiming role. Its architect owns dispatch and resumption:
 
-1. **The implementer creates the research wisp** against its own bead and pings its
-   architect for consent. The wisp is the brief, so the ping names the wisp id and nothing
-   else.
-2. **The architect consents and spawns `orc-researcher`.** One call, and its entire
-   involvement. It does not read the question, answer it, or wait on it.
-3. **The researcher pulls the wisp** (`--include-ephemeral`), writes `ADVICE` on the linked
-   node, and repeats the answer on the wisp.
-4. **The researcher pings the originating implementer directly**, sibling to sibling. The
-   answer never travels back through the architect.
-
-The wisp carries both ids, which is what makes hop 4 addressable with no relay: `assignee`
-is the researcher, `metadata.origin_actor` the implementer that asked.
+1. The implementer creates a parented, related escalation wisp with
+   `role=researcher`, `execution_kind=escalation`, source scope and `origin_actor`.
+   It records `BLOCKED` and yields paused, retaining the source claim.
+2. The architect dispatches `orc-researcher` on that queue.
+3. The researcher verifies version-matching `ADVICE` on both node and wisp, closes
+   and releases the answered wisp, then notifies the architect with its id. A ping to
+   a still-live requester is optional; it cannot resume a finished isolated task.
+4. The architect collects both actual terminal results and preserves any successful
+   paused-worker capture. Before releasing/requeueing the retained source claim,
+   establish an operationally exclusive window with every claim/dispatch/branch writer
+   stopped and re-read current evidence. No exclusion means no mutation: preserve
+   the claim and report unresolved resumption. A replacement reads the durable advice.
 
 Findings stand on the wisp whether or not the ping lands, so the flow never depends on a
 message surviving. The ping is a doorbell over writing that already happened: not retried,
 not blocked on, carrying no content.
 
-**The cheap alternative, once it is wired.** `librarian` returns a structured result to its
-caller, so the answer arrives as the spawn's return value. There is nothing to route and
-nobody to ping, so it needs no wisp, no consent, and no hop 2. For an external-library fact a
-worker spawns it and reads what comes back. Keep the four hops for questions about this
-repository, this design, or a choice someone must own.
+**The factual shortcut.** `scout` returns `summary`, `files`, `architecture` and an
+optional `report`. A worker reads that direct return with no bead, wisp, consent or
+hop 2. For an external-library question, name the package and version, require
+installed source or official documentation, and request citations and excerpts in
+`report`. There are no dedicated library-answer or API-signature fields. Keep the
+four steps for unresolved design or debug uncertainty and choices someone must own.
 
-The test for a helper you expect to read: its frontmatter declares an explicit `tools:` list
-that omits `write`, `edit` and `task`, so it can neither mutate the checkout nor fan out
-further. `librarian` and `scout` pass. `sonic` fails it by declaring no `tools:` at all, which
-is why no allowlist names it. Agents that pass may still carry `bash`, `librarian` included,
-so the no-write guarantee is their prose rather than their tool list.
+Scout's declared tools are `read`, `grep`, `glob`, `web_search`. Its contract forbids
+mutation and command execution; inspect runtime-added tools before treating it as isolated.
+The bundled scout sets `readSummarize: false`: bare code reads return source rather than
+structural summaries with bodies elided. Keep bounded reads and return exact evidence.
 
-A helper whose job is to write fails that test by design. `operator` is the case: no `tools:`
-key, and bounded mechanical mutation is the whole point. `designer` fails it the same way, and
-inherits `write` and `edit`, which makes it implementer-shaped rather than helper-shaped.
+`operator` declares no `tools:` key and is write-capable. The architect grants it
+for bounded mechanical work in its own feature checkout and allowed scope; the
+implementer grants it inside its claimed scope and isolated checkout. Neither may
+target another agent's tree. This is not a read-only helper grant.
 
-`ui-ux-specialist` is the same implementer-shaped helper for UI work that needs system grounding, parallel critique, or a durable DESIGN.md. A small self-contained UI edit stays with `designer`. It declares no `tools:`, so it inherits write and edit and works in the architect's checkout. It also names `design-critic`, `a11y-auditor`, and `scout` in its own `spawns:`, so its wall time covers that fan-out and it returns reconciled findings rather than raw critique. Brief: the surface to drive (route or URL), the paths holding tokens and primitives, the scope it may touch, the viewport widths, and an explicit instruction not to invent tokens. It ships in `@srobroek/design`; without that package the grant is not spawnable and the bundled `designer` is the fallback. Do not add it to the six-role table: it claims nothing.
+UI work goes to a scoped `orc-implementer` bead with approved intent, existing
+tokens/primitives, required states, viewport widths and accessibility acceptance.
+Unresolved product choices require an `ASK` wisp and human gate. UI implementation is
+not a contract-free helper task.
 
 Depth closes the fan-out half instead. A worker sits at depth 2, so its helper lands at depth
 3, where the executor empties `spawnsEnv`. That helper spawns nothing, whatever its tools say.
 Containment is the worktree-confinement gate plus the helper's own prose.
 
-The `hub` exception above reaches `librarian` too, and configured `mcp__*` tools stay
-reachable. A probed `librarian` held both while its frontmatter named neither. Read a denial
-off frontmatter, never an inventory.
+Read the loaded definition and keep every helper's no-bead, no-commit, no-PR and
+no-worktree constraints explicit. An allowlist authorizes a name, not a sandbox.
 
-That shortcut needs both conditions above: `spawns: librarian` declared on the worker agent,
-and `task.maxRecursionDepth: 3`, because a worker's child sits at depth 3. Until the
-allowlist is declared the shortcut is documentation, not behaviour. The four hops need
-neither change -- hop 2 is the architect spawning a role its own allowlist already names, at
-depth 1 -- and that is precisely why the dance exists.
+The factual shortcut requires `scout` in the worker's own `spawns:` allowlist and
+`task.maxRecursionDepth: 3`. The implementer and reviewer already grant it. The four
+hops still route judgment to the researcher through the architect's existing grant.
 
 ## Research fan-out / fan-in
 
-The actor that needs the answer owns the decomposition, and it never reads raw sources
-itself.
-
-- **Narrow question:** one researcher, one terse digest.
-- **Broad question:** fan out several `@smol` gatherers in one `task` batch, each scoped to
-  one source, slice, or sub-question, each returning facts plus refs and nothing raw. Then
-  fan in: one `effort: "hi"` researcher dedupes, resolves conflicts, and returns a single
-  synthesis with citations. Keep the synthesis; the gatherers are done.
+The actor needing the answer owns the question and decomposition. Resolve small facts
+directly. Use one researcher for a bounded investigation; fan out only independent
+source slices that merit separate contexts. Add a synthesis pass only when conflicting
+or voluminous results need one; otherwise the owner combines the bounded returns.
 
 Bound the fan-out width to the sources that matter, and record what was skipped. Gatherers
 spawn nothing.
 
 ## Escalation ladder
+`effort` is a relative selector, not a literal thinking level. It overrides the agent's
+default when `task.enableEffort` is enabled:
+
+| Supported levels | `lo` | `med` | `hi` |
+|---|---|---|---|
+| low, medium | low | low | medium |
+| low, medium, high, xhigh | low | medium | xhigh |
+
+Use `lo` for routine scout collection. Researcher work uses `@smol`;
+omit `effort` to retain that role's configured thinking level.
+Before escalation, inspect the resolved model's supported levels and configured ceiling.
+Select `hi` only for an explicitly justified escalation to that model's highest allowed level.
+`hi` does not request an unsupported literal high or bypass the model ceiling.
+Do not change the global ceiling to handle one model.
+
 
 1. **The instance, not the role.** A task that failed on reasoning depth is respawned with
    `effort: "hi"`. Name the attempt that failed and say why it was depth rather than missing
@@ -179,8 +210,8 @@ spawn nothing.
 2. **`BLOCKED kind:design|debug`** creates an escalation wisp linked to the bead, carrying a
    `BLOCKED` comment, and the blocked actor yields. An open escalation wisp pauses the
    author's exit contract rather than failing it, so waiting is not punished. A researcher
-   pulls the wisp (`--include-ephemeral`) and answers with `ADVICE`. The four hops above
-   name who pings whom.
+   pulls the wisp (`--include-ephemeral`) and completes the four-step escalation
+   lifecycle above, including closure and architect-owned safe resumption.
 3. **A dispute that durable evidence does not settle** gets one fresh read-only researcher
    at `effort: "hi"` on the escalation wisp. Its `ADVICE` is promoted to a comment before
    anyone acts on it.
@@ -189,3 +220,24 @@ spawn nothing.
 
 Never upgrade a whole role to paper over one hard case, and never wait live on a peer at any
 rung: record what you need, yield, and let the run wake you.
+
+## Optional specialist briefs
+
+Select review dimensions for material risks or project policy. Independent node review
+remains required; a fixed roster of additional guards does not.
+
+| Helper | When and required input |
+|---|---|
+| `adversarial-challenger` | unresolved material claim/decision; give facts, evidence and attempts without leading reasoning |
+| `security-reviewer` | material trust-boundary risk; give scoped paths, entry points and trust assumptions |
+| `docs-guard`, `lint-guard` | existing command findings need judgment; first run the repo command and supply a bounded `lint_report` artifact with node, bead, scope and files. They cannot run the command themselves |
+| `pr-reviewer` | PR-level risks or project policy require a pass; give PR number, repository and conventions. Its verdict informs landing, never authorizes a merge |
+
+`orc-reviewer` supplies the required bead verdict against captured work. `pr-reviewer`
+is optional, non-claiming PR inspection across the assembled diff and repository context.
+Skip it when it would repeat the same review without a distinct risk or policy requirement.
+
+Read the loaded helper's output schema rather than assuming a name fixes its return shape.
+`pr-reviewer` has GitHub mutation capabilities; retain the no-PR-mutation helper boundary.
+Use `skill://sniff` for its analyzer-backed workflow rather than spawning its internal
+`bloodhound` or `refactor-challenger` steps bare.
