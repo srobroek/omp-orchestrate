@@ -10,13 +10,13 @@
 
 import path from "node:path";
 import fs from "node:fs/promises";
-import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolveToCwd } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { editInspect } from "@oh-my-pi/pi-natives";
+import { getWorktreesDir } from "@oh-my-pi/pi-utils";
 import { bdShow, metadataRecord, metadataString } from "../bd";
 import { observedClaim } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
@@ -57,9 +57,7 @@ const execFileAsync = promisify(execFile);
 async function isolatedRoot(cwd: string): Promise<string | undefined> {
  try {
   // The shared base is only a discovery hint, never mutation authority.
-  const configured = process.env.OMP_WORKTREE_DIR;
-  const basePath = configured ? resolveToCwd(configured, os.homedir()) : path.join(os.homedir(), ".omp", "wt");
-  const base = await realpathOrUndefined(basePath);
+  const base = await realpathOrUndefined(getWorktreesDir());
   if (base === undefined || cwd === base || !within(cwd, base)) return undefined;
   const env = { ...process.env };
   // Repository-selection overrides must not turn another checkout into authority.

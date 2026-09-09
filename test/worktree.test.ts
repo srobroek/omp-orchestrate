@@ -19,6 +19,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import { getWorktreesDir, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { forgetClaim, recordClaim } from "../src/claim-state";
@@ -544,6 +545,31 @@ describe("G2 isolated checkout containment", () => {
 
  test("does not accept bash cwd as the current worker's root", async () => {
   expect((await gateWorktreeScope(ctxAt(isolated), "bash", { cwd: owned, command: "touch x" }))?.block).toBe(true);
+ });
+
+ test("uses the native default isolation root when no environment override is set", async () => {
+  delete process.env.OMP_WORKTREE_DIR;
+  const base = getWorktreesDir();
+  await fs.mkdir(base, { recursive: true });
+  const workspace = await fs.mkdtemp(path.join(base, "orc-confinement-"));
+  try {
+   await promisify(execFile)("git", ["init", workspace], { timeout: 1500 });
+   expect((await gateWorktreeScope(ctxAt(workspace), "bash", { cwd: owned, command: "touch src/api/x.ts" }))?.block).toBe(true);
+   expect(await writing("src/api/x.ts", workspace)).toBeUndefined();
+  } finally {
+   await fs.rm(workspace, { recursive: true, force: true });
+  }
+ });
+
+ test("honors the runtime worktree.base override without trusting the original checkout", async () => {
+  delete process.env.OMP_WORKTREE_DIR;
+  setWorktreesDir(isolationBase);
+  try {
+   expect((await gateWorktreeScope(ctxAt(isolated), "bash", { cwd: owned, command: "touch src/api/x.ts" }))?.block).toBe(true);
+   expect(await writing("src/api/x.ts", isolated)).toBeUndefined();
+  } finally {
+   setWorktreesDir(undefined);
+  }
  });
 });
 
