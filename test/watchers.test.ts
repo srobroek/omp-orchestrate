@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import type { BdBead } from "../src/bd";
 import * as bd from "../src/bd";
+import { createClaimState } from "../src/claim-state";
+import { createExitGuard } from "../src/gates/exit";
 import {
 	appendAudit,
 	auditDir,
@@ -30,7 +33,7 @@ const MINUTE = 60_000;
 
 let cwd: string;
 
-const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "OMP_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET"] as const;
+const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "OMP_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET", "ORC_TEST_BD_WHERE", "ORC_TEST_BD_SHOW", "ORC_TEST_BD_COMMENTS", "BEADS_DIR"] as const;
 
 beforeEach(async () => {
 	cwd = join(tmpdir(), `orc-watchers-${Math.random().toString(36).slice(2)}`);
@@ -250,23 +253,64 @@ describe("W5 shared-database precondition", () => {
 		delete process.env.BEADS_DIR;
 	});
 
-	test("isolation with no pinned path is reported", async () => {
-		// The failure this replaces a server with. bd resolves by walking up from the working
-		// directory, `.beads/` is gitignored, so a clone or worktree arrives without one and the
-		// walk continues past the checkout. Measured on this host: `$HOME/.beads` exists.
+	test("isolation with no pinned path pins the database bd resolves", async () => {
+		// The preflight asks bd for the active database and pins that canonical path so every
+		// child inherits it. Linked worktrees may resolve the primary checkout's database;
+		// copied checkouts must not inherit an unrelated ancestor database.
 		await stubOmp(true);
+		await fakeBd();
 		await mkdir(join(cwd, ".beads"), { recursive: true });
-		delete process.env.BEADS_DIR;
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
+		expect(process.env.BEADS_DIR).toBe(await realpath(join(cwd, ".beads")));
+		expect((await bdCalls()).map(call => call[0])).toContain("where");
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
+	});
+
+	test("isolation in a linked worktree pins the primary checkout database", async () => {
+		await stubOmp(true);
+		await fakeBd();
+		const primary = join(cwd, "primary");
+		const linked = join(cwd, "linked");
+		await mkdir(primary);
+		const runGit = async (args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "pipe" });
+			const code = await proc.exited;
+			if (code !== 0) throw new Error(await new Response(proc.stderr).text());
+		};
+		await runGit(["init", primary]);
+		await runGit(["-C", primary, "config", "user.email", "test@example.com"]);
+		await runGit(["-C", primary, "config", "user.name", "Test"]);
+		await runGit(["-C", primary, "commit", "--allow-empty", "-m", "init"]);
+		await runGit(["-C", primary, "worktree", "add", "-b", "linked", linked]);
+		const primaryBeads = join(primary, ".beads");
+		await mkdir(primaryBeads);
+		process.env.ORC_TEST_BD_WHERE = primaryBeads;
+		const rig = harness();
+		resetWatchers();
+
+		await preflightSettings(rig.pi, linked);
+
+		expect(process.env.BEADS_DIR).toBe(await realpath(primaryBeads));
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
+	});
+
+	test("a pin bd refuses is reported with bd's reason", async () => {
+		await stubOmp(true);
+		await fakeBd();
+		process.env.ORC_TEST_BD_FAIL = "where";
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		expect(process.env.BEADS_DIR).toBeUndefined();
 		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("BEADS_DIR is unset");
-		expect(notice).toContain("/orchestrate-run");
+		expect(notice).toContain("BEADS_DIR could not be pinned");
+		expect(notice).toContain("bd could not locate a beads database");
 		// The old remedies are gone with the server they served.
 		expect(notice).not.toContain("bd init --server");
 		expect(notice).not.toContain("per-project Dolt server");
-		expect(notice).not.toContain("bd -C");
 	});
 
 	test("a pinned path silences it", async () => {
@@ -613,8 +657,20 @@ async function fakeBd(): Promise<string> {
 			'const args = process.argv.slice(2);',
 			'appendFileSync(process.env.ORC_TEST_BD_LOG, ">>>\\n" + args.join("\\n") + "\\n");',
 			'if (args[0] === process.env.ORC_TEST_BD_FAIL && (!process.env.ORC_TEST_BD_TARGET || args[1] === process.env.ORC_TEST_BD_TARGET)) process.exit(1);',
+			'const beads = JSON.parse(process.env.ORC_TEST_BD_LIST || "[]");',
+			'if (args[0] === "where") console.log(process.env.ORC_TEST_BD_WHERE);',
+			'if (args[0] === "show") {',
+			'  const source = process.env.ORC_TEST_BD_SHOW ? JSON.parse(process.env.ORC_TEST_BD_SHOW) : beads;',
+			'  console.log(JSON.stringify(source.find(item => item.id === args[1]) || null));',
+			'  process.exit(0);',
+			'}',
+			'if (args[0] === "comments") {',
+			'  const comments = JSON.parse(process.env.ORC_TEST_BD_COMMENTS || "{}");',
+			'  console.log(JSON.stringify(comments[args[1]] || []));',
+			'  process.exit(0);',
+			'}',
+			'if (args[0] === "dep") { console.log("[]"); process.exit(0); }',
 			'if (args[0] === "list") {',
-			'  const beads = JSON.parse(process.env.ORC_TEST_BD_LIST);',
 			'  const index = args.indexOf("--assignee");',
 			'  const matches = index === -1 ? beads : beads.filter(bead => bead.assignee === args[index + 1]);',
 			'  const limitIndex = args.indexOf("--limit");',
@@ -628,6 +684,8 @@ async function fakeBd(): Promise<string> {
 	process.env.BD_BIN = bin;
 	process.env.ORC_TEST_BD_LOG = join(cwd, "bd.log");
 	process.env.ORC_TEST_BD_LIST = "[]";
+	process.env.ORC_TEST_BD_WHERE = join(cwd, ".beads");
+	process.env.ORC_TEST_BD_COMMENTS = "{}";
 	return bin;
 }
 
@@ -659,15 +717,45 @@ interface Harness {
 	failures: string[];
 }
 
-function harness(tools: string[] = ["bash", "read", "task"]): Harness {
+interface ChildHarnessOptions {
+	entries?: unknown[];
+	systemPrompt?: string;
+	resolve?: (spec: string) => unknown;
+	current?: () => unknown;
+}
+
+function harness(
+	tools: string[] = ["bash", "read", "task"],
+	withModels = false,
+	child?: ChildHarnessOptions,
+): Harness {
 	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 	const listeners = new Map<string, Array<(data: unknown) => unknown>>();
 	const sweeps: Array<() => unknown> = [];
 	const messages: Array<Record<string, unknown>> = [];
 	const failures: string[] = [];
+	const timeouts = new Set<() => unknown>();
 
 	const ctx = {
 		cwd,
+		...((withModels || child !== undefined)
+			? {
+				models: {
+					resolve: child?.resolve ?? (() => undefined),
+					...(child?.current === undefined ? {} : { current: child.current }),
+				},
+			}
+			: {}),
+		...(child === undefined
+			? {}
+			: {
+				sessionManager: { getEntries: () => child.entries ?? [] },
+				getSystemPrompt: () => [child.systemPrompt ?? ""],
+			}),
+		setTimeout: (callback: () => unknown) => {
+			timeouts.add(callback);
+			return callback;
+		},
 		setInterval: (callback: () => unknown) => {
 			sweeps.push(callback);
 			return callback;
@@ -675,6 +763,7 @@ function harness(tools: string[] = ["bash", "read", "task"]): Harness {
 		clearTimer: (callback: () => unknown) => {
 			const index = sweeps.indexOf(callback);
 			if (index !== -1) sweeps.splice(index, 1);
+			timeouts.delete(callback);
 		},
 	};
 
@@ -719,7 +808,254 @@ function harness(tools: string[] = ["bash", "read", "task"]): Harness {
 	};
 }
 
+async function coreFixture(name: string, marker: string, model = "@task"): Promise<void> {
+	await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "core-fixture", omp: {} }));
+	await mkdir(join(cwd, "agents"), { recursive: true });
+	await writeFile(
+		join(cwd, "agents", `${name}.md`),
+		`---\nname: ${name}\ndescription: fixture\nmodel: "${model}"\n---\nORC-ROLE: ${marker}\n`,
+	);
+}
+
+function registerFixture(rig: Harness): void {
+	withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+}
+
+describe("assignment enforcement", () => {
+	test("refuses repeated requests for a malformed core assignment but leaves helpers available", async () => {
+		await coreFixture("orc-reviewer", "researcher", "@reviewer");
+		const rig = harness(undefined, true);
+		registerFixture(rig);
+
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const result = await rig.fire("tool_call", { toolName: "task", input: { agent: "orc-reviewer" } });
+			expect(result[0]).toMatchObject({ block: true });
+			expect(String((result[0] as Record<string, unknown>).reason)).toContain("expected reviewer");
+		}
+		expect(
+			rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight"),
+		).toHaveLength(1);
+
+		await coreFixture("orc-helper", "helper", "@task");
+		const helper = harness(undefined, true);
+		registerFixture(helper);
+		expect(await helper.fire("tool_call", { toolName: "task", input: { agent: "orc-helper" } })).toEqual([undefined]);
+	});
+
+	test("checks marker identity and the live model on every worker tool call", async () => {
+		const expected = { provider: "test-provider", id: "task-model" };
+		let current: unknown = expected;
+		const rig = harness(["bash", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-implementer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@task" ? expected : undefined),
+			current: () => current,
+		});
+		registerWatchers(rig.pi);
+		expect(await rig.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+
+		current = { provider: "test-provider", id: "other-model" };
+		const blocked = await rig.fire("tool_call", { toolName: "bash", input: {} });
+		expect(blocked[0]).toMatchObject({ block: true });
+		expect(String((blocked[0] as Record<string, unknown>).reason)).toContain("test-provider/task-model");
+		expect(String((blocked[0] as Record<string, unknown>).reason)).toContain("test-provider/other-model");
+		expect(await rig.fire("tool_call", { toolName: "yield", input: {} })).toEqual([undefined]);
+
+		const mismatched = harness(["read", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-reviewer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@reviewer" ? expected : undefined),
+			current: () => expected,
+		});
+		registerWatchers(mismatched.pi);
+		expect((await mismatched.fire("tool_call", { toolName: "read", input: {} }))[0]).toMatchObject({ block: true });
+
+		const unavailable = harness(["read", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-implementer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@task" ? expected : undefined),
+			current: () => {
+				throw new Error("model registry unavailable");
+			},
+		});
+		registerWatchers(unavailable.pi);
+		const unavailableResult = await unavailable.fire("tool_call", { toolName: "read", input: {} });
+		expect(unavailableResult[0]).toMatchObject({ block: true });
+		expect(String((unavailableResult[0] as Record<string, unknown>).reason)).toContain("model evidence unavailable");
+	});
+
+	test("permits only checked failure reporting and yields with complete retained-claim evidence", async () => {
+		await fakeBd();
+		process.env.BEADS_DIR = cwd;
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "worker-1" }]);
+		const expected = { provider: "test-provider", id: "task-model" };
+		const claims = createClaimState();
+		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
+		const rig = harness(["bash", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-implementer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@task" ? expected : undefined),
+			current: () => ({ provider: "test-provider", id: "wrong-model" }),
+		});
+		registerWatchers(rig.pi, claims);
+
+		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
+		bd.resetReadBudget();
+		let exhausted = false;
+		for (let read = 0; read < 50; read += 1) {
+			if ((await bd.bdShow("bd-claim")) !== null) continue;
+			exhausted = true;
+			break;
+		}
+		expect(exhausted).toBe(true);
+		expect(await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'FAILED assignment mismatch'" } })).toEqual([undefined]);
+		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
+
+		process.env.ORC_TEST_BD_COMMENTS = JSON.stringify({ "bd-claim": [{ text: "FAILED assignment mismatch" }] });
+		expect(await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } })).toEqual([undefined]);
+		expect((await rig.fire("tool_call", { toolName: "yield", input: {} }))[0]).toMatchObject({ block: true });
+
+		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "blocked", assignee: "worker-1" }]);
+		expect(await rig.fire("tool_call", { toolName: "yield", input: {} })).toEqual([undefined]);
+		expect(claims.observedClaim()).toEqual({ actor: "worker-1", beadIds: ["bd-claim"] });
+	});
+
+	test("rejects wrappers, alternate authority, background execution, other beads, and stale ownership", async () => {
+		await fakeBd();
+		process.env.BEADS_DIR = cwd;
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "worker-1" }]);
+		const expected = { provider: "test-provider", id: "task-model" };
+		const claims = createClaimState();
+		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
+		const rig = harness(["bash", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-implementer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@task" ? expected : undefined),
+			current: () => ({ provider: "test-provider", id: "wrong-model" }),
+		});
+		registerWatchers(rig.pi, claims);
+
+		for (const input of [
+			{ command: "bd comment bd-other 'BLOCKED not mine'" },
+			{ command: "bd comment bd-claim 'BLOCKED safe' && bd close bd-claim" },
+			{ command: "sh -c \"bd comment bd-claim 'BLOCKED wrapped'\"" },
+			{ command: "bd comment bd-claim 'BLOCKED $(whoami)'" },
+			{ command: "BEADS_DIR=/tmp/other bd comment bd-claim 'BLOCKED reassigned'" },
+			{ command: "bd --db /tmp/other update bd-claim --status blocked" },
+			{ command: "bd comment bd-claim 'BLOCKED changed cwd'", cwd: join(cwd, "other") },
+			{ command: "bd comment bd-claim 'BLOCKED changed env'", env: { BEADS_DIR: cwd } },
+			{ command: "bd comment bd-claim 'BLOCKED background'", async: true },
+		]) {
+			expect((await rig.fire("tool_call", { toolName: "bash", input }))[0]).toMatchObject({ block: true });
+		}
+
+		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "different-worker" }]);
+		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'BLOCKED stale owner'" } }))[0]).toMatchObject({ block: true });
+		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "closed", assignee: "worker-1" }]);
+		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'BLOCKED terminal claim'" } }))[0]).toMatchObject({ block: true });
+	});
+
+	test("does not consume its way past mismatch refusal and fails closed on unreadable evidence", async () => {
+		await fakeBd();
+		process.env.BEADS_DIR = cwd;
+		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "worker-1" }]);
+		const expected = { provider: "test-provider", id: "task-model" };
+		const claims = createClaimState();
+		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
+		const rig = harness(["bash", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-implementer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@task" ? expected : undefined),
+			current: () => ({ provider: "test-provider", id: "wrong-model" }),
+		});
+		registerWatchers(rig.pi, claims);
+		const exit = createExitGuard(claims);
+		const exitContext = { cwd, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
+
+		for (let attempt = 0; attempt < 5; attempt += 1) {
+			await exit(exitContext, {});
+			expect((await rig.fire("tool_call", { toolName: "yield", input: {} }))[0]).toMatchObject({ block: true });
+		}
+		process.env.ORC_TEST_BD_FAIL = "comments";
+		process.env.ORC_TEST_BD_COMMENTS = JSON.stringify({ "bd-claim": [{ text: "BLOCKED assignment mismatch" }] });
+		expect((await rig.fire("tool_call", { toolName: "yield", input: {} }))[0]).toMatchObject({ block: true });
+		expect(claims.observedClaim()).toEqual({ actor: "worker-1", beadIds: ["bd-claim"] });
+	});
+
+	test("enforces marker-only legacy workers without inventing helper identity", async () => {
+		const expected = { provider: "test-provider", id: "smol-model" };
+		let current = expected;
+		const worker = harness(["bash", "yield"], false, {
+			entries: [{ type: "session_init", task: "legacy worker" }],
+			systemPrompt: "ORC-ROLE: researcher",
+			resolve: spec => (spec === "@smol" ? expected : undefined),
+			current: () => current,
+		});
+		registerWatchers(worker.pi);
+		expect(await worker.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+		current = { provider: "test-provider", id: "wrong" };
+		expect((await worker.fire("tool_call", { toolName: "bash", input: {} }))[0]).toMatchObject({ block: true });
+	});
+});
+
 describe("registerWatchers", () => {
+	test("reports an unresolved discovery defect again in the next session", async () => {
+		await fakeBd();
+		const rig = harness(undefined, true);
+		await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "empty-agent-fixture", omp: {} }));
+		withOmpExtensionRootScope(
+			[cwd], "explicit-only",
+			() => registerWatchers(rig.pi),
+		);
+		const warnings = () => rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight");
+
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(warnings()).toHaveLength(1);
+		expect(warnings()[0]?.content).toContain("orc-architect");
+
+		await rig.fire("session_shutdown", {});
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(warnings()).toHaveLength(2);
+		expect(warnings()[1]?.content).toContain("orc-architect");
+		await rig.fire("session_shutdown", {});
+	});
+
+	test("records an already displayed discovery warning after an epic is bound", async () => {
+		await fakeBd();
+		const rig = harness(undefined, true);
+		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([]);
+
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		const comments = (await bdCalls()).filter(call => call[0] === "comment");
+		expect(comments).toHaveLength(1);
+		expect(comments[0]?.[1]).toBe("bd-1");
+		expect(comments[0]?.[2]).toContain("orc-architect");
+		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
+		await rig.fire("session_shutdown", {});
+	});
+
+	test("a session with no active run starts silently", async () => {
+		// Every lead session in every repository that tracks work in beads used to hear
+		// the contract warnings at start, orchestrated or not. The contract governs runs.
+		await fakeBd();
+		await stubSettings({ "task.isolation.enabled": true });
+		await mkdir(join(cwd, ".beads"), { recursive: true });
+		const rig = harness(undefined, true);
+		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+		await rig.fire("session_start", {});
+		expect(rig.messages).toEqual([]);
+		await rig.fire("session_shutdown", {});
+	});
+
 	test("subscribes nothing before a session starts", async () => {
 		const rig = harness();
 		registerWatchers(rig.pi);

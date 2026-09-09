@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { bdLinkedChecked, bdListChecked, bdRun, commentVerb, metadataString, resetReadBudget } from "../src/bd";
+import { bdLinkedChecked, bdListChecked, bdRun, bdWispListChecked, commentVerb, metadataString, resetReadBudget } from "../src/bd";
 
 describe("bdRun never throws", () => {
 	// The whole reason this wrapper exists: a throw inside a tool_call handler
@@ -120,6 +120,52 @@ describe("read budget", () => {
 			resetReadBudget();
 		}
 	});
+});
+
+describe("checked wisp listing", () => {
+ const spawnResult = (stdout: string, code = 0) => ({
+  stdout: new Response(stdout).body,
+  stderr: new Response("").body,
+  exited: Promise.resolve(code),
+  kill: () => { },
+ } as unknown as Bun.Subprocess);
+
+ test("normalizes the exact empty wisp envelope", async () => {
+  const spawn = spyOn(Bun, "spawn").mockImplementation(() => spawnResult(
+   JSON.stringify({ count: 0, schema_version: 1, wisps: [] }),
+  ));
+  try {
+   resetReadBudget();
+   expect(await bdWispListChecked()).toEqual([]);
+  } finally {
+   spawn.mockRestore();
+  }
+ });
+
+ test.each([
+  { count: 1, schema_version: 1, wisps: [] },
+  { count: 0, schema_version: 1, wisps: {} },
+  { count: 1, schema_version: 1, wisps: [{}] },
+  { count: 0, schema_version: 2, wisps: [] },
+ ])("keeps malformed wisp envelopes unknown: %j", async payload => {
+  const spawn = spyOn(Bun, "spawn").mockImplementation(() => spawnResult(JSON.stringify(payload)));
+  try {
+   resetReadBudget();
+   expect(await bdWispListChecked()).toBeNull();
+  } finally {
+   spawn.mockRestore();
+  }
+ });
+
+ test("keeps a failed wisp listing unknown", async () => {
+  const spawn = spyOn(Bun, "spawn").mockImplementation(() => spawnResult("", 1));
+  try {
+   resetReadBudget();
+   expect(await bdWispListChecked()).toBeNull();
+  } finally {
+   spawn.mockRestore();
+  }
+ });
 });
 
 describe("checked linked evidence", () => {

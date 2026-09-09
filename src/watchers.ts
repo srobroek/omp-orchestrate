@@ -1,10 +1,10 @@
 /**
- * W1-W4 — the runtime watchers.
+ * W1-W5 — the runtime watchers.
  *
- * Four deterministic observers that record and warn but never gate: stall
- * detection, the bd-mutation audit ledger, dispatch preflight, and the goal
- * relay. Enforcement stays with G1 and the reaper; a watcher's worst failure is
- * silence.
+ * Five deterministic observers that record and warn but never gate: stall
+ * detection, the bd-mutation audit ledger, agent and dependency preflight,
+ * the goal relay, and settings checks. Enforcement stays with G1 and the reaper;
+ * a watcher's worst failure is silence.
  *
  * Nothing here throws out of a handler. A throwing `tool_call` handler blocks the
  * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`), and
@@ -21,13 +21,36 @@
  * spawned, never a sibling's.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
+import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import {
+ coreContractForAgent,
+ coreContractForRole,
+ ROLE_MARKER,
+ type AgentDiscoveryFinding,
+ discoverAgentFindings,
+ requestedAgentNames,
+} from "./agent-preflight";
+import {
+ type BdBead,
+ bdCommentsChecked,
+ bdList,
+ bdRun,
+ bdShow,
+ claimedBead,
+ commentVerb,
+ metadataString,
+ resetReadBudget,
+} from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
-import { bdInvocations } from "./shell";
+import { ensureBeadsPath } from "./beads-mode";
+import { createClaimState, type ClaimObservation, type ClaimState } from "./claim-state";
+import { bdInvocations, effectiveSegments, parseBdInvocation } from "./shell";
+type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
+ Partial<Pick<ExtensionContext, "models">>;
 
 /**
  * Bus channels, as `task/types.ts:59-65`, `mcp/startup-events.ts:4`, and
@@ -43,6 +66,7 @@ const LSP_STARTUP_CHANNEL = "lsp:startup";
 /** Custom-message types for the plugin's notices, namespaced as its others are. */
 const GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
+const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
 
 /**
  * Model roles this plugin's agents name that OMP does NOT ship.
@@ -52,8 +76,8 @@ const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-prefli
  * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
  * unconfigured alias without warning -- so the run must announce it instead.
  *
- * `reviewer` is here because a critic must not share the model family it judges, and no
- * built-in expresses that: `slow` and `plan` are the authoring tier.
+ * `reviewer` gives the independent review agent its own configurable model selection.
+ * Model-family separation is optional and requires an explicit model choice.
  *
  * `test/declared-surface.json` carries the same list and the suite asserts they agree.
  */
@@ -226,8 +250,14 @@ async function reportStall(flag: StallFlag): Promise<void> {
   report.commented = true;
  }
  const result = await bdRun([
-  "create", report.notice, "--ephemeral", "--wisp-type", "error",
-  "--deps", `relates-to:${report.bead}`, "--silent",
+  "create",
+  report.notice,
+  "--ephemeral",
+  "--wisp-type",
+  "error",
+  "--deps",
+  `relates-to:${report.bead}`,
+  "--silent",
  ]);
  if (result?.code === 0) state.flagged = true;
 }
@@ -535,6 +565,241 @@ async function warnPreflight(cwd: string, atMs: number): Promise<void> {
  await bdRun(["comment", epic, `WARN preflight: ${items.join(", ")} degraded`]);
 }
 
+const AGENT_PREFLIGHT_TIMEOUT_MS = 10_000;
+
+function findingKey(finding: AgentDiscoveryFinding): string {
+ return `${finding.agent}\0${finding.message}\0${finding.path ?? ""}`;
+}
+
+interface SessionInitIdentity {
+ agent?: unknown;
+}
+
+function modelIdentity(model: unknown): string | undefined {
+ if (model === null || typeof model !== "object") return undefined;
+ const record = model as Record<string, unknown>;
+ return typeof record.provider === "string" && typeof record.id === "string"
+  ? `${record.provider}/${record.id}`
+  : undefined;
+}
+
+const FAILURE_VERBS: Record<string, true> = { BLOCKED: true, FAILED: true };
+const FAILURE_REPORT_INPUT_KEYS: Record<string, true> = { command: true, cwd: true, i: true, timeout: true };
+
+/** Unknown ownership, status, or comments never count as durable failure evidence. */
+async function hasMismatchFailureEvidence(claim: ClaimObservation): Promise<boolean> {
+ for (const beadId of claim.beadIds) {
+  const bead = await bdShow(beadId);
+  if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "blocked") return false;
+  const comments = await bdCommentsChecked(beadId);
+  if (comments === null || !comments.some(comment => FAILURE_VERBS[commentVerb(comment.text)] === true)) return false;
+ }
+ return true;
+}
+
+/**
+ * Allow only direct, pinned failure-report writes after fresh ownership reads.
+ * Wrappers, substitutions, alternate environments, background execution, and
+ * mutations of any bead outside this session's claim are refused.
+ */
+async function safeFailureReport(
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+ sourceCwd: string,
+): Promise<boolean> {
+ if (toolName !== "bash" || claim === undefined || claim.beadIds.length === 0) return false;
+ if (input === null || typeof input !== "object") return false;
+ const record = input as Record<string, unknown>;
+ if (Object.keys(record).some(key => FAILURE_REPORT_INPUT_KEYS[key] !== true)) return false;
+ if (Object.hasOwn(record, "cwd") && record.cwd !== sourceCwd) return false;
+ const beadsDir = process.env.BEADS_DIR;
+ if (beadsDir === undefined || !path.isAbsolute(beadsDir)) return false;
+
+ const command = record.command;
+ if (typeof command !== "string" || command.length === 0 || /[`$]/.test(command)) return false;
+ const comment = /^bd[ \t]+comment[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+'((?:BLOCKED|FAILED)[ \t]+[^'\r\n]+)'[ \t]*$/.exec(command);
+ const update = /^bd[ \t]+update[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+--status[ \t]+blocked[ \t]*$/.exec(command);
+ const beadId = comment?.[1] ?? update?.[1];
+ if (beadId === undefined || !claim.beadIds.includes(beadId)) return false;
+
+ const segments = effectiveSegments(command);
+ if (segments.length !== 1) return false;
+ const invocation = parseBdInvocation(segments[0]!);
+ if (invocation === null || invocation.assignments.size !== 0 || invocation.hasClaim || invocation.positionals[0] !== beadId) {
+  return false;
+ }
+ if (comment !== null && (invocation.subcommand !== "comment" || invocation.positionals.length < 2)) return false;
+ if (
+  update !== null &&
+  (invocation.subcommand !== "update" ||
+   invocation.positionals.length !== 2 ||
+   invocation.positionals[1] !== "blocked" ||
+   invocation.rest.length !== 4)
+ ) return false;
+
+ const bead = await bdShow(beadId);
+ if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "in_progress") return false;
+ if (comment !== null) return true;
+ const comments = await bdCommentsChecked(beadId);
+ return comments !== null && comments.some(entry => FAILURE_VERBS[commentVerb(entry.text)] === true);
+}
+
+async function allowMismatchTool(
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+ sourceCwd: string,
+): Promise<boolean> {
+ try {
+  if (await safeFailureReport(toolName, input, claim, sourceCwd)) return true;
+  if (toolName !== "yield") return false;
+  if (claim === undefined || claim.beadIds.length === 0) return true;
+  return await hasMismatchFailureEvidence(claim);
+ } catch {
+  return false;
+ }
+}
+
+function mismatchRefusal(reason: string): ToolCallEventResult {
+ return {
+  block: true,
+  reason: `${reason}. To preserve this claim for recovery, run exactly \`bd comment <claimed-id> 'BLOCKED <reason>'\` (or \`'FAILED <reason>'\`), then \`bd update <claimed-id> --status blocked\`. No wrappers, flags, environment changes, or other bead writes are allowed; the claim remains held.`,
+ };
+}
+
+/**
+ * Enforce the assignment contract inside spawned workers.
+ *
+ * Task and eval children use the same `tool_call` seam. The current model is
+ * checked on every call, so a later model switch cannot evade the contract.
+ * This seam runs before tools, not before the initial model invocation.
+ */
+export async function childAssignmentGate(
+ pi: ExtensionAPI,
+ ctx: ExtensionContext,
+ toolName: string,
+ input: unknown,
+ claim: ClaimObservation | undefined,
+): Promise<ToolCallEventResult | undefined> {
+ if (sessionRole(pi) !== "worker") return undefined;
+ if (
+  ctx.sessionManager === undefined ||
+  typeof ctx.sessionManager.getEntries !== "function" ||
+  ctx.models === undefined ||
+  typeof ctx.models.resolve !== "function" ||
+  typeof ctx.models.current !== "function" ||
+  typeof ctx.getSystemPrompt !== "function"
+ ) return undefined;
+
+ const entries = ctx.sessionManager.getEntries();
+ let init: SessionInitIdentity | undefined;
+ for (let index = entries.length - 1; index >= 0; index -= 1) {
+  const entry = entries[index];
+  if (entry !== null && typeof entry === "object" && "type" in entry && entry.type === "session_init") {
+   init = entry as SessionInitIdentity;
+   break;
+  }
+ }
+ const namedAgent = typeof init?.agent === "string" && init.agent.length > 0 ? init.agent : undefined;
+ const namedContract = namedAgent === undefined ? undefined : coreContractForAgent(namedAgent);
+ if (namedAgent !== undefined && namedContract === undefined) return undefined;
+
+ const marker = ROLE_MARKER.exec(ctx.getSystemPrompt().join("\n"))?.[1];
+ const contract = namedContract ?? coreContractForRole(marker ?? "");
+ if (contract === undefined) return undefined;
+ const sourceAgent = namedAgent ?? `marker-only (${contract.role})`;
+
+ if (namedContract !== undefined && marker !== namedContract.role) {
+  const reason = `ORC assignment refused for ${sourceAgent}: expected ORC-ROLE ${namedContract.role}, actual ${marker ?? "missing"}; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+
+ let expectedIdentity: string | undefined;
+ let actualIdentity: string | undefined;
+ try {
+  expectedIdentity = modelIdentity(ctx.models.resolve(namedContract?.modelAlias ?? contract.modelAlias));
+  actualIdentity = modelIdentity(ctx.models.current());
+ } catch {
+  const reason = `ORC assignment refused for ${sourceAgent}: model evidence unavailable; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+ if (expectedIdentity === undefined || expectedIdentity !== actualIdentity) {
+  const reason = `ORC assignment refused for ${sourceAgent}: expected model ${expectedIdentity ?? contract.modelAlias}, actual ${actualIdentity ?? "unavailable"}; source agent ${sourceAgent}`;
+  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
+  return mismatchRefusal(reason);
+ }
+ return undefined;
+}
+function findingLine(finding: AgentDiscoveryFinding): string {
+ return `${finding.agent}: ${finding.message}${finding.path === undefined ? "" : ` (${finding.path})`}`;
+}
+
+/**
+ * Check core and explicitly requested agent definitions without changing spawn policy.
+ * When the runtime exposes effective roots, callers can pass them to the discovery
+ * helper; ExtensionContext currently exposes no roots field, so the watcher delegates
+ * to OMP's initialized discovery scope and otherwise reports what that scope resolves.
+ */
+export async function preflightAgents(
+ pi: ExtensionAPI,
+ ctx: AgentPreflightContext,
+ requested: readonly string[] = [],
+ reportedAgentFindings?: Set<string>,
+): Promise<AgentDiscoveryFinding[]> {
+ if (ctx.models === undefined) return [];
+ const settings = await readSettings(ctx.cwd);
+ const rawOverrides = settings["task.agentModelOverrides"];
+ const modelOverrides =
+  rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
+   ? (rawOverrides as Record<string, unknown>)
+   : {};
+ let rejectTimeout: (reason: Error) => void = () => { };
+ const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
+  rejectTimeout = reason => reject(reason);
+ });
+ const timer = ctx.setTimeout(() => rejectTimeout(new Error("agent discovery timed out")), AGENT_PREFLIGHT_TIMEOUT_MS);
+ try {
+  const findings = await Promise.race([discoverAgentFindings(ctx, requested, modelOverrides), timeout]).catch(
+   (error): AgentDiscoveryFinding[] => [{
+    agent: "discovery",
+    message: `unavailable: ${error instanceof Error ? error.message : String(error)}`,
+   }],
+  );
+  const fresh = findings.filter(finding => {
+   const key = findingKey(finding);
+   if (reportedAgentFindings?.has(key)) return false;
+   reportedAgentFindings?.add(key);
+   return true;
+  });
+  if (fresh.length > 0) {
+   pi.sendMessage({
+    customType: AGENT_PREFLIGHT_MESSAGE,
+    content: ["WARN agents: runtime discovery is incomplete or inconsistent.", ...fresh.map(finding => `- ${findingLine(finding)}`)].join("\n"),
+    display: true,
+   });
+  }
+  if (findings.length === 0) return findings;
+  const epic = await boundEpic(ctx.cwd);
+  if (epic !== undefined) {
+   const pending = findings.filter(finding => !reportedAgentFindings?.has(`epic:${epic}\0${findingKey(finding)}`));
+   if (pending.length > 0) {
+    const keys = pending.map(finding => `epic:${epic}\0${findingKey(finding)}`);
+    for (const key of keys) reportedAgentFindings?.add(key);
+    const result = await bdRun(["comment", epic, `WARN agents: ${pending.map(findingLine).join("; ")}`], undefined, ctx.cwd);
+    if (result?.code !== 0) {
+     for (const key of keys) reportedAgentFindings?.delete(key);
+    }
+   }
+  }
+  return findings;
+ } finally {
+  ctx.clearTimer(timer);
+ }
+}
+
 // ============================================================================
 // W4 — goal relay
 // ============================================================================
@@ -591,7 +856,13 @@ export function runEpics(epics: readonly BdBead[], runId: string | undefined): B
  * Extensions have no IRC API, so the live half is a one-line notice in the lead's
  * own transcript; the content is already durable on the beads.
  */
-async function deliverGoal(pi: ExtensionAPI, cwd: string, queue: GoalQueue, goal: GoalNotice, refresh: boolean): Promise<void> {
+async function deliverGoal(
+ pi: ExtensionAPI,
+ cwd: string,
+ queue: GoalQueue,
+ goal: GoalNotice,
+ refresh: boolean,
+): Promise<void> {
  resetReadBudget();
  const runId = await boundEpic(cwd);
  if (runId === undefined || queue.latest !== goal) return;
@@ -601,7 +872,11 @@ async function deliverGoal(pi: ExtensionAPI, cwd: string, queue: GoalQueue, goal
   queue.deliveries.set(runId, delivery);
  }
  if (delivery.complete && !refresh) return;
- const open = await bdList(["list", "--type", "epic", "--status", "open,in_progress", "--limit", "0", "--json"], undefined, cwd);
+ const open = await bdList(
+  ["list", "--type", "epic", "--status", "open,in_progress", "--limit", "0", "--json"],
+  undefined,
+  cwd,
+ );
  const targets = runEpics(open, runId);
  if (targets.length === 0 || queue.latest !== goal) return;
  delivery.complete = false;
@@ -650,8 +925,13 @@ async function relayGoal(pi: ExtensionAPI, cwd: string, goal: GoalNotice | null)
  if (queue === undefined) {
   queue = { latest: goal === null ? null : { ...goal }, running: undefined, deliveries: new Map() };
   goalQueues.set(cwd, queue);
- } else if (goal === null || queue.latest === null || goal.id !== queue.latest.id ||
-  goal.status !== queue.latest.status || goal.objective !== queue.latest.objective) {
+ } else if (
+  goal === null ||
+  queue.latest === null ||
+  goal.id !== queue.latest.id ||
+  goal.status !== queue.latest.status ||
+  goal.objective !== queue.latest.objective
+ ) {
   queue.latest = goal === null ? null : { ...goal };
   queue.deliveries.clear();
  }
@@ -717,7 +997,8 @@ const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
   key: "task.isolation.merge",
   want: "branch",
   satisfied: value => value === "branch",
-  consequence: "commits are replayed as a patch instead of captured as a branch, so no omp/task/<id> branch survives to integrate or to recover after a crash",
+  consequence:
+   "commits are replayed as a patch instead of captured as a branch, so no omp/task/<id> branch survives to integrate or to recover after a crash",
  },
  {
   key: "task.isolation.apply",
@@ -742,7 +1023,8 @@ const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
   key: "bash.autoBackground.enabled",
   want: "false",
   satisfied: value => value === false,
-  consequence: "slow claim commands can auto-background, so their completion bypasses the tool_result observer and the worker's claim is not adopted",
+  consequence:
+   "slow claim commands can auto-background, so their completion bypasses the tool_result observer and the worker's claim is not adopted",
  },
 ];
 
@@ -790,7 +1072,7 @@ async function readSettings(cwd: string): Promise<Record<string, unknown>> {
    const parsed: unknown = JSON.parse(stdout);
    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
    const observed: Record<string, unknown> = {};
-   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles"]) {
+   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles", "task.agentModelOverrides"]) {
     const entry: unknown = (parsed as Record<string, unknown>)[key];
     if (entry !== null && typeof entry === "object" && "value" in entry) observed[key] = entry.value;
    }
@@ -833,36 +1115,33 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  // Only an observed true proves isolation is on; an unavailable setting
  // cannot establish that this repository risks a split database.
  const isolating = observed["task.isolation.enabled"] === true;
- // A repository with no beads database has no claims to split, so the precondition
- // does not apply and saying so is noise. Observed in the field: this fired in a
- // repository that had never run `bd init`, where the advice was unactionable.
- const tracked = await fs
-  .stat(path.join(cwd, ".beads"))
-  .then(entry => entry.isDirectory())
-  .catch(() => false);
- // Under an embedded database the precondition is a pinned PATH, not a server. bd resolves
- // by walking up from the working directory, `.beads/` is gitignored, so a clone or worktree
- // arrives without one and the walk continues past the checkout. Measured on this host:
- // `$HOME/.beads` exists, so the walk can end in a personal database that no run reads.
+ // Probe through bd itself instead of looking only for cwd/.beads. Linked worktrees share the
+ // primary checkout's database and intentionally have no local .beads directory.
+ // Under an embedded database the precondition is a pinned path, not a server. A copied
+ // checkout can resolve a private or unrelated ancestor database because `.beads/` is
+ // gitignored. A linked worktree resolves the primary checkout's database but still needs
+ // the pin so every child inherits the same answer.
  //
- // An earlier version of this line demanded a per-project Dolt server instead. That server
+ // The pin is applied here rather than demanded of the operator. `ensureBeadsPath` asks bd
+ // for the active database, accepts the checkout or its Git-shared primary database, rejects
+ // unrelated external databases, and exports the canonical path. Only refusal merits a line.
+ //
+ // An earlier version of this block demanded a per-project Dolt server instead. That server
  // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
  // rather than from the port, so a removed pid file made every later call start a rival --
  // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
- if (tracked && isolating && (process.env.BEADS_DIR ?? "") === "") {
-  lines.push(
-   "isolation is on and BEADS_DIR is unset, so an isolated worker resolves its own beads database rather than this run's. bd walks up from the working directory and `.beads/` is gitignored, so a clone or worktree arrives without one and the walk can end in a personal database. `/orchestrate-run` pins the run's path for this session and every child it spawns",
-  );
+ if (isolating && (process.env.BEADS_DIR ?? "") === "") {
+  const pinned = await ensureBeadsPath(cwd);
+  if (!pinned.ok) {
+   lines.push(
+    `isolation is on and BEADS_DIR could not be pinned, so an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+   );
+  }
  }
 
- // `orc-reviewer` names `@reviewer`, which is NOT one of OMP's ten built-in roles. An
- // alias OMP cannot resolve returns undefined with NO warning and falls back to the
- // session default, so an unconfigured consumer would silently run its reviewer on the
- // author's own model -- losing the family separation the role exists to provide.
- //
- // Announced here because a prerequisite that fails silently is the defect this whole
- // preflight exists to prevent. `test/declared-surface.json` holds the same list, and
- // the suite asserts the two agree, so neither can drift alone.
+ // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
+ // may fall back to the session model or fail selection. Preflight checks that the
+ // selection exists, not whether author and reviewer use different model families.
  //
  // An UNREADABLE setting is skipped, matching this function's rule of warning only
  // about what it can prove. An empty object is not unreadable: it proves the role is
@@ -872,14 +1151,15 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   for (const role of DECLARED_MODEL_ROLES) {
    if (Object.hasOwn(roles, role)) continue;
    lines.push(
-    `modelRoles.${role} is not configured, so \`@${role}\` resolves to nothing and the agent naming it silently runs the session default -- add it, or accept that a critic shares the family it judges`,
+    `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
    );
   }
  }
 
  if (lines.length === 0) return deviations;
 
- const tail = "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.";
+ const tail =
+  "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.";
 
  pi.sendMessage({
   customType: SETTINGS_PREFLIGHT_MESSAGE,
@@ -905,22 +1185,27 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  * the two extension-event handlers are `pi.on` registrations, so importing this
  * module has no observable effect.
  */
-export function registerWatchers(pi: ExtensionAPI): void {
+export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createClaimState()): void {
+ // Lifecycle handlers can run after construction's async scope has ended.
+ const runInDiscoveryScope = AsyncLocalStorage.snapshot();
+ let reportedAgentFindings = new Set<string>();
  let dispose = () => { };
  pi.on("session_start", async (_event, ctx) => {
   dispose();
+  reportedAgentFindings = new Set<string>();
   const unsubscribers: Array<() => void> = [];
   dispose = () => {
    for (const unsubscribe of unsubscribers) unsubscribe();
   };
   const cwd = ctx.cwd;
-
   // W1. `progress.id` names the child; `Date.now()` is the only clock the
   // live watcher needs, and the sweep takes its own so it can be exercised.
-  unsubscribers.push(pi.events.on(PROGRESS_CHANNEL, data => {
-   const sample = progressSample(data);
-   if (sample !== undefined) noteProgress(sample, Date.now());
-  }));
+  unsubscribers.push(
+   pi.events.on(PROGRESS_CHANNEL, data => {
+    const sample = progressSample(data);
+    if (sample !== undefined) noteProgress(sample, Date.now());
+   }),
+  );
   // Returning the promise is deliberate: the managed timer contains a
   // rejection only when it can see one (`managed-timers.ts:66-75`).
   const timer = ctx.setInterval(async () => {
@@ -934,28 +1219,38 @@ export function registerWatchers(pi: ExtensionAPI): void {
   // W5. The isolation contract is a session setting, so it is checked once, in
   // the session that spawns. A worker inherits whatever the lead was given and
   // cannot change it, so warning there would only duplicate the notice.
-  if (sessionRole(pi) === "lead") {
+  //
+  // Checked at start only where a run is already active: the contract governs
+  // orchestrated runs, and a repository that merely tracks work in beads has no
+  // claims to split until one starts. `/orchestrate-run` runs the settings check
+  // at activation, and the `task` handler below checks agents at spawn, so a
+  // session that never orchestrates hears nothing.
+  if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
+   runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
+    logFailure(pi, "agent discovery preflight", error),
+   );
   }
-
   // W2. Passive provenance of every child's bead mutations. A bus handler is
   // handed no context, so the ledger is rooted at the session's cwd as it was
   // at start; a run that relocates names its directory through `setAuditDir`,
   // which is why the path is resolved per write rather than captured here.
-  unsubscribers.push(pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
-   const mutation = bdMutationEvent(data);
-   if (mutation === undefined) return;
-   try {
-    await appendAudit(auditDir(cwd), {
-     ts: new Date().toISOString(),
-     child: mutation.child,
-     argv: mutation.command,
-     exitCode: mutation.exitCode,
-    });
-   } catch (error) {
-    logFailure(pi, "audit ledger", error);
-   }
-  }));
+  unsubscribers.push(
+   pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
+    const mutation = bdMutationEvent(data);
+    if (mutation === undefined) return;
+    try {
+     await appendAudit(auditDir(cwd), {
+      ts: new Date().toISOString(),
+      child: mutation.child,
+      argv: mutation.command,
+      exitCode: mutation.exitCode,
+     });
+    } catch (error) {
+     logFailure(pi, "audit ledger", error);
+    }
+   }),
+  );
 
   // W3, first half: watch what degrades.
   unsubscribers.push(pi.events.on(MCP_STATUS_CHANNEL, noteMcpStatus));
@@ -964,18 +1259,30 @@ export function registerWatchers(pi: ExtensionAPI): void {
  pi.on("session_shutdown", () => dispose());
 
  /**
-  * W3, second half: observe `task` spawns.
-  *
-  * A handler of its own, separate from the gate dispatcher: every registered
-  * handler runs (`extensions/runner.ts:1462-1470`), and this one returns nothing
-  * on every path, so a degraded dependency can never become a reason a wave does
-  * not launch.
+  * W3, second half: enforce core assignments before observing `task` spawns.
+  * Warning dedupe never weakens refusal: a known bad core request blocks every
+  * invocation, while the narrow durable failure path preserves its claim.
   */
  pi.on("tool_call", async (event, ctx) => {
-  if (event.toolName !== "task") return undefined;
   try {
    resetReadBudget();
+   const assignment = await childAssignmentGate(pi, ctx, event.toolName, event.input, claims.observedClaim());
+   if (assignment) return assignment;
+   if (event.toolName !== "task") return undefined;
+   const requested = requestedAgentNames(event.input);
+   const findings = await runInDiscoveryScope(() =>
+    preflightAgents(pi, ctx, requested, reportedAgentFindings),
+   );
+   const requestedCoreFindings = findings.filter(
+    finding => requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined,
+   );
    await warnPreflight(ctx.cwd, Date.now());
+   if (requestedCoreFindings.length > 0) {
+    return {
+     block: true,
+     reason: `requested core assignment refused: ${requestedCoreFindings.map(findingLine).join("; ")}`,
+    };
+   }
   } catch (error) {
    logFailure(pi, "preflight warning", error);
   }

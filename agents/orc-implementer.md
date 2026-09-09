@@ -16,11 +16,12 @@ Run this pull alone in the foreground under the injected dispatch contract:
     bd ready --parent <epic> --metadata-field role=implementer --unassigned --claim --json
 
 Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop rules.
-Work only in the bead's `metadata.worktree` or its assigned isolated copy, inside `metadata.scope`.
+In an isolated task, write and commit only inside the assigned isolated checkout, within `metadata.scope`. Never switch to the original `metadata.worktree`; that path identifies source ownership, not a second permitted write destination. If the isolated checkout lacks the claimed source, report BLOCKED before editing.
+In a non-isolated task, work only inside the claimed `metadata.worktree` and `metadata.scope`.
 
 ## Task
 
-1. Read the bead and verify cited code before editing. Report drift when the brief disagrees with the implementation; do not redo work already present.
+1. After claiming, inspect the bead, cited source, and relevant tests in one read wave. Verify citations against current code; report drift instead of redoing completed work. Do not poll unchanged bead or file state.
 2. Implement within scope. A required out-of-scope change → stop and ask the architect to widen or split ownership, never silently edit a sibling's files.
 3. Run the acceptance criteria's verification and report actual results. Never claim success over failed verification.
 4. Commit in your isolated workspace; never push. Successful task completion captures `omp/task/<id>` with apply=false for architect integration. A failed isolated task may lose even committed work; an early commit is not a recovery checkpoint.
@@ -28,9 +29,11 @@ Work only in the bead's `metadata.worktree` or its assigned isolated copy, insid
 
 ## Reporting contract
 
-Follow the injected dispatch contract for actor identity and evidence semantics. Before yielding, record:
-- git work: final `metadata.head_sha`; parent-side capture is verified after successful task completion;
+Follow the injected dispatch contract for actor identity and evidence semantics. Persist terminal evidence, reviewer handoff, and release as one final mutation batch where `bd` command semantics permit; claim and release checks remain separate. Before yielding, record:
+- bead id and changed paths;
+- git work: final `metadata.head_sha`, with parent-side capture verified only after successful task completion;
 - non-git work: `metadata.output_ref`, with artifacts inside stamped `artifacts_dir`;
+- exact verification command and result;
 - `agent:reviewer`, cleared assignee, and `REPORTED`.
 
 NOT Close the bead or write `merge_sha` or `pr`.
@@ -49,4 +52,4 @@ Before filing a pre-existing out-of-scope defect, LOAD `skill://orchestrate/refe
 ## Output
 
 Begin your reply with `VERDICT: REPORTED|BLOCKED|FAILED — <reason>`; empty pulls return NO_WORK.
-CAP 100w. Return only the receipt; never reprint code, diffs, file contents, the assignment or bead history.
+CAP 100w. Return one receipt containing only bead id, changed paths or artifact ref, head SHA when applicable, and verification result. Never reprint code, diffs, file contents, the assignment, progress, or bead history.

@@ -13,11 +13,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
-import { forgetClaim, observedClaim, recordClaim } from "../src/claim-state";
+import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
 
 /** Beads `bdShow` resolves, by id. A missing key models an unreadable bead. */
 let beads: Record<string, BdBead>;
+let claims = createClaimState();
 /** What `bd list --label orc-node --status in_progress` reports. */
 let inFlight: BdBead[];
 let shown: string[];
@@ -54,43 +55,43 @@ beforeEach(() => {
  inFlight = [];
  shown = [];
  listed = [];
- forgetClaim();
+ claims = createClaimState();
 });
 
-afterEach(forgetClaim);
+
 
 describe("G5 acquisition lifecycle", () => {
  test("explicit async claims are refused without blocking ordinary async reads", async () => {
-  expect((await gateClaimEligibility(ctxFor("implementer"), {
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "bd ready --claim --json", async: true,
   }))?.block).toBe(true);
-  expect(await gateClaimEligibility(ctxFor("implementer"), {
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "bd show orc-1 --json", async: true,
   })).toBeUndefined();
  });
  test("a live claim blocks a second named claim and queue acquisition but permits a same-bead retry", async () => {
-  recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
+  claims.recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
   beads["orc-1"] = bead("orc-1", { status: "in_progress", assignee: "impl-1" });
-  expect((await gateClaimEligibility(ctxFor("implementer"), { command: "bd update orc-2 --claim" }))?.block).toBe(true);
-  expect((await gateClaimEligibility(ctxFor("implementer"), { command: "bd ready --claim --json" }))?.block).toBe(true);
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: "bd update orc-1 --claim" })).toBeUndefined();
-  expect(observedClaim()?.beadIds).toEqual(["orc-1"]);
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-2 --claim" }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd ready --claim --json" }))?.block).toBe(true);
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-1 --claim" })).toBeUndefined();
+  expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
  });
 
  test("an unreadable previous owner blocks new acquisitions but not ordinary tools", async () => {
-  recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
-  expect((await gateClaimEligibility(ctxFor("implementer"), { command: "bd update orc-2 --claim" }))?.block).toBe(true);
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: "bd show orc-1 --json" })).toBeUndefined();
-  expect(observedClaim()?.beadIds).toEqual(["orc-1"]);
+  claims.recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-2 --claim" }))?.block).toBe(true);
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd show orc-1 --json" })).toBeUndefined();
+  expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
  });
 
  test("verified release permits the next claim without mutating Beads", async () => {
-  recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
+  claims.recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
   beads["orc-1"] = bead("orc-1", { status: "open", assignee: "" });
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: "bd update orc-2 --claim" })).toBeUndefined();
-  expect(observedClaim()).toBeUndefined();
-  recordClaim({ actor: "impl-1", beadIds: ["orc-2"] });
-  expect(observedClaim()?.beadIds).toEqual(["orc-2"]);
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-2 --claim" })).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
+  claims.recordClaim({ actor: "impl-1", beadIds: ["orc-2"] });
+  expect(claims.observedClaim()?.beadIds).toEqual(["orc-2"]);
  });
 
  test("separate claiming leaves and option-interleaved targets are refused", async () => {
@@ -99,9 +100,9 @@ describe("G5 acquisition lifecycle", () => {
    "bd update orc-1 --json orc-2 --claim",
    "bd update orc-1 --parent orc-parent orc-2 --claim",
   ]) {
-   expect((await gateClaimEligibility(ctxFor("implementer"), { command }))?.block).toBe(true);
+   expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command }))?.block).toBe(true);
   }
-  expect(await gateClaimEligibility(ctxFor("implementer"), {
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "bd update orc-1 --parent orc-parent --claim",
   })).toBeUndefined();
  });
@@ -109,7 +110,7 @@ describe("G5 acquisition lifecycle", () => {
 
 describe("G5 role routing", () => {
  test("routing writes after newlines and comments are refused", async () => {
-  const result = await gateClaimEligibility(ctxFor("implementer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "printf ready\n# explanation\nbd update orc-1 --set-metadata role=reviewer",
   });
   expect(result?.block).toBe(true);
@@ -117,7 +118,7 @@ describe("G5 role routing", () => {
  test("refuses a reviewer claiming an implementer bead, naming both roles", async () => {
   beads["orc-7"] = bead("orc-7", { labels: ["orc-node", "agent:implementer"] });
 
-  const result = await gateClaimEligibility(ctxFor("reviewer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("reviewer"), {
    command: "BEADS_ACTOR=orc-rev-1 bd update orc-7 --claim",
   });
 
@@ -126,19 +127,19 @@ describe("G5 role routing", () => {
   expect(result?.reason).toContain("agent:implementer");
   expect(result?.reason).toContain("reviewer");
   // A refused claim is not recorded: the session holds nothing.
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("allows a claim of a bead routed to this session's own role", async () => {
   beads["orc-7"] = bead("orc-7", { labels: ["agent:reviewer"] });
 
   expect(
-   await gateClaimEligibility(ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update orc-7 --claim" }),
+   await gateClaimEligibility(claims, ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update orc-7 --claim" }),
   ).toBeUndefined();
  });
 
  test("refuses a ready --claim against another role's queue without any lookup", async () => {
-  const result = await gateClaimEligibility(ctxFor("reviewer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("reviewer"), {
    command: "bd ready --label agent:implementer --unassigned --claim --json",
   });
 
@@ -151,14 +152,14 @@ describe("G5 role routing", () => {
  test.each(["--label", "-l", "--label-any"])(
   "allows a ready --claim on this session's own queue via %s with no bead lookup",
   async flag => {
-   const result = await gateClaimEligibility(ctxFor("implementer"), {
+   const result = await gateClaimEligibility(claims, ctxFor("implementer"), {
     command: `BEADS_ACTOR=orc-impl-1 bd ready ${flag} agent:implementer --unassigned --claim --json`,
    });
 
    expect(result).toBeUndefined();
    // The queue filter already pins the role, so beads never has to answer.
    expect(shown).toEqual([]);
-   expect(observedClaim()).toBeUndefined();
+   expect(claims.observedClaim()).toBeUndefined();
   },
  );
 });
@@ -170,7 +171,7 @@ describe("G5 fail-open", () => {
   beads["orc-9"] = bead("orc-9", { labels: ["orc-node", "kind:incidental"] });
 
   expect(
-   await gateClaimEligibility(ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update orc-9 --claim" }),
+   await gateClaimEligibility(claims, ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update orc-9 --claim" }),
   ).toBeUndefined();
  });
 
@@ -179,52 +180,52 @@ describe("G5 fail-open", () => {
   // by id. Resolving it is a hole closed, not fail-open behaviour lost.
   beads["orc-9"] = bead("orc-9", { labels: ["orc-node", "agent:integrator"] });
 
-  const result = await gateClaimEligibility(ctxFor("reviewer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("reviewer"), {
    command: "BEADS_ACTOR=orc-rev-1 bd update orc-9 --claim",
   });
 
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("agent:integrator");
   expect(
-   await gateClaimEligibility(ctxFor("shepherd"), { command: "BEADS_ACTOR=orc-shep-1 bd update orc-9 --claim" }),
+   await gateClaimEligibility(claims, ctxFor("shepherd"), { command: "BEADS_ACTOR=orc-shep-1 bd update orc-9 --claim" }),
   ).toBeUndefined();
  });
 
  test("an unreadable bead allows the claim, and records nothing", async () => {
   expect(
-   await gateClaimEligibility(ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update ghost-1 --claim" }),
+   await gateClaimEligibility(claims, ctxFor("reviewer"), { command: "BEADS_ACTOR=orc-rev-1 bd update ghost-1 --claim" }),
   ).toBeUndefined();
   expect(shown).toEqual(["ghost-1"]);
   // It used to record here, reasoning that the worktree gate needed the observation
   // even from a claim it could not evaluate. That recorded a bead the call had not
   // yet acquired. The claim report arms G2 now, so a failing claim arms nothing.
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a session declaring no role is not evaluated against routing", async () => {
   beads["orc-7"] = bead("orc-7", { labels: ["agent:implementer"] });
 
   expect(
-   await gateClaimEligibility(ctxFor(), { command: "BEADS_ACTOR=helper-1 bd update orc-7 --claim" }),
+   await gateClaimEligibility(claims, ctxFor(), { command: "BEADS_ACTOR=helper-1 bd update orc-7 --claim" }),
   ).toBeUndefined();
  });
 
  test("a role-less session may pull from any queue", async () => {
   expect(
-   await gateClaimEligibility(ctxFor(), { command: "bd ready --label agent:implementer --claim --json" }),
+   await gateClaimEligibility(claims, ctxFor(), { command: "bd ready --label agent:implementer --claim --json" }),
   ).toBeUndefined();
  });
 
  test("ignores a command with no bd --claim in it", async () => {
   for (const command of ["bd show orc-7 --json", "git status", "", "bd update orc-7 --status closed"]) {
-   expect(await gateClaimEligibility(ctxFor("reviewer"), { command })).toBeUndefined();
+   expect(await gateClaimEligibility(claims, ctxFor("reviewer"), { command })).toBeUndefined();
   }
   expect(shown).toEqual([]);
  });
 
  test("ignores a missing or non-string command", async () => {
-  expect(await gateClaimEligibility(ctxFor("reviewer"), {})).toBeUndefined();
-  expect(await gateClaimEligibility(ctxFor("reviewer"), { command: 42 })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("reviewer"), {})).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("reviewer"), { command: 42 })).toBeUndefined();
  });
 });
 
@@ -240,7 +241,7 @@ describe("G5 scope conflict", () => {
   beads["orc-10"] = candidate(["src/api/**"]);
   inFlight = [bead("orc-3", { assignee: "writer-3", status: "in_progress", metadata: { scope: ["src/api/handlers.ts"] } })];
 
-  const result = await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM });
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM });
 
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("scope conflict");
@@ -261,7 +262,7 @@ describe("G5 scope conflict", () => {
     assignee: "writer-3", status: "in_progress",
     metadata: { role: "implementer", scope: [heldScope] },
    })];
-   expect((await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
+   expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
   }
  });
 
@@ -272,7 +273,7 @@ describe("G5 scope conflict", () => {
    bead("orc-4", { assignee: "writer-4", status: "in_progress", metadata: { scope: ["test/**"] } }),
   ];
 
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
  });
 
  test("parses the JSON-string metadata form on both sides", async () => {
@@ -284,7 +285,7 @@ describe("G5 scope conflict", () => {
    bead("orc-3", { assignee: "writer-3", status: "in_progress", metadata: JSON.stringify({ scope: ["src/api/handlers.ts"] }) as unknown as Record<string, unknown> }),
   ];
 
-  const result = await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM });
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM });
 
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("scope conflict");
@@ -294,14 +295,14 @@ describe("G5 scope conflict", () => {
   beads["orc-10"] = candidate('["src/api/**"]');
   inFlight = [bead("orc-3", { assignee: "writer-3", status: "in_progress", metadata: { scope: '["src/api/handlers.ts"]' } })];
 
-  expect((await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
  });
 
  test("the bead does not conflict with itself when it is already in flight", async () => {
   beads["orc-10"] = candidate(["src/api/**"]);
   inFlight = [bead("orc-10", { assignee: "writer-10", status: "in_progress", metadata: { scope: ["src/api/**"] } })];
 
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
  });
 
  test.each([
@@ -311,7 +312,7 @@ describe("G5 scope conflict", () => {
   beads["orc-10"] = candidate(scope);
   inFlight = [bead("orc-3", { assignee: "writer-3", status: "in_progress", metadata: { scope: ["src/api/**"] } })];
 
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
   // No scope to compare means no reason to ask.
   expect(listed).toEqual([]);
  });
@@ -320,21 +321,21 @@ describe("G5 scope conflict", () => {
   beads["orc-10"] = candidate(["src/api/**"]);
   inFlight = [bead("orc-3", { assignee: "writer-3", status: "in_progress" })];
 
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
  });
 
  test("fails open when bd list is unavailable", async () => {
   beads["orc-10"] = candidate(["src/api/**"]);
   inFlight = [];
 
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
  });
 
  test("a bare ** scope conflicts with everything", async () => {
   beads["orc-10"] = candidate(["**"]);
   inFlight = [bead("orc-3", { assignee: "writer-3", status: "in_progress", metadata: { scope: ["docs/readme.md"] } })];
 
-  expect((await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
  });
 
  test("scoped research and review can proceed alongside a paused writer", async () => {
@@ -344,7 +345,7 @@ describe("G5 scope conflict", () => {
   })];
   for (const role of ["researcher", "reviewer"]) {
    beads["orc-10"] = bead("orc-10", { metadata: { role, scope: ["src/api/**"] } });
-   expect(await gateClaimEligibility(ctxFor(role), { command: CLAIM })).toBeUndefined();
+   expect(await gateClaimEligibility(claims, ctxFor(role), { command: CLAIM })).toBeUndefined();
   }
  });
 
@@ -355,7 +356,7 @@ describe("G5 scope conflict", () => {
    bead("orc-advice", { status: "in_progress", assignee: "research-1", metadata: { role: "researcher", scope: ["src/api/**"] } }),
    bead("orc-review", { status: "in_progress", assignee: "review-1", metadata: { role: "reviewer", scope: ["src/api/**"] } }),
   ];
-  expect(await gateClaimEligibility(ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
  });
 });
 
@@ -376,33 +377,33 @@ describe("G5 records nothing", () => {
   beads["orc-7"] = bead("orc-7", { labels: ["agent:implementer"], metadata: { worktree: "/tmp/wt" } });
 
   expect(
-   await gateClaimEligibility(ctxFor("implementer"), { command: "BEADS_ACTOR=orc-impl-1 bd update orc-7 --claim" }),
+   await gateClaimEligibility(claims, ctxFor("implementer"), { command: "BEADS_ACTOR=orc-impl-1 bd update orc-7 --claim" }),
   ).toBeUndefined();
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a queue claim is allowed and not recorded", async () => {
   expect(
-   await gateClaimEligibility(ctxFor("implementer"), {
+   await gateClaimEligibility(claims, ctxFor("implementer"), {
     command: "bd ready --metadata-field role=implementer --unassigned --claim --json",
    }),
   ).toBeUndefined();
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("a claim inside a pipeline is refused before an unobservable acquisition", async () => {
   const command = "git status && env BEADS_ACTOR=orc-impl-3 bd update orc-8 --claim --json | jq .";
 
-  expect((await gateClaimEligibility(ctxFor("implementer"), { command }))?.block).toBe(true);
-  expect(observedClaim()).toBeUndefined();
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command }))?.block).toBe(true);
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("does not fire on a quoted mention of a claim", async () => {
   // Parsed argv, not substrings: the payload of a comment is not a command.
   expect(
-   await gateClaimEligibility(ctxFor("reviewer"), { command: `bd comment orc-7 "never bd update x --claim"` }),
+   await gateClaimEligibility(claims, ctxFor("reviewer"), { command: `bd comment orc-7 "never bd update x --claim"` }),
   ).toBeUndefined();
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 });
 
@@ -415,20 +416,20 @@ describe("G5 routing reads metadata", () => {
  test("refuses a reviewer claiming a metadata-routed implementer bead", async () => {
   beads["orc-7"] = bead("orc-7", { metadata: { role: "implementer" } });
 
-  const result = await gateClaimEligibility(ctxFor("reviewer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("reviewer"), {
    command: "BEADS_ACTOR=orc-rev-1 bd -C /run/repo update orc-7 --claim",
   });
 
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("role=implementer");
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 
  test("allows the role the metadata names", async () => {
   beads["orc-7"] = bead("orc-7", { metadata: { role: "implementer", worktree: "/tmp/wt" } });
 
   expect(
-   await gateClaimEligibility(ctxFor("implementer"), {
+   await gateClaimEligibility(claims, ctxFor("implementer"), {
     command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim",
    }),
   ).toBeUndefined();
@@ -436,7 +437,7 @@ describe("G5 routing reads metadata", () => {
  });
 
  test("refuses a pull against another role's metadata queue without reading a bead", async () => {
-  const result = await gateClaimEligibility(ctxFor("reviewer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("reviewer"), {
    command: "bd -C /run/repo ready --metadata-field role=implementer --unassigned --claim --json",
   });
 
@@ -447,7 +448,7 @@ describe("G5 routing reads metadata", () => {
 
  test("allows the canonical pull for this session's own queue", async () => {
   expect(
-   await gateClaimEligibility(ctxFor("implementer"), {
+   await gateClaimEligibility(claims, ctxFor("implementer"), {
     command:
      "BEADS_ACTOR=orc-impl-1 bd -C /run/repo ready --parent orc-1 --metadata-field role=implementer --unassigned --claim --json",
    }),
@@ -458,7 +459,7 @@ describe("G5 routing reads metadata", () => {
   // It resolved to no role before, so this pull was refused for naming a queue that
   // could never equal the session's declared role.
   expect(
-   await gateClaimEligibility(ctxFor("shepherd"), {
+   await gateClaimEligibility(claims, ctxFor("shepherd"), {
     command: "BEADS_ACTOR=orc-shep-1 bd -C /run/repo ready --label agent:integrator --unassigned --claim --json",
    }),
   ).toBeUndefined();
@@ -469,7 +470,7 @@ describe("G5 routing reads metadata", () => {
   // resolved to nobody and any role could claim it by id.
   beads["orc-m"] = bead("orc-m", { labels: ["pr:merge"], metadata: { role: "shepherd" } });
 
-  const result = await gateClaimEligibility(ctxFor("implementer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-m --claim",
   });
 
@@ -487,7 +488,7 @@ describe("G5 routing reads metadata", () => {
   });
 
   expect(
-   await gateClaimEligibility(ctxFor("implementer"), {
+   await gateClaimEligibility(claims, ctxFor("implementer"), {
     command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim",
    }),
   ).toBeUndefined();
@@ -507,7 +508,7 @@ describe("G5 routing authority", () => {
  test.each(["implementer", "researcher", "reviewer", "shepherd"])(
   "%s may not re-point a route",
   async role => {
-   const result = await gateClaimEligibility(ctxFor(role), { command: REPOINT });
+   const result = await gateClaimEligibility(claims, ctxFor(role), { command: REPOINT });
 
    expect(result?.block).toBe(true);
    expect(result?.reason).toContain("metadata.role");
@@ -516,18 +517,18 @@ describe("G5 routing authority", () => {
  );
 
  test("the architect may, because it routes the epic it decomposed", async () => {
-  expect(await gateClaimEligibility(ctxFor("architect"), { command: REPOINT })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor("architect"), { command: REPOINT })).toBeUndefined();
  });
 
  test("a session declaring no role is not checked", async () => {
   // The lead routes the whole DAG, and a contract-free helper is already behind
   // BD_READONLY=1, so it cannot write a bead at all.
-  expect(await gateClaimEligibility(ctxFor(), { command: REPOINT })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor(), { command: REPOINT })).toBeUndefined();
  });
 
  test("clearing a route counts as re-pointing it", async () => {
   // A bead with no route reaches no queue, which strands it as surely as a wrong one.
-  const result = await gateClaimEligibility(ctxFor("implementer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "bd -C /run/repo update orc-7 --unset-metadata role",
   });
 
@@ -538,7 +539,7 @@ describe("G5 routing authority", () => {
   // An unrouted bug bead reaches no queue and then fails close-out as stranded, and
   // a bead that does not exist yet has no route to steal.
   expect(
-   await gateClaimEligibility(ctxFor("implementer"), {
+   await gateClaimEligibility(claims, ctxFor("implementer"), {
     command: `bd -C /run/repo create "flaky retry path" --type bug --metadata '{"role":"implementer"}'`,
    }),
   ).toBeUndefined();
@@ -549,12 +550,12 @@ describe("G5 routing authority", () => {
   // worktree gate keyed on a bead this session never took.
   beads["orc-7"] = bead("orc-7", { metadata: { role: "implementer" } });
 
-  const result = await gateClaimEligibility(ctxFor("implementer"), {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), {
    command: "BEADS_ACTOR=orc-impl-1 bd -C /run/repo update orc-7 --claim --set-metadata role=reviewer",
   });
 
   expect(result?.block).toBe(true);
-  expect(observedClaim()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
  });
 });
 
@@ -608,7 +609,7 @@ describe("G5 routing-write matcher corpus", () => {
  test("every routing-write spelling fires, at every pin", async () => {
   const missed: string[] = [];
   for (const command of MUST_FIRE) {
-   const result = await gateClaimEligibility(ctxFor("implementer"), { command });
+   const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command });
    if (result?.block !== true) missed.push(command);
   }
 
@@ -618,7 +619,7 @@ describe("G5 routing-write matcher corpus", () => {
  test("nothing else fires", async () => {
   const leaked: string[] = [];
   for (const command of MUST_STAY_QUIET) {
-   const result = await gateClaimEligibility(ctxFor("implementer"), { command });
+   const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command });
    if (result !== undefined) leaked.push(command);
   }
 

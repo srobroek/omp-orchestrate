@@ -3,9 +3,9 @@
  * and which run bead that run answers to.
  *
  * Replaces the marker halves of `orchestrator-run-activate.py` and
- * `orchestrate_run_marker.py`. Liveness (`bd show` on the run bead) is not here:
- * the gates that need it own that probe, and marker presence must stay cheap
- * enough to sit in front of every gated call.
+ * `orchestrate_run_marker.py`. Marker reads stay cheap enough for every gated
+ * call; `isBoundRunActive` owns the explicit Beads liveness probe used only by
+ * child supervision.
  *
  * Two properties the scripts established and this keeps:
  *
@@ -27,7 +27,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ensureBeadsPath } from "./beads-mode";
-import { resetReadBudget } from "./bd";
+import { bdShow, resetReadBudget } from "./bd";
 import { ensurePatrolWisp } from "./supervision";
 
 /**
@@ -106,8 +106,8 @@ function asActiveRun(value: unknown): ActiveRun | null {
  return state;
 }
 
-/** Transactional reads distinguish absence from unreadable or malformed authority. */
-async function readMarkerForMutation(cwd: string): Promise<ActiveRun | null> {
+/** Authority reads distinguish absence from unreadable or malformed markers. */
+export async function readActiveRunStrict(cwd: string): Promise<ActiveRun | null> {
  let raw: string;
  try {
   raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
@@ -137,6 +137,34 @@ async function readMarkerForMutation(cwd: string): Promise<ActiveRun | null> {
  const state: ActiveRun = { schema_version: 1, run_id: record.run_id };
  if (typeof record.session_id === "string") state.session_id = record.session_id;
  return state;
+}
+
+const ACTIVE_RUN_STATUSES: Record<string, true> = {
+	open: true,
+	in_progress: true,
+	blocked: true,
+	deferred: true,
+};
+
+/**
+ * Verify that the bound run still authorises child supervision.
+ *
+ * A missing or pending marker is an ordinary inactive repository. Once a run id
+ * is bound, only a positively observed Beads status establishes supervision.
+ * Unreadable, malformed, missing, and unknown authority remains unavailable so
+ * callers cannot mistake uncertainty for an inactive or closed run.
+ */
+export async function isBoundRunActive(cwd: string): Promise<boolean> {
+	const marker = await readActiveRunStrict(cwd);
+	if (marker === null || marker.run_id === PENDING) return false;
+	const run = await bdShow(marker.run_id, undefined, cwd);
+	if (run === null || typeof run.status !== "string") {
+		throw new Error(`run liveness unavailable: bound run ${marker.run_id} status could not be verified`);
+	}
+	const status = run.status.toLowerCase();
+	if (status === "closed") return false;
+	if (ACTIVE_RUN_STATUSES[status] === true) return true;
+	throw new Error(`run liveness unavailable: bound run ${marker.run_id} has unknown status ${JSON.stringify(run.status)}`);
 }
 
 /** Write the marker atomically, leaving no temporary behind on either path. */
@@ -186,7 +214,7 @@ async function withMarkerLock<T>(cwd: string, action: () => Promise<T>): Promise
  */
 export async function activateRun(cwd: string, sessionId?: string): Promise<ActiveRun> {
  return withMarkerLock(cwd, async () => {
-  const existing = await readMarkerForMutation(cwd);
+  const existing = await readActiveRunStrict(cwd);
   const session = sessionId ?? existing?.session_id;
   const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
   if (session !== undefined) state.session_id = session;
@@ -208,7 +236,7 @@ export async function activateRun(cwd: string, sessionId?: string): Promise<Acti
 export async function bindRun(cwd: string, runId: string): Promise<void> {
  if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
  await withMarkerLock(cwd, async () => {
-  const existing = await readMarkerForMutation(cwd);
+  const existing = await readActiveRunStrict(cwd);
   if (existing === null) throw new Error("no active-run marker to bind; run /orchestrate-run first");
   if (existing.run_id !== PENDING && existing.run_id !== runId) {
    throw new Error(`active-run marker is already bound to ${existing.run_id}`);
@@ -231,8 +259,12 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
  * tests can import the marker functions without touching the registry.
  *
  * `orchestrate-status` is registered by the entry point, not here.
+ *
+ * `onActivate` runs after the marker is written and the database is pinned. The
+ * settings preflight lives in `watchers.ts`, which imports this module, so the
+ * hook is injected rather than imported.
  */
-export function registerRunCommands(pi: ExtensionAPI): void {
+export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string) => Promise<unknown>): void {
  pi.registerCommand("orchestrate-run", {
   description: "Activate orchestrate run enforcement in this repository",
   handler: async (_args, ctx) => {
@@ -244,6 +276,10 @@ export function registerRunCommands(pi: ExtensionAPI): void {
    const beads = await ensureBeadsPath(cwd);
    if (!beads.ok) {
     ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
+    return;
+   }
+   if (beads.tracked === false) {
+    ctx.ui.notify("orchestrate run NOT activated: no active Beads workspace was found", "error");
     return;
    }
    if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
@@ -258,6 +294,15 @@ export function registerRunCommands(pi: ExtensionAPI): void {
    } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`could not activate orchestrate run: ${reason}`, "error");
+    return;
+   }
+   // The run is active by now, whatever the hook does; a failing readiness check
+   // must not read as a failed activation.
+   try {
+    await onActivate?.(cwd);
+   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`orchestrate run active; readiness check failed: ${reason}`, "warning");
    }
   },
  });

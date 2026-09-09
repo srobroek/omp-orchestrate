@@ -181,10 +181,10 @@ function asBead(value: unknown): BdBead | null {
  * `bd show --json` returns a single-element array, so both an array and a bare
  * object are accepted.
  */
-export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdBead | null> {
- const payload = await readJson(["show", id, "--json"], timeoutMs);
- if (Array.isArray(payload)) return asBead(payload[0]);
- return asBead(payload);
+export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead | null> {
+	const payload = await readJson(["show", id, "--json"], timeoutMs, cwd);
+	if (Array.isArray(payload)) return asBead(payload[0]);
+	return asBead(payload);
 }
 
 /** Beads matching a caller-supplied query. The caller passes its own `--json`. */
@@ -192,16 +192,41 @@ export async function bdList(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd
  return (await bdListChecked(args, timeoutMs, cwd)) ?? [];
 }
 
+function asBeadArray(payload: unknown): BdBead[] | null {
+	if (!Array.isArray(payload)) return null;
+	const beads: BdBead[] = [];
+	for (const entry of payload) {
+		const bead = asBead(entry);
+		if (!bead) return null;
+		beads.push(bead);
+	}
+	return beads;
+}
+
 export async function bdListChecked(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
- const payload = await readJson(args, timeoutMs, cwd);
- if (!Array.isArray(payload)) return null;
- const beads: BdBead[] = [];
- for (const entry of payload) {
+	return asBeadArray(await readJson(args, timeoutMs, cwd));
+}
+
+/**
+ * Ephemeral wisp listing, or `null` when the command failed or returned malformed data.
+ *
+ * Unlike ordinary `bd list --json` responses, `bd mol wisp list --json` returns a
+ * schema object containing the rows under `wisps`. Keep this exception at its API
+ * seam so the generic list reader remains strict about array-shaped responses.
+ */
+export async function bdWispListChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
+ const payload = await readJson(["mol", "wisp", "list", "--json"], timeoutMs, cwd);
+ const envelope = metadataRecord(payload);
+ if (envelope === undefined || envelope.schema_version !== 1 || typeof envelope.count !== "number"
+  || !Number.isInteger(envelope.count) || envelope.count < 0 || !Array.isArray(envelope.wisps)
+  || envelope.count !== envelope.wisps.length) return null;
+ const wisps: BdBead[] = [];
+ for (const entry of envelope.wisps) {
   const bead = asBead(entry);
   if (!bead) return null;
-  beads.push(bead);
+  wisps.push(bead);
  }
- return beads;
+ return wisps;
 }
 
 /** Comments on a bead, oldest first as `bd` returns them. */

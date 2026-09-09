@@ -1,0 +1,39 @@
+# agnix 0.52.2 configuration for the OMP orchestrator source tree.
+# Keep the generic validator active; carve out only OMP-owned paths and fields
+# that have no agnix platform equivalent.
+severity = "Warning"
+exclude = [
+  "node_modules/**",
+  ".git/**",
+  "dist/**",
+  "target/**",
+  ".apm/**",
+  "**/.apm/**",
+  ".agents/**",
+  "**/.agents/**",
+  ".beads/**",
+]
+
+[rules]
+disabled_rules = []
+disabled_validators = []
+
+# OMP agents use OMP model aliases and tool names, plus native routing metadata
+# (advisor, spawns, and thinking-level). These fields are not Claude Code agent
+# schema, so only the corresponding Claude checks are carved out on OMP agents.
+[[overrides]]
+paths = ["agents/*.md", "**/agents/*.md"]
+disabled_rules = ["CC-AG-003", "CC-AG-009", "CC-AG-010", "CC-AG-019"]
+
+# Literal CLI placeholders reported as unclosed XML by agnix 0.52.2.
+[[overrides]]
+paths = [
+  "skills/orchestrate/references/dispatch-contract.md",
+  "skills/orchestrate/references/lifecycle.md",
+  "skills/orchestrate/references/planning.md",
+]
+disabled_rules = ["XML-001"]
+
+[files]
+# Keep staged skill references in the generic markdown/reference pass.
+include_as_generic = ["skills/*/references/**/*.md", "**/skills/*/references/**/*.md"]

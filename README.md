@@ -15,14 +15,18 @@ This plugin coordinates agents in OMP. It stores work in
 | Install | `omp plugin marketplace add srobroek/omp-orchestrate` then `omp plugin install orchestrate@omp-orchestrate` |
 | Install for development | `omp plugin link /path/to/omp-orchestrate` |
 
+For development, run `./scripts/install-agnix-hooks.sh` once in each checkout. It preserves
+an existing hook path and validates staged instruction files; Git does not install tracked
+hooks automatically.
+
 After either command, restart the session. OMP loads a new extension module only at startup, so
 `/reload-plugins` does not find it. Claude Code reads the same catalog from
 `.claude-plugin/marketplace.json`.
 
 ## Agents
 
-Each agent names an OMP model role without a thinking level. The role controls the
-tier. To tune it, edit `modelRoles` in your configuration.
+Agents select models through `modelRoles` in your configuration and inherit the
+role's configured thinking level.
 
 | Agent | Role | Edits code | May spawn |
 | --- | --- | --- | --- |
@@ -40,16 +44,38 @@ Only the architect may spawn a role that claims a bead. A worker may spawn helpe
 
 The architect holds the feature branch, so it is the one agent that outlives a single bead.
 
+Use scout for routine factual collection and researcher for unresolved research or
+design/debug questions that need durable evidence.
+
+OMP enforces child-spawn names and recursion depth for both task and eval calls.
+Tool lists are not sandboxes: runtime-added tools and Bash can permit mutation.
+Reviewer and researcher code-edit restrictions remain behavioral contracts.
+
+The optional `pr-reviewer` checks PR-wide risks. It does not replace `orc-reviewer`'s
+required bead verdict or authorize a merge. Skip it when no separate PR risk needs review.
+
+Per-spawn `effort` selects the lowest (`lo`), middle (`med`) or highest (`hi`)
+supported thinking level. With only low and medium available, both `lo` and `med`
+select low; `hi` selects medium. It never requests an unsupported literal high.
+
 ## Required configuration
 
 | Setting | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `modelRoles.reviewer` | model selector | none | `orc-reviewer` names `@reviewer`, which OMP does not ship. Unset, the reviewer shares the family it judges. Point it at another family. |
+| `modelRoles.reviewer` | model selector | none | Defines the model used by the independent review role. Configure it before dispatch. |
 | `task.maxRecursionDepth` | number | `2` | A helper runs at depth 3. At `2` no worker can spawn one. Set `3`. |
 | `bash.autoBackground.enabled` | boolean | set explicitly to `false` | Claim results must stay foreground so the observer can bind them. Never set `async: true` on a claim. |
 
 The extension reports deviations through `WARN settings` notices and a comment on
 the bound epic. Preflight never creates or rewrites project configuration.
+
+Agent discovery preflight reports missing core roles, incorrect role markers and
+unresolved model aliases. It checks optional helpers when a task requests them.
+Warnings include the resolved definition path when one exists.
+
+If `/agents` and task dispatch disagree, check the effective `extensions` roots.
+With the `claude-plugins` source disabled, list the installed package root in `extensions`
+so native discovery can load its agents. Files under `agents/` alone do not register them.
 
 Choose one response:
 
@@ -65,7 +91,8 @@ The extension registers a single `tool_call` handler with seven checks. They cat
 protocol mistakes but cannot enforce transactional isolation. G6 delivers notices.
 Unavailable evidence and bounded exit paths can fail open without accepting the work.
 
-- **G1 (`bash`):** imposes `BD_READONLY=1` to block bead writes from sessions without a contract.
+- **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` only when the top-level OMP process has a non-empty absolute `BEADS_DIR` pin from `ensureBeadsPath`. The session checkout or pinned repository must also have a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
+  G1 checks the session checkout first, then the pinned repository. This preserves linked-worktree runs whose shared `.beads` lives in the primary checkout.
 - **G2 (`bash`, `edit`, `write`):** blocks edits outside the worktree named by the claimed bead.
 - **G3 (`bash`):** blocks mutating `git worktree` commands and `gh pr checkout` because they bypass Worktrunk.
   Inspection remains allowed.
@@ -84,9 +111,10 @@ Unavailable evidence and bounded exit paths can fail open without accepting the 
 Before a command runs, four TTSR rules in `rules/` check its arguments for protocol slips.
 Each rule is advisory or tool-only, never a security boundary.
 
-The run pins one absolute `BEADS_DIR` to its embedded database.
-Each copied checkout inherits that pin. Discovering a local database does not share state.
-G6 and G7 check Beads discipline during a run.
+The run pins one absolute `BEADS_DIR` to its embedded database. G1 uses that process-local
+pin and a valid marker in the session checkout or pinned repository before sandboxing a
+generic helper. Each copied checkout inherits the pin. Discovering a local database does
+not share state. G6 and G7 check Beads discipline during a run.
 
 The host has a separate regex engine. Python accepting a pattern does not prove the
 host accepts it. After editing a rule, run `sh scripts/validate-rules.sh`.
@@ -99,6 +127,15 @@ This local check needs an installed `omp`, so CI does not run it.
 | --- | --- |
 | `/orchestrate-status` | run status for the active epic |
 | `/orchestrate-roster` | live agents, beside the queue depth for each routing label |
+
+## Development
+
+Run `bun install --frozen-lockfile` before `bun run typecheck` or `bun test`, and
+again after every pull that changes `bun.lock`. The lockfile pins the
+`@oh-my-pi/pi-coding-agent` release the source compiles against; a `node_modules`
+left over from an older release fails with missing-export errors in
+`src/agent-preflight.ts` and `src/worktree.ts` and a missing `pi-natives` export in
+`test/wiring.test.ts`, while CI, which installs fresh, stays green.
 
 ## License
 

@@ -3,7 +3,9 @@ import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as supervision from "../src/supervision";
-import { activateRun, bindRun, markerPath, readActiveRun } from "../src/run-state";
+import * as bd from "../src/bd";
+import { activateRun, bindRun, isBoundRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockResolvedValue(undefined);
 afterAll(() => patrolSpy.mockRestore());
@@ -13,11 +15,13 @@ let cwd: string;
 beforeEach(async () => {
 	cwd = await mkdtemp(join(tmpdir(), "orc-run-state-"));
 	delete process.env.ORCHESTRATE_MARKER_FILE;
+	delete process.env.BD_BIN;
 });
 
 afterEach(async () => {
 	delete process.env.ORCHESTRATE_MARKER_FILE;
 	await rm(cwd, { recursive: true, force: true });
+	delete process.env.BD_BIN;
 });
 
 /** Write a marker body directly, bypassing `activateRun`, to fake prior state. */
@@ -167,6 +171,60 @@ describe("readActiveRun", () => {
 	});
 });
 
+describe("isBoundRunActive", () => {
+	test("does not query Beads for an absent or pending marker", async () => {
+		const show = spyOn(bd, "bdShow").mockResolvedValue(null);
+		try {
+			expect(await isBoundRunActive(cwd)).toBe(false);
+			await seed('{"schema_version": 1, "run_id": "pending"}');
+			expect(await isBoundRunActive(cwd)).toBe(false);
+			expect(show).not.toHaveBeenCalled();
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test("requires a known run status and passes the repository cwd", async () => {
+		await seed('{"schema_version": 1, "run_id": "orc-7"}');
+		const show = spyOn(bd, "bdShow").mockResolvedValue({ id: "orc-7", status: "open" });
+		try {
+			for (const status of ["open", "in_progress", "blocked", "deferred"]) {
+				show.mockResolvedValue({ id: "orc-7", status });
+				expect(await isBoundRunActive(cwd)).toBe(true);
+			}
+			expect(show).toHaveBeenCalledWith("orc-7", undefined, cwd);
+			show.mockResolvedValue({ id: "orc-7", status: "closed" });
+			expect(await isBoundRunActive(cwd)).toBe(false);
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test.each([
+		[null, "status could not be verified"],
+		[{ id: "orc-7" }, "status could not be verified"],
+		[{ id: "orc-7", status: "paused" }, "unknown status"],
+	])("throws when run evidence is unavailable or unknown: %j", async (run, reason) => {
+		await seed('{"schema_version": 1, "run_id": "orc-7"}');
+		const show = spyOn(bd, "bdShow").mockResolvedValue(run as { id: string; status?: string } | null);
+		try {
+			await expect(isBoundRunActive(cwd)).rejects.toThrow(reason);
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test("throws when marker authority is unreadable", async () => {
+		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const read = spyOn(fs, "readFile").mockRejectedValue(denied);
+		try {
+			await expect(isBoundRunActive(cwd)).rejects.toThrow("permission denied");
+		} finally {
+			read.mockRestore();
+		}
+	});
+});
+
 describe("bindRun", () => {
 	test("overlapping different binders cannot both acquire the pending marker", async () => {
 		await activateRun(cwd);
@@ -249,5 +307,88 @@ describe("bindRun", () => {
 	test("refuses to retarget a legacy raw-string marker", async () => {
 		await seed("orc-legacy\n");
 		await expect(bindRun(cwd, "orc-new")).rejects.toThrow(/already bound to orc-legacy/);
+	});
+});
+
+describe("registerRunCommands", () => {
+	type Handler = (args: string, ctx: unknown) => Promise<void>;
+
+	function rig(onActivate?: (cwd: string) => Promise<unknown>) {
+		const handlers = new Map<string, Handler>();
+		const notices: Array<[string, string]> = [];
+		const pi = {
+			registerCommand: (name: string, spec: { handler: Handler }) => {
+				handlers.set(name, spec.handler);
+			},
+		} as unknown as ExtensionAPI;
+		registerRunCommands(pi, onActivate);
+		const ctx = {
+			sessionManager: { getCwd: () => cwd, getSessionId: () => "session-t" },
+			ui: { notify: (text: string, level: string) => notices.push([level, text]) },
+		};
+		const run = handlers.get("orchestrate-run");
+		if (run === undefined) throw new Error("orchestrate-run not registered");
+		return { run: () => run("", ctx), notices };
+	}
+
+	beforeEach(() => {
+		// An inherited pin is accepted as-is, which keeps bd out of these tests.
+		process.env.BEADS_DIR = join(cwd, ".beads");
+	});
+	afterEach(() => {
+		delete process.env.BEADS_DIR;
+	});
+
+	test("/orchestrate-run calls the activation hook once, after the marker exists", async () => {
+		const seen: Array<string | null> = [];
+		const { run, notices } = rig(async hookCwd => {
+			seen.push((await readActiveRun(hookCwd))?.run_id ?? null);
+		});
+		await run();
+		expect(seen).toEqual(["pending"]);
+		expect(notices.map(([level]) => level)).toEqual(["info"]);
+	});
+
+	test("/orchestrate-run refuses a project without a Beads workspace", async () => {
+		delete process.env.BEADS_DIR;
+		const bd = join(cwd, "bd-no-workspace");
+		await writeFile(bd, '#!/bin/sh\necho "No active beads workspace found" >&2\nexit 1\n', { mode: 0o755 });
+		process.env.BD_BIN = bd;
+		let calls = 0;
+		const { run, notices } = rig(async () => {
+			calls += 1;
+		});
+
+		await run();
+
+		expect(await readActiveRun(cwd)).toBeNull();
+		expect(calls).toBe(0);
+		expect(notices).toEqual([["error", "orchestrate run NOT activated: no active Beads workspace was found"]]);
+	});
+
+	test("a failing hook is reported as a readiness failure, not a failed activation", async () => {
+		const { run, notices } = rig(async () => {
+			throw new Error("omp config unreadable");
+		});
+		await run();
+		expect((await readActiveRun(cwd))?.run_id).toBe("pending");
+		expect(notices.at(-1)).toEqual(["warning", "orchestrate run active; readiness check failed: omp config unreadable"]);
+	});
+
+	test("the hook does not run when activation fails", async () => {
+		await seed('{"run_id":"orc-existing","schema_version":1}\n');
+		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const readSpy = spyOn(fs, "readFile").mockRejectedValue(denied);
+		let calls = 0;
+		try {
+			const { run, notices } = rig(async () => {
+				calls += 1;
+			});
+			await run();
+			expect(notices.at(-1)?.[0]).toBe("error");
+		} finally {
+			readSpy.mockRestore();
+		}
+		expect(calls).toBe(0);
 	});
 });

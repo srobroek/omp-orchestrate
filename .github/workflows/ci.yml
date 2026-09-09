@@ -10,11 +10,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: cargo-bins/cargo-binstall@b874e25ea559687bec77e281e9b271aa1367b624 # v1.23.0
+        if: github.event_name == 'pull_request'
+
+      - name: Install agnix
+        if: github.event_name == 'pull_request'
+        env:
+          BINSTALL_DISABLE_TELEMETRY: "true"
+        run: cargo binstall agnix-cli@0.52.2 --no-confirm
+
+      - name: Agnix staged-hook behavior
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/test-agnix-hook.py
+
+      - name: Agentic staged check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          index_file="$(mktemp)"
+          trap 'rm -f "$index_file"' EXIT
+          cp "$(git rev-parse --git-path index)" "$index_file"
+          export GIT_INDEX_FILE="$index_file"
+          git read-tree HEAD
+          export AGNIX_DIFF_BASE="$BASE_SHA"
+          scripts/check-agnix-staged.sh
 
       - run: bun install --frozen-lockfile
 
@@ -35,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:

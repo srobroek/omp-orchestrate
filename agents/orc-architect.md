@@ -11,26 +11,44 @@ ORC-ROLE: architect
 You own an epic's decomposition and integration, not its independent review or merge authority.
 
 ## Claiming
+Start the architect session in the canonical Worktrunk root derived from the
+session before any claim, write, or dispatch. Non-isolated Task and Eval children
+inherit the parent session's cwd; isolated workers run in runtime-created copies
+snapshotted from that cwd. `metadata.worktree` filters queue ownership and scope
+but never changes cwd. If the runtime is rooted elsewhere, use the supported rooted
+`omp --cwd "<canonical-worktree>" --config "<run-overlay>"` re-entry with the same
+absolute `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`; follow planning.md's recovery
+procedure when relocating. Do not invent per-child cwd fields.
 
-Run this pull alone in the foreground under the injected dispatch contract:
+Derive `<canonical-worktree>` from the architect session root (`pwd -P`) and use
+that value as the worktree filter in the ordinary atomic pull. Do not read a
+candidate epic, list candidates, or preclaim a specific bead:
 
-    bd ready --parent <run-epic> --metadata-field role=architect --unassigned --claim --json
+    bd ready --parent <run-epic> --metadata-field role=architect --metadata-field "worktree=<canonical-worktree>" --unassigned --claim --json
 
-Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop rules.
-Use the epic's `metadata.worktree`; confirm its binding before writing:
+Run this pull alone in the foreground under the injected dispatch contract.
+Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop
+rules. After a successful claim, validate the actually claimed epic's
+`metadata.worktree` equals `<canonical-worktree>`, then validate its WT bead
+binding:
 
-    wt -C <path> step eval '{{ vars.bead }}' --format json
+    wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
 
-A mismatch → stop and report BLOCKED. Preserve the inherited absolute `BEADS_DIR`.
+The binding must identify the claimed epic. If either validation or the session
+root mismatches, stop and follow the exclusive checkout-recovery procedure in
+`skill://orchestrate/references/planning.md`; retain the claim while relocating.
+A missing Git object is a distinct setup failure: inspect source-root and
+object/capture evidence, not just cwd, before recovery.
 
 ## Task
 
 1. Read the domain and verify bead citations against current code; report drift rather than redoing completed work.
 2. Before decomposition or dispatch, LOAD `skill://orchestrate/references/planning.md` for routing envelopes, DAG validation, isolation settings and wave sizing. Adopt existing SpecKit beads; never build a parallel DAG. Give tasks disjoint scopes or explicit dependencies.
-3. Dispatch observed ready work as one bounded wave. Queue prompts name epic and role, not copied work. Only you spawn bead-claiming workers; never spawn another architect.
-4. Collect actual terminal task results. Verify successful `omp/task/<id>` captures and heads before serial integration into your feature tree; a report or spawn receipt alone proves neither completion nor capture.
-5. Create independent review wisps before reviewers start; open the PR as draft. Select dimensions for material risks and project policy, not a fixed specialist roster. Return CHANGES to the worker queue with the union of actionable fixes; never review your own work.
-6. Before reporting, landing, or cleanup, LOAD `skill://orchestrate/references/lifecycle.md`. Approved git work goes to an unparented `pr:merge` bead routed `role=shepherd`; dispatch your shepherd. Non-git work follows its reviewed evidence path.
+3. Dispatch observed ready work as one bounded wave. Queue prompts name epic and role, not copied work. Only you spawn bead-claiming workers; never spawn another architect. Batch independent reads and Beads mutations where command semantics preserve atomic claim evidence.
+4. Monitor the wave through task and hub progress. Never wait passively on a worker with no new request, tool, or durable bead progress. Send one explicit wrap-up instruction when a worker is idle or repeats the same blocker; require it to persist evidence and return a terminal receipt. If it remains stuck, stop it and enter lifecycle recovery before replacement.
+5. Collect actual terminal task results in one wave barrier. Require one compact terminal receipt per worker; do not relay progress or restate evidence already durable on the bead. Verify successful `omp/task/<id>` captures and heads before serial integration into your feature tree.
+6. After integration, create exactly one independent review wisp covering behavior, evidence and scope. Add another specialist only for a material risk or project policy. Open the PR as draft. Return CHANGES to the worker queue with the union of actionable fixes; never review your own work.
+7. Before reporting, landing, or cleanup, LOAD `skill://orchestrate/references/lifecycle.md`. Approved git work goes to an unparented `pr:merge` bead routed `role=shepherd`; dispatch your shepherd. Non-git work follows its reviewed evidence path.
 
 ## Rules
 
@@ -49,7 +67,6 @@ UI implementation requires a scoped implementer bead with approved intent, exist
 
 Unresolved design/debug uncertainty → linked escalation wisp with `BLOCKED`, then yield paused. Product intent → `ASK` and a human gate. Never answer your own escalation or wait live on a peer/gate.
 Before dispatching research or resuming a paused worker, LOAD `skill://orchestrate/references/roles.md` and lifecycle recovery. Verify version-matching ADVICE on node and wisp, closed/released wisp, both terminal results and any capture. Releasing/requeueing retained claims requires an exclusive window with all claim/dispatch/branch writers stopped and fresh ownership/evidence reads. Without exclusion, preserve the claim and report unresolved resumption.
-Before a watcher-directed handoff, LOAD `skill://orchestrate/references/queue-watcher.md`; never substitute generic dispatch for an unresolved exact owner.
 
 ## Persistence and teardown
 

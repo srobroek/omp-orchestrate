@@ -5,8 +5,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead, BdComment } from "../src/bd";
 import * as actualBd from "../src/bd";
-import { forgetClaim, recordClaim } from "../src/claim-state";
-import { gateExitContract, resetUnclaimedReminder } from "../src/gates/exit";
+import { createClaimState } from "../src/claim-state";
+import { createExitGuard } from "../src/gates/exit";
 
 const BEAD = "orc-42";
 const CTX = { getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
@@ -17,6 +17,8 @@ let linkedBead: BdBead | null;
 let linkedComments: BdComment[] | null;
 let issued: string[][];
 let fixture: string;
+let claims = createClaimState();
+let gateExitContract: ReturnType<typeof createExitGuard>;
 const spies = [
  spyOn(actualBd, "bdShow").mockImplementation(async id => id === BEAD ? bead : linkedBead),
  spyOn(actualBd, "bdCommentsChecked").mockImplementation(async id => id === BEAD ? comments : linkedComments),
@@ -30,19 +32,20 @@ const spies = [
  }),
 ];
 afterAll(() => { for (const spy of spies) spy.mockRestore(); });
-afterEach(async () => { forgetClaim(); await rm(fixture, { recursive: true, force: true }); });
+afterEach(async () => { claims = createClaimState(); await rm(fixture, { recursive: true, force: true }); });
 beforeEach(async () => {
  fixture = await mkdtemp(path.join(tmpdir(), "orc-exit-"));
  await mkdir(path.join(fixture, "artifacts"));
  await writeFile(path.join(fixture, "artifacts/result"), "evidence");
- resetUnclaimedReminder();
+ claims = createClaimState();
+ gateExitContract = createExitGuard(claims);
  issued = [];
  bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git" } };
  comments = [];
  linked = [];
  linkedBead = null;
  linkedComments = [];
- recordClaim({ actor: "A", beadIds: [BEAD] });
+ claims.recordClaim({ actor: "A", beadIds: [BEAD] });
 });
 
 test("released shepherd preserves inherited approval on an exact-head IDLE exit", async () => {
@@ -74,8 +77,9 @@ describe("G4 activation refusal budget", () => {
  });
  test("a new activation gets its own refusal budget", async () => {
   for (let i = 0; i < 3; i++) await gateExitContract(CTX);
-  forgetClaim();
-  recordClaim({ actor: "A", beadIds: [BEAD] });
+  claims = createClaimState();
+  gateExitContract = createExitGuard(claims);
+  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
   expect(JSON.parse((await gateExitContract(CTX))!.reason!).attempt).toBe(1);
  });
  test("late A yield cannot change successor B ownership", async () => {
@@ -94,7 +98,7 @@ describe("G4 activation refusal budget", () => {
   bead = { id: BEAD, status: "blocked", assignee: "A" };
   comments = [{ text: "BLOCKED awaiting prerequisite" }];
   linkedBead = { id: "second", assignee: "A", metadata: { execution_kind: "git" } };
-  recordClaim({ actor: "A", beadIds: [BEAD, "second"] });
+  claims.recordClaim({ actor: "A", beadIds: [BEAD, "second"] });
   expect(JSON.parse((await gateExitContract(CTX))!.reason!).bead).toBe("second");
   expect(issued).toEqual([]);
  });
@@ -185,8 +189,9 @@ describe("G4 checked evidence", () => {
 
 describe("G4 unclaimed exit", () => {
  beforeEach(() => {
-  forgetClaim();
-  resetUnclaimedReminder();
+  claims = createClaimState();
+  claims = createClaimState();
+ gateExitContract = createExitGuard(claims);
  });
 
  test("a role-marked worker holding no claim is refused once", async () => {

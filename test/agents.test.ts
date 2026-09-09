@@ -1,13 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolveExplicitModelRole } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
+import {
+ CORE_AGENT_CONTRACTS,
+ agentDiscoveryFindings,
+ coreContractForAgent,
+ discoverAgentFindings,
+ requestedAgentNames,
+} from "../src/agent-preflight";
 import declared from "./declared-surface.json";
+import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const AGENTS_DIR = join(ROOT, "agents");
@@ -41,10 +51,7 @@ const parsed = new Map<string, AgentDefinition>(
 );
 
 const rawFrontmatter = new Map<string, Record<string, unknown>>(
- files.map(file => [
-  file,
-  parseFrontmatter(text.get(file) ?? "", { location: file, level: "fatal" }).frontmatter,
- ]),
+ files.map(file => [file, parseFrontmatter(text.get(file) ?? "", { location: file, level: "fatal" }).frontmatter]),
 );
 
 /**
@@ -135,7 +142,6 @@ describe("agent definitions", () => {
    test("frontmatter names the agent after its role", () => {
     expect(parsed.get(file)?.name).toBe(`orc-${role}`);
    });
-
   });
  }
 
@@ -261,5 +267,177 @@ describe("agent definitions", () => {
    expect(tools).toContain("bash");
   }
  });
+});
 
+describe("runtime discovery preflight", () => {
+ const definition = (
+  name: string,
+  role: string,
+  model = coreContractForAgent(name)?.modelAlias ?? "@task:medium",
+  filePath = `/tmp/${name}.md`,
+ ): AgentDefinition =>
+  parseAgent(
+   filePath,
+   `---\nname: ${name}\ndescription: test agent\nmodel: "${model}"\n---\nORC-ROLE: ${role}\n`,
+   "project",
+  );
+
+ test("reports missing requested agents and role overrides with source paths", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  agents[2] = definition("orc-reviewer", "researcher", "@task:medium", "/override/agents/orc-reviewer.md");
+  const findings = agentDiscoveryFindings(agents, ["operator"], spec => (spec === "@task:medium" ? {} : undefined));
+
+  expect(findings).toContainEqual({ agent: "operator", message: "requested agent is not discoverable" });
+  expect(findings).toContainEqual({
+   agent: "orc-reviewer",
+   message: "resolved override declares ORC-ROLE researcher; expected reviewer",
+   path: "/override/agents/orc-reviewer.md",
+  });
+ });
+
+ test("valid overrides do not hide invalid core definitions", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role, "@missing:high"));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   spec =>
+    resolveExplicitModelRole([spec], {
+     getModelRole: role => ((MODEL_ROLE_IDS as string[]).includes(role) ? role : undefined),
+    })
+     ? {}
+     : undefined,
+   { "orc-reviewer": "@task:medium" },
+  );
+
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-architect", message: 'model alias "@missing" does not resolve' }),
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-reviewer", message: 'model alias "@missing" does not resolve' }),
+  );
+  expect(findings.some(finding => finding.agent === "orc-reviewer" && finding.message.includes('"@task"'))).toBe(false);
+ });
+
+ test("accepts each core role's required alias with OMP selector forms", () => {
+  expect(Object.keys(CORE_AGENT_CONTRACTS).sort()).toEqual(KNOWN_ROLES.map(role => `orc-${role}`).sort());
+  const agents = KNOWN_ROLES.map(role =>
+   definition(`orc-${role}`, role, `${coreContractForAgent(`orc-${role}`)!.modelAlias}:high`),
+  );
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   () => ({ provider: "test", id: "model" }),
+   { "orc-architect": ["@plan", "@plan:high"], "orc-implementer": "@task, @task:high" },
+  );
+  expect(findings).toEqual([]);
+ });
+
+ test.each(["inh", "inher", "xhig"])("accepts runtime thinking abbreviation %s", suffix => {
+  const agents = KNOWN_ROLES.map(role =>
+   definition(`orc-${role}`, role, role === "architect" ? `@plan:${suffix}` : coreContractForAgent(`orc-${role}`)!.modelAlias),
+  );
+  expect(agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }))).toEqual([]);
+ });
+
+ test("rejects a valid alternate alias override on architect", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   () => ({ provider: "test", id: "model" }),
+   { "orc-architect": "@smol:high" },
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({
+    agent: "orc-architect",
+    message: 'effective model must use @plan; received "@smol:high"',
+   }),
+  );
+ });
+
+ test.each([
+  ["wrong valid alias", "orc-architect", "architect", "@smol"],
+  ["wrong valid alias", "orc-reviewer", "reviewer", "@task"],
+  ["raw selector", "orc-reviewer", "reviewer", "openai/gpt-5"],
+  ["mixed fallback aliases", "orc-implementer", "implementer", "@task,@smol"],
+  ["malformed thinking suffix", "orc-architect", "architect", "@plan:bogus"],
+ ])("%s is rejected for a core agent", (_label, name, role, model) => {
+  const agents = KNOWN_ROLES.map(currentRole => definition(`orc-${currentRole}`, currentRole));
+  const index = agents.findIndex(agent => agent.name === name);
+  agents[index] = definition(name, role, model);
+  const findings = agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }));
+  expect(findings.some(finding => finding.agent === name && finding.message.includes("must use"))).toBe(true);
+ });
+
+ test.each([
+  ["empty override", ""],
+  ["empty array", []],
+  ["non-string array member", ["@reviewer", 42]],
+ ])("rejects a %s", (_label, value) => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  const findings = agentDiscoveryFindings(
+   agents,
+   [],
+   () => ({ provider: "test", id: "model" }),
+   { "orc-reviewer": value },
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-reviewer", message: "effective model selector is missing or malformed" }),
+  );
+ });
+
+ test("rejects a core definition with no model selector", () => {
+  const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
+  const index = agents.findIndex(agent => agent.name === "orc-reviewer");
+  agents[index] = parseAgent(
+   "/tmp/orc-reviewer-missing-model.md",
+   "---\nname: orc-reviewer\ndescription: missing model\n---\nORC-ROLE: reviewer\n",
+   "project",
+  );
+  const findings = agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }));
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "orc-reviewer", message: "effective model selector is missing or malformed" }),
+  );
+ });
+
+ test("keeps helper alias resolution checks and prototype-key inputs harmless", () => {
+  const agents = [...KNOWN_ROLES.map(role => definition(`orc-${role}`, role)), definition("constructor", "helper", "@missing")];
+  const findings = agentDiscoveryFindings(
+   agents,
+   ["constructor"],
+   spec => (spec === "@missing" ? undefined : {}),
+   { constructor: "@missing" },
+  );
+  expect(findings).toContainEqual(
+   expect.objectContaining({ agent: "constructor", message: 'model alias "@missing" does not resolve' }),
+  );
+ });
+
+ test("reads task names from flat and batch requests", () => {
+  expect(requestedAgentNames({ agent: " operator ", tasks: [{ agent: "scout" }, { agent: "operator" }] })).toEqual([
+   "operator",
+   "scout",
+  ]);
+ });
+
+ test("discovers an agent from an explicit extension root", async () => {
+  const root = mkdtempSync(join(tmpdir(), "orc-agent-root-"));
+  const agentsDir = join(root, "agents");
+  mkdirSync(agentsDir);
+  writeFileSync(
+   join(agentsDir, "orc-helper.md"),
+   '---\nname: orc-helper\ndescription: explicit helper\nmodel: "@task"\n---\nA helper.\n',
+  );
+  try {
+   const runInSessionScope = withOmpExtensionRootScope([root], "explicit-only", () => AsyncLocalStorage.snapshot());
+   const findings = await runInSessionScope(() => discoverAgentFindings({ cwd: ROOT }, ["orc-helper"]));
+   expect(
+    findings.some(
+     finding => finding.agent === "orc-helper" && finding.message === "requested agent is not discoverable",
+    ),
+   ).toBe(false);
+  } finally {
+   rmSync(root, { recursive: true, force: true });
+  }
+ });
 });

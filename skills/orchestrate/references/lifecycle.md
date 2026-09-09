@@ -103,10 +103,9 @@ Do not use type `merge-request`: it is a ready-filter alias, not a creatable typ
 Stamp `repo`, `branch`, `base_sha`, `origin_bead` and `integration_owner=orchestrate`.
 When transferring ownership for the same repository/PR, `origin_bead` names the source
 node or its explicit parent; preserve that parent in ownership snapshots. Source
-approval and receipts do not transfer. After the shepherd verifies the PR/head,
+approval does not transfer. After the shepherd verifies the PR/head,
 stamp the merge's own `pr` and `head_sha`; its own approval, `in_progress` state and
-exact head govern dispatch. LOAD `skill://orchestrate/references/queue-watcher.md`
-before receipt-directed acquisition or acknowledgment.
+exact head govern dispatch.
 
 ## Persistence classes
 
@@ -161,20 +160,31 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    binding from `/orchestrate-status`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
    the actor in `assignee`, the location in `metadata.worktree`/`branch`, and the
-   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`;
-   a recorded branch with no worktree is recovered by `wt switch <branch> --no-cd
-   --format=json`, and the bead is updated when Worktrunk returns a different path.
-3. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
+   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`.
+3. If a stamped path is missing or the runtime root mismatches, execute
+   `planning.md`'s **Canonical checkout recovery** in one explicit exclusive
+   claim/dispatch/branch-writer window. Inventory the owning epic's stamped branch/path
+   and WT rows first; preserve an existing dirty resumed checkout, captures, terminal
+   results, and all evidence. Recreate only a missing checkout with
+   `wt -C "<source-root>" switch "<branch>" --no-cd --format=json`, use its returned JSON
+   `path` as the canonical worktree, and reject an unresolved or foreign WT bead binding.
+   A missing Git object or capture is a separate setup failure, not cwd repair.
+4. While that same window remains held, stamp the updated `metadata.worktree` and WT
+   `bead` binding for the exact owning epic, read both back, and require equality before
+   actor re-entry. Do not release a retained claim merely to relocate; a mismatch
+   preserves the claim, checkout, capture, terminal result, and evidence for recovery.
+   Re-enter only through the rooted `omp --cwd "<canonical-worktree>" --config
+   "<run-overlay>"` procedure in `planning.md`, with the same absolute
+   `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`.
+5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
-4. Run `bd merge-slot check`. Never infer a dead holder from age or from a recycled shepherd.
-   Resume the landing transaction, or use its evidence-gated recovery path after proving the
-   exact actor lease is dead.
-5. Drain the patrol wisp for each epic (below) before dispatching anything new.
-6. For GitHub-backed runs, restart the release watcher with `--slots=1` and replay
-   unacknowledged records first: `orc_resolve_queue_dispatch` with a `bd list --json`
-   snapshot and `replayUnacknowledged`. Only a matching ack suppresses a replay. See
-   `references/queue-watcher.md`.
+6. Run `bd merge-slot check`. Never infer a dead holder from age or from a recycled
+   shepherd. Resume the landing transaction, or use its evidence-gated recovery path after
+   proving the exact actor lease is dead.
+7. Drain the patrol wisp for each epic (below) before dispatching anything new.
+   Replacement requires the same exclusive recovery procedure; it never starts by
+   releasing a retained claim just to re-enter the runtime.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
 replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
@@ -236,6 +246,14 @@ timestamp is old.
 2. Establish holder death, then an exclusive recovery window: all claim, dispatch and
    branch writers must be stopped. A fresh read or human confirmation alone is not
    exclusion. Re-read owner, status and branch evidence inside that window.
+   If checkout or runtime-root repair is needed, run `planning.md`'s **Canonical
+   checkout recovery** in this same window before any release or reopen: inventory the
+   stamped branch/path and WT rows, preserve dirty trees and all terminal/capture evidence,
+   recreate only a missing checkout with `wt -C "<source-root>" switch "<branch>" --no-cd
+   --format=json`, use its returned path, reject foreign bindings, stamp both the owning
+   epic's `metadata.worktree` and WT `bead`, and read both back for exact equality. Do not
+   release a retained claim merely to relocate; a missing Git object remains a separate
+   failure.
 3. Preserve the worktree, the captured branch, artifacts, comments, and external resource
    references. Do not sweep them during recovery.
 4. Only while that exclusive window remains held, record the recovery with a bead comment
@@ -269,11 +287,13 @@ source of truth.
 
 - **Architect:** replace it between waves, never mid-integration. The feature branch and the
   bead state carry the domain.
-- **Shepherd:** it is already two ephemeral phases. Restart from the merge bead after the
-  slot is released, never during a landing transaction.
-- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a recovery-needed note alone never makes work claimable.
-- **Standalone `pr-shepherd`:** repository-global recovery and queue drain only, when no run
-  shepherd owns the landing.
+- **Shepherd:** it is already two ephemeral phases, but each phase claims only the ordinary
+  merge bead; gate creation/discovery and the merge slot are separate controls, not wisp
+  claims. Restart from the merge bead after the slot is released, never during a landing
+  transaction.
+- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
+  recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
+  ephemeral ownership separately and releases each through its own path.
 
 ## Human-in-the-loop and safe autonomy
 
@@ -321,10 +341,12 @@ Nobody polls it and nobody holds a session open for it.
 
 Park the bead instead. Record what is awaited with `bd set-state <bead> state=waiting_gate
 --reason "<what is awaited and how to resume>"`, add `bd gate create --type=gh:run --blocks
-<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR
-merge, then continue unrelated beads from `bd ready`. When nothing else is ready and only
-external waits remain, write the run report and exit; the gate bead and the next pass own
-the wait. `bd gate check` plus `bd ready --gated` is how the cleared gate re-enters the run.
+<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR,
+then release the phase-one claim with `bd update <bead> --status open --assignee ""`. Continue
+unrelated beads from `bd ready`. When nothing else is ready and only external waits remain,
+write the run report and exit; the gate bead and the next pass own the wait. `bd gate check`
+plus `bd ready --gated` is how the cleared gate is discovered, after which ordinary
+`bd ready --claim` acquires the reopened bead.
 
 Two campaign runs violated this on their final release bead: each polled a release workflow
 and a package-executing reviewer until the stream aborted, leaving that bead `in_progress`
