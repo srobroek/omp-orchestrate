@@ -106,8 +106,8 @@ function asActiveRun(value: unknown): ActiveRun | null {
  return state;
 }
 
-/** Transactional reads distinguish absence from unreadable or malformed authority. */
-async function readMarkerForMutation(cwd: string): Promise<ActiveRun | null> {
+/** Authority reads distinguish absence from unreadable or malformed markers. */
+export async function readActiveRunStrict(cwd: string): Promise<ActiveRun | null> {
  let raw: string;
  try {
   raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
@@ -186,7 +186,7 @@ async function withMarkerLock<T>(cwd: string, action: () => Promise<T>): Promise
  */
 export async function activateRun(cwd: string, sessionId?: string): Promise<ActiveRun> {
  return withMarkerLock(cwd, async () => {
-  const existing = await readMarkerForMutation(cwd);
+  const existing = await readActiveRunStrict(cwd);
   const session = sessionId ?? existing?.session_id;
   const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
   if (session !== undefined) state.session_id = session;
@@ -208,7 +208,7 @@ export async function activateRun(cwd: string, sessionId?: string): Promise<Acti
 export async function bindRun(cwd: string, runId: string): Promise<void> {
  if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
  await withMarkerLock(cwd, async () => {
-  const existing = await readMarkerForMutation(cwd);
+  const existing = await readActiveRunStrict(cwd);
   if (existing === null) throw new Error("no active-run marker to bind; run /orchestrate-run first");
   if (existing.run_id !== PENDING && existing.run_id !== runId) {
    throw new Error(`active-run marker is already bound to ${existing.run_id}`);
