@@ -14,9 +14,9 @@ let cwd: string;
 beforeEach(async () => {
 	cwd = await mkdtemp(join(tmpdir(), "orc-run-state-"));
 	delete process.env.ORCHESTRATE_MARKER_FILE;
+	delete process.env.BD_BIN;
 });
 
-	delete process.env.BD_BIN;
 afterEach(async () => {
 	delete process.env.ORCHESTRATE_MARKER_FILE;
 	await rm(cwd, { recursive: true, force: true });
