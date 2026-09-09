@@ -3,7 +3,8 @@ import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as supervision from "../src/supervision";
-import { activateRun, bindRun, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
+import * as bd from "../src/bd";
+import { activateRun, bindRun, isBoundRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockResolvedValue(undefined);
@@ -167,6 +168,59 @@ describe("readActiveRun", () => {
 	test("ignores a non-string session id", async () => {
 		await seed('{"run_id": "orc-9", "session_id": 5}');
 		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
+	});
+});
+
+describe("isBoundRunActive", () => {
+	test("does not query Beads for an absent or pending marker", async () => {
+		const show = spyOn(bd, "bdShow").mockResolvedValue(null);
+		try {
+			expect(await isBoundRunActive(cwd)).toBe(false);
+			await seed('{"schema_version": 1, "run_id": "pending"}');
+			expect(await isBoundRunActive(cwd)).toBe(false);
+			expect(show).not.toHaveBeenCalled();
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test("requires a known run status and passes the repository cwd", async () => {
+		await seed('{"schema_version": 1, "run_id": "orc-7"}');
+		const show = spyOn(bd, "bdShow").mockResolvedValue({ id: "orc-7", status: "in_progress" });
+		try {
+			expect(await isBoundRunActive(cwd)).toBe(true);
+			expect(show).toHaveBeenCalledWith("orc-7", undefined, cwd);
+			show.mockResolvedValue({ id: "orc-7", status: "closed" });
+			expect(await isBoundRunActive(cwd)).toBe(false);
+			show.mockResolvedValue({ id: "orc-7", status: "deferred" });
+			expect(await isBoundRunActive(cwd)).toBe(true);
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test.each([
+		[null, "status could not be verified"],
+		[{ id: "orc-7" }, "status could not be verified"],
+		[{ id: "orc-7", status: "paused" }, "unknown status"],
+	])("throws when run evidence is unavailable or unknown: %j", async (run, reason) => {
+		await seed('{"schema_version": 1, "run_id": "orc-7"}');
+		const show = spyOn(bd, "bdShow").mockResolvedValue(run as { id: string; status?: string } | null);
+		try {
+			await expect(isBoundRunActive(cwd)).rejects.toThrow(reason);
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test("throws when marker authority is unreadable", async () => {
+		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		const read = spyOn(fs, "readFile").mockRejectedValue(denied);
+		try {
+			await expect(isBoundRunActive(cwd)).rejects.toThrow("permission denied");
+		} finally {
+			read.mockRestore();
+		}
 	});
 });
 

@@ -1,5 +1,9 @@
 import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { markerPath, readActiveRun } from "../src/run-state";
 import * as realBd from "../src/bd";
 import type { BdBead, BdComment, BdResult } from "../src/bd";
 import type { Exec, ExecResult } from "../src/supervision";
@@ -246,6 +250,12 @@ describe("branchIntegrated", () => {
  });
 });
 
+/** Match the marker half of production binding without a Beads fixture. */
+async function markerBound(cwd: string): Promise<boolean> {
+ const marker = await readActiveRun(cwd);
+ return marker !== null && marker.run_id !== "pending";
+}
+
 /** Collect what `registerSupervision` subscribes, without an OMP session. */
 function recordingApi(): {
  pi: ExtensionAPI;
@@ -254,39 +264,54 @@ function recordingApi(): {
  /** Bus channels it subscribed, in order. */
  channels: string[];
  messages: string[];
+ errors: string[];
  sessionStart: (ctx: ExtensionContext) => void;
+ sessionShutdown: () => void;
  deliver: (payload: unknown) => Promise<void>;
 } {
  const events: string[] = [];
  const channels: string[] = [];
  const messages: string[] = [];
- const handlers: ((event: unknown, ctx: ExtensionContext) => void)[] = [];
- const listeners: ((data: unknown) => unknown)[] = [];
+ const errors: string[] = [];
+ const handlers: { event: string; handler: (event: unknown, ctx: ExtensionContext) => unknown }[] = [];
+ const listeners = new Set<(data: unknown) => unknown>();
  const stub = {
   sendMessage: (message: { content: string }) => { messages.push(message.content); },
-  on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => {
+  on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => {
    events.push(event);
-   handlers.push(handler);
+   handlers.push({ event, handler });
   },
   events: {
    on: (channel: string, listener: (data: unknown) => unknown) => {
     channels.push(channel);
-    listeners.push(listener);
+    listeners.add(listener);
+    return () => listeners.delete(listener);
    },
   },
-  logger: { error: () => { }, debug: () => { }, warn: () => { }, info: () => { } },
+  logger: {
+   error: (message: string) => { errors.push(message); },
+   debug: () => { },
+   warn: () => { },
+   info: () => { },
+  },
  };
  return {
   pi: stub as unknown as ExtensionAPI,
   events,
   channels,
   messages,
+  errors,
   sessionStart: ctx => {
-   for (const handler of handlers) handler({}, ctx);
+   for (const entry of handlers) {
+    if (entry.event === "session_start") void entry.handler({}, ctx);
+   }
+  },
+  sessionShutdown: () => {
+   for (const entry of handlers) {
+    if (entry.event === "session_shutdown") void entry.handler({}, {} as ExtensionContext);
+   }
   },
   deliver: async payload => {
-   // The handler hands its promise back to the bus, so the reap is awaited
-   // here rather than guessed at with a delay.
    for (const listener of listeners) await listener(payload);
   },
  };
@@ -294,10 +319,82 @@ function recordingApi(): {
 
 describe("registerSupervision", () => {
  const ctx = { cwd: "/repo" } as unknown as ExtensionContext;
+ const bound = async () => true;
+
+ test("unbound and pending markers skip discovery and notices", async () => {
+  const noRun = await mkdtemp(join(tmpdir(), "orc-supervision-no-run-"));
+  const pending = await mkdtemp(join(tmpdir(), "orc-supervision-pending-"));
+  try {
+   await mkdir(join(pending, ".orchestration"));
+   await writeFile(markerPath(pending), JSON.stringify({ schema_version: 1, run_id: "pending" }));
+   const api = recordingApi();
+   registerSupervision(api.pi, markerBound);
+
+   api.sessionStart({ cwd: noRun } as ExtensionContext);
+   await api.deliver({ id: "impl-7", status: "failed" });
+   api.sessionStart({ cwd: pending } as ExtensionContext);
+   await api.deliver({ id: "impl-7", status: "failed" });
+
+   expect(ran).toEqual([]);
+   expect(api.messages).toEqual([]);
+  } finally {
+   await Promise.all([rm(noRun, { recursive: true, force: true }), rm(pending, { recursive: true, force: true })]);
+  }
+ });
+
+ test("binding after session start activates subsequent terminal events", async () => {
+  let boundNow = false;
+  const api = recordingApi();
+  registerSupervision(api.pi, async () => boundNow);
+  api.sessionStart(ctx);
+
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran).toEqual([]);
+  expect(api.messages).toEqual([]);
+
+  boundNow = true;
+  world.wisps = null;
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran.some(args => args[0] === "mol")).toBe(true);
+  expect(api.messages.some(message => message.includes("explicitly reconcile"))).toBe(true);
+ });
+
+ test("switching from bound to unbound cwd stops old repository processing", async () => {
+  const oldCwd = "/bound-repository";
+  const newCwd = "/unbound-repository";
+  const checked: string[] = [];
+  const api = recordingApi();
+  registerSupervision(api.pi, async cwd => {
+   checked.push(cwd);
+   return cwd === oldCwd;
+  });
+  api.sessionStart({ cwd: oldCwd } as ExtensionContext);
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran.length).toBeGreaterThan(0);
+
+  ran = [];
+  api.sessionStart({ cwd: newCwd } as ExtensionContext);
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(checked).toEqual([oldCwd, newCwd]);
+  expect(ran).toEqual([]);
+  expect(api.messages).toEqual([]);
+ });
+
+ test("an unavailable liveness check does not allege child recovery", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, async () => {
+   throw new Error("marker unreadable");
+  });
+  api.sessionStart(ctx);
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran).toEqual([]);
+  expect(api.messages).toEqual([]);
+  expect(api.errors).toEqual(["orchestrate run liveness check unavailable; recovery skipped"]);
+ });
 
  test("unread candidate discovery notifies the spawning session with a reconciliation action", async () => {
   const api = recordingApi();
-  registerSupervision(api.pi);
+  registerSupervision(api.pi, bound);
   api.sessionStart(ctx);
   world.wisps = null;
   await api.deliver({ id: "impl-7", status: "failed" });
@@ -307,8 +404,8 @@ describe("registerSupervision", () => {
 
  test("subscribes the lifecycle channel once, inside session_start", () => {
   const api = recordingApi();
-  registerSupervision(api.pi);
-  expect(api.events).toEqual(["session_start"]);
+  registerSupervision(api.pi, bound);
+  expect(api.events).toEqual(["session_start", "session_shutdown"]);
   expect(api.channels).toEqual([]);
 
   api.sessionStart(ctx);
@@ -316,14 +413,29 @@ describe("registerSupervision", () => {
   expect(api.channels).toEqual(["task:subagent:lifecycle"]);
  });
 
- test("a terminal payload reaps, a malformed one is ignored", async () => {
+ test("disposes the lifecycle subscription on shutdown", async () => {
   const api = recordingApi();
-  registerSupervision(api.pi);
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+  api.sessionShutdown();
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran).toEqual([]);
+
+  api.sessionStart(ctx);
+  await api.deliver({ id: "impl-7", status: "failed" });
+  expect(ran.some(args => args[0] === "mol")).toBe(true);
+  expect(api.channels).toEqual(["task:subagent:lifecycle", "task:subagent:lifecycle"]);
+ });
+
+ test("a completed generic helper with empty candidate lists remains quiet", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
   api.sessionStart(ctx);
 
   await api.deliver({ id: "impl-7", status: "completed" });
   expect(ran.some(args => args[0] === "mol")).toBe(true);
   expect(update()).toBeUndefined();
+  expect(api.messages).toEqual([]);
 
   ran = [];
   await api.deliver({ agent: "orc-implementer" });
