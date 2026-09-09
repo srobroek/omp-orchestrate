@@ -16,9 +16,11 @@ beforeEach(async () => {
 	delete process.env.ORCHESTRATE_MARKER_FILE;
 });
 
+	delete process.env.BD_BIN;
 afterEach(async () => {
 	delete process.env.ORCHESTRATE_MARKER_FILE;
 	await rm(cwd, { recursive: true, force: true });
+	delete process.env.BD_BIN;
 });
 
 /** Write a marker body directly, bypassing `activateRun`, to fake prior state. */
@@ -290,6 +292,23 @@ describe("registerRunCommands", () => {
 		await run();
 		expect(seen).toEqual(["pending"]);
 		expect(notices.map(([level]) => level)).toEqual(["info"]);
+	});
+
+	test("/orchestrate-run refuses a project without a Beads workspace", async () => {
+		delete process.env.BEADS_DIR;
+		const bd = join(cwd, "bd-no-workspace");
+		await writeFile(bd, '#!/bin/sh\necho "No active beads workspace found" >&2\nexit 1\n', { mode: 0o755 });
+		process.env.BD_BIN = bd;
+		let calls = 0;
+		const { run, notices } = rig(async () => {
+			calls += 1;
+		});
+
+		await run();
+
+		expect(await readActiveRun(cwd)).toBeNull();
+		expect(calls).toBe(0);
+		expect(notices).toEqual([["error", "orchestrate run NOT activated: no active Beads workspace was found"]]);
 	});
 
 	test("a failing hook is reported as a readiness failure, not a failed activation", async () => {

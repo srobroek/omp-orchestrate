@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -252,18 +252,45 @@ describe("W5 shared-database precondition", () => {
 	});
 
 	test("isolation with no pinned path pins the database bd resolves", async () => {
-		// The failure this replaces a server with. bd resolves by walking up from the working
-		// directory, `.beads/` is gitignored, so a clone or worktree arrives without one and the
-		// walk continues past the checkout. The preflight pins the answer bd gives from the
-		// checkout itself, so every child inherits it; nothing is asked of the operator.
+		// The preflight asks bd for the active database and pins that canonical path so every
+		// child inherits it. Linked worktrees may resolve the primary checkout's database;
+		// copied checkouts must not inherit an unrelated ancestor database.
 		await stubOmp(true);
 		await fakeBd();
 		await mkdir(join(cwd, ".beads"), { recursive: true });
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
-		expect(process.env.BEADS_DIR).toBe(join(cwd, ".beads"));
+		expect(process.env.BEADS_DIR).toBe(await realpath(join(cwd, ".beads")));
 		expect((await bdCalls()).map(call => call[0])).toContain("where");
+		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
+	});
+
+	test("isolation in a linked worktree pins the primary checkout database", async () => {
+		await stubOmp(true);
+		await fakeBd();
+		const primary = join(cwd, "primary");
+		const linked = join(cwd, "linked");
+		await mkdir(primary);
+		const runGit = async (args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "pipe" });
+			const code = await proc.exited;
+			if (code !== 0) throw new Error(await new Response(proc.stderr).text());
+		};
+		await runGit(["init", primary]);
+		await runGit(["-C", primary, "config", "user.email", "test@example.com"]);
+		await runGit(["-C", primary, "config", "user.name", "Test"]);
+		await runGit(["-C", primary, "commit", "--allow-empty", "-m", "init"]);
+		await runGit(["-C", primary, "worktree", "add", "-b", "linked", linked]);
+		const primaryBeads = join(primary, ".beads");
+		await mkdir(primaryBeads);
+		process.env.ORC_TEST_BD_WHERE = primaryBeads;
+		const rig = harness();
+		resetWatchers();
+
+		await preflightSettings(rig.pi, linked);
+
+		expect(process.env.BEADS_DIR).toBe(await realpath(primaryBeads));
 		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
 	});
 
