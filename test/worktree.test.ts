@@ -61,8 +61,8 @@ type Verdict = Promise<ToolCallEventResult | undefined>;
  * The gate as `src/index.ts` calls it for a `bash` command: a tool that declares no
  * path, so only the cwd comparison applies.
  */
-function fromBash(cwd: string, command = "echo hi"): Verdict {
- return gateWorktreeScope(claims, ctxAt(cwd), "bash", { command });
+function fromBash(cwd: string, command = "echo hi", env?: Record<string, string>): Verdict {
+ return gateWorktreeScope(claims, ctxAt(cwd), "bash", { command, ...(env === undefined ? {} : { env }) });
 }
 
 /** The gate as `src/index.ts` calls it for a `write` of one file. */
@@ -478,6 +478,96 @@ describe("G2 ownership freshness", () => {
 
  test("keeps a recognized Beads read control path safe after reassignment", async () => {
   expect(await fromBash(owned, `bd show ${BEAD} --json`)).toBeUndefined();
+ });
+});
+
+describe("G2 standalone ownership controls", () => {
+ const actor = "orc-impl-1";
+ const foreignActor = "other-worker";
+
+ test("allows a pure release by the observed actor on a closed bead", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
+
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee ""`)).toBeUndefined();
+ });
+
+ test("allows an idempotent pure release of a closed already-unassigned bead", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", metadata: { worktree: owned } };
+
+  expect(await fromBash(owned, `env BD_ACTOR=${actor} bd update ${BEAD} --assignee ""`)).toBeUndefined();
+ });
+
+ test("refuses release flags that would reopen a terminal bead", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
+
+  expect((await fromBash(owned, `BD_ACTOR=${actor} bd update ${BEAD} --status open --assignee ""`))?.block).toBe(true);
+ });
+
+ test.each([
+  ["after reassignment", { status: "closed", assignee: foreignActor }],
+  ["when the bead is missing", undefined],
+  ["while open and unassigned", { status: "open" }],
+ ])("refuses a pure release %s", async (_state, bead) => {
+  if (bead === undefined) delete beads[BEAD];
+  else beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned } };
+
+  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee ""`))?.block).toBe(true);
+ });
+
+ test.each([
+  `BEADS_ACTOR=${foreignActor} bd update ${BEAD} --assignee ""`,
+  `env BD_ACTOR=${foreignActor} bd comment ${BEAD} "foreign note"`,
+ ])("refuses a foreign-actor control without an overlapping owner: %s", async (command) => {
+  expect((await fromBash(owned, command))?.block).toBe(true);
+ });
+
+ test("allows a bare owned Beads mutation without a scope conflict", async () => {
+  expect(await fromBash(owned, `bd comment ${BEAD} "ordinary note"`)).toBeUndefined();
+ });
+
+ test("denies an explicit foreign actor in the execution environment without a scope conflict", async () => {
+  expect((await fromBash(owned, `bd comment ${BEAD} "foreign note"`, { BEADS_ACTOR: foreignActor }))?.block).toBe(true);
+ });
+
+ test.each([
+  `BEADS_ACTOR=${foreignActor} BD_ACTOR=${actor}`,
+  `BEADS_ACTOR=${actor} BD_ACTOR=${foreignActor}`,
+ ])("rejects conflicting explicit actor identities: %s", async (bindings) => {
+  expect((await fromBash(owned, `${bindings} bd update ${BEAD} --assignee ""`))?.block).toBe(true);
+ });
+
+ test("rejects conflicting actor identities in the execution environment", async () => {
+  expect((await fromBash(owned, `bd update ${BEAD} --assignee ""`, {
+   BEADS_ACTOR: foreignActor, BD_ACTOR: actor,
+  }))?.block).toBe(true);
+ });
+
+ test("does not hide an explicit foreign actor behind unrelated environment values", async () => {
+  expect((await fromBash(owned, `bd update ${BEAD} --assignee ""`, {
+   BEADS_ACTOR: foreignActor, CI: "1",
+  }))?.block).toBe(true);
+ });
+
+ test("preserves an inherited actor's release while unknown identity cannot escape a conflict", async () => {
+  const priorActor = process.env.BEADS_ACTOR;
+  const priorLegacyActor = process.env.BD_ACTOR;
+  try {
+   process.env.BEADS_ACTOR = actor;
+   delete process.env.BD_ACTOR;
+   beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
+   expect(await fromBash(owned, `bd update ${BEAD} --assignee ""`)).toBeUndefined();
+   delete process.env.BEADS_ACTOR;
+   beads[BEAD] = { id: BEAD, status: "in_progress", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
+   listSpy.mockResolvedValueOnce([
+    { id: "orc-other", status: "in_progress", assignee: foreignActor, metadata: { scope: ["src/**"] } },
+   ]);
+   expect((await fromBash(owned, `bd comment ${BEAD} "ordinary note"`))?.block).toBe(true);
+  } finally {
+   if (priorActor === undefined) delete process.env.BEADS_ACTOR;
+   else process.env.BEADS_ACTOR = priorActor;
+   if (priorLegacyActor === undefined) delete process.env.BD_ACTOR;
+   else process.env.BD_ACTOR = priorLegacyActor;
+  }
  });
 });
 

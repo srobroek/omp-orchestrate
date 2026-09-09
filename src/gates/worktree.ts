@@ -258,7 +258,9 @@ function isControlCommand(command: string): boolean {
  * A deliberately narrow escape from a scope conflict, not a shell safety parser.
  * Only literal standalone Beads reads and own-claim comment/release forms qualify.
  */
-function conflictControl(input: Record<string, unknown>, actor: string, beadId: string): "read" | "write" | undefined {
+type ConflictControl = "read" | "write" | "release" | "deny";
+
+function conflictControl(input: Record<string, unknown>, actor: string, beadId: string): ConflictControl | undefined {
  const command = input.command;
  if (typeof command !== "string") return undefined;
  // Reject expansion, redirection, operators and wrappers before discarding quoting.
@@ -268,39 +270,67 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  const tokens = [...segments[0]!];
  if (tokens[0] === "env") tokens.shift();
  const environment = input.env && typeof input.env === "object" ? input.env as Record<string, unknown> : {};
- if (Object.entries(environment).some(([key, value]) => (key !== "BEADS_ACTOR" && key !== "BD_ACTOR") || value !== actor)) return undefined;
- let boundActor = environment.BEADS_ACTOR ?? environment.BD_ACTOR ?? process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
+ let trustedEnvironment = true;
+ let hasExplicitActor = false;
+ let actorMismatch = false;
+ for (const [key, value] of Object.entries(environment)) {
+  if ((key !== "BEADS_ACTOR" && key !== "BD_ACTOR") || typeof value !== "string") {
+   trustedEnvironment = false;
+  } else {
+   hasExplicitActor = true;
+   actorMismatch ||= value !== actor;
+  }
+ }
  while (tokens[0]?.includes("=")) {
   const assignment = tokens.shift()!;
   const split = assignment.indexOf("=");
   const key = assignment.slice(0, split);
   const value = assignment.slice(split + 1);
-  if ((key !== "BEADS_ACTOR" && key !== "BD_ACTOR") || value !== actor) return undefined;
-  boundActor = value;
+  if (key !== "BEADS_ACTOR" && key !== "BD_ACTOR") {
+   trustedEnvironment = false;
+  } else {
+   hasExplicitActor = true;
+   actorMismatch ||= value !== actor;
+  }
  }
  if (tokens.shift() !== "bd") return undefined;
  if (tokens[0] === "--actor") {
   tokens.shift();
-  boundActor = tokens.shift();
+  const supplied = tokens.shift();
+  if (supplied === undefined) return undefined;
+  hasExplicitActor = true;
+  actorMismatch ||= supplied !== actor;
  }
  if (tokens.at(-1) === "--json") tokens.pop();
  const operation = tokens.shift();
- if ((operation === "show" || operation === "comments") && tokens.length === 1 && tokens[0] === beadId) return "read";
- if ((operation === "list" || operation === "blocked" || operation === "status") && tokens.length === 0) return "read";
- if (boundActor !== actor) return undefined;
+ if ((operation === "show" || operation === "comments") && tokens.length === 1 && tokens[0] === beadId) {
+  return trustedEnvironment ? "read" : undefined;
+ }
+ if ((operation === "list" || operation === "blocked" || operation === "status") && tokens.length === 0) {
+  return trustedEnvironment ? "read" : undefined;
+ }
+ if (operation !== "comment" && operation !== "comments" && operation !== "update") return undefined;
  if (operation === "comments" && tokens[0] === "add") tokens.shift();
- if ((operation === "comment" || operation === "comments") && tokens.length === 2 && tokens[0] === beadId) return "write";
- if (operation !== "update" || tokens.shift() !== beadId) return undefined;
+ if (tokens[0] !== beadId) return undefined;
+ if (actorMismatch) return "deny";
+ if (!trustedEnvironment) return undefined;
+ const inheritedActor = process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
+ if (!hasExplicitActor && inheritedActor !== actor) return undefined;
+ if ((operation === "comment" || operation === "comments") && tokens.length === 2) return "write";
+ if (operation !== "update") return undefined;
+ tokens.shift();
  let released = false;
+ let changedStatus = false;
  while (tokens.length > 0) {
   const flag = tokens.shift();
   const value = tokens.shift();
   if (flag === "--assignee" && value === "" && !released) released = true;
-  else if (flag !== "--status" || (value !== "open" && value !== "in_progress" && value !== "blocked")) return undefined;
+  else if (flag === "--status" && (value === "open" || value === "in_progress" || value === "blocked")) changedStatus = true;
+  else return undefined;
  }
- return released ? "write" : undefined;
+ if (!released) return changedStatus ? "write" : undefined;
+ return changedStatus ? "write" : "release";
 }
-
 
 /** Refuse a mutation outside the tree, or the territory, the claimed bead names. */
 export async function gateWorktreeScope(
@@ -312,19 +342,29 @@ export async function gateWorktreeScope(
  if (!Object.hasOwn(GATED_WRITE_TOOLS, toolName)) return undefined;
  const claim = claims.observedClaim();
  if (!claim || claim.beadIds.length === 0) return undefined;
-
  const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(input, claim.actor, beadId) : undefined);
  const hasControl = controls.some(control => control !== undefined);
- const beadViews: { beadId: string; bead: BdBead | null; control: "read" | "write" | undefined }[] = [];
+ const beadViews: { beadId: string; bead: BdBead | null; control: ConflictControl | undefined }[] = [];
  for (const [index, beadId] of claim.beadIds.entries()) {
   const bead = await bdShow(beadId);
   const control = controls[index];
+  if (control === "deny") {
+   return { block: true, reason: `control command is not authorized for claimed bead '${beadId}'` };
+  }
   const checkFreshness = !hasControl || control === "write";
   if (checkFreshness && (bead?.status !== "in_progress" || bead.assignee !== claim.actor)) {
    return {
     block: true,
     reason: `claimed bead '${beadId}' is no longer in_progress and assigned to '${claim.actor}'; refresh ownership before mutating product files`,
    };
+  }
+  if (control === "release" && (
+   bead === null ||
+   (bead.status === "in_progress" && bead.assignee !== claim.actor) ||
+   (bead.status !== "in_progress" && bead.status !== "closed") ||
+   (bead.status === "closed" && bead.assignee !== undefined && bead.assignee !== "" && bead.assignee !== claim.actor)
+  )) {
+   return { block: true, reason: `cannot release ownership of claimed bead '${beadId}' without current ownership` };
   }
   beadViews.push({ beadId, bead, control });
  }
@@ -361,9 +401,8 @@ export async function gateWorktreeScope(
  // globs disjoint, so intersecting them would refuse every write a worker holding two
  // beads could possibly make.
  const scoped: { beadId: string; worktree: string; globs: string[] }[] = [];
-
  for (const { beadId, bead, control } of beadViews) {
-  const ownsControl = control === "read" || control === "write";
+  const ownsControl = control === "read" || control === "write" || control === "release";
   if (!ownsControl) {
    const conflict = await scopeConflict(bead);
    if (conflict) return conflict;
