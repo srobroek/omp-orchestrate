@@ -5,7 +5,7 @@
   "completion": [
     {
       "check": "disposition",
-      "require": "comment.verb in [LANDED, BOUNCED, CONFLICT, IDLE, BLOCKED]"
+      "require": "comment.verb in [LANDED, BOUNCED, CONFLICT, IDLE, ESCALATED, BLOCKED]"
     }
   ],
   "authority": {

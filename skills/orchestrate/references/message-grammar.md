@@ -37,6 +37,7 @@ narrowed here, so a reviewer may argue with the set without arguing with the ver
 | `ADVICE` | A researcher's durable answer to an escalation wisp, promoted to the linked node. | `researcher` |
 | `LANDED` | The merge bead's branch is merged and metadata.merge_sha is stamped. | `shepherd` |
 | `BOUNCED` | The merge attempt is refused back to its origin as a fix bead. | `shepherd` |
+| `ESCALATED` | The same material review issue exhausted its fix-attempt limit. The merge is held at `waiting_human`. | `shepherd` |
 | `CONFLICT` | The branch does not merge into its base. The node returns to working for a rebase; the shepherd never resolves it. | `shepherd` |
 | `IDLE` | Nothing was landable this transaction. The merge slot is released and the waiter queue outlives the exit. | `shepherd` |
 | `NO_WORK` | The role's queue is empty. Yield rather than widen the filter or invent work. | `*` -- every claiming role |

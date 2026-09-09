@@ -34,7 +34,7 @@ export const EXIT_STALE = 11;
 export const EXIT_ACTIONABLE = 12;
 export const EXIT_DECLINED = 13;
 
-export const DEFAULT_BOTS = "coderabbitai";
+export const DEFAULT_BOTS = "coderabbitai,chatgpt-codex-connector,copilot-pull-request-reviewer,greptile-apps";
 /**
  * A bot slug is matched against check names and details URLs by alphanumeric containment
  * in either direction ("CodeRabbit" vs "coderabbitai"). The floor keeps a short slug from
@@ -99,10 +99,11 @@ const ADAPTERS: Record<string, Adapter> = {
  },
 };
 
-// A bot with no adapter still gets classified: its check and review presence are visible,
-// and a CHANGES_REQUESTED verdict is actionable everywhere. Only the count is unavailable,
-// which reads as "no recognised verdict yet".
-const GENERIC_NOTE = "no adapter: review state only";
+// A bot with no adapter still gets classified from its exact-head review and inline
+// comments. CHANGES_REQUESTED is actionable everywhere; a COMMENTED review with inline
+// comments is actionable, and one with none is clean. The head match prevents resolved
+// comments from an older revision from keeping the new round open.
+const GENERIC_NOTE = "no adapter: exact-head review state and inline comments";
 
 function adapterFor(slug: string): Adapter {
  // `Object.hasOwn`, not a plain index: the slug is caller data (`--bots`,
@@ -540,9 +541,9 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
  findings.files = [];
  for (const entry of comments) {
   if (!isObject(entry)) continue;
-  if (loginSlug(str(entry.login), slugs) === null || str(entry.commit) !== head) continue;
-  const line = truthy(entry.line) ? str(entry.line) : truthy(entry.original_line) ? str(entry.original_line) : "0";
-  findings.files.push(`${str(entry.path) || "?"}:${line} ${str(entry.url)}`.trim());
+  if (entry.resolved === true || loginSlug(str(entry.login), slugs) === null || str(entry.commit) !== head) continue;
+  const line = truthy(entry.line) ? str(entry.line) : "0";
+  findings.files.push(`thread=${str(entry.threadId) || "?"} ${str(entry.path) || "?"}:${line} ${str(entry.url)}`.trim());
  }
  findings.files.sort(compare);
 
@@ -550,7 +551,13 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
   if (changes) {
    return verdictOf(findings, "actionable", EXIT_ACTIONABLE, "changes requested without a summary count");
   }
-  return verdictOf(findings, "pending", EXIT_WAITING, "no actionable-comment summary at head yet");
+  findings.actionable = findings.files.length;
+  if (findings.actionable > 0) {
+   return verdictOf(findings, "actionable", EXIT_ACTIONABLE, `${findings.actionable} inline comment(s)`);
+  }
+  const knownAdapter = Object.keys(ADAPTERS).some((known) => related(normalize(newest[0]), normalize(known)));
+  if (knownAdapter) return verdictOf(findings, "pending", EXIT_WAITING, "no actionable-comment summary at head yet");
+  return verdictOf(findings, "clean", 0, "completed review with no unresolved inline comments");
  }
 
  findings.actionable = latest.actionable;
@@ -672,6 +679,21 @@ export function ghApiArgv(path: string): string[] {
  return ["gh", "api", "--paginate", "--slurp", path];
 }
 
+const REVIEW_THREADS_QUERY = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{id isResolved isOutdated comments(first:100){nodes{author{login} path line originalLine url body commit{oid}}}} pageInfo{hasNextPage endCursor}}}}}`;
+
+/** Paginated GraphQL read for thread ids and resolution state, which REST comments omit. */
+export function ghReviewThreadsArgv(repo: string, pr: string): string[] | null {
+ const parts = repo.split("/");
+ if (parts.length !== 2 || parts[0] === "" || parts[1] === "" || !/^\d+$/.test(pr)) return null;
+ return [
+  "gh", "api", "graphql", "--paginate", "--slurp",
+  "-f", `query=${REVIEW_THREADS_QUERY}`,
+  "-F", `owner=${parts[0]}`,
+  "-F", `name=${parts[1]}`,
+  "-F", `number=${pr}`,
+ ];
+}
+
 type Read<T> = { ok: true; value: T } | { ok: false; error: string };
 
 async function ghJson(argv: string[], exec: Exec, opts: ExecOptions): Promise<Read<unknown>> {
@@ -726,6 +748,61 @@ async function ghPaginatedJson(
  return { ok: true, value: rows };
 }
 
+interface ReviewThreadComment {
+ login: string;
+ path: string;
+ line: unknown;
+ commit: string;
+ url: string;
+ body: string;
+ threadId: string;
+ resolved: boolean;
+ outdated: boolean;
+}
+
+/** Read and flatten review-thread pages while preserving each thread's resolution state. */
+async function ghReviewThreads(
+ repo: string,
+ pr: string,
+ exec: Exec,
+ opts: ExecOptions,
+): Promise<Read<ReviewThreadComment[]>> {
+ const argv = ghReviewThreadsArgv(repo, pr);
+ if (argv === null) return { ok: false, error: `invalid GitHub PR identity: ${repo}#${pr}` };
+ const read = await ghJson(argv, exec, opts);
+ if (!read.ok) return read;
+ if (!Array.isArray(read.value)) return { ok: false, error: "paginated GraphQL response must be an array of pages" };
+ const comments: ReviewThreadComment[] = [];
+ for (const page of read.value) {
+  if (!isObject(page) || !isObject(page.data) || !isObject(page.data.repository) ||
+      !isObject(page.data.repository.pullRequest) || !isObject(page.data.repository.pullRequest.reviewThreads)) {
+   return { ok: false, error: "paginated GraphQL response contains a malformed reviewThreads page" };
+  }
+  const nodes = page.data.repository.pullRequest.reviewThreads.nodes;
+  if (!Array.isArray(nodes)) return { ok: false, error: "reviewThreads nodes must be an array" };
+  for (const thread of nodes) {
+   if (!isObject(thread) || !isObject(thread.comments) || !Array.isArray(thread.comments.nodes)) {
+    return { ok: false, error: "reviewThreads page contains a malformed thread" };
+   }
+   for (const entry of thread.comments.nodes) {
+    if (!isObject(entry)) return { ok: false, error: "review thread contains a malformed comment" };
+    comments.push({
+     login: nested(entry, "author", "login"),
+     path: str(entry.path),
+     line: truthy(entry.line) ? entry.line : truthy(entry.originalLine) ? entry.originalLine : 0,
+     commit: nested(entry, "commit", "oid"),
+     url: str(entry.url),
+     body: str(entry.body),
+     threadId: str(thread.id),
+     resolved: thread.isResolved === true,
+     outdated: thread.isOutdated === true,
+    });
+   }
+  }
+ }
+ return { ok: true, value: comments };
+}
+
 /** What the four `gh` reads produce, and the only input {@link classifyBotReviews} takes. */
 export interface BotReviewPayload {
  head: string;
@@ -735,7 +812,7 @@ export interface BotReviewPayload {
   */
  checks: unknown;
  reviews: { login: string; state: string; body: string; commit: string; url: string; at: string }[];
- comments: { login: string; path: string; line: unknown; commit: string; url: string }[];
+ comments: ReviewThreadComment[];
  notices: { login: string; body: string; at: string }[];
 }
 
@@ -744,9 +821,9 @@ export type FetchOutcome = { ok: true; payload: BotReviewPayload } | { ok: false
 /**
  * Four reads, no classification.
  *
- * `gh pr view` omits each review's commit id, so the reviews and their inline comments come
- * from REST. Issue comments are read as well, because a quota refusal arrives there rather
- * than as a review.
+ * `gh pr view` omits each review's commit id, so reviews come from REST. Review
+ * threads come from GraphQL because REST omits thread ids and `isResolved`.
+ * Issue comments are read as well, because a quota refusal arrives there.
  */
 export async function fetchBotReviewEvidence(
  repo: string,
@@ -777,7 +854,7 @@ export async function fetchBotReviewEvidence(
 
  const [reviews, comments, notices] = await Promise.all([
   ghPaginatedJson(`repos/${repo}/pulls/${pr}/reviews`, exec, run),
-  ghPaginatedJson(`repos/${repo}/pulls/${pr}/comments`, exec, run),
+  ghReviewThreads(repo, pr, exec, run),
   ghPaginatedJson(`repos/${repo}/issues/${pr}/comments`, exec, run),
  ]);
  if (!reviews.ok) return { ok: false, error: reviews.error };
@@ -797,13 +874,7 @@ export async function fetchBotReviewEvidence(
     url: str(r.html_url),
     at: str(r.submitted_at),
    })),
-   comments: comments.value.map((c) => ({
-    login: nested(c, "user", "login"),
-    path: str(c.path),
-    line: truthy(c.line) ? c.line : truthy(c.original_line) ? c.original_line : 0,
-    commit: str(c.commit_id),
-    url: str(c.html_url),
-   })),
+   comments: comments.value,
    notices: notices.value.map((n) => ({
     login: nested(n, "user", "login"),
     body: str(n.body),

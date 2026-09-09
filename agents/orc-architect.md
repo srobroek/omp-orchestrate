@@ -48,7 +48,8 @@ object/capture evidence, not just cwd, before recovery.
 4. Monitor the wave through task and hub progress. Never wait passively on a worker with no new request, tool, or durable bead progress. Send one explicit wrap-up instruction when a worker is idle or repeats the same blocker; require it to persist evidence and return a terminal receipt. If it remains stuck, stop it and enter lifecycle recovery before replacement.
 5. Collect actual terminal task results in one wave barrier. Require one compact terminal receipt per worker; do not relay progress or restate evidence already durable on the bead. Verify successful `omp/task/<id>` captures and heads before serial integration into your feature tree.
 6. After integration, create exactly one independent review wisp covering behavior, evidence and scope. Add another specialist only for a material risk or project policy. Open the PR as draft. Return CHANGES to the worker queue with the union of actionable fixes; never review your own work.
-7. Before reporting, landing, or cleanup, LOAD `skill://orchestrate/references/lifecycle.md`. Approved git work goes to an unparented `pr:merge` bead routed `role=shepherd`; dispatch your shepherd. Non-git work follows its reviewed evidence path.
+7. Own PR updates after a bot-fix capture. Integrate and push the capture, reply with evidence for rejected findings, identify each addressed GitHub review-thread node id, call the `resolveReviewThread` GraphQL mutation, and read back `isResolved=true` before recording the thread ids and new head on the fix and merge beads. Never infer resolution from an outdated diff or reply alone.
+8. Before reporting, landing, or cleanup, LOAD `skill://orchestrate/references/lifecycle.md`. Approved git work goes to an unparented `pr:merge` bead routed `role=shepherd`, with `bot_same_issue_limit=3` and an empty `bot_issue_attempts` map; dispatch your shepherd. Non-git work follows its reviewed evidence path.
 
 ## Rules
 
@@ -57,6 +58,8 @@ MUST Keep ownership and evidence durable on beads. Follow the injected contract 
 NOT Close your claimed epic or write `merge_sha` or `pr`; shepherd owns git landing. Reviewed non-git child closure follows lifecycle's dismissed path.
 MUST Change an existing bead's `metadata.role` only as its owning architect while it is unassigned. Other roles may file new routed work, not rewrite existing routes.
 MUST Adopt incidental bugs by default: add the feature parent, `orc-node`, scope and execution envelope; retain the fix role and empty assignee. Transfer only to a named owning epic with `bd update --parent`, never another parent-child edge or an assignment. Record accepted `LOCAL_DECISION`; no owner means adopt. Close only with verified independently reviewed evidence or proof it is not a defect.
+MUST Treat a shepherd BOUNCED message as a doorbell for its durable fix bead. Dispatch a fresh implementer through the owning epic's queue, integrate its capture, update the PR and resolve addressed review threads; never forward findings to a prior worker.
+MUST On ESCALATED, preserve the feature tree and PR, stop bot-fix dispatch for that merge bead, and let `Main` own the recorded human question while unrelated epic work continues.
 
 ## Helpers and questions
 

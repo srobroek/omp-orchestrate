@@ -65,6 +65,13 @@
       "source": { "kind": "contract", "where": "shepherd.json: completion.disposition" }
     },
     {
+      "verb": "ESCALATED",
+      "meaning": "A repeated review issue exhausted its own fix-attempt limit and is held for human adjudication.",
+      "writers": ["shepherd"],
+      "terminal": true,
+      "source": { "kind": "contract", "where": "shepherd.json: completion.disposition" }
+    },
+    {
       "verb": "CONFLICT",
       "meaning": "The branch does not merge into its base. The node returns to working for a rebase; the shepherd never resolves it.",
       "writers": ["shepherd"],

@@ -100,12 +100,42 @@ Its mapped `in_progress` status stays out of `bd ready` until the explicit reope
 
 Create the merge bead with label `pr:merge`, metadata `role=shepherd`, and no parent.
 Do not use type `merge-request`: it is a ready-filter alias, not a creatable type.
-Stamp `repo`, `branch`, `base_sha`, `origin_bead` and `integration_owner=orchestrate`.
-When transferring ownership for the same repository/PR, `origin_bead` names the source
-node or its explicit parent; preserve that parent in ownership snapshots. Source
-approval does not transfer. After the shepherd verifies the PR/head,
-stamp the merge's own `pr` and `head_sha`; its own approval, `in_progress` state and
-exact head govern dispatch.
+Stamp `repo`, `branch`, `base_sha`, `origin_bead`, `integration_owner=orchestrate`,
+`bot_same_issue_limit=3`, and an empty `bot_issue_attempts` map. When transferring
+ownership for the same repository/PR, `origin_bead` names the source node or its
+explicit parent; preserve that parent in ownership snapshots. Source approval does
+not transfer. After the shepherd verifies the PR/head, stamp the merge's own `pr`
+and `head_sha`; its own approval, `in_progress` state and exact head govern dispatch.
+ 
+### Automated review loop
+
+The shepherd owns automated review observation. It never holds a watcher agent open.
+Pending or stale reviews produce an IDLE disposition and a parked merge bead; unrelated
+queues continue. The next shepherd patrol re-probes the exact PR head.
+
+For an actionable round, the shepherd collects all configured bots before routing one
+fix bead. Use the GitHub review-thread node id as the issue identity. When a finding has
+no thread, use its review URL plus a stable fingerprint of bot, path, location and finding.
+Compare the current finding with prior bot-fix evidence: only the same material issue
+increments its entry in `metadata.bot_issue_attempts`. A new issue begins at one even
+when the PR has already completed other bot-fix rounds.
+
+Below `metadata.bot_same_issue_limit`, the shepherd records BOUNCED, creates one
+unassigned fix bead for the round, and wakes the owning architect with the bead id.
+The architect dispatches a fresh implementer through the queue. After capture, the
+architect integrates and pushes the fix, replies where a rejection needs evidence,
+resolves each addressed thread with GitHub's `resolveReviewThread` GraphQL mutation,
+and reads back `isResolved=true`. Record the resolved thread ids and new head before
+removing the same-PR merge blocker. A reply, an outdated diff or a hidden thread is not
+resolution. The shepherd then probes every configured bot at the new head.
+
+When the same material issue remains actionable after the default three fix attempts,
+the shepherd records ESCALATED on merge and feature instead of creating another fix.
+The record carries issue identities, attempts, prior heads, fix beads, thread URLs, one
+human question and the resume transition. Set `state=waiting_human`, release the merge
+slot, preserve the PR and feature tree, and notify `Main` through `hub` with only the
+merge bead id. `Main` surfaces the question to the human. No other implementation or
+landing queue waits on that hold.
 
 ## Persistence classes
 
@@ -307,8 +337,9 @@ An agent may choose a default autonomously only when every condition is true:
 
 Record the ambiguity before applying the default. A cross-boundary choice that existing
 evidence fully resolves uses a decision bead. Cross-boundary uncertainty, irreversible
-action, external mutation, security/financial/legal risk, or missing user intent is not an
-autonomous default. It enters `waiting_human` with one exact question and its impact.
+action, external mutation, security/financial/legal risk, missing user intent, or a
+review issue that exhausted its own fix-attempt limit is not an autonomous default. It
+enters `waiting_human` with one exact question and its impact.
 
 The holding actor adds this comment to the affected bead:
 
@@ -322,9 +353,10 @@ resume: <exact state transition, gate action, and actor to wake>
 ```
 
 Every field is nonempty. The question cannot delegate discovery back to the human or ask for
-general approval. Record `orc.ask`, run `bd set-state <bead> state=waiting_human --reason
-"<question summary>"`, and keep status `in_progress`. The resulting `state:waiting_human`
-label is the durable hold. A bead that had not started also receives
+general approval. Record `orc.ask`; a shepherd review-loop escalation also records
+ESCALATED with the repeated issue evidence. Run `bd set-state <bead> state=waiting_human
+--reason "<question summary>"`, and keep status `in_progress`. The resulting
+`state:waiting_human` label is the durable hold. A bead that had not started also receives
 `bd gate create --type=human --blocks <bead> --reason "<question>"`.
 
 Nobody polls the human or the held worker. Unrelated ready beads continue. On an answer,

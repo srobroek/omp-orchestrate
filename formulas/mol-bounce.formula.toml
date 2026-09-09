@@ -8,7 +8,7 @@ description = "the merge bead being bounced; stays open and parked, never closed
 
 [vars.failure_key]
 required = true
-description = "failure identity over repo, failure kind, and exact detail; a review-bot round is keyed bot:<slug>@<head_sha>"
+description = "failure identity over repo, failure kind, and exact detail; one bot round groups its current issue identities at one head"
 
 [vars.route_role]
 default = "implementer"
@@ -23,12 +23,16 @@ labels = ["bounce", "phase:dedupe"]
 description = """
 Dedupe FIRST. Search every non-closed fix bead carrying {{failure_key}} before
 creating anything. The same key deduplicates sequential passes, so a repeated
-bounce of the same failure reuses the existing bead and this molecule stops here.
+bounce of the same exact-head finding set reuses the existing bead and this
+molecule stops here.
 
-Keying is what makes that safe. A review-bot round is keyed
-`bot:<slug>@<head_sha>` so a new push produces a NEW round rather than reopening a
-closed fix bead; a CI or conflict failure keys on repo, kind, and the exact check
-name or sorted conflict paths.
+For review bots, first collect every configured bot's actionable findings. Use
+the GitHub review-thread node id as each issue identity; without a thread, use
+the review URL plus a stable bot/path/location/finding fingerprint. The round
+key combines the sorted issue identities with `head_sha`. A new push produces
+a new round key, while `metadata.bot_issue_attempts` separately counts whether
+the same material issue survived prior fixed heads. A newly discovered issue
+starts at one and does not inherit the PR's total round count.
 
 On a concurrent creation race keep the OLDEST open fix bead and close the later
 one as its duplicate.
@@ -57,10 +61,10 @@ dependency edge park-merge-bead adds next, and that edge dies with a burned wisp
 
 Carry EVIDENCE, not a copy of the findings: the exact PR, branch, failure, check
 name, `origin_actor` (the handle the fix routes back to), and `origin_bead` (the
-merge bead it came from). For a review-bot round carry POINTERS -- the
-summary review URL plus each comment's `path:line` and URL. The bot thread is live
-and its diff suggestions render only on the PR, so a copy is stale the moment it
-is written.
+merge bead it came from). For a review-bot round carry the issue identities,
+attempt counts and POINTERS -- the summary review URL plus each thread node id,
+comment `path:line` and URL. The bot thread is live and its diff suggestions
+render only on the PR, so a copied body is stale the moment it is written.
 
 Unassigned is deliberate. The specialist discovers this work by CLAIMING the fix
 bead and does the work in its own isolated workspace -- it never enters the
@@ -108,11 +112,13 @@ labels = ["bounce", "phase:record"]
 description = """
 Correlate both beads with a stable marker carrying {{failure_key}}, so a later
 pass -- or a recovery after a crash mid-bounce -- can find this round instead of
-opening a second one.
+opening a second one. Record the current `bot_issue_attempts` map and the
+same-issue limit on review-bot bounces.
 
 The comment states what happened and what unblocks it. It never states a verdict
 on a review finding: the specialist claiming the fix bead judges which findings
-are correct, applies those, and replies on the PR to the rest.
+are correct, applies those, and records evidence for the architect. The architect
+owns PR replies and review-thread resolution after integrating the capture.
 """
 
 [[steps]]
