@@ -212,6 +212,7 @@ const BOOLEAN_FLAGS: Record<string, true> = {
 	"--claim": true,
 	"--claim-next": true,
 	"--continue": true,
+	"--ephemeral": true,
 	"--force": true,
 	"--global": true,
 	"--ignore-schema-skew": true,

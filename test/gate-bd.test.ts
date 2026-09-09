@@ -213,6 +213,10 @@ describe("the identity notice", () => {
 	test("keeps a genuine update help call non-mutating", () => {
 		expect(actorNotice(only("bd update orc-1 --help"))).toBeUndefined();
 	});
+
+	test("keeps help after a valueless flag non-mutating", () => {
+		expect(actorNotice(only("bd create x --ephemeral --help"))).toBeUndefined();
+	});
 	test("accepts an identity set through the bash call's own env", () => {
 		expect(actorNotice(only("bd close orc-1"), { BEADS_ACTOR: "impl" })).toBeUndefined();
 		expect(actorNotice(only("bd close orc-1"), { BD_ACTOR: "impl" })).toBeUndefined();
