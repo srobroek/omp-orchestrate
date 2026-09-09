@@ -41,6 +41,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - MUST Confine helpers to the owner's checkout and scope. Keep their grants unchanged.
 - NOT Let helpers claim beads or commit. They cannot touch PRs or manage worktrees either.
 - MUST Collect a helper's terminal result before another writer acts. A job receipt is not completion.
+- MUST Treat an architect runtime stop as a rollover when its epic remains actionable. LOAD `roles.md`, build the handover from durable epic and worktree evidence, and start a replacement `orc-architect` for the same epic. Never restart from chat memory alone.
 - MUST Preserve required CI at the exact head. A closed gate does not prove success.
 - MUST Record external waits on the bead with the awaited id and resume steps. Take ready work or yield instead of polling a gate.
 - MUST Preserve held claims and captures after an incomplete exit. Neither a completed task nor an unevaluated exit proves acceptance.
