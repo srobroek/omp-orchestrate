@@ -16,7 +16,7 @@ import { promisify } from "node:util";
 import { resolveToCwd } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { Patch, expandApplyPatchToPreviewEntries, splitSloppySections } from "@oh-my-pi/pi-coding-agent/edit";
+import { editInspect } from "@oh-my-pi/pi-natives";
 import { bdShow, metadataRecord, metadataString } from "../bd";
 import { observedClaim } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
@@ -168,42 +168,44 @@ function declaredTargets(toolName: string, input: Record<string, unknown>): stri
   return typeof input.path === "string" && input.path.length > 0 ? [input.path] : [];
  }
  if (toolName !== "edit") return [];
-
  // Text is authoritative; host compatibility fields are not executable targets.
  const raw = input.input ?? input._input;
- if (typeof raw === "string") {
-  const targets = new Set<string>();
-  try {
-   const hashline = Patch.parse(raw);
-   for (const section of hashline.sections) {
-    targets.add(section.path);
-    const fileOp = section.fileOp;
-    if (fileOp?.kind === "move") targets.add(fileOp.dest);
-   }
-  } catch {
-   // Try the other installed edit grammars below.
+ const textual = typeof raw === "string";
+ const args = textual ? { input: raw } : { ...input, path: input.path ?? input._path };
+ const modes = textual ? ["hashline", "apply_patch", "sloppy"] : ["replace", "patch"];
+ const targets = new Set<string>();
+ if (textual) {
+  for (const match of raw.matchAll(/^\*{3}\s+(?:Add|Update|Delete) File:\s*(.+)$/gim)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
   }
-  try {
-   for (const entry of expandApplyPatchToPreviewEntries({ input: raw })) {
-    targets.add(entry.path);
-    if (entry.rename !== undefined) targets.add(entry.rename);
-   }
-  } catch {
-   // An incomplete or non-apply-patch payload is handled by the other parsers.
+  for (const match of raw.matchAll(/^\*{3}\s+Move to:\s*(.+)$/gim)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
   }
-  for (const section of splitSloppySections(raw)) targets.add(section.path);
-  return targets.size > 0 ? [...targets] : undefined;
- }
-
- const target = input.path ?? input._path;
- if (typeof target !== "string" || target.length === 0) return undefined;
- const targets = new Set([target]);
- if (Array.isArray(input.edits)) {
-  for (const edit of input.edits) {
-   if (edit !== null && typeof edit === "object" && typeof edit.rename === "string") targets.add(edit.rename);
+  for (const match of raw.matchAll(/^§(?!\*)\s*(\S.*)$/gm)) {
+   const target = match[1]?.trim();
+   if (target) targets.add(target);
+  }
+  for (const match of raw.matchAll(/^\[([^\]\n]+)\]$/gm)) {
+   const target = match[1]?.replace(/#[0-9a-f]{4}$/i, "").trim();
+   if (target) targets.add(target);
   }
  }
- return [...targets];
+ try {
+  const json = JSON.stringify(args);
+  for (const mode of modes) {
+   const inspection = editInspect(mode, json);
+   for (const target of inspection.paths) targets.add(target);
+   for (const operation of inspection.fileOps) {
+    targets.add(operation.path);
+    if (operation.to !== undefined) targets.add(operation.to);
+   }
+  }
+ } catch {
+  // Native inspection is optional for incomplete payloads; header parsing still applies.
+ }
+ return targets.size > 0 ? [...targets] : undefined;
 }
 
 /**
