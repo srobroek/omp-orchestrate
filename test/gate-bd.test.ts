@@ -133,43 +133,90 @@ describe("the identity notice", () => {
 		["mol last-activity", "bd mol last-activity mol-1"],
 		["mol seed", "bd mol seed formula"],
 		["mol pour preview", "bd mol pour formula --dry-run"],
+		["mol wisp preview", "bd mol wisp formula --dry-run"],
 		["mol wisp list", "bd mol wisp list"],
-		["dep list", "bd dep list orc-1"],
-		["dep tree", "bd dep tree orc-1"],
-		["dep help", "bd dep --help"],
-		["label list", "bd label list orc-1"],
-		["label list-all", "bd label list-all"],
-		["audit list", "bd audit list"],
-		["audit help", "bd audit --help"],
-		["gate list", "bd gate list"],
-		["gate show", "bd gate show gate-1"],
-		["todo list", "bd todo list"],
+		["mol wisp help", "bd mol wisp --help"],
 		["formula list", "bd formula list"],
-		["formula show", "bd formula show release"],
+		["formula show", "bd formula show mol-review"],
 		["epic status", "bd epic status epic-1"],
 		["merge-slot check", "bd merge-slot check"],
 		["swarm list", "bd swarm list"],
 		["swarm status", "bd swarm status epic-1"],
 		["swarm validate", "bd swarm validate epic-1"],
+		["dep cycles", "bd dep cycles"],
+		["dep list", "bd dep list orc-1"],
+		["dep tree", "bd dep tree orc-1"],
+		["dep help", "bd dep --help"],
+		["label list", "bd label list orc-1"],
+		["label list-all", "bd label list-all"],
+		["kv get", "bd kv get somekey"],
+		["kv list", "bd kv list"],
+		["audit list", "bd audit list"],
+		["audit help", "bd audit --help"],
+		["gate discover", "bd gate discover --type gh:run"],
+		["gate list", "bd gate list"],
+		["gate show", "bd gate show gate-1"],
+		["todo list", "bd todo list"],
+		["comments list", "bd comments orc-1"],
 	])("leaves grouped read %s alone", (_label, command) => {
 		expect(actorNotice(only(command))).toBeUndefined();
 	});
 
 	test.each([
 		["mol pour", "bd mol pour formula"],
-		["mol wisp", "bd mol wisp formula"],
+		["bare mol wisp", "bd mol wisp"],
+		["mol wisp proto", "bd mol wisp beads-release"],
+		["mol wisp create", "bd mol wisp create formula"],
+		["mol wisp gc", "bd mol wisp gc"],
+		["formula convert", "bd formula convert formula.json"],
+		["epic close-eligible", "bd epic close-eligible"],
+		["merge-slot acquire", "bd merge-slot acquire"],
+		["merge-slot create", "bd merge-slot create"],
+		["merge-slot release", "bd merge-slot release"],
+		["swarm create", "bd swarm create epic-1"],
+		["dep --blocks", "bd dep orc-1 --blocks orc-2"],
 		["dep remove", "bd dep remove orc-1 orc-2"],
 		["label propagate", "bd label propagate orc-1 kind:design"],
+		["kv clear", "bd kv clear key"],
+		["audit label", "bd audit label event-1 keep"],
 		["audit record", "bd audit record --kind tool_call"],
 		["gate check", "bd gate check"],
 		["todo done", "bd todo done todo-1"],
-		["epic close-eligible", "bd epic close-eligible"],
-		["merge-slot acquire", "bd merge-slot acquire"],
-		["swarm create", "bd swarm create epic-1"],
+		["comments add", "bd comments add orc-1 REPORTED"],
+		["unknown grouped action", "bd gate frobnicate"],
 	])("fires on grouped write %s", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
 	});
 
+	test("keeps claim help non-mutating", () => {
+		expect(actorNotice(only("bd update orc-1 --claim --help"))).toBeUndefined();
+	});
+
+	test.each([
+		["help after option terminator", "bd create -- --help"],
+		["wisp dry-run after option terminator", "bd mol wisp beads-release -- --dry-run"],
+		["pour dry-run after option terminator", "bd mol pour formula -- --dry-run"],
+	])("does not treat positional %s as a control flag", (_label, command) => {
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
+	});
+
+	test.each([
+		["separate long help", "bd update orc-1 --description --help"],
+		["separate short help", "bd update orc-1 --notes -h"],
+		["inline long help", "bd update orc-1 --description=--help"],
+		["close reason", "bd close orc-1 --reason --help"],
+		["audit kind", "bd audit record --kind --help"],
+	])("does not treat %s option data as help", (_label, command) => {
+		expect(actorNotice(only(command))).toContain("WARN bd identity");
+	});
+
+	test("keeps a genuine update help call non-mutating", () => {
+		expect(actorNotice(only("bd update orc-1 --help"))).toBeUndefined();
+	});
+
+	test("keeps help after a valueless flag non-mutating", () => {
+		expect(actorNotice(only("bd create x --ephemeral --help"))).toBeUndefined();
+	});
 	test("accepts an identity set through the bash call's own env", () => {
 		expect(actorNotice(only("bd close orc-1"), { BEADS_ACTOR: "impl" })).toBeUndefined();
 		expect(actorNotice(only("bd close orc-1"), { BD_ACTOR: "impl" })).toBeUndefined();

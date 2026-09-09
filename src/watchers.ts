@@ -632,10 +632,7 @@ async function safeFailureReport(
  if (comment !== null && (invocation.subcommand !== "comment" || invocation.positionals.length < 2)) return false;
  if (
   update !== null &&
-  (invocation.subcommand !== "update" ||
-   invocation.positionals.length !== 2 ||
-   invocation.positionals[1] !== "blocked" ||
-   invocation.rest.length !== 4)
+  (invocation.subcommand !== "update" || invocation.positionals.length !== 1 || invocation.rest.length !== 4)
  ) return false;
 
  const bead = await bdShow(beadId);

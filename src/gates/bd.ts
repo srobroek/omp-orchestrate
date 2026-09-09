@@ -37,7 +37,7 @@ import { commentVerb } from "../bd";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
 import { readActiveRun } from "../run-state";
-import { type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
+import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
 
 /**
  * One finding on one parsed invocation: what to say, or `undefined` for silence.
@@ -207,6 +207,27 @@ const ADMIN_SUBCOMMANDS: Record<string, true> = {
  */
 const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
+/** Flags proven not to consume a following token; unknown flags fail closed as value-taking. */
+const BOOLEAN_FLAGS: Record<string, true> = {
+	"--claim": true,
+	"--claim-next": true,
+	"--continue": true,
+	"--ephemeral": true,
+	"--force": true,
+	"--global": true,
+	"--ignore-schema-skew": true,
+	"--json": true,
+	"--no-auto": true,
+	"--quiet": true,
+	"--readonly": true,
+	"--sandbox": true,
+	"--silent": true,
+	"--suggest-next": true,
+	"--unassigned": true,
+	"--verbose": true,
+};
+
+
 /** Grouped subcommands whose first positional selects a read. */
 const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
 	audit: { list: true, show: true },
@@ -217,6 +238,7 @@ const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
 	gate: { discover: true, list: true, show: true },
 	kv: { get: true, list: true },
 	label: { list: true, "list-all": true, show: true },
+	"merge-slot": { check: true },
 	mol: {
 		current: true,
 		"last-activity": true,
@@ -227,7 +249,6 @@ const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
 		show: true,
 		stale: true,
 	},
-	"merge-slot": { check: true },
 	swarm: { list: true, status: true, validate: true },
 	todo: { list: true },
 };
@@ -238,8 +259,9 @@ const GROUP_WRITE_ACTIONS: Record<string, Record<string, true>> = {
 	comments: { add: true },
 	dep: { add: true, relate: true, remove: true, unrelate: true },
 	epic: { "close-eligible": true },
+	formula: { convert: true },
 	gate: { "add-waiter": true, check: true, create: true, resolve: true },
-	kv: { append: true, delete: true, rm: true, set: true, update: true },
+	kv: { append: true, clear: true, delete: true, rm: true, set: true, update: true },
 	label: { add: true, propagate: true, remove: true },
 	mol: { bond: true, burn: true, distill: true, pour: true, squash: true },
 	"merge-slot": { acquire: true, create: true, release: true },
@@ -269,8 +291,28 @@ const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
  * exempt: `bd show` yields `metadata.actor` before the claim.
  */
 function writesBeads(invocation: BdInvocation): boolean {
+	let hasHelp = false;
+	let hasDryRun = false;
+	let hasBlocks = false;
+	let skipValue = false;
+	for (const token of invocation.rest) {
+		if (token === "--") break;
+		if (skipValue) {
+			skipValue = false;
+			continue;
+		}
+		const { flag, inline } = splitFlag(token);
+		if (BD_VALUE_FLAGS[flag] === true) {
+			skipValue = inline === undefined;
+			continue;
+		}
+		if (token === "--help" || token === "-h") hasHelp = true;
+		else if (token === "--dry-run") hasDryRun = true;
+		else if (token === "--blocks") hasBlocks = true;
+		else if (inline === undefined && token.startsWith("-") && BOOLEAN_FLAGS[flag] !== true) skipValue = true;
+	}
+	if (hasHelp) return false;
 	if (invocation.hasClaim) return invocation.subcommand !== "ready";
-	if (invocation.rest.includes("--help") || invocation.rest.includes("-h")) return false;
 
 	const { subcommand } = invocation;
 	// A bare `bd`, or a first positional that is really a redirection: both print help.
@@ -278,19 +320,23 @@ function writesBeads(invocation: BdInvocation): boolean {
 	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;
 
 	const action = invocation.positionals[0] ?? "";
+	// Every non-`add` positional is an issue ID in `bd comments <issue-id>`.
+	if (subcommand === "comments") return action === "add";
 	if (subcommand === "mol" && action === "wisp") {
-		if (invocation.rest.includes("--dry-run")) return false;
+		// Dry-run is inherited by proto creation, `create`, and `gc`; all are previews.
+		if (hasDryRun) return false;
 		const wispAction = invocation.positionals[1];
-		if (wispAction === undefined) return false;
-		if (MOL_WISP_READS[wispAction] === true) return false;
-		if (MOL_WISP_WRITES[wispAction] === true) return true;
+		if (wispAction !== undefined && MOL_WISP_READS[wispAction] === true) return false;
+		if (wispAction !== undefined && MOL_WISP_WRITES[wispAction] === true) return true;
 		return true;
 	}
-	if (subcommand === "mol" && invocation.rest.includes("--dry-run")) return false;
-	if (subcommand === "dep" && invocation.rest.includes("--blocks")) return true;
+	if (subcommand === "mol" && action === "pour" && hasDryRun) return false;
+	if (subcommand === "dep" && hasBlocks) return true;
 	if (GROUP_WRITE_ACTIONS[subcommand]?.[action] === true) return true;
 	if (GROUP_READ_ACTIONS[subcommand]?.[action] === true) return false;
-	if (GROUP_READ_ACTIONS[subcommand] !== undefined || GROUP_WRITE_ACTIONS[subcommand] !== undefined) return false;
+	if ((GROUP_READ_ACTIONS[subcommand] !== undefined || GROUP_WRITE_ACTIONS[subcommand] !== undefined) && action === "") {
+		return false;
+	}
 	return READ_SUBCOMMANDS[subcommand] !== true;
 }
 

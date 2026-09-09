@@ -25,7 +25,7 @@ import { bdList, bdShow } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
 import { scopeOf, scopesOverlap } from "../scope";
-import { type BdInvocation, bdInvocations, effectiveSegments } from "../shell";
+import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments } from "../shell";
 
 /**
  * A flag token split into its name and its inline `=` operand, when it carries one.
@@ -246,14 +246,6 @@ export async function scopeConflict(bead: BdBead | null): Promise<ToolCallEventR
  return undefined;
 }
 
-const CLAIM_VALUE_FLAGS: Record<string, true> = {
- "-C": true, "--directory": true, "--actor": true, "--db": true, "--dolt-auto-commit": true,
- "--acceptance": true, "--add-label": true, "--append-notes": true, "-a": true, "--assignee": true, "--await-id": true,
- "--body-file": true, "--defer": true, "-d": true, "--description": true, "--design": true, "--design-file": true, "--due": true,
- "-e": true, "--estimate": true, "--external-ref": true, "--metadata": true, "--notes": true, "--parent": true, "-p": true,
- "--priority": true, "--remove-label": true, "--session": true, "--set-labels": true, "--set-metadata": true,
- "--spec-id": true, "-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--unset-metadata": true,
-};
 
 /** Named targets excluding option operands, including flags interleaved between IDs. */
 function claimTargets(claim: BdInvocation): string[] {
@@ -268,7 +260,7 @@ function claimTargets(claim: BdInvocation): string[] {
    continue;
   }
   if (!positionalOnly && token.startsWith("-")) {
-   if (!token.includes("=") && CLAIM_VALUE_FLAGS[token] === true) index++;
+   if (!token.includes("=") && BD_VALUE_FLAGS[token] === true) index++;
    continue;
   }
   if (!subcommandSeen) {
@@ -343,7 +335,7 @@ function shepherdStateWrite(invocation: BdInvocation): boolean {
     const state = status ? normalized : normalized.startsWith("state:") ? normalized.slice(6) : "";
     return SHEPHERD_DENIED_STATES[state] === true;
    })) return true;
-  } else if (inline === undefined && CLAIM_VALUE_FLAGS[flag] === true) {
+  } else if (inline === undefined && BD_VALUE_FLAGS[flag] === true) {
    index++;
   }
  }
