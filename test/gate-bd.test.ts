@@ -134,6 +134,14 @@ describe("the identity notice", () => {
 		["mol pour preview", "bd mol pour formula --dry-run"],
 		["mol wisp preview", "bd mol wisp formula --dry-run"],
 		["mol wisp list", "bd mol wisp list"],
+		["bare mol wisp help", "bd mol wisp"],
+		["formula list", "bd formula list"],
+		["formula show", "bd formula show mol-review"],
+		["epic status", "bd epic status epic-1"],
+		["merge-slot check", "bd merge-slot check"],
+		["swarm list", "bd swarm list"],
+		["swarm status", "bd swarm status"],
+		["swarm validate", "bd swarm validate epic-1"],
 		["dep cycles", "bd dep cycles"],
 		["dep list", "bd dep list orc-1"],
 		["dep tree", "bd dep tree orc-1"],
@@ -153,9 +161,14 @@ describe("the identity notice", () => {
 	test.each([
 		["mol pour", "bd mol pour formula"],
 		["mol wisp proto", "bd mol wisp beads-release"],
-		["bare mol wisp", "bd mol wisp"],
 		["mol wisp create", "bd mol wisp create formula"],
 		["mol wisp gc", "bd mol wisp gc"],
+		["formula convert", "bd formula convert formula.json"],
+		["epic close-eligible", "bd epic close-eligible"],
+		["merge-slot acquire", "bd merge-slot acquire"],
+		["merge-slot create", "bd merge-slot create"],
+		["merge-slot release", "bd merge-slot release"],
+		["swarm create", "bd swarm create epic-1"],
 		["dep --blocks", "bd dep orc-1 --blocks orc-2"],
 		["dep remove", "bd dep remove orc-1 orc-2"],
 		["label propagate", "bd label propagate orc-1 kind:design"],
@@ -167,6 +180,10 @@ describe("the identity notice", () => {
 		["unknown grouped action", "bd gate frobnicate"],
 	])("fires on grouped write %s", (_label, command) => {
 		expect(actorNotice(only(command))).toContain("WARN bd identity");
+	});
+
+	test("keeps claim help non-mutating", () => {
+		expect(actorNotice(only("bd update orc-1 --claim --help"))).toBeUndefined();
 	});
 
 	test("accepts an identity set through the bash call's own env", () => {

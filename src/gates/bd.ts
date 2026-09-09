@@ -209,10 +209,13 @@ const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
 /** Grouped subcommands whose first positional selects a read. */
 const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
+	epic: { status: true },
+	formula: { list: true, show: true },
 	dep: { cycles: true, list: true, tree: true },
 	gate: { discover: true, list: true, show: true },
 	kv: { get: true, list: true },
 	label: { list: true, "list-all": true },
+	"merge-slot": { check: true },
 	mol: {
 		current: true,
 		"last-activity": true,
@@ -222,17 +225,22 @@ const GROUP_READ_ACTIONS: Record<string, Record<string, true>> = {
 		show: true,
 		stale: true,
 	},
+	swarm: { list: true, status: true, validate: true },
 	todo: { list: true },
 };
 
 /** Grouped subcommands whose first positional selects a write. */
 const GROUP_WRITE_ACTIONS: Record<string, Record<string, true>> = {
 	audit: { label: true, record: true },
+	epic: { "close-eligible": true },
+	formula: { convert: true },
 	dep: { add: true, relate: true, remove: true, unrelate: true },
 	gate: { "add-waiter": true, check: true, create: true, resolve: true },
 	kv: { clear: true, set: true },
 	label: { add: true, propagate: true, remove: true },
+	"merge-slot": { acquire: true, create: true, release: true },
 	mol: { bond: true, burn: true, distill: true, pour: true, squash: true },
+	swarm: { create: true },
 	todo: { add: true, done: true },
 };
 
@@ -257,8 +265,8 @@ const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
  * exempt: `bd show` yields `metadata.actor` before the claim.
  */
 function writesBeads(invocation: BdInvocation): boolean {
-	if (invocation.hasClaim) return invocation.subcommand !== "ready";
 	if (invocation.rest.includes("--help") || invocation.rest.includes("-h")) return false;
+	if (invocation.hasClaim) return invocation.subcommand !== "ready";
 
 	const { subcommand } = invocation;
 	// A bare `bd`, or a first positional that is really a redirection: both print help.
@@ -266,11 +274,13 @@ function writesBeads(invocation: BdInvocation): boolean {
 	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;
 
 	const action = invocation.positionals[0] ?? "";
+	// Every non-`add` positional is an issue ID in `bd comments <issue-id>`.
 	if (subcommand === "comments") return action === "add";
 	if (subcommand === "mol" && action === "wisp") {
+		// Dry-run is inherited by proto creation, `create`, and `gc`; all are previews.
 		if (invocation.rest.includes("--dry-run")) return false;
 		const wispAction = invocation.positionals[1];
-		if (wispAction !== undefined && MOL_WISP_READS[wispAction] === true) return false;
+		if (wispAction === undefined || MOL_WISP_READS[wispAction] === true) return false;
 		return true;
 	}
 	if (subcommand === "mol" && action === "pour" && invocation.rest.includes("--dry-run")) return false;
