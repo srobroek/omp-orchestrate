@@ -128,6 +128,15 @@ This local check needs an installed `omp`, so CI does not run it.
 | `/orchestrate-status` | run status for the active epic |
 | `/orchestrate-roster` | live agents, beside the queue depth for each routing label |
 
+## Development
+
+Run `bun install --frozen-lockfile` before `bun run typecheck` or `bun test`, and
+again after every pull that changes `bun.lock`. The lockfile pins the
+`@oh-my-pi/pi-coding-agent` release the source compiles against; a `node_modules`
+left over from an older release fails with missing-export errors in
+`src/agent-preflight.ts` and `src/worktree.ts` and a missing `pi-natives` export in
+`test/wiring.test.ts`, while CI, which installs fresh, stays green.
+
 ## License
 
 Apache-2.0 governs this repository. Read the full text in [LICENSE](LICENSE).
