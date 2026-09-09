@@ -303,6 +303,7 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  }
  if (tokens.at(-1) === "--json") tokens.pop();
  const operation = tokens.shift();
+ if (actorMismatch) return "deny";
  if ((operation === "show" || operation === "comments") && tokens.length === 1 && tokens[0] === beadId) {
   return trustedEnvironment ? "read" : undefined;
  }
@@ -312,7 +313,6 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  if (operation !== "comment" && operation !== "comments" && operation !== "update") return undefined;
  if (operation === "comments" && tokens[0] === "add") tokens.shift();
  if (tokens[0] !== beadId) return undefined;
- if (actorMismatch) return "deny";
  if (!trustedEnvironment) return undefined;
  const inheritedActor = process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
  if (!hasExplicitActor && inheritedActor !== actor) return undefined;

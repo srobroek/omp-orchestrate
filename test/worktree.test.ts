@@ -521,6 +521,12 @@ describe("G2 standalone ownership controls", () => {
   expect((await fromBash(owned, command))?.block).toBe(true);
  });
 
+ test("rejects explicit foreign identity on otherwise permitted reads", async () => {
+  expect((await fromBash(owned, `BEADS_ACTOR=${foreignActor} bd show ${BEAD}`))?.block).toBe(true);
+  expect((await fromBash(owned, `bd --actor ${foreignActor} list --json`))?.block).toBe(true);
+  expect((await fromBash(owned, `bd show ${BEAD}`, { BEADS_ACTOR: actor, BD_ACTOR: foreignActor }))?.block).toBe(true);
+ });
+
  test("allows a bare owned Beads mutation without a scope conflict", async () => {
   expect(await fromBash(owned, `bd comment ${BEAD} "ordinary note"`)).toBeUndefined();
  });
