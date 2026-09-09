@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6](https://github.com/srobroek/omp-orchestrate/compare/v0.3.5...v0.3.6) (2026-09-09)
+
+
+### Bug Fixes
+
+* classify grouped bd commands by grammar ([#68](https://github.com/srobroek/omp-orchestrate/issues/68)) ([0485d98](https://github.com/srobroek/omp-orchestrate/commit/0485d9890079fb67b4bf64f5c7ea44d0ce0f6f64))
+
 ## [0.3.5](https://github.com/srobroek/omp-orchestrate/compare/v0.3.4...v0.3.5) (2026-09-09)
 
 
