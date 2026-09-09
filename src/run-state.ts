@@ -250,6 +250,10 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
     ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
     return;
    }
+   if (beads.tracked === false) {
+    ctx.ui.notify("orchestrate run NOT activated: no active Beads workspace was found", "error");
+    return;
+   }
    if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
    try {
     const state = await activateRun(cwd, ctx.sessionManager.getSessionId());
