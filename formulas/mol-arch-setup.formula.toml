@@ -97,7 +97,15 @@ type = "task"
 needs = ["verify-writable"]
 labels = ["arch-setup", "phase:provision"]
 description = """
-bd update "{{owner_bead}}" --metadata '{"worktree":"<abs path>","branch":"{{branch}}"}'
+bd update "{{owner_bead}}" --metadata '{"worktree":"<worktree>","branch":"{{branch}}"}'
+
+Then read the bead back:
+
+bd show "{{owner_bead}}" --json
+
+The returned `metadata.worktree` must equal `<worktree>`, and
+`metadata.branch` must equal `{{branch}}`. Refuse any mismatch before declaring
+the epic ready.
 
 Metadata, not a label: exactly one worktree may be true per bead, and this single
 value is what the architect claiming {{owner_bead}} reads to find its tree. Two
@@ -114,9 +122,9 @@ labels = ["arch-setup", "phase:provision"]
 description = """
 Preconditions all true: the worktree exists, its bead var reads {{owner_bead}},
 fresh setup is clean (or resumed dirty state is preserved and inspected),
-ignored inputs are present, and metadata.worktree is stamped. The lead now launches
-the native architect with its actual session cwd at this canonical worktree. Only
-then may the architect pull work under {{owner_bead}}:
+ignored inputs are present, and metadata.worktree equals the Worktrunk-returned
+path. The lead now launches the native architect with its session rooted at this
+canonical worktree. Only then may the architect pull work under {{owner_bead}}:
 `bd ready --parent "{{owner_bead}}" --metadata-field role=<role> --unassigned --claim --json`.
 Use role=implementer for implementation and role=architect for child epics;
 reviewer and researcher pulls also require `--include-ephemeral`. Shepherds
