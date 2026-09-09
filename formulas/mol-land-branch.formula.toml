@@ -94,9 +94,9 @@ findings, and the shepherd never judges them.
 The union of current-head/current-round human and automated verdicts decides the
 route. Collect every configured review bot before routing one fix bead. Bot issue
 attempts are per material issue, keyed by review-thread node id or, without a
-thread, a stable finding fingerprint. New issues begin at one regardless of prior
-PR rounds. Any finding below its same-issue limit routes through fix-round; one
-that remains after its own limit routes to ESCALATED and `waiting_human` instead.
+thread, a stable finding fingerprint. New issues begin at zero completed fixes
+regardless of prior PR rounds. Counts below the same-issue limit route through
+fix-round; a finding still present at the limit routes to ESCALATED instead.
 Only after every dimension reports changes or approval, and only when changes
 are required, restore {{node_bead}} to its implementer queue: preserve the owning
 epic and scope, set status=open with an empty assignee, and let a fresh implementer

@@ -116,21 +116,23 @@ queues continue. The next shepherd patrol re-probes the exact PR head.
 For an actionable round, the shepherd collects all configured bots before routing one
 fix bead. Use the GitHub review-thread node id as the issue identity. When a finding has
 no thread, use its review URL plus a stable fingerprint of bot, path, location and finding.
-Compare the current finding with prior bot-fix evidence: only the same material issue
-increments its entry in `metadata.bot_issue_attempts`. A new issue begins at one even
-when the PR has already completed other bot-fix rounds.
+Compare the current finding with prior bot-fix evidence. Each entry in
+`metadata.bot_issue_attempts` counts completed fixes, not observations. Initialize a
+new issue at zero. Increment it only after the architect integrates and pushes that
+issue's fix; unrelated issues keep separate counters.
 
-Below `metadata.bot_same_issue_limit`, the shepherd records BOUNCED, creates one
-unassigned fix bead for the round, and wakes the owning architect with the bead id.
-The architect dispatches a fresh implementer through the queue. After capture, the
-architect integrates and pushes the fix, replies where a rejection needs evidence,
-resolves each addressed thread with GitHub's `resolveReviewThread` GraphQL mutation,
-and reads back `isResolved=true`. Record the resolved thread ids and new head before
-removing the same-PR merge blocker. A reply, an outdated diff or a hidden thread is not
-resolution. The shepherd then probes every configured bot at the new head.
+When the completed count is below `metadata.bot_same_issue_limit`, the shepherd
+records BOUNCED, creates one unassigned fix bead for the round, and wakes the owning
+architect with the bead id. With the default limit of three, counts 0, 1 and 2 authorize
+the first, second and third fixes. The architect dispatches a fresh implementer through
+the queue. After capture, the architect integrates and pushes the fix, increments the
+completed count, replies where a rejection needs evidence, resolves each addressed
+thread with GitHub's `resolveReviewThread` GraphQL mutation, and reads back
+`isResolved=true`. Record the resolved thread ids and new head before removing the
+same-PR merge blocker. The shepherd then probes every configured bot at the new head.
 
-When the same material issue remains actionable after the default three fix attempts,
-the shepherd records ESCALATED on merge and feature instead of creating another fix.
+When the same material issue remains actionable with a completed count at or above the
+resolved limit, the shepherd records ESCALATED instead of creating another fix.
 The record carries issue identities, attempts, prior heads, fix beads, thread URLs, one
 human question and the resume transition. Set `state=waiting_human`, release the merge
 slot, preserve the PR and feature tree, and notify `Main` through `hub` with only the
