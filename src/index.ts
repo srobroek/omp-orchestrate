@@ -24,7 +24,7 @@ import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerConflictProbe } from "./tools/conflict-probe";
 import { registerRunStatus } from "./tools/run-status";
-import { registerWatchers } from "./watchers";
+import { preflightSettings, registerWatchers } from "./watchers";
 
 /** Tools any gate inspects. Everything else returns before doing work. */
 const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true };
@@ -33,7 +33,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  pi.setLabel("Orchestrate");
 
  // Deterministic surfaces the pull loop and the shepherd call by schema, not prose.
- registerRunCommands(pi);
+ // Activation is the moment the coordination contract starts to matter, so the
+ // settings preflight runs there; a session that never activates hears nothing.
+ registerRunCommands(pi, cwd => preflightSettings(pi, cwd));
  registerConflictProbe(pi);
  registerRunStatus(pi);
  registerBotReviewProbe(pi);
