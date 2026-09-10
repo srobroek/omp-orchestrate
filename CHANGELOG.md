@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.13](https://github.com/srobroek/omp-orchestrate/compare/v0.3.12...v0.3.13) (2026-09-10)
+
+
+### Bug Fixes
+
+* **gates:** BEADS_DIR identity check applies only to a bound checkout ([#90](https://github.com/srobroek/omp-orchestrate/issues/90)) ([67bb45e](https://github.com/srobroek/omp-orchestrate/commit/67bb45e31bc2a91abb66fb2943a98b0c7c6b3645))
+
 ## [0.3.12](https://github.com/srobroek/omp-orchestrate/compare/v0.3.11...v0.3.12) (2026-09-10)
 
 
