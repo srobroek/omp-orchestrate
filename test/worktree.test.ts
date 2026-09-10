@@ -557,10 +557,16 @@ describe("G2 runtime database identity", () => {
   });
  });
 
- test("blocks a command-prefix database override even without an observed claim", async () => {
+ test.each([
+  ["direct prefix", `BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open`],
+  ["persistent assignment", `BEADS_DIR=${foreignBeadsDir}; bd update ${BEAD} --status open`],
+  ["export", `export BEADS_DIR=${foreignBeadsDir}; bd update ${BEAD} --status open`],
+  ["absolute env wrapper", `/usr/bin/env BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open`],
+  ["env split-string wrapper", `env -S 'BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open'`],
+ ])("blocks a %s database override even without an observed claim", async (_label, command) => {
   claims = createClaimState();
   await withPinnedBeadsDir(async () => {
-   const result = await fromBash(owned, `BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open`);
+   const result = await fromBash(owned, command);
 
    expect(result?.block).toBe(true);
    expect(result?.reason).toContain("Bash tool environment");

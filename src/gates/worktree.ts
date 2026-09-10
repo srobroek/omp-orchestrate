@@ -24,7 +24,7 @@ import type { BdBead } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
 import { scopeConflict } from "./claim";
-import { bdInvocations, splitSegments } from "../shell";
+import { splitSegments } from "../shell";
 
 /** Tools that mutate the working tree and therefore need a scope check. */
 export const GATED_WRITE_TOOLS: Record<string, true> = { bash: true, edit: true, write: true };
@@ -53,18 +53,22 @@ type RuntimeBeadsDirValidation =
  | { ok: true; input: Record<string, unknown>; changed: boolean }
  | { ok: false; refusal: ToolCallEventResult };
 
+/** Command text cannot grant database authority; BEADS_DIR belongs in structured env. */
+function commandNamesBeadsDir(command: string): boolean {
+ return splitSegments(command).some(segment => segment.some(token =>
+  token.split(/[ \t]+/).some(word => word === "BEADS_DIR" || word.startsWith("BEADS_DIR=")),
+ ));
+}
+
 /** Validate and canonicalize a structured Bash BEADS_DIR override. */
 export async function normalizeRuntimeBeadsDir(
  ctx: ExtensionContext,
  input: Record<string, unknown>,
 ): Promise<RuntimeBeadsDirValidation> {
  const command = input.command;
- if (
-  typeof command === "string" &&
-  bdInvocations(command).some(invocation => invocation.assignments.has("BEADS_DIR"))
- ) {
+ if (typeof command === "string" && commandNamesBeadsDir(command)) {
   return { ok: false, refusal: { block: true, reason: "BEADS_DIR must be supplied through the Bash tool environment, not command text" } };
- }
+}
  const rawEnvironment = input.env;
  if (
   rawEnvironment === null ||
