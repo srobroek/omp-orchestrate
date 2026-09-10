@@ -7,10 +7,10 @@
  * parser-backed check earns what a regex could not be trusted with, and reading the run
  * marker is what keeps it off every other session.
  *
- * None of the three blocks. Each returns a sentence the entry point sends with
- * `pi.sendMessage`, and the command runs. `ToolCallEventResult` carries no advisory
- * shape, but `pi` is in scope inside the handler, so a notice needs no new return
- * channel.
+ * None of the three notices blocks. A single unattributed mutation may instead return a rewritten
+ * input when a run-scoped actor is known; otherwise the notice leaves through `pi.sendMessage`
+ * and the command runs. `ToolCallEventResult` carries no advisory shape, but `pi` is in scope
+ * inside the handler, so a notice needs no new return channel.
  *
  * A pin check (`-C <run repo>` required on every call) existed here and was removed:
  * the run pins BEADS_DIR instead, which every child inherits, so bd reads the run's
@@ -33,11 +33,18 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { commentVerb } from "../bd";
+import { bdShow, commentVerb, metadataRecord } from "../bd";
+import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
 import { readActiveRun } from "../run-state";
 import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
+
+/** Shell metacharacters that make a command unsafe to rewrite as one invocation. */
+const REWRITE_METACHARACTERS = /[;&|`\n]/;
+
+/** Optional plain shell assignments followed directly by the `bd` executable. */
+const SINGLE_BD_COMMAND = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|`]*)\s+)*bd(?:\s|$)/;
 
 /**
  * Process-wide seam owned by the beads actor gate. G6 claims a tool-call id only after
@@ -400,6 +407,35 @@ function envCarriesActor(env: unknown): boolean {
  * An assignment with an empty value is no identity. The regex silently agreed by
  * accident -- it required `\w+=\S+` and so never matched `BEADS_ACTOR= bd ...` at all.
  */
+/** Whether this raw command is safe to rewrite as one direct `bd` invocation. */
+function isSingleBdCommand(command: string): boolean {
+ return !REWRITE_METACHARACTERS.test(command) && SINGLE_BD_COMMAND.test(command);
+}
+
+/** Quote an actor only when shell syntax requires it. */
+function shellActor(actor: string): string {
+ if (/^[A-Za-z0-9_./:@-]+$/.test(actor)) return actor;
+ return `'${actor.replaceAll("'", "'\\''")}'`;
+}
+
+/** Resolve the best actor available before falling back to the existing warning. */
+async function resolvedActor(
+ invocation: BdInvocation,
+ input: Record<string, unknown>,
+ claims: ClaimState | undefined,
+): Promise<string | undefined> {
+ if (invocationCarriesActor(invocation, input.env)) return undefined;
+ const observed = claims?.observedClaim()?.actor;
+ if (typeof observed === "string" && observed.length > 0) return observed;
+ if (!invocation.hasClaim || invocation.subcommand === "ready") return undefined;
+ const target = invocation.positionals[0];
+ if (target === undefined || !BEAD_ID.test(target)) return undefined;
+ const bead = await bdShow(target);
+ const metadata = metadataRecord(bead?.metadata);
+ const actor = metadata?.actor;
+ return typeof actor === "string" && actor.length > 0 ? actor : undefined;
+}
+
 function invocationCarriesActor(
 	invocation: BdInvocation,
 	env: unknown,
@@ -610,43 +646,18 @@ export const bugRouteNotice: BdCheck = invocation => {
 	);
 };
 
-/**
- * The advisory checks, in the order their notices read best: identity, then the comment
- * body, then the shape of a filed bead.
- */
+/** The advisory checks, in the order their notices read best. */
 const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice];
 
 /**
  * Warn about a `bd` call this run cannot attribute, cannot read, or cannot route.
- *
- * Parses before reading the marker, because most `bash` calls name no `bd` at all and a
- * file read for each of those buys nothing. The marker then gates all three checks:
- * outside a run this returns `undefined` before any of them is consulted.
- *
- * The return value is always `undefined`: nothing here refuses, so the notices leave
- * through `pi.sendMessage` and the command runs. It stays in the refusal position in
- * `src/index.ts` so a check that later has to refuse cannot land after G5 recorded a
- * claim.
- *
- * `deliverAs: "steer"` is chosen from the handler's timing, not from tidiness. This runs
- * mid-turn, before the tool result exists, so the session is streaming and
- * `sendCustomMessage` will "queue as steer/follow-up or store for next turn"
- * (`session/agent-session.d.ts:585-598`). A steer is consumed at the next model call in
- * the SAME turn — the request that carries this tool's result — which is where TTSR put
- * its own non-interrupting tool reminder, in-band on that result. `nextTurn` would hold
- * the notice until a turn that a worker about to yield may never take, and `followUp`
- * would force a fresh turn after the agent stopped. Verified end to end against a live
- * session: the notice text came back quoted by the model in the same turn as the command.
- *
- * `attribution: "user"` for the same reason the dispatch contract uses it: any other value
- * normalises to `"agent"`, and a nag that reads as the model talking to itself is a nag it
- * may discount. This is the extension's voice, which is what WARN means in the grammar.
  */
 export async function gateBdDiscipline(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	input: Record<string, unknown>,
 	toolCallId: string,
+	claims?: ClaimState,
 ): Promise<ToolCallEventResult | undefined> {
 	const command = input.command;
 	if (typeof command !== "string" || command.length === 0) return undefined;
@@ -654,11 +665,26 @@ export async function gateBdDiscipline(
 	const invocations = bdInvocations(command);
 	if (invocations.length === 0) return undefined;
 
-	// `.catch`, as `src/index.ts` does at the same call: an unreadable marker is not a run.
 	const run = await readActiveRun(ctx.cwd).catch(() => null);
 	if (run === null) return undefined;
 
 	const arbiter = actorNoticeArbiter();
+	if (invocations.length === 1 && isSingleBdCommand(command)) {
+		const invocation = invocations[0] as BdInvocation;
+		if (writesBeads(invocation) && !invocationCarriesActor(invocation, input.env)) {
+			const actor = await resolvedActor(invocation, input, claims);
+			if (actor !== undefined && !invocation.assignments.has("BEADS_ACTOR") && !invocation.assignments.has("BD_ACTOR")) {
+				arbiter?.handledToolCalls.add(toolCallId);
+				return {
+					input: {
+						...input,
+						command: `BEADS_ACTOR=${shellActor(actor)} BD_ACTOR=${shellActor(actor)} ${command}`,
+					},
+				};
+			}
+		}
+	}
+
 	const beadsWillBlockClaim = arbiter !== undefined && invocations.some(
 		invocation =>
 			(invocation.subcommand === "claim" || invocation.hasClaim) &&
