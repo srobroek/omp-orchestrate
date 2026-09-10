@@ -29,7 +29,7 @@ import * as actualBd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
 import { gateOneClaim } from "../src/gates/one-claim";
-import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
+import { beadWriteFreeEnv, pinAddition, reviseBashEnv } from "../src/gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "../src/gates/worktree";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
 
@@ -121,7 +121,7 @@ async function gateChain(
  }
  // Mirrors `index.ts`: the environment gate contributes to one revision.
  if (toolName === "bash") {
-  return reviseBashEnv(input, { ...(await beadWriteFreeEnv(WORKER, ctx)) });
+  return reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(WORKER, ctx)) });
  }
  return undefined;
 }
