@@ -1,0 +1,6 @@
+# Project-scoped OMP plugins; synced by agentic-scaffold (`scaffold.py plugins sync`).
+
+[[marketplaces]]
+name = "srobroek-omp"
+source = "srobroek/omp-plugins"
+plugins = ["typescript", "architecture"]
