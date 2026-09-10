@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.10](https://github.com/srobroek/omp-orchestrate/compare/v0.3.9...v0.3.10) (2026-09-10)
+
+
+### Bug Fixes
+
+* **rules:** advise against running roles as nested omp processes ([#83](https://github.com/srobroek/omp-orchestrate/issues/83)) ([e30498a](https://github.com/srobroek/omp-orchestrate/commit/e30498a30d66b8594cd89839182598cd1c9bf645))
+
 ## [0.3.9](https://github.com/srobroek/omp-orchestrate/compare/v0.3.8...v0.3.9) (2026-09-10)
 
 

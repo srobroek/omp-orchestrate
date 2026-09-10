@@ -1,6 +1,6 @@
 {
   "name": "orchestrate",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Multi-agent orchestration with isolated worktrees, independent review, and durable run state in beads.",
   "author": {
     "name": "srobroek"
