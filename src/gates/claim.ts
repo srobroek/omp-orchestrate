@@ -218,19 +218,60 @@ function metadataRecord(bead: BdBead | null): Record<string, unknown> | undefine
  return undefined;
 }
 
-/** Exclusive scope friction between held code-writing claims; read-only roles keep their envelopes without reserving territory. */
+/** Maximum number of parent links traversed while checking claim lineage. */
+const MAX_LINEAGE_DEPTH = 3;
+
+/** Parent fields emitted by different `bd --json` shapes. */
+function parentId(bead: BdBead | null): string | undefined {
+ for (const field of ["parent", "parent_id"] as const) {
+  const value = bead?.[field];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (value !== null && typeof value === "object" && typeof (value as { id?: unknown }).id === "string") {
+   return (value as { id: string }).id;
+  }
+ }
+ return undefined;
+}
+
+/** IDs of a bead's ancestors, loading missing links only as far as the guard needs. */
+async function parentChain(bead: BdBead): Promise<Set<string>> {
+ const ancestors = new Set<string>();
+ let current: BdBead | null = bead;
+ let parent = parentId(current);
+ if (parent === undefined) {
+  // `bd list --json` may omit parent fields; refresh the candidate through the existing
+  // show seam before deciding that it has no lineage.
+  current = await bdShow(bead.id);
+  parent = parentId(current);
+ }
+ for (let depth = 0; depth < MAX_LINEAGE_DEPTH && parent !== undefined; depth++) {
+  if (ancestors.has(parent)) break;
+  ancestors.add(parent);
+  current = await bdShow(parent);
+  parent = parentId(current);
+ }
+ return ancestors;
+}
+
+/** Exclusive scope friction between held code-writing claims; read-only roles and a bead's own lineage keep their envelopes without reserving territory. An unrelated architect envelope still counts. */
 export async function scopeConflict(bead: BdBead | null): Promise<ToolCallEventResult | undefined> {
  if (!bead) return undefined;
  const role = beadRouting(bead)?.role;
  if (role === "researcher" || role === "reviewer") return undefined;
  const candidate = scopeOf(metadataRecord(bead));
  if (candidate.length === 0) return undefined;
+ const candidateAncestors = await parentChain(bead);
  const inFlight = await bdList(["list", "--label", "orc-node", "--status", "in_progress", "--json"]);
  for (const other of inFlight) {
   if (other.id === bead.id) continue;
   if (typeof other.assignee !== "string" || other.assignee.trim().length === 0) continue;
   const otherRole = beadRouting(other)?.role;
   if (otherRole === "researcher" || otherRole === "reviewer") continue;
+  // A feature's held envelope is intentionally the union of its tasks. Neither side of
+  // that parent/child relationship should turn the integration claim into friction.
+  if (candidateAncestors.has(other.id)) continue;
+  const otherAncestors = await parentChain(other);
+  if (otherAncestors.has(bead.id)) continue;
   const otherScope = scopeOf(metadataRecord(other));
   if (otherScope.length === 0) continue;
   if (scopesOverlap(candidate, otherScope)) {

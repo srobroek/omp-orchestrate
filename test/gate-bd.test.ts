@@ -1,10 +1,12 @@
 /** G6: bd notices and run-scoped delivery through the gate entry point. */
 
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import * as actualBd from "../src/bd";
+import { createClaimState, type ClaimState } from "../src/claim-state";
 import {
 	ACTOR_NOTICE_ARBITER,
 	actorNotice,
@@ -463,15 +465,26 @@ afterEach(() => {
 	Reflect.deleteProperty(globalThis, ACTOR_NOTICE_ARBITER);
 });
 
+async function rawGateInput(
+	input: Record<string, unknown>,
+	cwd: string = inRun,
+	toolCallId: string = "tool-call",
+	claims?: ClaimState,
+): Promise<unknown> {
+	sent = [];
+	return gateBdDiscipline(pi, ctxAt(cwd), input, toolCallId, claims);
+}
+
 async function gateInput(
 	input: Record<string, unknown>,
 	cwd: string = inRun,
 	toolCallId: string = "tool-call",
+	claims?: ClaimState,
 ): Promise<Outcome> {
-	sent = [];
-	const result = await gateBdDiscipline(pi, ctxAt(cwd), input, toolCallId);
+	const result = await rawGateInput(input, cwd, toolCallId, claims);
+	const refusal = result !== undefined && typeof result === "object" ? result as Record<string, unknown> : undefined;
 	return {
-		block: result?.block === true ? result.reason : undefined,
+		block: refusal?.block === true ? String(refusal.reason) : undefined,
 		notices: sent.flatMap(entry => String(entry.message.content).split("\n")),
 	};
 }
@@ -621,6 +634,53 @@ describe("G6 inside a run", () => {
 		expect(sent[0]?.message.attribution).toBe("user");
 		expect(sent[0]?.message.display).toBe(true);
 		expect(sent[0]?.options).toEqual({ deliverAs: "steer" });
+	});
+
+	test("rewrites a single claim with the target bead metadata actor", async () => {
+		const show = spyOn(actualBd, "bdShow").mockResolvedValue({
+			id: "orc-1",
+			metadata: { actor: "metadata/actor" },
+		});
+		const handled = installActorNoticeArbiter();
+		try {
+			const result = await rawGateInput(
+				{ command: "bd update orc-1 --claim" },
+				inRun,
+				"metadata-claim",
+				createClaimState(),
+			);
+			expect(result).toEqual({ input: { command: "BEADS_ACTOR=metadata/actor BD_ACTOR=metadata/actor bd update orc-1 --claim" } });
+			expect(sent).toEqual([]);
+			expect(handled.has("metadata-claim")).toBe(true);
+		} finally {
+			show.mockRestore();
+		}
+	});
+
+	test("rewrites later writes with the actor from an observed claim", async () => {
+		const claims = createClaimState();
+		claims.recordClaim({ actor: "worker actor", beadIds: ["orc-1"] });
+		const result = await rawGateInput(
+			{ command: "bd comments add orc-1 'REPORTED done'" },
+			inRun,
+			"observed-comment",
+			claims,
+		);
+		expect(result).toEqual({ input: { command: "BEADS_ACTOR='worker actor' BD_ACTOR='worker actor' bd comments add orc-1 'REPORTED done'" } });
+		expect(sent).toEqual([]);
+	});
+
+	test("keeps the warning for a compound command", async () => {
+		const claims = createClaimState();
+		claims.recordClaim({ actor: "worker-1", beadIds: ["orc-1"] });
+		const result = await gate("cd dir && bd update orc-1");
+		expect(result).toEqual({ block: undefined, notices: [expect.stringContaining("WARN bd identity")] });
+	});
+
+	test("does not rewrite a command that already carries BD_ACTOR", async () => {
+		const result = await rawGateInput({ command: "BD_ACTOR=worker-1 bd update orc-1" });
+		expect(result).toBeUndefined();
+		expect(sent).toEqual([]);
 	});
 
 	test.each([

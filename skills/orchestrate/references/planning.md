@@ -140,6 +140,8 @@ Overlapping scopes are what produce the merge conflicts an architect then has to
 Spend the effort here rather than there: the claim rule's overlap check is friction that
 catches the honest mistake, not a substitute for disjoint globs.
 
+A feature bead's scope may be the union of its tasks: a bead's own parent chain and children are exempt from the friction check, so an architect can hold the feature envelope while its workers hold task scopes. An unrelated architect's envelope still counts as friction. Architects never take a code-writing claim over task territory; their feature claim is for integration and coordination, not editing.
+
 ## Concurrency
 
 `task.maxConcurrency` is a per-spawner ceiling, not a run-wide budget. Each architect

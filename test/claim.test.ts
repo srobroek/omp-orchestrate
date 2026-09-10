@@ -298,6 +298,57 @@ describe("G5 scope conflict", () => {
   expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
  });
 
+ test("allows a feature parent and its child task to overlap", async () => {
+  beads["orc-10"] = bead("orc-10", {
+   parent: "orc-feature",
+   labels: ["agent:implementer"],
+   metadata: { scope: ["src/merge.ts"] },
+  });
+  inFlight = [bead("orc-feature", {
+   assignee: "architect-1", status: "in_progress", metadata: { role: "architect", scope: ["src/**"] },
+  })];
+
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+ });
+
+ test("blocks an unrelated architect envelope that overlaps", async () => {
+  beads["orc-10"] = candidate(["src/merge.ts"]);
+  inFlight = [bead("orc-other-feature", {
+   assignee: "architect-2", status: "in_progress", metadata: { role: "architect", scope: ["src/**"] },
+  })];
+
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("friction guard");
+ });
+
+ test("allows an architect-held feature envelope over a task", async () => {
+  beads["orc-10"] = candidate(["src/**"]);
+  inFlight = [bead("orc-task", {
+   parent: "orc-10", assignee: "writer-1", status: "in_progress",
+   metadata: { role: "implementer", scope: ["src/merge.ts"] },
+  })];
+
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+ });
+
+ test("skips a three-level ancestor but retains sibling friction", async () => {
+  beads["orc-10"] = bead("orc-10", {
+   parent: "orc-parent", labels: ["agent:implementer"], metadata: { scope: ["src/merge.ts"] },
+  });
+  beads["orc-parent"] = bead("orc-parent", { parent: "orc-epic" });
+  beads["orc-epic"] = bead("orc-epic", { parent: "orc-root" });
+  inFlight = [bead("orc-root", {
+   assignee: "architect-1", status: "in_progress", metadata: { role: "implementer", scope: ["src/**"] },
+  })];
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+
+  inFlight = [bead("orc-sibling", {
+   assignee: "writer-1", status: "in_progress", metadata: { role: "implementer", scope: ["src/**"] },
+  })];
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
+ });
+
  test("the bead does not conflict with itself when it is already in flight", async () => {
   beads["orc-10"] = candidate(["src/api/**"]);
   inFlight = [bead("orc-10", { assignee: "writer-10", status: "in_progress", metadata: { scope: ["src/api/**"] } })];

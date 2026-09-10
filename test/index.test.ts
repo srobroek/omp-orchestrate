@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BdBead } from "../src/bd";
 import { describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -242,6 +245,68 @@ describe("orchestrate-roster", () => {
 			}]);
 		} finally {
 			spawn.mockRestore();
+		}
+	});
+});
+
+describe("actor rewrite keeps claim gates active", () => {
+	async function activeRun(): Promise<{ root: string; prior: string | undefined }> {
+		const root = await mkdtemp(join(tmpdir(), "orc-index-actor-"));
+		await mkdir(join(root, ".orchestration"), { recursive: true });
+		await writeFile(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
+		const prior = process.env.ORCHESTRATE_MARKER_FILE;
+		process.env.ORCHESTRATE_MARKER_FILE = join(root, ".orchestration", ".active-run");
+		return { root, prior };
+	}
+
+	function restoreMarker(prior: string | undefined): void {
+		if (prior === undefined) delete process.env.ORCHESTRATE_MARKER_FILE;
+		else process.env.ORCHESTRATE_MARKER_FILE = prior;
+	}
+
+	test("still blocks a rewritten claim rejected by routing", async () => {
+		const { root, prior } = await activeRun();
+		const show = spyOn(actualBd, "bdShow").mockResolvedValue({
+			id: "orc-claim",
+			labels: ["agent:reviewer"],
+			metadata: { actor: "worker-1" },
+		});
+		try {
+			const { pi, seen } = recordingApi("worker");
+			ompOrchestrate(pi);
+			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const result = await toolCall(
+				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-route" },
+				{ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext,
+			);
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining("reviewer") });
+		} finally {
+			show.mockRestore();
+			restoreMarker(prior);
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("returns the prefixed command after an eligible rewritten claim", async () => {
+		const { root, prior } = await activeRun();
+		const show = spyOn(actualBd, "bdShow").mockResolvedValue({
+			id: "orc-claim",
+			labels: ["agent:implementer"],
+			metadata: { actor: "worker-1" },
+		});
+		try {
+			const { pi, seen } = recordingApi("worker");
+			ompOrchestrate(pi);
+			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const result = await toolCall(
+				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-pass" },
+				{ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext,
+			);
+			expect(result).toMatchObject({ input: { command: "BEADS_ACTOR=worker-1 BD_ACTOR=worker-1 bd update orc-claim --claim" } });
+		} finally {
+			show.mockRestore();
+			restoreMarker(prior);
+			await rm(root, { recursive: true, force: true });
 		}
 	});
 });
