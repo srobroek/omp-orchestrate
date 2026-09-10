@@ -69,11 +69,11 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 | Role | Writes | Spawns | Notes |
 |---|---|---|---|
 | Lead | run epics, their metadata, wakes | architects | coordination and bounded factual inspection; delegates implementation and substantive domain investigation |
-| Architect | its feature tree, commits, draft PR, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-tree mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures; never merges a PR |
+| Architect | its feature tree, commits, draft PR, review requests, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-tree and PR-content mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures; never merges a PR |
 | Implementer | code inside `metadata.scope`, in its isolated copy | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
-| Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree; omits `edit` and `write`, but retains `bash` for verdicts and reading git, so no-code-edit is also a prose contract |
+| Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree without editing code; dispatch determines checkout isolation |
 | Researcher | comments (`ADVICE`), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
-| Shepherd | PR state, `pr` and `merge_sha`, fix beads, merge-slot | nothing | the only role that may merge; never edits or pushes content |
+| Shepherd | PR state, `pr` and `merge_sha`, fix beads, merge-slot | nothing | observes provider requests and reviews; the only role that may merge; never edits or pushes content |
 | Helper | only explicitly scoped files in its spawner's checkout when write-capable | only its own allowlist within the depth limit | no bead, no commit, no PR, no worktree. An architect's helper outcome is promoted to a feature comment before its trace wisp can be compacted |
 
 `tools:` restricts built-in tools, not every execution path. The parser adds `yield`;
@@ -82,9 +82,10 @@ Extension-registered tools and configured MCP tools can remain available outside
 No `tools:` key means inherited tools. Bash, GitHub and eval-capable tools can mutate state
 without `edit` or `write`; no-code-edit rules are behavioral contracts, not a sandbox.
 
-The shepherd explicitly requests its conflict/CI and bot-review probes plus `hub`.
-The extension must register those probes. Missing probes require BLOCKED, not a shell
-substitute that skips their evidence checks.
+The architect uses the provider-request tool while it holds sole PR-update ownership. The
+shepherd explicitly requests its conflict/CI probe, bot-review probe, round-policy tool
+and `hub`. Missing tools require BLOCKED, not a shell substitute that skips evidence or
+posts an unverified command.
 
 A declaration guarantees nothing about which definition answers to a name. Discovery resolves
 a bare name in order, and a marketplace plugin claims it before a bundled agent. Bundled

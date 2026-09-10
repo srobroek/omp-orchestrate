@@ -101,43 +101,56 @@ Its mapped `in_progress` status stays out of `bd ready` until the explicit reope
 Create the merge bead with label `pr:merge`, metadata `role=shepherd`, and no parent.
 Do not use type `merge-request`: it is a ready-filter alias, not a creatable type.
 Stamp `repo`, `branch`, `base_sha`, `origin_bead`, `integration_owner=orchestrate`,
-`bot_same_issue_limit=3`, and an empty `bot_issue_attempts` map. When transferring
-ownership for the same repository/PR, `origin_bead` names the source node or its
-explicit parent; preserve that parent in ownership snapshots. Source approval does
-not transfer. After the shepherd verifies the PR/head, stamp the merge's own `pr`
-and `head_sha`; its own approval, `in_progress` state and exact head govern dispatch.
+`bot_same_issue_limit=3`, an empty `bot_issue_attempts` map, `bot_round_limit=6`,
+`bot_rounds_completed=0`, and a `bot_review_requests` provider-to-mode object. Keep
+the request object empty unless the originating work, repository policy, or a recorded
+material-risk decision requires a provider second opinion. When transferring ownership
+for the same repository/PR, `origin_bead` names the source node or its explicit parent;
+preserve that parent in ownership snapshots. Source approval does not transfer. While
+retaining sole PR-update ownership, the architect requests every configured provider at
+the exact head and records the request result before dispatching the shepherd. After the
+shepherd verifies the PR/head, stamp the merge's own `pr` and `head_sha`; its own approval,
+`in_progress` state and exact head govern dispatch.
  
 ### Automated review loop
 
-The shepherd owns automated review observation. It never holds a watcher agent open.
-Pending or stale reviews produce an IDLE disposition and a parked merge bead; unrelated
-queues continue. The next shepherd patrol re-probes the exact PR head.
+The architect owns automated review requests; the shepherd owns observation. Neither
+holds a watcher agent open. LOAD `review-providers.md` before configuring or requesting
+a provider. The request tool accepts only allowlisted commands, verifies the exact head,
+and uses provider/mode/head markers for replay-safe deduplication. The tool does not lock
+GitHub comments, so the architect serializes calls under sole PR-update ownership. The
+shepherd requires the probe's request marker for each configured provider and probes that
+provider separately. An absent, pending or stale result stays IDLE for ten minutes from
+`requestedAt`; after ten minutes without provider evidence, record BLOCKED. Missing
+markers or timestamps are BLOCKED. Manual requests, clean verdicts and external waits do
+not increment remediation rounds.
 
-For an actionable round, the shepherd collects all configured bots before routing one
-fix bead. Use the GitHub review-thread node id as the issue identity. When a finding has
-no thread, use its review URL plus a stable fingerprint of bot, path, location and finding.
-Compare the current finding with prior bot-fix evidence. Each entry in
-`metadata.bot_issue_attempts` counts completed fixes, not observations. Initialize a
-new issue at zero. Increment it only after the architect integrates and pushes that
-issue's fix; unrelated issues keep separate counters.
+For an actionable round, collect every configured bot before routing one fix bead. Use
+the GitHub review-thread node id as the issue identity. When a finding has no thread, use
+its review URL plus a stable fingerprint of bot, path, location and finding. Each entry
+in `metadata.bot_issue_attempts` counts completed fixes for that issue and begins at zero.
+`metadata.bot_rounds_completed` counts integrated and pushed bot-fix rounds for the PR
+and begins at zero. Missing, invalid or non-positive limits resolve to three same-issue
+fixes and six total rounds.
 
-When the completed count is below `metadata.bot_same_issue_limit`, the shepherd
-records BOUNCED, creates one unassigned fix bead for the round, and wakes the owning
-architect with the bead id. With the default limit of three, counts 0, 1 and 2 authorize
-the first, second and third fixes. The architect dispatches a fresh implementer through
-the queue. After capture, the architect integrates and pushes the fix, increments the
-completed count, replies where a rejection needs evidence, resolves each addressed
-thread with GitHub's `resolveReviewThread` GraphQL mutation, and reads back
-`isResolved=true`. Record the resolved thread ids and new head before removing the
-same-PR merge blocker. The shepherd then probes every configured bot at the new head.
+Before creating a fix bead, call `orc_review_round_policy` with total completed rounds
+and only issues actionable in the current exact-head round. A `decision=escalate`
+result produces ESCALATED instead of another fix. An invalid result is BLOCKED. The
+escalation record names the exhausted bound, completed rounds, issue identities,
+attempts, prior heads, fix beads, thread URLs, one human question and the resume
+transition. Set `state=waiting_human`, release the merge slot, preserve the PR and
+feature tree, and notify `Main` through `hub` with only the merge bead id. No unrelated
+queue waits.
 
-When the same material issue remains actionable with a completed count at or above the
-resolved limit, the shepherd records ESCALATED instead of creating another fix.
-The record carries issue identities, attempts, prior heads, fix beads, thread URLs, one
-human question and the resume transition. Set `state=waiting_human`, release the merge
-slot, preserve the PR and feature tree, and notify `Main` through `hub` with only the
-merge bead id. `Main` surfaces the question to the human. No other implementation or
-landing queue waits on that hold.
+When both limits permit a fix, the shepherd records BOUNCED, creates one unassigned fix
+bead for the aggregated round, and wakes the owning architect with the bead id. The
+architect dispatches a fresh implementer through the queue. After capture, the architect
+integrates and pushes the fix, increments `bot_rounds_completed` once, increments each
+addressed issue count once, replies where a rejection needs evidence, resolves addressed
+threads with GitHub's `resolveReviewThread` mutation, and reads back `isResolved=true`.
+Record the resolved thread ids and new head before removing the same-PR merge blocker.
+Before waking the shepherd, the architect requests configured manual providers for the
+new exact head. The next shepherd patrol verifies those markers and probes every bot.
 
 ## Persistence classes
 

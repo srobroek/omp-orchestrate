@@ -3,7 +3,7 @@
  *
  * Every case in `skills/orchestrate/scripts/_test_bot_review_probe.py` appears here,
  * fixture for fixture: the pytest suite is the contract, and the classification half is
- * pure, so none of these tests runs a subprocess. The three `gh` reads are answered from a
+ * pure, so none of these tests runs a subprocess. The five `gh` reads are answered from a
  * transcript through the exported {@link Exec} seam.
  *
  * Where the script's CLI was the observable surface (exit code, rendered stdout, the `bots`
@@ -40,6 +40,7 @@ import {
  spawnExec,
  waitMinutes,
 } from "../src/tools/bot-review-probe";
+import { detectReviewRequests } from "../src/tools/bot-review-providers";
 
 const HEAD = "a".repeat(40);
 const OLD_HEAD = "b".repeat(40);
@@ -688,6 +689,7 @@ const VIEW = prViewArgv(REPO, PR).join(" ");
 const REVIEWS = ghApiArgv(`repos/${REPO}/pulls/${PR}/reviews`).join(" ");
 const THREADS = ghReviewThreadsArgv(REPO, PR)!.join(" ");
 const ISSUE_COMMENTS = ghApiArgv(`repos/${REPO}/issues/${PR}/comments`).join(" ");
+const ACTOR = "gh api user";
 
 /** A transcript where every read answers, with the reviews page the caller supplies. */
 function reads(over: Record<string, ExecResult | null> = {}): Record<string, ExecResult | null> {
@@ -696,6 +698,7 @@ function reads(over: Record<string, ExecResult | null> = {}): Record<string, Exe
   [REVIEWS]: ok([[]]),
   [THREADS]: ok(threadPages()),
   [ISSUE_COMMENTS]: ok([[]]),
+  [ACTOR]: ok({ login: "orchestrator" }),
   ...over,
  };
 }
@@ -750,12 +753,29 @@ describe("fetch", () => {
   const result = await fetchBotReviewEvidence(REPO, PR, { exec });
 
   expect(result.ok).toBe(true);
-  const restReads = calls.filter((argv) => argv[1] === "api" && argv[2] !== "graphql");
-  expect(restReads).toHaveLength(2);
-  expect(restReads.every((argv) => argv.includes("--paginate") && argv.includes("--slurp"))).toBe(true);
+  const paginatedReads = calls.filter((argv) => argv[1] === "api" && argv[2] !== "graphql" && argv.includes("--paginate"));
+  expect(paginatedReads).toHaveLength(2);
+  expect(paginatedReads.every((argv) => argv.includes("--slurp"))).toBe(true);
   if (!result.ok) return;
   expect(result.payload.reviews).toHaveLength(1);
   expect(result.payload.head).toBe(HEAD);
+ });
+
+ test("keeps ordinary review evidence while refusing markers from an unknown actor", async () => {
+  const marker = `<!-- omp-orchestrate:review-request provider=codex mode=review head=${HEAD} -->`;
+  const { exec } = transcript(reads({
+   [ACTOR]: null,
+   [ISSUE_COMMENTS]: ok([[{
+    user: { login: "orchestrator" },
+    body: marker,
+    created_at: "2026-07-30T11:45:00Z",
+   }]]),
+  }));
+  const result = await fetchBotReviewEvidence(REPO, PR, { exec });
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.payload.requestActor).toBe("");
+  expect(detectReviewRequests(result.payload)).toEqual([]);
  });
 
  test("maps the REST fields the classifier reads", async () => {
@@ -999,6 +1019,20 @@ describe("registerBotReviewProbe", () => {
       },
      ],
     ]),
+    [ISSUE_COMMENTS]: ok([[
+     {
+      user: { login: "orchestrator" },
+      body: `@codex review\n\n<!-- omp-orchestrate:review-request provider=codex mode=review head=${HEAD} -->`,
+      created_at: "2026-07-30T11:45:00Z",
+      html_url: "https://c/request",
+     },
+     {
+      user: { login: "outsider" },
+      body: `<!-- omp-orchestrate:review-request provider=gemini mode=review head=${HEAD} -->`,
+      created_at: "2026-07-30T11:46:00Z",
+      html_url: "https://c/forged",
+     },
+    ]]),
    }),
   );
   const tool = registered(exec);
@@ -1010,8 +1044,23 @@ describe("registerBotReviewProbe", () => {
   expect(text).toContain(`verdict: actionable (exit ${EXIT_ACTIONABLE}) at head ${HEAD}`);
   expect(text).toContain("BOT_REVIEW actionable");
   expect(text).toContain('adapters: coderabbitai=CodeRabbit summary line "Actionable comments posted: N"');
+  expect(text).toContain("coderabbit=observed:review");
+  expect(result.details?.providers?.find(provider => provider.provider === "coderabbit")).toEqual({
+   provider: "coderabbit",
+   status: "observed",
+   evidence: "review",
+  });
+  expect(result.details?.providers?.find(provider => provider.provider === "gemini")?.status).toBe("unknown");
+  expect(result.details?.requests).toEqual([{
+   provider: "codex",
+   mode: "review",
+   head: HEAD,
+   requestedAt: "2026-07-30T11:45:00Z",
+   url: "https://c/request",
+  }]);
+  expect(text).toContain(`requests: codex/review@${HEAD}:2026-07-30T11:45:00Z`);
   expect(text).toContain("never to be treated as clean");
-  expect(calls.map((argv) => argv.join(" "))).toEqual([VIEW, REVIEWS, THREADS, ISSUE_COMMENTS]);
+  expect(calls.map((argv) => argv.join(" "))).toEqual([VIEW, REVIEWS, THREADS, ISSUE_COMMENTS, ACTOR]);
  });
 
  test("classifies against the head the reads returned, so an older round stays stale", async () => {
@@ -1096,7 +1145,7 @@ describe("bounded bot evidence reads", () => {
   const fetching = fetchBotReviewEvidence(REPO, PR, { exec });
   try {
    await firstReadStarted;
-   expect(started).toEqual([VIEW, REVIEWS, THREADS, ISSUE_COMMENTS]);
+   expect(started).toEqual([VIEW, REVIEWS, THREADS, ISSUE_COMMENTS, ACTOR]);
    expect(completed).toEqual([VIEW]);
   } finally {
    release();

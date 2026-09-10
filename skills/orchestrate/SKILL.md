@@ -57,6 +57,8 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 |---|---|
 | Conflict or CI evidence | `orc_conflict_probe` |
 | Bot round at the exact head | `orc_bot_review_probe`; unknown and declined are never clean |
+| Request a provider review | Architect only: `orc_bot_review_request`; retain sole PR-update ownership, use modes in `review-providers.md`, and pass the exact expected head |
+| Decide actionable-round bounce or escalation | `orc_review_round_policy`; pass only issues actionable at the exact head |
 | Run status | `orc_run_status`; use its rollup, not a hand-built `bd list` summary |
 
 | Status scope | Filter |
