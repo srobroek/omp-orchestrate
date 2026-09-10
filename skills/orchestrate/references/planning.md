@@ -194,13 +194,17 @@ isolated children run in a runtime-created copy snapshotted from that cwd.
 Verify the architect session root matches before any write or dispatch.
 
 When re-entry changes the discovery root, use the supported rooted lead CLI and
-preserve the loaded native agent's role and spawn policy:
+preserve the loaded native agent's role and spawn policy. Run it through the Bash
+tool with the marker in the call's `env` field, never as an inline `NAME=value`
+prefix. Do not pass `BEADS_DIR`: the run's pin already rides on every Bash call
+(the gate and the beads plugin both mirror it), and the gate refuses `BEADS_DIR=`
+in command text.
 
-```sh
-BEADS_DIR="<absolute-beads-dir>" \
-ORCHESTRATE_MARKER_FILE="<absolute-marker-file>" \
-omp --cwd "<canonical-worktree>" --config "<run-overlay>" --print \
-  "Lead: dispatch the loaded native orc-architect for the bound epic; preserve its role and spawn policy; collect and return the actual terminal result." </dev/null
+```json
+{
+  "command": "omp --cwd \"<canonical-worktree>\" --config \"<run-overlay>\" --print \"Lead: dispatch the loaded native orc-architect for the bound epic; preserve its role and spawn policy; collect and return the actual terminal result.\" </dev/null",
+  "env": { "ORCHESTRATE_MARKER_FILE": "<absolute-marker-file>" }
+}
 ```
 
 Pass `--config "<run-overlay>"` when re-entry changes discovery root; otherwise retain
