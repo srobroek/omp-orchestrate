@@ -64,6 +64,19 @@ export async function beadWriteFreeEnv(
 	return undefined;
 }
 
+/** Rebuild raw Bash input from the allowlist, preserving a rewritten BEADS_DIR. */
+export function rebuildBashInput(input: Record<string, unknown>): Record<string, unknown> {
+	const existing = input.env;
+	const env: Record<string, unknown> =
+		existing !== null && typeof existing === "object" ? { ...existing } : {};
+	const revised: Record<string, unknown> = {};
+	for (const key of BASH_PARAMS) {
+		if (key in input) revised[key] = input[key];
+	}
+	if (Object.keys(env).length > 0) revised.env = env;
+	return revised;
+}
+
 /**
  * One revision carrying every gate's environment addition, or nothing when the call
  * already has them all.

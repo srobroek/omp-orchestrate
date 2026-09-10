@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createClaimState } from "../src/claim-state";
-import { beadWriteFreeEnv, reviseBashEnv } from "../src/gates/readonly";
+import { beadWriteFreeEnv, rebuildBashInput, reviseBashEnv } from "../src/gates/readonly";
 import { markerPath } from "../src/run-state";
 
 function api(toolNames: string[]): ExtensionAPI {
@@ -188,6 +188,16 @@ describe("G1 bead-write-free sandbox", () => {
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
+	});
+
+	test("rebuilds a runtime database rewrite from allowlisted bash fields", () => {
+		const rebuilt = rebuildBashInput({
+			command: "echo ok",
+			cwd: "/tmp",
+			env: { BEADS_DIR: "/canonical/.beads" },
+			derivedGateOnlyField: "must not survive",
+		});
+		expect(rebuilt).toEqual({ command: "echo ok", cwd: "/tmp", env: { BEADS_DIR: "/canonical/.beads" } });
 	});
 
 	test("does not re-revise an already-sandboxed call", async () => {

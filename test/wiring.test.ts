@@ -13,10 +13,15 @@ interface Sent {
  content?: string;
  deliverAs?: string;
 }
+interface LoggedError {
+ message: string;
+ details: unknown;
+}
+
 
 type ToolCallHandler = (
  event: { toolName: string; input: unknown },
- ctx: { cwd: string },
+ ctx: ExtensionContext,
 ) => Promise<ToolCallEventResult | undefined>;
 
 function runtimeApi(): {
@@ -24,9 +29,11 @@ function runtimeApi(): {
  handlers: ToolCallHandler[];
  starts: ((event: unknown, ctx: ExtensionContext) => Promise<void>)[];
  sent: Sent[];
+ errors: LoggedError[];
 } {
  const handlers: ToolCallHandler[] = [];
  const sent: Sent[] = [];
+ const errors: LoggedError[] = [];
  const starts: ((event: unknown, ctx: ExtensionContext) => Promise<void>)[] = [];
  const zodStub: unknown = new Proxy(() => zodStub, { get: () => zodStub, apply: () => zodStub });
  const stub = {
@@ -39,12 +46,12 @@ function runtimeApi(): {
   registerTool: () => { },
   zod: zodStub,
   getAllTools: () => [],
-  logger: { error: () => { }, debug: () => { }, warn: () => { }, info: () => { } },
+  logger: { error: (message: string, details: unknown) => { errors.push({ message, details }); }, debug: () => { }, warn: () => { }, info: () => { } },
   sendMessage: (message: { customType?: string; content?: string }, options?: { deliverAs?: string }) => {
    sent.push({ customType: message.customType, content: message.content, deliverAs: options?.deliverAs });
   },
  };
- return { pi: stub as unknown as ExtensionAPI, handlers, starts, sent };
+ return { pi: stub as unknown as ExtensionAPI, handlers, starts, sent, errors };
 }
 
 /** Dispatch to every subscriber, as OMP does; registration order is not a contract. */
@@ -54,8 +61,9 @@ async function dispatchAll(
  ctx: { cwd: string },
 ): Promise<(ToolCallEventResult | undefined)[]> {
  if (handlers.length === 0) throw new Error("no tool_call handler was registered");
+ const runtimeCtx = { ...ctx, getSystemPrompt: () => [] } as unknown as ExtensionContext;
  const results: (ToolCallEventResult | undefined)[] = [];
- for (const handler of handlers) results.push(await handler(event, ctx));
+ for (const handler of handlers) results.push(await handler(event, runtimeCtx));
  return results;
 }
 
@@ -122,6 +130,33 @@ describe("gate dispatcher wiring", () => {
   );
 
   expect(sent).toHaveLength(0);
+ });
+
+ test("rewrites a matching runtime database alias to the canonical session pin", async () => {
+  const beadsDir = path.join(dir, "run-beads");
+  const alias = path.join(dir, "run-beads-alias");
+  await fs.mkdir(beadsDir);
+  await fs.symlink(beadsDir, alias, "dir");
+  const previous = process.env.BEADS_DIR;
+  process.env.BEADS_DIR = beadsDir;
+  try {
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   const results = await dispatchAll(
+    handlers,
+    { toolName: "bash", input: { command: "echo ok", env: { BEADS_DIR: alias }, derivedGateOnlyField: "must not survive" } },
+    { cwd: dir },
+   );
+   const revision = results.find(result => result?.input !== undefined);
+
+   expect(errors).toEqual([]);
+   expect(revision?.input).toEqual({ command: "echo ok", env: { BEADS_DIR: await fs.realpath(beadsDir) } });
+   expect(revision?.input).not.toHaveProperty("derivedGateOnlyField");
+  } finally {
+   if (previous === undefined) delete process.env.BEADS_DIR;
+   else process.env.BEADS_DIR = previous;
+  }
  });
 
  test("a tool the gate does not cover reaches no gate at all", async () => {
