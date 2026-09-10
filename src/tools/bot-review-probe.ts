@@ -27,6 +27,7 @@
  */
 
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { detectProviderAvailability, detectReviewRequests, type ProviderAvailability, type ReviewRequestObservation } from "./bot-review-providers";
 
 export const EXIT_UNKNOWN = 2;
 export const EXIT_WAITING = 10;
@@ -813,17 +814,19 @@ export interface BotReviewPayload {
  checks: unknown;
  reviews: { login: string; state: string; body: string; commit: string; url: string; at: string }[];
  comments: ReviewThreadComment[];
- notices: { login: string; body: string; at: string }[];
+ notices: { login: string; body: string; at: string; url: string }[];
+ requestActor: string;
 }
 
 export type FetchOutcome = { ok: true; payload: BotReviewPayload } | { ok: false; error: string };
 
 /**
- * Four reads, no classification.
+ * Five reads, no classification.
  *
  * `gh pr view` omits each review's commit id, so reviews come from REST. Review
  * threads come from GraphQL because REST omits thread ids and `isResolved`.
- * Issue comments are read as well, because a quota refusal arrives there.
+ * Issue comments carry durable request markers and quota refusals. The active
+ * GitHub login binds request-marker evidence to the architect's authenticated actor.
  */
 export async function fetchBotReviewEvidence(
  repo: string,
@@ -852,20 +855,23 @@ export async function fetchBotReviewEvidence(
  }
  const rollup = isObject(view.value) ? view.value.statusCheckRollup : undefined;
 
- const [reviews, comments, notices] = await Promise.all([
+ const [reviews, comments, notices, actor] = await Promise.all([
   ghPaginatedJson(`repos/${repo}/pulls/${pr}/reviews`, exec, run),
   ghReviewThreads(repo, pr, exec, run),
   ghPaginatedJson(`repos/${repo}/issues/${pr}/comments`, exec, run),
+  ghJson(["gh", "api", "user"], exec, run),
  ]);
  if (!reviews.ok) return { ok: false, error: reviews.error };
  if (!comments.ok) return { ok: false, error: comments.error };
  if (!notices.ok) return { ok: false, error: notices.error };
+ const requestActor = actor.ok && isObject(actor.value) ? str(actor.value.login) : "";
 
  return {
   ok: true,
   payload: {
    head,
    checks: truthy(rollup) ? rollup : [],
+   requestActor,
    reviews: reviews.value.map((r) => ({
     login: nested(r, "user", "login"),
     state: str(r.state),
@@ -879,6 +885,7 @@ export async function fetchBotReviewEvidence(
     login: nested(n, "user", "login"),
     body: str(n.body),
     at: str(n.created_at),
+    url: str(n.html_url),
    })),
   },
  };
@@ -932,6 +939,8 @@ export interface BotReviewDetails {
  wait?: string;
  files?: string[];
  error?: string;
+ providers?: ProviderAvailability[];
+ requests?: ReviewRequestObservation[];
 }
 
 function unreadable(text: string, error: string): AgentToolResult<BotReviewDetails> {
@@ -997,10 +1006,20 @@ export function registerBotReviewProbe(pi: ExtensionAPI, exec: Exec = spawnExec)
     const slugs = configuredSlugs(params.bots ? params.bots : undefined);
     const result = classifyBotReviews(fetched.payload, { head: fetched.payload.head, slugs });
     const adapters = slugs.map((slug) => `${slug}=${adapterNote(slug)}`).join("; ");
+    const providers = detectProviderAvailability(fetched.payload);
+    const providerText = providers
+     .map(provider => `${provider.provider}=${provider.status}${provider.evidence ? `:${provider.evidence}` : ""}`)
+     .join("; ");
+    const requests = detectReviewRequests(fetched.payload);
+    const requestText = requests.length === 0
+     ? "none"
+     : requests.map(request => `${request.provider}/${request.mode}@${request.head}${request.requestedAt ? `:${request.requestedAt}` : ""}`).join("; ");
     const text = [
      `verdict: ${result.verdict} (exit ${result.code}) at head ${result.findings.head}`,
      renderBotReview(result),
      adapters === "" ? "" : `adapters: ${adapters}`,
+     `providers: ${providerText}`,
+     `requests: ${requestText}`,
      NEVER_CLEAN,
     ]
      .filter(Boolean)
@@ -1016,6 +1035,8 @@ export function registerBotReviewProbe(pi: ExtensionAPI, exec: Exec = spawnExec)
       changesRequested: result.findings.changesRequested,
       wait: result.findings.wait,
       files: result.findings.files,
+      providers,
+      requests,
      },
      // pending, stale, actionable and declined are answers, not failures. Only
      // evidence that could not be read is an error result.

@@ -92,15 +92,19 @@ endpoint carries it. The orchestrator observes those comments without relaying
 findings, and the shepherd never judges them.
 
 The union of current-head/current-round human and automated verdicts decides the
-route. Collect every configured review bot before routing one fix bead. Bot issue
-attempts are per material issue, keyed by review-thread node id or, without a
-thread, a stable finding fingerprint. New issues begin at zero completed fixes
-regardless of prior PR rounds. Counts below the same-issue limit route through
-fix-round; a finding still present at the limit routes to ESCALATED instead.
-Only after every dimension reports changes or approval, and only when changes
-are required, restore {{node_bead}} to its implementer queue: preserve the owning
-epic and scope, set status=open with an empty assignee, and let a fresh implementer
-pull it. Never activate a worker with a bead-id message.
+route. While retaining sole PR-update ownership, the architect requests every provider
+in `bot_review_requests` through the allowlisted request tool at the exact head and
+records each durable marker before shepherd handoff. The shepherd verifies those
+markers and collects every configured review bot before routing one fix bead. Bot issue
+attempts are per material issue, keyed by
+review-thread node id or, without a thread, a stable finding fingerprint. New issues
+begin at zero completed fixes. `bot_rounds_completed` begins at zero and counts one
+integrated and pushed bot-fix round, regardless of finding count. Counts below both
+the same-issue and total-round limits route through fix-round; either exhausted limit
+routes to ESCALATED instead. Only after every dimension reports changes or approval,
+and only when changes are required, restore {{node_bead}} to its implementer queue:
+preserve the owning epic and scope, set status=open with an empty assignee, and let a
+fresh implementer pull it. Never activate a worker with a bead-id message.
 """
 
 [[steps]]
@@ -119,9 +123,12 @@ It records evidence for rejected findings and applies accepted fixes.
 The replacement works in isolation, never the feature worktree, and never pushes.
 OMP captures commits plus remaining working-tree delta only on a successful child
 result; failed or aborted work may not survive. The architect collects the actual
-capture, integrates and pushes it, replies where evidence is required, resolves each
-addressed GitHub review thread through `resolveReviewThread`, and reads back
-`isResolved=true`. Record those thread ids at the new head before review restarts.
+capture, integrates and pushes it, increments `bot_rounds_completed` once and each
+addressed issue's completed-fix count once, replies where evidence is required,
+resolves each addressed GitHub review thread through `resolveReviewThread`, and reads
+back `isResolved=true`. The architect then requests every configured manual provider
+at the new exact head before waking the shepherd. Record those thread ids, request
+markers and the new head before review restarts.
 """
 
 [[steps]]

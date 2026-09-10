@@ -263,7 +263,7 @@ filterability does not distinguish them.
 | Carrier | Cardinality | Carries |
 |---|---|---|
 | Label | multi-value. A bead holds every label added | multi-value classification: `pr:`, `state:`, `kind:`, `lang:`, `evidence:` |
-| Metadata | single-value per key. `--metadata` merges per key on write, so stamps never clobber `node` or `scope` | single-value enforcement: `role`, `worktree`, `branch`, `scope`, `base_sha`, `actor`, `origin_actor`, `origin_bead`, `run_epic`, `merge_sha`, `stage` |
+| Metadata | single-value per key. `--metadata` merges per key on write, so stamps never clobber `node` or `scope` | single-value enforcement: `role`, `worktree`, `branch`, `scope`, `base_sha`, `actor`, `origin_actor`, `origin_bead`, `run_epic`, `merge_sha`, `stage`, `bot_same_issue_limit`, `bot_issue_attempts`, `bot_round_limit`, `bot_rounds_completed`, `bot_review_requests` |
 
 Cardinality first. A label set accumulates: a stage pipeline built on labels collected
 `stage:implement` + `stage:review` + `stage:fix` and sat in three queues simultaneously.

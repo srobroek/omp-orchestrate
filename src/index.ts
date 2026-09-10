@@ -23,8 +23,10 @@ import { orcRole, sessionRole } from "./identity";
 import { isBoundRunActive, readActiveRun, registerRunCommands } from "./run-state";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
+import { registerBotReviewRequest } from "./tools/bot-review-request";
 import { registerConflictProbe } from "./tools/conflict-probe";
 import { registerRunStatus } from "./tools/run-status";
+import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 import { preflightSettings, registerWatchers } from "./watchers";
 
 /** Tools any gate inspects. Everything else returns before doing work. */
@@ -42,6 +44,8 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerConflictProbe(pi);
  registerRunStatus(pi);
  registerBotReviewProbe(pi);
+ registerBotReviewRequest(pi);
+ registerReviewRoundPolicy(pi);
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus.
  registerSupervision(pi, isBoundRunActive);
  registerWatchers(pi, claims);

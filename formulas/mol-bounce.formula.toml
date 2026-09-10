@@ -112,8 +112,9 @@ labels = ["bounce", "phase:record"]
 description = """
 Correlate both beads with a stable marker carrying {{failure_key}}, so a later
 pass -- or a recovery after a crash mid-bounce -- can find this round instead of
-opening a second one. Record the current `bot_issue_attempts` map and the
-same-issue limit on review-bot bounces.
+opening a second one. Record the current `bot_issue_attempts` map, same-issue limit,
+`bot_rounds_completed`, total-round limit and manual provider requests on review-bot
+bounces.
 
 The comment states what happened and what unblocks it. It never states a verdict
 on a review finding: the specialist claiming the fix bead judges which findings
