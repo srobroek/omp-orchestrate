@@ -506,6 +506,41 @@ describe("G2 ownership freshness", () => {
 });
 
 describe("G2 runtime database identity", () => {
+ // The identity check defends a bound run: these fixtures carry a run marker in
+ // both checkouts, and the direct calls pass `bound: true`.
+ const markers = (): string[] => [owned, foreign].map(dir => path.join(dir, ".orchestration", ".active-run"));
+ beforeAll(async () => {
+  for (const marker of markers()) {
+   await fs.mkdir(path.dirname(marker), { recursive: true });
+   await fs.writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
+  }
+ });
+ afterAll(async () => {
+  for (const marker of markers()) await fs.rm(path.dirname(marker), { recursive: true, force: true });
+ });
+
+ test("outside a run, an override only has to be an existing directory", async () => {
+  const unbound = await fs.mkdtemp(path.join(os.tmpdir(), "orc-unbound-"));
+  const own = path.join(unbound, ".beads");
+  await fs.mkdir(own);
+  await withPinnedBeadsDir(async () => {
+   // pinned to another database by a concurrent session, yet no run binds this checkout
+   const accepted = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", env: { BEADS_DIR: own } });
+   expect(accepted.ok).toBe(true);
+   const relative = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", env: { BEADS_DIR: ".beads" } });
+   expect(relative.ok && (relative.input.env as Record<string, string>).BEADS_DIR).toBe(await fs.realpath(own));
+   const missing = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", env: { BEADS_DIR: path.join(unbound, "nope") } });
+   expect(missing.ok).toBe(false);
+   const prefixed = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: `BEADS_DIR=${own} bd list` });
+   expect(prefixed.ok).toBe(false); // an inline assignment escapes validation in every state
+   const read = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "printenv BEADS_DIR" });
+   expect(read.ok).toBe(true); // a read is not a database choice
+   const badCwd = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", cwd: "\u0000bad", env: { BEADS_DIR: ".beads" } });
+   expect(badCwd.ok).toBe(false); // an unresolvable cwd refuses rather than escaping to the fail-open wrapper
+  });
+  await fs.rm(unbound, { recursive: true, force: true });
+ });
+
  test("accepts the canonical runtime pin without rewriting it", async () => {
   await withPinnedBeadsDir(async () => {
    const input = { command: "echo ok", env: { BEADS_DIR: beadsDir } };

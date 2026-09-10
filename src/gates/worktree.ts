@@ -25,6 +25,7 @@ import type { ClaimState } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
 import { scopeConflict } from "./claim";
 import { splitSegments } from "../shell";
+import { readActiveRun } from "../run-state";
 
 /** Tools that mutate the working tree and therefore need a scope check. */
 export const GATED_WRITE_TOOLS: Record<string, true> = { bash: true, edit: true, write: true };
@@ -54,35 +55,58 @@ type RuntimeBeadsDirValidation =
  | { ok: false; refusal: ToolCallEventResult };
 
 /** Command text cannot grant database authority; BEADS_DIR belongs in structured env. */
-function commandNamesBeadsDir(command: string): boolean {
+function commandNamesBeadsDir(command: string, assignmentsOnly = false): boolean {
  return splitSegments(command).some(segment => segment.some(token =>
-  token.split(/[ \t]+/).some(word => word === "BEADS_DIR" || word.startsWith("BEADS_DIR=")),
+  token.split(/[ \t]+/).some(word => word.startsWith("BEADS_DIR=") || (!assignmentsOnly && word === "BEADS_DIR")),
  ));
 }
 
-/** Validate and canonicalize a structured Bash BEADS_DIR override. */
+/**
+ * Validate and canonicalize a structured Bash BEADS_DIR override.
+ *
+ * The identity check defends a run's database, so it applies only where a run
+ * marker binds this checkout. Outside a run the override merely has to name an
+ * existing directory: a session scaffolding an unrelated repository, or one whose
+ * process pin belongs to another live session, may point `bd` at its own database.
+ */
 export async function normalizeRuntimeBeadsDir(
  ctx: ExtensionContext,
  input: Record<string, unknown>,
+ bound?: boolean,
 ): Promise<RuntimeBeadsDirValidation> {
- const command = input.command;
- if (typeof command === "string" && commandNamesBeadsDir(command)) {
-  return { ok: false, refusal: { block: true, reason: "BEADS_DIR must be supplied through the Bash tool environment, not command text" } };
-}
  const rawEnvironment = input.env;
- if (
-  rawEnvironment === null ||
-  typeof rawEnvironment !== "object" ||
-  Array.isArray(rawEnvironment) ||
-  !Object.hasOwn(rawEnvironment, "BEADS_DIR")
- ) {
-  return { ok: true, input, changed: false };
+ const hasOverride =
+  rawEnvironment !== null &&
+  typeof rawEnvironment === "object" &&
+  !Array.isArray(rawEnvironment) &&
+  Object.hasOwn(rawEnvironment, "BEADS_DIR");
+ const inRun = bound ?? (await readActiveRun(ctx.cwd)) !== null;
+ const command = input.command;
+ // In a run any mention is refused. Outside one only assignments are: a read such as
+ // `printenv BEADS_DIR` is not a database choice, an inline assignment escapes validation.
+ if (typeof command === "string" && commandNamesBeadsDir(command, !inRun)) {
+  return { ok: false, refusal: { block: true, reason: "BEADS_DIR must be supplied through the Bash tool environment, not command text" } };
  }
+ if (!hasOverride) return { ok: true, input, changed: false };
 
  const environment = rawEnvironment as Record<string, unknown>;
  const requested = environment.BEADS_DIR;
+ if (typeof requested !== "string" || requested.length === 0) {
+  return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must name a database directory" } };
+ }
+ if (!inRun) {
+  try {
+   const base = typeof input.cwd === "string" && input.cwd.length > 0 ? resolveToCwd(input.cwd, ctx.cwd) : ctx.cwd;
+   const canonical = await fs.realpath(path.isAbsolute(requested) ? requested : path.resolve(base, requested));
+   if (!(await fs.stat(canonical)).isDirectory()) throw new Error("not a directory");
+   if (requested === canonical) return { ok: true, input, changed: false };
+   return { ok: true, input: { ...input, env: { ...environment, BEADS_DIR: canonical } }, changed: true };
+  } catch {
+   return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must resolve to an existing database directory" } };
+  }
+ }
  const pinned = process.env.BEADS_DIR;
- if (typeof requested !== "string" || requested.length === 0 || pinned === undefined || !path.isAbsolute(pinned)) {
+ if (pinned === undefined || !path.isAbsolute(pinned)) {
   return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR requires an absolute session-pinned database" } };
  }
 
