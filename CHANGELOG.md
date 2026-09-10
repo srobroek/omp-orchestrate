@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.11](https://github.com/srobroek/omp-orchestrate/compare/v0.3.10...v0.3.11) (2026-09-10)
+
+
+### Bug Fixes
+
+* accept matching runtime BEADS_DIR aliases ([#82](https://github.com/srobroek/omp-orchestrate/issues/82)) ([840ed0a](https://github.com/srobroek/omp-orchestrate/commit/840ed0a25d94ce1b9dbe5be37de4a08eb3afa1df))
+* exempt lineage from scope friction and prefix bd writes with the known actor ([#86](https://github.com/srobroek/omp-orchestrate/issues/86)) ([fea578a](https://github.com/srobroek/omp-orchestrate/commit/fea578ae11c165d87f2dd2a2debc1c765a8b3c42))
+
 ## [0.3.10](https://github.com/srobroek/omp-orchestrate/compare/v0.3.9...v0.3.10) (2026-09-10)
 
 
