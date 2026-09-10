@@ -20,9 +20,15 @@ function context(prompt: string, cwd = "/tmp/unrelated-helper"): ExtensionContex
 
 const WORKER_TOOLS = ["bash", "read", "yield"];
 
-/** G1 as `index.ts` applies it: environment decision followed by the shared revision builder. */
+/** G1 as `index.ts` applies it: pin mirror plus environment decision, then the shared revision builder. */
 async function gateBeadWriteFree(pi: ExtensionAPI, ctx: ExtensionContext, input: Record<string, unknown>) {
-	return reviseBashEnv(input, { ...(await beadWriteFreeEnv(pi, ctx)) });
+	return reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(pi, ctx)) });
+}
+
+/** The readonly flag a revision carries, if any; the pin mirror alone is not a readonly decision. */
+function readonlyFlag(revision: { input?: unknown } | undefined): string | undefined {
+	const env = (revision?.input as { env?: Record<string, string> } | undefined)?.env;
+	return env?.BD_READONLY;
 }
 
 let previousBeadsDir: string | undefined;
@@ -65,21 +71,41 @@ describe("pinAddition", () => {
  });
 });
 
+describe("G1 revision carries the pin with the readonly flag", () => {
+	test("an active-run bash call without BEADS_DIR receives both", async () => {
+		const root = await mkdtemp(join(tmpdir(), "orc-g1-pin-"));
+		const saved = process.env.BEADS_DIR;
+		try {
+			const beads = join(root, ".beads");
+			await mkdir(beads);
+			await mkdir(join(root, ".orchestration"), { recursive: true });
+			await writeFile(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
+			process.env.BEADS_DIR = beads;
+			const revised = await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd list" });
+			expect((revised?.input as { env: Record<string, string> }).env).toEqual({ BEADS_DIR: beads, BD_READONLY: "1" });
+		} finally {
+			if (saved === undefined) delete process.env.BEADS_DIR;
+			else process.env.BEADS_DIR = saved;
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("G1 bead-write-free sandbox", () => {
 	test("fails open without a process-local BEADS_DIR", async () => {
-		expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper"), { command: "bd update x" })).toBeUndefined();
+		expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper"), { command: "bd update x" }))).toBeUndefined();
 	});
 
 	test.each(["", "relative/.beads"])("fails open for a blank or relative BEADS_DIR (%s)", async beadsDir => {
 		process.env.BEADS_DIR = beadsDir;
-		expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper"), { command: "bd update x" })).toBeUndefined();
+		expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper"), { command: "bd update x" }))).toBeUndefined();
 	});
 
 	test("fails open when the pinned repository has no active marker", async () => {
 		const root = await mkdtemp(join(tmpdir(), "orc-g1-no-marker-"));
 		try {
 			process.env.BEADS_DIR = join(root, ".beads");
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toBeUndefined();
+			expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" }))).toBeUndefined();
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -93,7 +119,7 @@ describe("G1 bead-write-free sandbox", () => {
 				process.env.BEADS_DIR = join(root, ".beads");
 				await mkdir(join(root, ".orchestration"), { recursive: true });
 				await writeFile(markerPath(root), body);
-				expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toBeUndefined();
+				expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" }))).toBeUndefined();
 			} finally {
 				await rm(root, { recursive: true, force: true });
 			}
@@ -105,7 +131,7 @@ describe("G1 bead-write-free sandbox", () => {
 		const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
 		const readSpy = spyOn(fs, "readFile").mockRejectedValue(denied);
 		try {
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toBeUndefined();
+			expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" }))).toBeUndefined();
 		} finally {
 			readSpy.mockRestore();
 			await rm(root, { recursive: true, force: true });
@@ -116,7 +142,7 @@ describe("G1 bead-write-free sandbox", () => {
 		const { root } = await activeRun();
 		try {
 			await rm(markerPath(root));
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toBeUndefined();
+			expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" }))).toBeUndefined();
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -130,10 +156,10 @@ describe("G1 bead-write-free sandbox", () => {
 			await mkdir(join(root, "run-state"), { recursive: true });
 			await writeFile(markerPath(root), JSON.stringify({ run_id: "orc-g1" }));
 			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toEqual({
-				input: { command: "bd update x", env: { BD_READONLY: "1" } },
+				input: { command: "bd update x", env: { BEADS_DIR: process.env.BEADS_DIR, BD_READONLY: "1" } },
 			});
 			await rm(markerPath(root));
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toBeUndefined();
+			expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" }))).toBeUndefined();
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -146,7 +172,7 @@ describe("G1 bead-write-free sandbox", () => {
 				command: "bd update x",
 				env: { FOO: "bar" },
 			});
-			expect(result?.input?.env).toEqual({ FOO: "bar", BD_READONLY: "1" });
+			expect(result?.input?.env).toEqual({ FOO: "bar", BEADS_DIR: process.env.BEADS_DIR, BD_READONLY: "1" });
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -160,7 +186,7 @@ describe("G1 bead-write-free sandbox", () => {
 			await mkdir(join(linked, ".orchestration"), { recursive: true });
 			await writeFile(markerPath(linked), JSON.stringify({ schema_version: 1, run_id: "orc-g1" }));
 			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", linked), { command: "bd update x" })).toEqual({
-				input: { command: "bd update x", env: { BD_READONLY: "1" } },
+				input: { command: "bd update x", env: { BEADS_DIR: join(primary, ".beads"), BD_READONLY: "1" } },
 			});
 		} finally {
 			await Promise.all([
@@ -173,7 +199,7 @@ describe("G1 bead-write-free sandbox", () => {
 	test("preserves a contract-bound orc writer with an active marker", async () => {
 		const { root } = await activeRun();
 		try {
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("ORC-ROLE: implementer", root), { command: "bd comment x" })).toBeUndefined();
+			expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("ORC-ROLE: implementer", root), { command: "bd comment x" }))).toBeUndefined();
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -183,7 +209,7 @@ describe("G1 bead-write-free sandbox", () => {
 		const { root } = await activeRun();
 		try {
 			delete process.env.BEADS_DIR;
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" })).toBeUndefined();
+			expect(readonlyFlag(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x" }))).toBeUndefined();
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -198,7 +224,7 @@ describe("G1 bead-write-free sandbox", () => {
 				timeout: 5,
 				derivedGateOnlyField: "must not survive",
 			});
-			expect(result?.input).toEqual({ command: "bd show x", cwd: "/tmp", timeout: 5, env: { BD_READONLY: "1" } });
+			expect(result?.input).toEqual({ command: "bd show x", cwd: "/tmp", timeout: 5, env: { BEADS_DIR: process.env.BEADS_DIR, BD_READONLY: "1" } });
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -217,7 +243,11 @@ describe("G1 bead-write-free sandbox", () => {
 	test("does not re-revise an already-sandboxed call", async () => {
 		const { root } = await activeRun();
 		try {
-			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd show x", env: { BD_READONLY: "1" } })).toBeUndefined();
+			// The readonly flag alone is not complete: the pin mirror still has to be added once.
+			const pin = process.env.BEADS_DIR as string;
+			const once = await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd show x", env: { BD_READONLY: "1" } });
+			expect((once?.input as { env: Record<string, string> }).env).toEqual({ BD_READONLY: "1", BEADS_DIR: pin });
+			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd show x", env: { BD_READONLY: "1", BEADS_DIR: pin } })).toBeUndefined();
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
