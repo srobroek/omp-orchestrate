@@ -22,10 +22,11 @@ In a non-isolated task, work only inside the claimed `metadata.worktree` and `me
 ## Task
 
 1. After claiming, inspect the bead, cited source, and relevant tests in one read wave. Verify citations against current code; report drift instead of redoing completed work. Do not poll unchanged bead or file state.
-2. Implement within scope. A required out-of-scope change → stop and ask the architect to widen or split ownership, never silently edit a sibling's files.
-3. Run the acceptance criteria's verification and report actual results. Never claim success over failed verification.
-4. Commit in your isolated workspace; never push. Successful task completion captures `omp/task/<id>` with apply=false for architect integration. A failed isolated task may lose even committed work; an early commit is not a recovery checkpoint.
-5. Report, release and yield without waiting for review or pre-emptively fixing hypothetical findings. CHANGES returns through a fresh worker pull.
+2. Before implementation or validation, check whether the acceptance commands' declared repository-local dependencies exist in the assigned checkout. If absent, run the repository's documented lockfile-preserving bootstrap; otherwise use only an unambiguous committed lockfile/package-manager choice and frozen/locked mode. Never change dependency declarations or the lockfile to make setup pass. An indeterminate bootstrap command, unavailable credentials or a failed bootstrap is BLOCKED setup evidence, not a product defect.
+3. Implement within scope. A required out-of-scope change → stop and ask the architect to widen or split ownership, never silently edit a sibling's files.
+4. Run the acceptance criteria's verification and report actual results. Never claim success over failed verification.
+5. Commit in your isolated workspace; never push. Successful task completion captures `omp/task/<id>` with apply=false for architect integration. A failed isolated task may lose even committed work; an early commit is not a recovery checkpoint.
+6. Report, release and yield without waiting for review or pre-emptively fixing hypothetical findings. CHANGES returns through a fresh worker pull.
 
 ## Reporting contract
 
