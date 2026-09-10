@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.12](https://github.com/srobroek/omp-orchestrate/compare/v0.3.11...v0.3.12) (2026-09-10)
+
+
+### Bug Fixes
+
+* bootstrap dependencies before implementation validation ([#87](https://github.com/srobroek/omp-orchestrate/issues/87)) ([225f083](https://github.com/srobroek/omp-orchestrate/commit/225f0836d8878cada6df15d656fc28072ff15493))
+* re-prompt the lead when it ends a bound run without a terminal verb ([#89](https://github.com/srobroek/omp-orchestrate/issues/89)) ([a4ce7f3](https://github.com/srobroek/omp-orchestrate/commit/a4ce7f37d94f0f2d18562fff348ee9009ed419bc))
+
 ## [0.3.11](https://github.com/srobroek/omp-orchestrate/compare/v0.3.10...v0.3.11) (2026-09-10)
 
 
