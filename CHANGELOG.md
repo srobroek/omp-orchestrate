@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.9](https://github.com/srobroek/omp-orchestrate/compare/v0.3.8...v0.3.9) (2026-09-10)
+
+
+### Features
+
+* add bounded manual bot review requests ([#80](https://github.com/srobroek/omp-orchestrate/issues/80)) ([9bc9051](https://github.com/srobroek/omp-orchestrate/commit/9bc90519fa418d24d676b74e0bf56fd732de64b7))
+
 ## [0.3.8](https://github.com/srobroek/omp-orchestrate/compare/v0.3.7...v0.3.8) (2026-09-09)
 
 
