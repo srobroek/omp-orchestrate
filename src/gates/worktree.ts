@@ -49,6 +49,80 @@ async function realpathOrUndefined(target: string): Promise<string | undefined> 
  }
 }
 
+type RuntimeBeadsDirValidation =
+ | { ok: true; input: Record<string, unknown>; changed: boolean }
+ | { ok: false; refusal: ToolCallEventResult };
+
+/** Command text cannot grant database authority; BEADS_DIR belongs in structured env. */
+function commandNamesBeadsDir(command: string): boolean {
+ return splitSegments(command).some(segment => segment.some(token =>
+  token.split(/[ \t]+/).some(word => word === "BEADS_DIR" || word.startsWith("BEADS_DIR=")),
+ ));
+}
+
+/** Validate and canonicalize a structured Bash BEADS_DIR override. */
+export async function normalizeRuntimeBeadsDir(
+ ctx: ExtensionContext,
+ input: Record<string, unknown>,
+): Promise<RuntimeBeadsDirValidation> {
+ const command = input.command;
+ if (typeof command === "string" && commandNamesBeadsDir(command)) {
+  return { ok: false, refusal: { block: true, reason: "BEADS_DIR must be supplied through the Bash tool environment, not command text" } };
+}
+ const rawEnvironment = input.env;
+ if (
+  rawEnvironment === null ||
+  typeof rawEnvironment !== "object" ||
+  Array.isArray(rawEnvironment) ||
+  !Object.hasOwn(rawEnvironment, "BEADS_DIR")
+ ) {
+  return { ok: true, input, changed: false };
+ }
+
+ const environment = rawEnvironment as Record<string, unknown>;
+ const requested = environment.BEADS_DIR;
+ const pinned = process.env.BEADS_DIR;
+ if (typeof requested !== "string" || requested.length === 0 || pinned === undefined || !path.isAbsolute(pinned)) {
+  return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR requires an absolute session-pinned database" } };
+ }
+
+ let executionCwd = ctx.cwd;
+ if (typeof input.cwd === "string" && input.cwd.length > 0) {
+  try {
+   executionCwd = resolveToCwd(input.cwd, ctx.cwd);
+  } catch {
+   return { ok: false, refusal: { block: true, reason: "cannot resolve runtime BEADS_DIR against the Bash cwd" } };
+  }
+ }
+ const canonicalCwd = await realpathOrUndefined(executionCwd);
+ if (canonicalCwd === undefined) {
+  return { ok: false, refusal: { block: true, reason: "cannot resolve runtime BEADS_DIR against the Bash cwd" } };
+ }
+
+ try {
+  const requestedPath = path.isAbsolute(requested) ? requested : path.resolve(canonicalCwd, requested);
+  const [canonicalPinned, canonicalRequested] = await Promise.all([fs.realpath(pinned), fs.realpath(requestedPath)]);
+  const [pinnedStat, requestedStat] = await Promise.all([fs.stat(canonicalPinned), fs.stat(canonicalRequested)]);
+  if (
+   !pinnedStat.isDirectory() ||
+   !requestedStat.isDirectory() ||
+   canonicalPinned !== canonicalRequested ||
+   pinnedStat.dev !== requestedStat.dev ||
+   pinnedStat.ino !== requestedStat.ino
+  ) {
+   return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR does not identify the session-pinned database" } };
+  }
+  if (requested === canonicalPinned) return { ok: true, input, changed: false };
+  return {
+   ok: true,
+   input: { ...input, env: { ...environment, BEADS_DIR: canonicalPinned } },
+   changed: true,
+  };
+ } catch {
+  return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must resolve to the existing session-pinned database" } };
+ }
+}
+
 /** Whether `child` is `parent` or sits beneath it. Both must already be resolved. */
 function within(child: string, parent: string): boolean {
  return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
@@ -274,6 +348,7 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  let hasExplicitActor = false;
  let actorMismatch = false;
  for (const [key, value] of Object.entries(environment)) {
+  if (key === "BEADS_DIR" && typeof value === "string") continue;
   if ((key !== "BEADS_ACTOR" && key !== "BD_ACTOR") || typeof value !== "string") {
    trustedEnvironment = false;
   } else {
@@ -347,9 +422,15 @@ export async function gateWorktreeScope(
  input: Record<string, unknown>,
 ): Promise<ToolCallEventResult | undefined> {
  if (!Object.hasOwn(GATED_WRITE_TOOLS, toolName)) return undefined;
+ let normalizedInput = input;
+ if (toolName === "bash") {
+  const validation = await normalizeRuntimeBeadsDir(ctx, input);
+  if (!validation.ok) return validation.refusal;
+  normalizedInput = validation.input;
+ }
  const claim = claims.observedClaim();
  if (!claim || claim.beadIds.length === 0) return undefined;
- const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(input, claim.actor, beadId) : undefined);
+ const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(normalizedInput, claim.actor, beadId) : undefined);
  const hasControl = controls.some(control => control !== undefined);
  const beadViews: { beadId: string; bead: BdBead | null; control: ConflictControl | undefined }[] = [];
  for (const [index, beadId] of claim.beadIds.entries()) {
@@ -385,9 +466,9 @@ export async function gateWorktreeScope(
  const sessionCwd = await realpathOrUndefined(ctx.cwd);
  if (sessionCwd === undefined) return undefined;
  let executionCwd = ctx.cwd;
- if (toolName === "bash" && typeof input.cwd === "string" && input.cwd.length > 0) {
+ if (toolName === "bash" && typeof normalizedInput.cwd === "string" && normalizedInput.cwd.length > 0) {
   try {
-   executionCwd = resolveToCwd(input.cwd, ctx.cwd);
+   executionCwd = resolveToCwd(normalizedInput.cwd, ctx.cwd);
   } catch {
    return { block: true, reason: "cannot establish bash input.cwd containment; use a local filesystem cwd" };
   }
@@ -395,7 +476,7 @@ export async function gateWorktreeScope(
  const cwd = await resolveTarget(sessionCwd, executionCwd);
  if (cwd === undefined || (await realpathOrUndefined(cwd)) === undefined) return undefined;
  const isolation = await isolatedRoot(sessionCwd);
- const declaredPaths = declaredTargets(toolName, input);
+ const declaredPaths = declaredTargets(toolName, normalizedInput);
  if (declaredPaths === undefined) {
   return { block: true, reason: "cannot inspect edit mutation targets; use a supported edit payload with explicit targets" };
  }

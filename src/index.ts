@@ -16,8 +16,8 @@ import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { gateOneClaim } from "./gates/one-claim";
-import { beadWriteFreeEnv, reviseBashEnv } from "./gates/readonly";
-import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
+import { beadWriteFreeEnv, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
+import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
 import { isBoundRunActive, readActiveRun, registerRunCommands } from "./run-state";
@@ -65,11 +65,17 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
   try {
    resetReadBudget();
-   const input = event.input as Record<string, unknown>;
+   let input = event.input as Record<string, unknown>;
+   let inputRevised = false;
 
    if (event.toolName === "yield") return await gateExitContract(ctx, input);
 
    if (event.toolName === "bash") {
+    const runtimeDatabase = await normalizeRuntimeBeadsDir(ctx, input);
+    if (!runtimeDatabase.ok) return runtimeDatabase.refusal;
+    input = runtimeDatabase.input;
+    inputRevised = runtimeDatabase.changed;
+
     const ownership = gateWorktrunkOwnership(input);
     if (ownership) return ownership;
 
@@ -99,7 +105,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    // Last, and only for `bash`: G1 asynchronously checks the process-local pin and
    // active-run marker before the shared builder adds its environment revision. A
    // missing or invalid marker fails open, while blocking gates above still win.
-   if (event.toolName === "bash") return reviseBashEnv(input, { ...(await beadWriteFreeEnv(pi, ctx)) });
+   if (event.toolName === "bash") {
+    const revision = reviseBashEnv(input, { ...(await beadWriteFreeEnv(pi, ctx)) });
+    if (revision) return { input: rebuildBashInput(revision.input as Record<string, unknown>) };
+    return inputRevised ? { input: rebuildBashInput(input) } : undefined;
+   }
 
    return undefined;
   } catch (error) {

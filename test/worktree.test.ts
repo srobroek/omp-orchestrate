@@ -23,7 +23,7 @@ import { getWorktreesDir, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
-import { GATED_WRITE_TOOLS, gateWorktreeScope } from "../src/gates/worktree";
+import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "../src/gates/worktree";
 
 let beads: Record<string, BdBead>;
 let claims = createClaimState();
@@ -47,6 +47,11 @@ let foreign: string;
 /** OMP's task-isolation base, and a workspace materialised under it. */
 let isolationBase: string;
 let isolated: string;
+/** Canonical and alternate database paths used by runtime BEADS_DIR checks. */
+let beadsDir: string;
+let beadsAlias: string;
+let foreignBeadsDir: string;
+let nonDirectory: string;
 let priorWorktreeDir: string | undefined;
 
 /** `ExtensionContext` as this gate consumes it: a cwd, and nothing else. */
@@ -63,6 +68,17 @@ type Verdict = Promise<ToolCallEventResult | undefined>;
  */
 function fromBash(cwd: string, command = "echo hi", env?: Record<string, string>): Verdict {
  return gateWorktreeScope(claims, ctxAt(cwd), "bash", { command, ...(env === undefined ? {} : { env }) });
+}
+
+async function withPinnedBeadsDir<T>(run: () => Promise<T>): Promise<T> {
+ const previous = process.env.BEADS_DIR;
+ process.env.BEADS_DIR = beadsDir;
+ try {
+  return await run();
+ } finally {
+  if (previous === undefined) delete process.env.BEADS_DIR;
+  else process.env.BEADS_DIR = previous;
+ }
 }
 
 /** The gate as `src/index.ts` calls it for a `write` of one file. */
@@ -87,6 +103,14 @@ beforeAll(async () => {
  await fs.mkdir(path.join(owned, "src", "deep"), { recursive: true });
  await fs.mkdir(path.join(owned, "src", "api"), { recursive: true });
  await fs.mkdir(path.join(foreign, "src"), { recursive: true });
+ beadsDir = path.join(root, "run-beads");
+ beadsAlias = path.join(root, "run-beads-alias");
+ foreignBeadsDir = path.join(root, "foreign-beads");
+ nonDirectory = path.join(root, "not-a-directory");
+ await fs.mkdir(beadsDir);
+ await fs.mkdir(foreignBeadsDir);
+ await fs.symlink(beadsDir, beadsAlias, "dir");
+ await fs.writeFile(nonDirectory, "not a database directory");
  await fs.mkdir(isolated, { recursive: true });
  await promisify(execFile)("git", ["init", isolated], { timeout: 1500 });
  priorWorktreeDir = process.env.OMP_WORKTREE_DIR;
@@ -481,6 +505,75 @@ describe("G2 ownership freshness", () => {
  });
 });
 
+describe("G2 runtime database identity", () => {
+ test("accepts the canonical runtime pin without rewriting it", async () => {
+  await withPinnedBeadsDir(async () => {
+   const input = { command: "echo ok", env: { BEADS_DIR: beadsDir } };
+   const validation = await normalizeRuntimeBeadsDir(ctxAt(owned), input);
+
+   expect(validation).toEqual({ ok: true, input, changed: false });
+  });
+ });
+
+ test.each([
+  ["a symlink alias", () => beadsAlias, undefined],
+  ["a path relative to Bash cwd", () => path.relative(owned, beadsDir), owned],
+ ])("normalizes %s to the canonical runtime pin", async (_label, requested, cwd) => {
+  await withPinnedBeadsDir(async () => {
+   const input = { command: "echo ok", ...(cwd === undefined ? {} : { cwd }), env: { BEADS_DIR: requested() } };
+   const validation = await normalizeRuntimeBeadsDir(ctxAt(foreign), input);
+
+   expect(validation.ok).toBe(true);
+   if (!validation.ok) return;
+   expect(validation.changed).toBe(true);
+   expect((validation.input.env as Record<string, unknown>).BEADS_DIR).toBe(beadsDir);
+  });
+ });
+
+ test.each([
+  ["another database", () => foreignBeadsDir],
+  ["a missing path", () => path.join(root, "missing-beads")],
+  ["a non-directory", () => nonDirectory],
+ ])("refuses runtime BEADS_DIR targeting %s", async (_label, requested) => {
+  await withPinnedBeadsDir(async () => {
+   const validation = await normalizeRuntimeBeadsDir(ctxAt(owned), {
+    command: "echo no",
+    env: { BEADS_DIR: requested() },
+   });
+
+   expect(validation.ok).toBe(false);
+   if (validation.ok) return;
+   expect(validation.refusal.block).toBe(true);
+  });
+ });
+
+ test("blocks a mismatched runtime database even without an observed claim", async () => {
+  claims = createClaimState();
+  await withPinnedBeadsDir(async () => {
+   const result = await fromBash(owned, "echo no", { BEADS_DIR: foreignBeadsDir });
+
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("session-pinned database");
+  });
+ });
+
+ test.each([
+  ["direct prefix", `BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open`],
+  ["persistent assignment", `BEADS_DIR=${foreignBeadsDir}; bd update ${BEAD} --status open`],
+  ["export", `export BEADS_DIR=${foreignBeadsDir}; bd update ${BEAD} --status open`],
+  ["absolute env wrapper", `/usr/bin/env BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open`],
+  ["env split-string wrapper", `env -S 'BEADS_DIR=${foreignBeadsDir} bd update ${BEAD} --status open'`],
+ ])("blocks a %s database override even without an observed claim", async (_label, command) => {
+  claims = createClaimState();
+  await withPinnedBeadsDir(async () => {
+   const result = await fromBash(owned, command);
+
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("Bash tool environment");
+  });
+ });
+});
+
 describe("G2 standalone ownership controls", () => {
  const actor = "orc-impl-1";
  const foreignActor = "other-worker";
@@ -514,6 +607,21 @@ describe("G2 standalone ownership controls", () => {
    { id: "orc-other", status: "in_progress", assignee: foreignActor, metadata: { scope: ["src/api/**"] } },
   ]);
   expect((await fromBash(owned, "touch src/api.ts"))?.block).toBe(true);
+ });
+
+ test("allows matching structured BEADS_DIR for standalone recovery", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
+  await withPinnedBeadsDir(async () => {
+   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`, { BEADS_DIR: beadsDir })).toBeUndefined();
+  });
+ });
+
+ test("keeps unrelated structured environment keys untrusted for recovery", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
+  await withPinnedBeadsDir(async () => {
+   const result = await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`, { BEADS_DIR: beadsDir, OTHER: "x" });
+   expect(result?.block).toBe(true);
+  });
  });
 
  test.each([
