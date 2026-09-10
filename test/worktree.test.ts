@@ -12,6 +12,7 @@
  * the isolation-base exemption fire or not depending on the host.
  */
 
+import { pinAddition } from "../src/gates/readonly";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -517,6 +518,19 @@ describe("G2 runtime database identity", () => {
  });
  afterAll(async () => {
   for (const marker of markers()) await fs.rm(path.dirname(marker), { recursive: true, force: true });
+ });
+
+ test("the documented re-entry command passes through the env field and is refused inline", async () => {
+  // Mirrors skills/orchestrate/references/planning.md "re-entry changes the discovery root".
+  await withPinnedBeadsDir(async () => {
+   const pinned = process.env.BEADS_DIR as string;
+   const command = `omp --cwd "${owned}" --config overlay.json --print "Lead: dispatch" </dev/null`;
+   const documented = await normalizeRuntimeBeadsDir(ctxAt(owned), { command, env: { ORCHESTRATE_MARKER_FILE: "/run/.active-run" } });
+   expect(documented.ok).toBe(true); // no BEADS_DIR on the call: the pin rides in through the revision
+   expect(pinAddition({ command, env: { ORCHESTRATE_MARKER_FILE: "/run/.active-run" } })).toEqual({ BEADS_DIR: pinned });
+   const inline = await normalizeRuntimeBeadsDir(ctxAt(owned), { command: `BEADS_DIR="${pinned}" ORCHESTRATE_MARKER_FILE=/run/.active-run ${command}` });
+   expect(inline.ok).toBe(false);
+  });
  });
 
  test("outside a run, an override only has to be an existing directory", async () => {
