@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createClaimState } from "../src/claim-state";
-import { beadWriteFreeEnv, rebuildBashInput, reviseBashEnv } from "../src/gates/readonly";
+import { beadWriteFreeEnv, pinAddition, rebuildBashInput, reviseBashEnv } from "../src/gates/readonly";
 import { markerPath } from "../src/run-state";
 
 function api(toolNames: string[]): ExtensionAPI {
@@ -50,6 +50,20 @@ async function activeRun(): Promise<{ root: string; beadsDir: string }> {
 	await writeFile(markerPath(root), JSON.stringify({ schema_version: 1, run_id: "orc-g1" }));
 	return { root, beadsDir };
 }
+
+describe("pinAddition", () => {
+ test("mirrors an absolute process pin onto a call without one; leaves a caller pin; ignores no or relative pin", () => {
+  expect(pinAddition({ command: "bd list" }, { BEADS_DIR: "/repo/.beads" })).toEqual({ BEADS_DIR: "/repo/.beads" });
+  expect(pinAddition({ command: "bd list", env: { BEADS_DIR: "/mine/.beads" } }, { BEADS_DIR: "/repo/.beads" })).toEqual({});
+  expect(pinAddition({ command: "bd list" }, {})).toEqual({});
+  expect(pinAddition({ command: "bd list" }, { BEADS_DIR: ".beads" })).toEqual({});
+ });
+
+ test("a revision that carries the readonly flag also carries the pin", () => {
+  const revised = reviseBashEnv({ command: "bd list" }, { ...pinAddition({ command: "bd list" }, { BEADS_DIR: "/repo/.beads" }), BD_READONLY: "1" });
+  expect(revised?.input).toEqual({ command: "bd list", env: { BEADS_DIR: "/repo/.beads", BD_READONLY: "1" } });
+ });
+});
 
 describe("G1 bead-write-free sandbox", () => {
 	test("fails open without a process-local BEADS_DIR", async () => {

@@ -17,7 +17,7 @@ import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { createLeadExitWatch } from "./gates/lead-exit";
 import { gateOneClaim } from "./gates/one-claim";
-import { beadWriteFreeEnv, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
+import { beadWriteFreeEnv, pinAddition, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
@@ -118,7 +118,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    // active-run marker before the shared builder adds its environment revision. A
    // missing or invalid marker fails open, while blocking gates above still win.
    if (event.toolName === "bash") {
-    const revision = reviseBashEnv(input, { ...(await beadWriteFreeEnv(pi, ctx)) });
+    const revision = reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(pi, ctx)) });
     if (revision) return { input: rebuildBashInput(revision.input as Record<string, unknown>) };
     return inputRevised ? { input: rebuildBashInput(input) } : undefined;
    }
