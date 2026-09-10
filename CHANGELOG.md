@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.14](https://github.com/srobroek/omp-orchestrate/compare/v0.3.13...v0.3.14) (2026-09-10)
+
+
+### Bug Fixes
+
+* **gates:** a Bash revision carries the process pin ([#92](https://github.com/srobroek/omp-orchestrate/issues/92)) ([eb6b919](https://github.com/srobroek/omp-orchestrate/commit/eb6b9193a1afe49e2e82a2a5d8d18ab27d2e94ba))
+
 ## [0.3.13](https://github.com/srobroek/omp-orchestrate/compare/v0.3.12...v0.3.13) (2026-09-10)
 
 
