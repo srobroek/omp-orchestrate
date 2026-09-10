@@ -15,6 +15,7 @@ import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
+import { createLeadExitWatch } from "./gates/lead-exit";
 import { gateOneClaim } from "./gates/one-claim";
 import { beadWriteFreeEnv, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
@@ -35,6 +36,7 @@ const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true,
 export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claims = createClaimState();
  const gateExitContract = createExitGuard(claims);
+ const leadExitWatch = createLeadExitWatch(claims, process.cwd(), pi.sendMessage.bind(pi));
  pi.setLabel("Orchestrate");
 
  // Deterministic surfaces the pull loop and the shepherd call by schema, not prose.
@@ -49,6 +51,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus.
  registerSupervision(pi, isBoundRunActive);
  registerWatchers(pi, claims);
+
+ // The lead has no `yield` tool, so G4 cannot observe its final turn. Keep this
+ // advisory watch on the same claim state and active run binding as the gates.
+ pi.on("agent_end", (event, ctx) => leadExitWatch(event, ctx));
 
  /**
   * One handler for every gate, dispatching on tool name.

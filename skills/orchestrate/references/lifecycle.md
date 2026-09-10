@@ -34,12 +34,14 @@ never stored as a bead state.
 | `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git), handoff, release and `REPORTED`. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
 | `reported → in_review` | the architect collects the successful terminal task result, verifies the captured branch and head, integrates it, then creates review-wisp shells. A pre-yield report alone is not capture proof |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with `ADVICE` |
+
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
 | `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead; the shepherd claims it, proves CI and the bot round, serializes on the merge slot, merges, stamps, releases, closes |
 | `approved → dismissed` | non-git evidence only: the architect records the accepted evidence, sets `state=dismissed`, and closes |
 | `waiting_human` | an agent raised `ASK`. The question is recorded on the bead and the bead is held. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
 | `waiting_gate` | only an external machine gate remains (CI, a release workflow, a bot round). The bead is parked with the awaited identifier and a resume instruction, and nobody polls it |
 | `failed` | unrecoverable: `state:failed` plus status `blocked`, with the error recorded and surfaced |
+The lead has the same terminal duty as a claimed worker: it must finish or explicitly terminate every held bead before its session settles. Because the lead has no `yield` tool, G4 cannot intercept an incomplete final turn; the lead-exit watch checks the bound run and claim state after `agent_end`, then gives the lead up to three follow-ups when its final text has no terminal grammar verb. The lead must finish the held work and end with a terminal verb, or write `ESCALATED`/`BLOCKED` with the reason required by the grammar.
 
 Review and escalation evidence is version-bound when either endpoint names a version.
 Stamp `head_sha=<value>` and `review_round=<value>` on linked-node `REVIEW`/`ADVICE`
