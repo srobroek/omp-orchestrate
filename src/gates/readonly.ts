@@ -64,6 +64,23 @@ export async function beadWriteFreeEnv(
 	return undefined;
 }
 
+/**
+ * The process pin, as an addition for a Bash call that carries no `BEADS_DIR`.
+ *
+ * The persistent shell of an interactive session predates the pin the run (or the
+ * beads plugin) placed on `process.env`, so the pin has to travel on the call. The
+ * beads plugin injects it too; a `tool_call` handler's revision replaces any other
+ * extension's, so whichever revision wins must carry the pin itself.
+ */
+export function pinAddition(input: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+	const pin = env.BEADS_DIR;
+	if (pin === undefined || pin.length === 0 || !path.isAbsolute(pin)) return {};
+	const existing = input.env;
+	const current = existing !== null && typeof existing === "object" ? (existing as Record<string, unknown>).BEADS_DIR : undefined;
+	if (typeof current === "string" && current.length > 0) return {};
+	return { BEADS_DIR: pin };
+}
+
 /** Rebuild raw Bash input from the allowlist, preserving a rewritten BEADS_DIR. */
 export function rebuildBashInput(input: Record<string, unknown>): Record<string, unknown> {
 	const existing = input.env;
