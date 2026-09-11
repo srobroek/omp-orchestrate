@@ -45,7 +45,7 @@ import {
  resetReadBudget,
 } from "./bd";
 import { sessionRole } from "./identity";
-import { readActiveRun } from "./run-state";
+import { mkdirRunState, readActiveRun } from "./run-state";
 import { ensureBeadsPath } from "./beads-mode";
 import { createClaimState, type ClaimObservation, type ClaimState } from "./claim-state";
 import { bdInvocations, effectiveSegments, parseBdInvocation } from "./shell";
@@ -385,7 +385,7 @@ export function auditFileName(child: string): string | undefined {
 export async function appendAudit(dir: string, entry: AuditEntry): Promise<void> {
  const name = auditFileName(entry.child);
  if (name === undefined) return;
- await fs.mkdir(dir, { recursive: true });
+	await fs.mkdir(dir, { recursive: true });
  await fs.appendFile(path.join(dir, name), `${JSON.stringify(entry)}\n`, "utf8");
 }
 
@@ -1237,7 +1237,13 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
     const mutation = bdMutationEvent(data);
     if (mutation === undefined) return;
     try {
-     await appendAudit(auditDir(cwd), {
+					// The ledger can be written with no activation at all: this
+					// subscription is live from session_start and checks no marker, so the
+					// audit path creates `.orchestration/` on its own. Ensure the tree
+					// self-ignores here too, or a repository that only ever saw child bash
+					// traffic keeps an untracked directory.
+					await mkdirRunState(auditDir(cwd), cwd);
+					await appendAudit(auditDir(cwd), {
       ts: new Date().toISOString(),
       child: mutation.child,
       argv: mutation.command,
