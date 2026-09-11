@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +22,7 @@ import {
 	isLeadSession,
 	LEAD_CONTRACT_MESSAGE,
 	markerPath,
+	mkdirRunState,
 	readActiveRun,
 	readActiveRunStrict,
 	registerRunCommands,
@@ -183,6 +184,49 @@ describe("markerPath", () => {
 		// Blank-but-exported must not point the marker at the repository root.
 		process.env.ORCHESTRATE_MARKER_FILE = "";
 		expect(markerPath(cwd)).toBe(join(cwd, ".orchestration", ".active-run"));
+	});
+});
+
+
+describe("mkdirRunState", () => {
+	test("writes a self-ignoring .gitignore at the .orchestration root", async () => {
+		// Run state lands in the ORCHESTRATED repository, so without this every
+		// project acquires an untracked .orchestration/ that shows in git status
+		// for every actor.
+		await mkdirRunState(join(cwd, ".orchestration", "audit"), cwd);
+		const body = await readFile(join(cwd, ".orchestration", ".gitignore"), "utf8");
+		expect(body).toContain("*");
+		expect(body).toContain("omp-orchestrate");
+	});
+
+	test("git then reports nothing untracked for the tree", async () => {
+		// The behaviour that matters, asserted through git rather than inferred
+		// from the file's contents.
+		execFileSync("git", ["init", "-q"], { cwd });
+		await mkdirRunState(join(cwd, ".orchestration", "audit"), cwd);
+		await writeFile(join(cwd, ".orchestration", "audit", "Child.bdlog"), "{}\n", "utf8");
+		const status = execFileSync("git", ["status", "--porcelain=v1"], { cwd, encoding: "utf8" });
+		expect(status.trim()).toBe("");
+	});
+
+	test("never clobbers a rule someone tuned by hand", async () => {
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(join(cwd, ".orchestration", ".gitignore"), "audit/\n", "utf8");
+		await mkdirRunState(join(cwd, ".orchestration", "audit"), cwd);
+		expect(await readFile(join(cwd, ".orchestration", ".gitignore"), "utf8")).toBe("audit/\n");
+	});
+
+	test("leaves a redirected directory alone, even one named .orchestration", async () => {
+		// ORCHESTRATE_MARKER_FILE and ORCHESTRATE_AUDIT_DIR can point anywhere. The
+		// root is cwd's own .orchestration, so a redirected path gets nothing --
+		// including a path that merely contains the name, which an ancestor scan
+		// would have claimed.
+		await mkdirRunState(join(cwd, "somewhere", "audit"), cwd);
+		expect(await readdir(join(cwd, "somewhere"))).toEqual(["audit"]);
+
+		const lookalike = join(cwd, "elsewhere", ".orchestration", "audit");
+		await mkdirRunState(lookalike, cwd);
+		expect(await readdir(join(cwd, "elsewhere", ".orchestration"))).toEqual(["audit"]);
 	});
 });
 
@@ -465,7 +509,7 @@ describe("closeRun", () => {
 		await bindRun(cwd, "orc-7", SESSION);
 		await closeRun(cwd, "orc-7");
 		expect(await readActiveRun(cwd)).toBeNull();
-		expect(await readdir(join(cwd, ".orchestration"))).toEqual([]);
+		expect(await readdir(join(cwd, ".orchestration"))).toEqual([".gitignore"]);
 		expect(listArgs).toEqual([["list", "--status", "all", "--exclude-type", "event", "--limit", "0", "--json"]]);
 	});
 

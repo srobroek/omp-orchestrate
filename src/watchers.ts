@@ -43,7 +43,7 @@ import {
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { runScope } from "./run-scope";
-import { leadActor, sweepLapsedClaims } from "./run-state";
+import { leadActor, mkdirRunState, sweepLapsedClaims } from "./run-state";
 import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
@@ -356,7 +356,7 @@ export function auditFileName(child: string): string | undefined {
 export async function appendAudit(dir: string, entry: AuditEntry): Promise<void> {
  const name = auditFileName(entry.child);
  if (name === undefined) return;
- await fs.mkdir(dir, { recursive: true });
+	await fs.mkdir(dir, { recursive: true });
  await fs.appendFile(path.join(dir, name), `${JSON.stringify(entry)}\n`, "utf8");
 }
 
@@ -1108,6 +1108,10 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
     if (mutation === undefined) return;
     if ((await runScope({ cwd })) === null) return;
     try {
+     // The audit path may be the first thing that creates `.orchestration/` in a
+     // run activated mid-session, so the tree self-ignores here too, or a repository
+     // that only ever saw child bash traffic keeps an untracked directory.
+     await mkdirRunState(auditDir(cwd), cwd);
      await appendAudit(auditDir(cwd), {
       ts: new Date().toISOString(),
       child: mutation.child,
