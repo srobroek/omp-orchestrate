@@ -37,7 +37,6 @@ import {
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
-import { ensureBeadsPath } from "./beads-mode";
 import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
@@ -337,9 +336,10 @@ export interface AuditEntry {
  /** The beads directory the command wrote to, when the call or the session named one. */
  store?: string;
  /**
-  * Present when `store` is not the session's pinned database: a sandbox or another
-  * run's store. Such a row is provenance, not a run mutation, and a reader counting
-  * the run's writes skips it.
+  * Present when the command named a store of its own -- `--db`, `BEADS_DB`, `-C` or
+  * `--directory` -- rather than letting bd resolve the run's. Such a row is provenance
+  * of a sandbox or another repository, not a run mutation, and a reader counting the
+  * run's writes skips it.
   */
  foreign_store?: true;
 }
@@ -387,31 +387,39 @@ export interface BdMutationEvent {
  command: string;
  exitCode: number;
  /**
-  * The beads directory the command wrote to: an inline `BEADS_DIR=` assignment on the
-  * invocation, else the call's structured `env`, else the session's pin. `undefined`
-  * when none of the three named one.
+  * The store the command named, when it named one: the `--db` path, a `BEADS_DB`
+  * assignment on the invocation or in the call's structured `env`, or the directory
+  * given to `-C`/`--directory`. `undefined` when bd resolved the run's database from the
+  * working directory, which is how every call inside a run is meant to reach it; a
+  * named store is foreign to the run by construction.
   */
  store: string | undefined;
- /** True when `store` is not this session's pinned database. */
- foreignStore: boolean;
 }
+
+/** `bd` flags whose value names a store or the directory it is resolved from. */
+const STORE_FLAGS: Record<string, true> = { "--db": true, "-C": true, "--directory": true };
 
 /**
  * The write a bash call performs, with the store it targets, or `undefined` when the
  * command writes no bead. Classifying by command text alone attributed a researcher's
  * sandbox writes to the run; the store is what tells them apart.
  */
-function bdWriteOf(args: object): Pick<BdMutationEvent, "command" | "store" | "foreignStore"> | undefined {
+function bdWriteOf(args: object): Pick<BdMutationEvent, "command" | "store"> | undefined {
  if (!("command" in args) || typeof args.command !== "string") return undefined;
  const invocation = bdWrite(args.command);
  if (invocation === undefined) return undefined;
- let store = invocation.assignments.get("BEADS_DIR");
+ let store = invocation.assignments.get("BEADS_DB");
  if (store === undefined && "env" in args && args.env !== null && typeof args.env === "object") {
-  if ("BEADS_DIR" in args.env && typeof args.env.BEADS_DIR === "string") store = args.env.BEADS_DIR;
+  if ("BEADS_DB" in args.env && typeof args.env.BEADS_DB === "string") store = args.env.BEADS_DB;
  }
- const pin = process.env.BEADS_DIR;
- store ??= pin;
- return { command: args.command, store, foreignStore: pin !== undefined && store !== pin };
+ for (let index = 0; store === undefined && index < invocation.rest.length; index += 1) {
+  const token = invocation.rest[index] as string;
+  const split = token.indexOf("=");
+  const flag = split === -1 ? token : token.slice(0, split);
+  if (STORE_FLAGS[flag] !== true) continue;
+  store = split === -1 ? invocation.rest[index + 1] : token.slice(split + 1);
+ }
+ return { command: args.command, store };
 }
 
 /**
@@ -440,7 +448,7 @@ function exitCodeOf(result: unknown, isError: boolean): number {
  * `args` off the end event and consequently recorded nothing at all, across a whole
  * run, while every unit test passed against the assumed shape.
  */
-const pendingBd = new Map<string, Pick<BdMutationEvent, "child" | "command" | "store" | "foreignStore">>();
+const pendingBd = new Map<string, Pick<BdMutationEvent, "child" | "command" | "store">>();
 
 /**
  * Cap on un-settled starts. A child killed between start and end leaves its entry
@@ -1015,25 +1023,14 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   }
  }
 
- // The database pin is independent of the settings, and of whether they could be read.
- // The pin lives in this process's environment, so it does not survive a restart: a
- // lead that comes back to a marked repository has G1 inert and every isolated worker
- // resolving its own database until something re-pins. This is that something. Probe
- // through bd itself instead of looking only for cwd/.beads: linked worktrees share the
- // primary checkout's database and intentionally have no local .beads directory, a copied
- // checkout can resolve a private or unrelated ancestor database because `.beads/` is
- // gitignored. `ensureBeadsPath` asks bd for the active database, accepts the checkout or
- // its Git-shared primary database, rejects unrelated external databases, validates an
- // inherited pin, and exports the canonical path. Only refusal merits a line.
- //
- // An earlier version of this block demanded a per-project Dolt server instead. That server
- // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
- // rather than from the port, so a removed pid file made every later call start a rival --
- // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
- const pinned = await ensureBeadsPath(cwd);
- if (!pinned.ok) {
+ // The run's database is independent of the settings, and of whether they could be read.
+ // Every isolated copy redirects its own `.beads` to the `beads_dir` the marker records
+ // (`src/clone-adopt.ts`); a marker written before that field existed leaves each copy
+ // writing to its private store. Re-activation records it, so that is the repair named.
+ const run = await readActiveRun(cwd);
+ if (run !== null && run.beads_dir === undefined) {
   lines.push(
-   `BEADS_DIR could not be pinned, so generic helpers are not sandboxed and an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+   "the run marker names no beads database, so an isolated worker resolves its own store rather than this run's: run /orchestrate-run again to record it",
   );
  }
 
@@ -1126,8 +1123,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
       child: mutation.child,
       argv: mutation.command,
       exitCode: mutation.exitCode,
-      ...(mutation.store === undefined ? {} : { store: mutation.store }),
-      ...(mutation.foreignStore ? { foreign_store: true } : {}),
+      ...(mutation.store === undefined ? {} : { store: mutation.store, foreign_store: true }),
      });
     } catch (error) {
      logFailure(pi, "audit ledger", error);

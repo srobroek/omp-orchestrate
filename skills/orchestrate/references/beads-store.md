@@ -89,10 +89,6 @@ patrol wisp. Bind with `/orchestrate-bind <epic-id>` and read back the binding b
 dispatch; pending claims are invalid. Binding requires an active marker, permits the
 same id and refuses a different run.
 
-`/orchestrate-run` pins the embedded run database in absolute `BEADS_DIR`; every child
-must inherit it unchanged. Copies can lack ignored `.beads/` and discover an unrelated
-database by upward traversal. Diagnose empty copied-checkout queues with `bd where`,
-not by re-pouring work. Embedded storage needs no Dolt server.
 
 Sync discipline: the lead is the only session that runs `bd dolt push` or `bd dolt pull`
 while a run is active, and it does so once, at the barrier, after every agent has yielded:
@@ -240,7 +236,7 @@ Anchors are stamped so any later session can find where work physically lives:
 | Merge | shepherd | `bd update <bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` |
 
 The architect establishes its canonical session cwd before claiming or dispatching. Runtime
-re-entry preserves absolute `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`; metadata inheritance
+re-entry preserves absolute `ORCHESTRATE_MARKER_FILE`; metadata inheritance
 identifies ownership but never switches cwd. The supported re-entry and source-object
 procedure is canonical in `planning.md`; preserve dirty resumed trees and distinguish missing
 Git objects from cwd failures.

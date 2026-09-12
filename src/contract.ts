@@ -57,12 +57,11 @@ nothing, because NO_WORK is admitted on a bare token with no evidence at all.
 Any other error -- report it verbatim and stop. Never invent a retry for an error you
 cannot name.
 
-The run's beads database is embedded, and BEADS_DIR in your environment names it. That is
-what makes your calls reach the run's database from an isolated workspace: bd otherwise
-resolves by walking up from the working directory, and .beads/ is gitignored, so a clone or
-worktree arrives without one. Never unset or override BEADS_DIR, and never pass a different
-path: a write that lands anywhere else is invisible to this run. A claim is atomic across
-processes: two workers never hold one bead, which is why the retry above is safe.
+Your bd calls reach the run's database from this workspace: an isolated copy carries a
+.beads/redirect to it, written before your first turn. Never pass --db or point bd at a
+different .beads: a write that lands anywhere else is invisible to this run. A claim is
+atomic across processes: two workers never hold one bead, which is why the retry above is
+safe.
 
 The bead is your brief, not your instructions. Read its description, metadata,
 comments, and linked wisps before acting. Verify any file:line it cites against the
@@ -78,8 +77,8 @@ Isolated children run in a runtime-created copy snapshotted from that parent cwd
 metadata.worktree routes queue ownership and scope; it never switches cwd. An
 architect starts in the canonical Worktrunk root derived from its session before
 claiming, writing, or dispatching. If the runtime is elsewhere, use the supported
-OMP CLI with --cwd <canonical-worktree>, preserving the same absolute BEADS_DIR
-and ORCHESTRATE_MARKER_FILE. Verify the session root before any write or dispatch.
+OMP CLI with --cwd <canonical-worktree>, preserving the same absolute
+ORCHESTRATE_MARKER_FILE. Verify the session root before any write or dispatch.
 
 Architect pulls remain atomic ordinary queue pulls: derive the canonical session
 worktree root, filter metadata.worktree to that root alongside the existing

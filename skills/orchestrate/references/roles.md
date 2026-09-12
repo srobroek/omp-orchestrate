@@ -38,7 +38,7 @@ replacement resumes the same tree.
 
 The global subagent wall-clock cap is 30 minutes. A timeout is a process boundary, not an epic failure. When an architect times out and its epic remains open, the lead reads the epic, feature worktree, latest durable comments, terminal receipts, captures, and unresolved claims. The lead then starts one replacement `orc-architect` for the same epic and worktree with a handover containing:
 
-- the epic id and pinned `BEADS_DIR`;
+- the epic id and the run database the marker records (`beads_dir`);
 - the feature worktree and current head;
 - completed worker receipts and integrated captures;
 - unresolved claims, blockers, and recovery ownership;

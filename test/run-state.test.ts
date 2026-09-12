@@ -104,7 +104,7 @@ describe("activateRun", () => {
 		expect(await readFile(markerPath(cwd), "utf8")).toBe(original);
 	});
 
-	test.each(["", "{broken", "[]", '{"schema_version":1}', '{"run_id":false}', '{"run_id":"orc-existing","schema_version":2}'])(
+	test.each(["", "{broken", "[]", '{"schema_version":1}', '{"run_id":false}', '{"run_id":"orc-existing","schema_version":2}', '{"run_id":"orc-existing","beads_dir":"relative/.beads"}'])(
 		"malformed marker %s is never treated as permission to activate or bind",
 		async original => {
 			await seed(original);
@@ -168,6 +168,19 @@ describe("activateRun", () => {
 		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
 		expect(await activateRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
 		expect(JSON.parse(await readFile(markerPath(cwd), "utf8"))).toEqual({ run_id: "orc-9", schema_version: 1 });
+	});
+
+	test("records the run's database and keeps it across re-activation, binding and a lenient read", async () => {
+		const beadsDir = join(cwd, ".beads");
+		expect((await activateRun(cwd, "session-a", beadsDir)).beads_dir).toBe(beadsDir);
+		// A re-activation that names no database keeps the recorded one, as it keeps the session.
+		expect((await activateRun(cwd)).beads_dir).toBe(beadsDir);
+		await bindRun(cwd, "orc-42");
+		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-42", session_id: "session-a", beads_dir: beadsDir });
+		// The lenient reader drops a relative path rather than handing a copy a target it
+		// would resolve against its own tree.
+		await seed('{"run_id":"orc-9","schema_version":1,"beads_dir":"relative/.beads"}');
+		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-9" });
 	});
 });
 
@@ -560,13 +573,12 @@ describe("registerRunCommands", () => {
 	}
 
 	beforeEach(async () => {
-		// A valid inherited pin is accepted without consulting bd, which keeps bd out of
-		// these tests; an absent directory would now be refused.
+		// A stub bd answers `where --json` with this checkout's `.beads`, which keeps the real
+		// binary out of these tests while activation still records what bd resolved.
 		await mkdir(join(cwd, ".beads"));
-		process.env.BEADS_DIR = join(cwd, ".beads");
-	});
-	afterEach(() => {
-		delete process.env.BEADS_DIR;
+		const bd = join(cwd, "bd-where");
+		await writeFile(bd, `#!/bin/sh\necho '{"schema_version":1,"data":{"path":"${join(cwd, ".beads")}","prefix":"orc"}}'\n`, { mode: 0o755 });
+		process.env.BD_BIN = bd;
 	});
 
 	test("registers the four marker commands", () => {
@@ -583,8 +595,13 @@ describe("registerRunCommands", () => {
 		expect(notices.map(([level]) => level)).toEqual(["info"]);
 	});
 
+	test("/orchestrate-run records the located database in the marker", async () => {
+		const { run } = rig();
+		await run();
+		expect((await readActiveRun(cwd))?.beads_dir).toBe(await fs.realpath(join(cwd, ".beads")));
+	});
+
 	test("/orchestrate-run refuses a project without a Beads workspace", async () => {
-		delete process.env.BEADS_DIR;
 		const bd = join(cwd, "bd-no-workspace");
 		await writeFile(bd, '#!/bin/sh\necho "No active beads workspace found" >&2\nexit 1\n', { mode: 0o755 });
 		process.env.BD_BIN = bd;

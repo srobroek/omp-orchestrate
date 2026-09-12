@@ -32,7 +32,6 @@
  * report instead, and the worktree gate reads that.
  */
 
-import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -524,21 +523,15 @@ const PENDING_RUN = "pending";
 
 /**
  * The epic the active-run marker binds this session to, or `undefined` when there is
- * none. Read from the session checkout first, then from the repository beside the
- * process pin -- the two roots `pinnedRunActive` reads, because a linked worktree or an
- * isolated copy shares the primary checkout's marker. A malformed marker is no run.
+ * none. Read from the session checkout, the one root `pinnedRunActive` reads: an
+ * isolated copy carries the primary checkout's marker. A malformed marker is no run.
  */
 async function boundEpic(cwd: string): Promise<string | undefined> {
- const pin = process.env.BEADS_DIR;
- const roots = [cwd];
- if (pin !== undefined && path.isAbsolute(pin) && path.dirname(pin) !== cwd) roots.push(path.dirname(pin));
- for (const root of roots) {
-  try {
-   const marker = await readActiveRunStrict(root);
-   if (marker !== null) return marker.run_id === PENDING_RUN ? undefined : marker.run_id;
-  } catch {
-   // Not positive run authority; the next root may be.
-  }
+ try {
+  const marker = await readActiveRunStrict(cwd);
+  if (marker !== null) return marker.run_id === PENDING_RUN ? undefined : marker.run_id;
+ } catch {
+  // Not positive run authority.
  }
  return undefined;
 }

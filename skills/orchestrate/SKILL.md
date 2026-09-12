@@ -32,7 +32,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 
 - MUST Follow the injected dispatch contract. It owns shared claim and evidence semantics. Each agent prompt holds its role's claim command.
 - NOT Paste the protocol into spawn prompts. Its human mirror is `skill://orchestrate/references/dispatch-contract.md`.
-- MUST Preserve the same pinned absolute `BEADS_DIR` in every child.
+- MUST Never pass `--db` or point `bd` at another `.beads` in any child; the run database is reached by redirect.
 - MUST Adopt existing SpecKit beads. Never pour a second graph beside them.
 - DEFAULT Check small facts directly. Delegate substantial work, not every lookup.
 - MUST Retain independent review. Add another specialist only for a material risk or unresolved gap, or when project policy requires it.

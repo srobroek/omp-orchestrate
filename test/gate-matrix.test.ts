@@ -72,7 +72,6 @@ let owned: string;
 /** A tree no claimed bead names. */
 let foreign: string;
 let priorWorktreeDir: string | undefined;
-let priorBeadsDir: string | undefined;
 
 /**
  * `ExtensionContext` as the gates consume it: a cwd and a system prompt.
@@ -143,15 +142,11 @@ beforeAll(async () => {
  priorWorktreeDir = process.env.OMP_WORKTREE_DIR;
  // Every row states its own run scope; the ambient shell's pin must not supply one,
  // or G1 mirrors it onto every bash row that expects no revision.
- priorBeadsDir = process.env.BEADS_DIR;
- delete process.env.BEADS_DIR;
 });
 
 afterAll(async () => {
  if (priorWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
  else process.env.OMP_WORKTREE_DIR = priorWorktreeDir;
- if (priorBeadsDir === undefined) delete process.env.BEADS_DIR;
- else process.env.BEADS_DIR = priorBeadsDir;
  await fs.rm(root, { recursive: true, force: true });
 });
 

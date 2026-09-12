@@ -223,7 +223,7 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    preserves the claim, checkout, capture, terminal result, and evidence for recovery.
    Re-enter only through the rooted `omp --cwd "<canonical-worktree>" --config
    "<run-overlay>"` procedure in `planning.md`, with the same absolute
-   `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`.
+   `ORCHESTRATE_MARKER_FILE`.
 5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
