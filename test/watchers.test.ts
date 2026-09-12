@@ -229,12 +229,30 @@ describe("bdMutationEvent across both runtime shapes", () => {
  * exactly what splits the beads database, so a run with perfect settings can still
  * lose every claim. Verified against a real checkout copy, where a bead created in
  * the copy is invisible in the original.
+ *
+ * Every invocation appends a line to `omp.log`, so a test can count spawns.
  */
 async function stubSettings(values: Record<string, unknown>): Promise<void> {
 	const snapshot = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { value }]));
 	const bin = join(cwd, "fake-omp");
-	await writeFile(bin, `#!/bin/sh\n[ "$1 $2 $3" = "config list --json" ] || exit 1\nprintf '%s' '${JSON.stringify(snapshot).replace(/'/g, "'\\''")}'\n`, { mode: 0o755 });
+	await writeFile(bin, `#!/bin/sh\necho "$@" >> '${join(cwd, "omp.log")}'\n[ "$1 $2 $3" = "config list --json" ] || exit 1\nprintf '%s' '${JSON.stringify(snapshot).replace(/'/g, "'\\''")}'\n`, { mode: 0o755 });
 	process.env.OMP_BIN = bin;
+}
+
+/** How many times the settings CLI was spawned. */
+async function ompCalls(): Promise<number> {
+	const log = await readFile(join(cwd, "omp.log"), "utf8").catch(() => "");
+	return log.split("\n").filter(line => line.length > 0).length;
+}
+
+/**
+ * Pin the run's database up front, for tests whose subject is not the pin. The
+ * preflight pins unconditionally, and an unpinned session would otherwise reach for
+ * the real `bd`.
+ */
+async function pinned(): Promise<void> {
+	await mkdir(join(cwd, ".beads"), { recursive: true });
+	process.env.BEADS_DIR = join(cwd, ".beads");
 }
 
 describe("W5 shared-database precondition", () => {
@@ -351,6 +369,7 @@ describe("W5 shared-database precondition", () => {
 		["roles that configure it", '{"reviewer":"mantle/openai.gpt-5.6-sol:medium"}', false],
 	])("a declared model role missing from %s warns=%p", async (_label, roles, wantWarning) => {
 		await stubOmpRoles(roles);
+		await pinned();
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
@@ -362,39 +381,62 @@ describe("W5 shared-database precondition", () => {
 		// This function's rule is to warn only about what it can prove. A setting that did
 		// not answer is not evidence the role is absent.
 		await stubOmpRoles(undefined);
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain(
-			"modelRoles.reviewer",
-		);
-	});
-
-	test("an unreadable isolation setting warns about nothing", async () => {
-		// `omp` absent: nothing is known, so nothing is claimed. Reading a missing key
-		// as "isolating" would warn about a split database on a run with no isolation.
-		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+		await pinned();
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
 		expect(rig.messages).toEqual([]);
 	});
 
-	test("isolation explicitly off warns about shared trees but not a split database", async () => {
+	test("an unreadable settings snapshot is reported as unverified, never as a deviation", async () => {
+		// `omp` absent: nothing is known about the settings, so no setting is named --
+		// reading a missing key as "isolating" would warn about a split database on a run
+		// with no isolation. What the operator is told is that the check did not run.
+		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+		await pinned();
+		const rig = harness();
+		resetWatchers();
+		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
+		expect(rig.messages).toHaveLength(1);
+		const notice = String(rig.messages[0]?.content);
+		expect(notice).toContain("could not be read");
+		expect(notice).not.toContain("task.isolation");
+		expect(notice).not.toContain("BEADS_DIR");
+	});
+
+	test("isolation explicitly off warns about shared trees and still pins the database", async () => {
 		await stubOmp(false);
+		await fakeBd();
 		await mkdir(join(cwd, ".beads"));
 
 		const rig = harness();
 		resetWatchers();
 		const deviations = await preflightSettings(rig.pi, cwd);
 		expect(deviations.map(item => item.key)).toEqual(["task.isolation.enabled"]);
-		// A run without isolation shares one checkout, so it shares one database.
-		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("BEADS_DIR is unset");
+		// G1 needs the pin whether or not workers are isolated; a lead that restarted mid-run
+		// had it inert until something re-pinned.
+		expect(process.env.BEADS_DIR).toBe(await realpath(join(cwd, ".beads")));
+		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("BEADS_DIR");
+	});
+
+	test("a pin the gates would reject is reported when a lead comes back to a marked repository", async () => {
+		// The pin lives in the process environment and does not survive a restart; an
+		// operator shell exporting a relative value used to leave the run reporting active
+		// with G1 disarmed and nothing said.
+		await stubOmp(true);
+		process.env.BEADS_DIR = "relative/.beads";
+		const rig = harness();
+		resetWatchers();
+		await preflightSettings(rig.pi, cwd);
+		const notice = String(rig.messages.at(-1)?.content ?? "");
+		expect(notice).toContain("BEADS_DIR could not be pinned");
+		expect(notice).toContain("not an absolute path");
 	});
 });
 
 describe("the settings preflight preserves user configuration", () => {
 	async function deviantSettings(): Promise<void> {
+		await pinned();
 		await stubSettings({
 			"task.isolation.enabled": true,
 			"task.isolation.merge": "patch",
@@ -1056,6 +1098,28 @@ describe("registerWatchers", () => {
 		await rig.fire("session_shutdown", {});
 	});
 
+	test("the settings CLI is spawned once per session, shared by both preflights and every task", async () => {
+		// Measured at 1-3 s per spawn; every `task` dispatch used to pay it to read a
+		// session-constant value, and `session_start` paid it twice at once.
+		await fakeBd();
+		await stubSettings({ "task.isolation.enabled": true, "task.agentModelOverrides": {} });
+		await pinned();
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		const rig = harness(undefined, true);
+		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+		await rig.fire("session_start", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(await ompCalls()).toBe(1);
+
+		// A switched session may sit in a different cwd; the snapshot is read again.
+		await rig.fire("session_switch", {});
+		await rig.fire("tool_call", { toolName: "task", input: {} });
+		expect(await ompCalls()).toBe(2);
+		await rig.fire("session_shutdown", {});
+	});
+
 	test("subscribes nothing before a session starts", async () => {
 		const rig = harness();
 		registerWatchers(rig.pi);
@@ -1382,6 +1446,13 @@ describe("registerWatchers", () => {
 
 	test("W4 periodic refresh delivers unchanged goals to newly created run epics only", async () => {
 		await fakeBd();
+		// The session starts under a marker, so W5 runs too; keep it satisfied so the
+		// comments below are W4's alone.
+		await stubSettings({
+			"task.isolation.enabled": true, "task.isolation.merge": "branch", "task.isolation.apply": false,
+			"task.enableEffort": true, "bash.autoBackground.enabled": false, modelRoles: { reviewer: "x/y" },
+		});
+		await pinned();
 		await mkdir(join(cwd, ".orchestration"));
 		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
@@ -1488,6 +1559,7 @@ describe("W5 settings preflight", () => {
 
 	test.each([true, "false"])("an unsafe automatic background snapshot (%p) warns without changing config", async enabled => {
 		await stubSettings({ "bash.autoBackground.enabled": enabled });
+		await pinned();
 		await mkdir(join(cwd, ".omp"));
 		const file = join(cwd, ".omp", "config.yml");
 		const config = "# operator owned\nbash:\n  autoBackground:\n    enabled: true\n";
@@ -1505,6 +1577,7 @@ describe("W5 settings preflight", () => {
 
 	test("a disabled automatic background snapshot satisfies claim observation", async () => {
 		await stubSettings({ "bash.autoBackground.enabled": false });
+		await pinned();
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		expect(rig.messages).toEqual([]);
@@ -1522,20 +1595,37 @@ describe("W5 settings preflight", () => {
 		expect(settingsDeviations({ "task.isolation.apply": "false" })).toHaveLength(1);
 	});
 
-	test("a missing omp binary reports nothing and does not throw", async () => {
+	test("a missing omp binary finds nothing, does not throw, and says the check did not run", async () => {
 		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+		await pinned();
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
-		delete process.env.OMP_BIN;
+		expect(String(rig.messages[0]?.content)).toContain("could not be read");
 	});
 
-	test("the check runs once per session", async () => {
-		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+	test("the check runs once per session, once it has run", async () => {
+		await stubSettings({ "task.isolation.enabled": true });
+		await pinned();
 		const rig = harness();
 		await preflightSettings(rig.pi, cwd);
+		expect(await ompCalls()).toBe(1);
 		// A second call short-circuits, so a re-fired `session_start` cannot spam the
-		// epic with duplicate comments.
+		// epic with duplicate comments -- and does not spawn the CLI again.
+		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
-		delete process.env.OMP_BIN;
+		expect(rig.messages).toEqual([]);
+	});
+
+	test("an unreadable host leaves the check pending for the next activation", async () => {
+		// Marking the check done on a host where `omp` was missing meant the
+		// `/orchestrate-run` hook returned [] forever with no notice.
+		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+		await pinned();
+		const rig = harness();
+		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
+		await stubSettings({ "task.isolation.enabled": true, "task.isolation.merge": "patch" });
+		expect((await preflightSettings(rig.pi, cwd)).map(item => item.key)).toEqual(["task.isolation.merge"]);
+		expect(rig.messages).toHaveLength(2);
+		expect(String(rig.messages[1]?.content)).toContain("task.isolation.merge");
 	});
 });
