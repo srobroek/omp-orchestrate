@@ -4,10 +4,10 @@ Five agents ship: `orc-architect`, `orc-implementer`, `orc-reviewer`, `orc-resea
 `orc-shepherd`. Each names one OMP model role. Tune model selection through `modelRoles`,
 not raw provider selectors in agent files. Each role inherits its configured thinking level.
 
-`orc-reviewer` names `@reviewer`, which OMP does not ship. Configure
-`modelRoles.reviewer` before a run. The verdict comes from a separate agent;
-model-family separation requires an explicit model choice. An unresolved role can fall back
-to the session model or fail selection; preflight reports it before dispatch.
+`orc-reviewer` names `@reviewer`, which OMP does not ship. `modelRoles.reviewer` is the
+one optional setting: unset, the doctor and the preflight warn once and the reviewer falls
+back to the session model. The verdict still comes from a separate agent; model-family
+separation requires an explicit model choice.
 
 Escalation is per-spawn `effort`, not a second agent. There is no deep variant of any role.
 
@@ -27,6 +27,7 @@ before it claims the epic or dispatches any child. Non-isolated children inherit
 parent session's `cwd`; isolated children run in runtime-created copies snapshotted from
 that parent-session `cwd`. The detailed session-cwd prerequisite and supported CLI re-entry
 path are in `planning.md`.
+
 The reviewer uses the configured `@reviewer` role. The researcher uses `@smol` and
 escalates hard cases per spawn with `effort`.
 

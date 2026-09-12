@@ -25,5 +25,6 @@ Recover instead:
 Both conditions read the `hub start` arguments. The shell form (`omp -p`, `--print`,
 `--cwd`, `--session-dir` from `bash`) is a G6 notice in `src/gates/bd.ts`: a rule cannot
 see whether a run is active, and this one fired on `omp -p` probes in sessions no run
-ever touched. The notice inherits G6's run gate and exempts `--config <run-overlay>`,
-the lead's rooted re-entry documented in `planning.md`.
+ever touched. The notice inherits G6's run gate and exempts
+`--config <plugin-root>/config/orchestrate.overlay.yml`, the lead's rooted re-entry
+documented in `planning.md`.

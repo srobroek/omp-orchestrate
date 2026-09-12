@@ -1608,7 +1608,7 @@ describe("W5 settings preflight", () => {
 
 	test("an unreadable host leaves the check pending for the next activation", async () => {
 		// Marking the check done on a host where the settings could not be read meant the
-		// `/orchestrate-run` hook returned [] forever with no notice.
+		// `/orchestrate-start` hook returned [] forever with no notice.
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		await stubSettings({ ...COMPLIANT_SETTINGS, "task.isolation.merge": "patch" });

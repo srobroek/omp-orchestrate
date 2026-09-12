@@ -309,7 +309,7 @@ describe("bindRun", () => {
 		expect((await readActiveRun(cwd))?.run_id).toBe("orc-1");
 	});
 
-	test("binds over a pending marker /orchestrate-run left, and over a legacy marker naming the same run", async () => {
+	test("binds over a pending marker an older release left, and over a legacy marker naming the same run", async () => {
 		await seed('{"schema_version":1,"run_id":"pending","session_id":"session-a"}');
 		await bindRun(cwd, "orc-7");
 		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-7", session_id: "session-a" });
@@ -859,11 +859,11 @@ describe("runStatusReport", () => {
 		expect((await runStatusReport(cwd, NOW)).lines[0]).toContain("schema 3 is newer than this plugin's 1");
 	});
 
-	test("a pending marker names the command that left it and both ways out", async () => {
+	test("a pending marker names the release that left it and both ways out", async () => {
 		await seed('{"schema_version":1,"run_id":"pending","session_id":"session-a"}');
 		const report = await runStatusReport(cwd, NOW);
 		expect(report.healthy).toBe(false);
-		expect(report.lines).toEqual([`run: pending (marker ${markerPath(cwd)}, session session-a, written by /orchestrate-run); /orchestrate-start <epic-id> binds it, /orchestrate-stop removes it`]);
+		expect(report.lines).toEqual([`run: pending (marker ${markerPath(cwd)}, session session-a, written by an older plugin release); /orchestrate-start <epic-id> binds it, /orchestrate-stop removes it`]);
 	});
 
 	test("a bound, open run with nothing pending is healthy and says attention: none", async () => {

@@ -39,5 +39,5 @@ MUST Record BOUNCED, ESCALATED or BLOCKED on your claimed merge bead before yiel
 
 ## Output
 
-Begin your reply with `VERDICT: BOUNCED|ESCALATED|BLOCKED — <reason>`; an empty pull returns NO_WORK.
+Begin your reply with `VERDICT: BOUNCED|ESCALATED|BLOCKED -- <reason>`; an empty pull returns NO_WORK.
 CAP 100w. Return only the disposition; never reprint code, diffs, file contents, the assignment or bead history.

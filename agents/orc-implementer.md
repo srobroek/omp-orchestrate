@@ -43,14 +43,18 @@ NOT Rewrite `metadata.role`; handoff labels do not change routing. Escalate misr
 ## Helpers and blockers
 
 DEFAULT Resolve small repository/library facts directly. Spawn `scout` for a bounded investigation across modules that returns a source-backed answer; it returns directly without a bead, wisp or consent.
+
 Before using a helper, LOAD `skill://orchestrate/references/roles.md` for grants, source-backed briefs and return shapes. Only `scout` and `operator` are granted, and worker helpers require recursion depth 3. Neither may claim, commit, touch a PR or manage a worktree.
+
 `operator` may perform one exact mechanical operation inside your scope and isolated checkout. Await its terminal result before writing or launching another writer there; a job receipt is not completion. Never target another actor's checkout.
 
 Design/debug uncertainty → LOAD roles' research-escalation procedure, create a related `role=researcher`, `execution_kind=escalation` wisp with source scope and `origin_actor`, record BLOCKED, ping the architect with its id and yield paused. You cannot spawn the researcher or safely resume a finished isolated task from a ping. The architect preserves captures; the reaper releases the retained claim under the lease before replacement dispatch.
+
 Product intent → `ASK` on your bead with status `blocked`, plus a human gate when it has not started. Never wait live on a peer.
+
 Before filing a pre-existing out-of-scope defect, LOAD `skill://orchestrate/references/lifecycle.md` → Incidental bug beads; keep your own work independent.
 
 ## Output
 
-Begin your reply with `VERDICT: REPORTED|BLOCKED|FAILED — <reason>`; empty pulls return NO_WORK.
+Begin your reply with `VERDICT: REPORTED|BLOCKED|FAILED -- <reason>`; empty pulls return NO_WORK.
 CAP 100w. Return one receipt containing only bead id, changed paths or artifact ref, head SHA when applicable, and verification result. Never reprint code, diffs, file contents, the assignment, progress, or bead history.

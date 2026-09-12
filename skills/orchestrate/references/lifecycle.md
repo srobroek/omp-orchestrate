@@ -34,14 +34,21 @@ never stored as a bead state.
 | `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED`, then releases with a single `bd update <id> --assignee ""`. The release comes last: it clears the ownership every other write on the bead is checked against, and only the terminal comment is admitted after it. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
 | `reported → in_review` | the architect collects the successful terminal task result, verifies the captured branch and head, integrates it, then creates review-wisp shells. A pre-yield report alone is not capture proof |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with a `NOTE` on the node |
-
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
 | `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead with `pr` and the reviewed `head_sha`; the plugin's landing sweep merges it at that head and writes `LANDED <sha>` |
 | `approved → dismissed` | non-git evidence only: the architect records the accepted evidence and closes with `--reason dismissed` |
 | `waiting_human` | an agent raised `ASK` on the bead and set its status `blocked`. The question is recorded in that comment. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
 | `waiting_gate` | only an external machine gate remains (a release workflow, a bot round). A gate bead blocks the work bead, `BLOCKED` names it and how to resume, the claim is released, and nobody polls it. CI on a merge bead's PR is not a gate: the landing sweep observes it |
 | `failed` | unrecoverable: status `blocked` plus a `FAILED` comment, with the error recorded and surfaced |
-The lead has the same terminal duty as a claimed worker: it must finish or explicitly terminate every held bead before its session settles. Because the lead has no `yield` tool, G4 cannot intercept an incomplete final turn; the lead-exit watch checks the bound run and claim state after `agent_end`, then gives the lead up to three follow-ups when its final text has no terminal grammar verb. The lead must finish the held work and end with a terminal verb, or write `ESCALATED`/`BLOCKED` with the reason required by the grammar.
+
+The lead has the same terminal duty as a claimed worker: it must finish or explicitly
+terminate every held bead before its session settles. Because the lead has no `yield` tool,
+G4 cannot intercept an incomplete final turn.
+
+The lead-exit watch checks the active run and claim state after `agent_end`, then gives the
+lead up to three follow-ups when its final text has no terminal grammar verb. The lead must
+finish the held work and end with a terminal verb, or write `ESCALATED`/`BLOCKED` with the
+reason required by the grammar.
 
 Review and escalation evidence is version-bound when either endpoint names a version.
 Stamp `head_sha=<value>` and `review_round=<value>` on linked-node `REVIEW`/`NOTE`
@@ -114,16 +121,18 @@ Do not use type `merge-request`: it is a ready-filter alias, not a creatable typ
 Stamp `repo` (`owner/name`), `pr`, `head_sha` (the reviewed head), `branch`, `base_sha`,
 `origin_bead`, `integration_owner=orchestrate`, `bot_same_issue_limit=3`, an empty
 `bot_issue_attempts` map, `bot_round_limit=6`, `bot_rounds_completed=0`, and a
-`bot_review_requests` provider-to-mode object. Keep the request object empty unless the
-originating work, repository policy, or a recorded material-risk decision requires a
-provider second opinion. `origin_bead` names the source node or its explicit parent;
-preserve that parent in ownership snapshots. Source approval does not transfer. While
-retaining sole PR-update ownership, the architect requests every configured provider at
-the exact head and records the request result before dispatching the shepherd.
+`bot_review_requests` provider-to-mode object.
+
+Keep the request object empty unless the originating work, repository policy, or a
+recorded material-risk decision requires a provider second opinion. `origin_bead` names the
+source node or its explicit parent; preserve that parent in ownership snapshots. Source
+approval does not transfer. While retaining sole PR-update ownership, the architect
+requests every configured provider at the exact head and records the request result before
+dispatching the shepherd.
 
 ### Landing
 
-The plugin lands. `/orchestrate-bind` probes the repository once (`autoMergeAllowed`,
+The plugin lands. `/orchestrate-start` probes the repository once (`autoMergeAllowed`,
 `squashMergeAllowed`, branch protection and rulesets, merge queue) and records the
 result on the run epic as `metadata.landing`. Mode `auto` needs auto-merge allowed and at
 least one required check; every other repository is `direct`. Every 60 s the lead's
@@ -154,26 +163,29 @@ The architect owns automated review requests; the shepherd owns observation. Nei
 holds a watcher agent open. LOAD `review-providers.md` before configuring or requesting
 a provider. The request tool accepts only allowlisted commands, verifies the exact head,
 and uses provider/mode/head markers for replay-safe deduplication. The tool does not lock
-GitHub comments, so the architect serializes calls under sole PR-update ownership. The
-shepherd requires the probe's request marker for each configured provider and probes that
-provider separately. For ten minutes from `requestedAt`, an absent, pending or stale result
-is a wait: the shepherd records BLOCKED naming the provider and releases; after ten minutes
-without provider evidence, BLOCKED names the missing evidence instead. Missing
+GitHub comments, so the architect serializes calls under sole PR-update ownership.
+
+The shepherd requires the probe's request marker for each configured provider and probes
+that provider separately. For ten minutes from `requestedAt`, an absent, pending or stale
+result is a wait: the shepherd records BLOCKED naming the provider and releases; after ten
+minutes without provider evidence, BLOCKED names the missing evidence instead. Missing
 markers or timestamps are BLOCKED. Manual requests, clean verdicts and external waits do
 not increment remediation rounds.
 
 For an actionable round, collect every configured bot before routing one fix bead. Use
 the GitHub review-thread node id as the issue identity. When a finding has no thread, use
-its review URL plus a stable fingerprint of bot, path, location and finding. Each entry
-in `metadata.bot_issue_attempts` counts completed fixes for that issue and begins at zero.
-`metadata.bot_rounds_completed` counts integrated and pushed bot-fix rounds for the PR
-and begins at zero. Missing, invalid or non-positive limits resolve to three same-issue
-fixes and six total rounds.
+its review URL plus a stable fingerprint of bot, path, location and finding.
+
+Each entry in `metadata.bot_issue_attempts` counts completed fixes for that issue and
+begins at zero. `metadata.bot_rounds_completed` counts integrated and pushed bot-fix rounds
+for the PR and begins at zero. Missing, invalid or non-positive limits resolve to three
+same-issue fixes and six total rounds.
 
 Before creating a fix bead, call `orc_review_round_policy` with total completed rounds
 and only issues actionable in the current exact-head round. A `decision=escalate`
-result produces ESCALATED instead of another fix. An invalid result is BLOCKED. The
-escalation record names the exhausted bound, completed rounds, issue identities,
+result produces ESCALATED instead of another fix. An invalid result is BLOCKED.
+
+The escalation record names the exhausted bound, completed rounds, issue identities,
 attempts, prior heads, fix beads, thread URLs, and the `ASK` fields: one human question,
 its impact and the resume transition. Set the merge bead's status to `blocked`, preserve
 the PR and feature tree, and notify `Main` through `hub` with only the merge bead id. No
@@ -182,12 +194,14 @@ unrelated queue waits.
 When both limits permit a fix, the shepherd records BOUNCED, creates one unassigned fix
 bead for the aggregated round, and wakes the owning architect with the bead id. When two
 shepherds raced and both created one, the oldest open fix bead stands and the newer closes
-as a duplicate. The architect dispatches a fresh implementer through the queue. After
-capture, the architect
-integrates and pushes the fix, increments `bot_rounds_completed` once, increments each
-addressed issue count once, replies where a rejection needs evidence, resolves addressed
-threads with GitHub's `resolveReviewThread` mutation, and reads back `isResolved=true`.
-Record the resolved thread ids and new head before removing the same-PR merge blocker.
+as a duplicate. The architect dispatches a fresh implementer through the queue.
+
+After capture, the architect integrates and pushes the fix, increments
+`bot_rounds_completed` once, increments each addressed issue count once, replies where a
+rejection needs evidence, resolves addressed threads with GitHub's `resolveReviewThread`
+mutation, and reads back `isResolved=true`. Record the resolved thread ids and new head
+before removing the same-PR merge blocker.
+
 Before waking the shepherd, the architect requests configured manual providers for the
 new exact head and re-stamps the merge bead's `head_sha`. The next shepherd pass verifies
 those markers and probes every bot; the landing sweep lands the PR.
@@ -241,9 +255,9 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
 
 ## Resume after compaction or crash
 
-1. Find the run epic: `/orchestrate-status` prints the marker binding, the epic's
-   liveness, and the lead lease (`lead_actor`, `lease_until`); or `bd list --type epic
-   --json`, matched on `metadata.run_id`.
+1. Find the run epic: `/orchestrate-status` prints the run epic the marker names, the
+   epic's liveness, the lead lease (`lead_actor`, `lease_until`), and the Attention
+   section; or `bd list --type epic --json`, matched on `metadata.run_id`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
    the actor in `assignee`, the location in `metadata.worktree`/`branch`, its lease in
    `metadata.lease_until`, and its last verb in `bd comments`. Confirm every stamped
@@ -259,17 +273,16 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    read both back, and require equality before actor re-entry. Do not release a retained
    claim merely to relocate; a mismatch preserves the claim, checkout, capture, terminal
    result, and evidence. Re-enter only through the rooted `omp --cwd
-   "<canonical-worktree>" --config "<run-overlay>"` procedure in `planning.md`, with the
-   same absolute `ORCHESTRATE_MARKER_FILE`.
+   "<canonical-worktree>" --config "<plugin-root>/config/orchestrate.overlay.yml"`
+   procedure in `planning.md`, with the same absolute `ORCHESTRATE_MARKER_FILE`.
 5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
 6. Claims whose holder died with the old lead's process are the adopting lead's to release:
-   `/orchestrate-bind <epic>` takes over a lapsed lead lease, and `/orchestrate-resume`
-   (wave 3.3) then releases each in-flight claim whose lease has lapsed, on the lease alone.
-   Until it exists, release such a claim by hand only after reading `lease_until` fresh and
-   finding it lapsed: `bd update <bead> --actor <holder> --claim --assignee "" --status
-   open`, then a `RECOVERED` comment. A live lease is a live holder until it lapses.
+   `/orchestrate-resume` takes over a lapsed lead lease, then reads every in-flight claim
+   fresh and releases those whose lease has lapsed, on the lease alone, writing
+   `RECOVERED` on each. A live lease is a live holder until it lapses; the command names it
+   and leaves it alone. Never release a claim by hand.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
 replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
@@ -311,7 +324,7 @@ can extend a lease and a release loses to a successor's claim. A lapsed lease al
 releases nothing: the spawner that holds the claimant in its registry decides, and a
 holder absent from that registry is unknown, never dead. The lead holds the same lease
 on the run epic (`lead_actor`, `lease_until`), renewed on its own activity; a second lead
-cannot bind while it is live, and `/orchestrate-status` prints it.
+cannot start or resume the run while it is live, and `/orchestrate-status` prints it.
 
 **Merge-completeness scan.** Integration is cherry-pick, so ancestry proves nothing and
 patch-id containment is the primitive:
@@ -344,15 +357,19 @@ What a release leaves behind: the bead `open` and unassigned, `metadata.recovere
 `metadata.recovered_branch` when the repository showed `omp/task/<holder>`, and a
 `RECOVERED <holder> <cause>` comment carrying the branch and contract evidence. Worktree,
 captured branch, artifacts, comments and external references are untouched. Requeue is
-implicit: the next `bd ready --claim` offers the bead, and the claimant inherits every
+implicit: the next `bd ready --claim` returns the bead, and the claimant inherits every
 preserved anchor including `recovered_branch`.
 
-What the reaper leaves alone, and why: a `blocked` or `deferred` bead (bd refuses
-`--claim` on it, so the fence cannot pass; a human unblocks it and `bd ready` never offers
-it meanwhile), a holder the registry reports `idle` or `parked` (revivable), and a holder
-absent from the registry (unknown). Each gets a `NOTE claim preserved` or a notice naming
-the lease state; none gets a blind release. If checkout or runtime-root repair is needed
-before a replacement can work, run `planning.md`'s **Canonical checkout recovery** first.
+What the reaper leaves alone, and why:
+
+- a `blocked` or `deferred` bead: bd refuses `--claim` on it, so the fence cannot pass; a
+  human unblocks it and `bd ready` never returns it meanwhile
+- a holder the registry reports `idle` or `parked`: revivable
+- a holder absent from the registry: unknown
+
+Each gets a `NOTE claim preserved` or a notice naming the lease state; none gets a blind
+release. If checkout or runtime-root repair is needed before a replacement can work, run
+`planning.md`'s **Canonical checkout recovery** first.
 
 ## Failure propagation
 
@@ -416,7 +433,7 @@ instead of a separate `ASK`. A bead that had not started also receives
 Nobody polls the human or the held worker. Unrelated ready beads continue. On an answer,
 promote it into a work-bead comment or decision bead, resolve the human gate when one
 exists, and follow the stored `resume` instruction: reopen the bead unassigned with
-`bd update <bead> --status open --assignee ""`. Normal dispatch re-offers it, and the next
+`bd update <bead> --status open --assignee ""`. Normal dispatch returns it, and the next
 claimant reads the answer on the bead.
 
 ## Ordering and waits are bead primitives
@@ -443,11 +460,12 @@ Park the bead instead. Add `bd gate create --type=gh:pr --blocks <bead> --await-
 a PR outside the run's landing, or `--type=human` for a person, comment `BLOCKED` naming the
 gate bead and how to resume, then release the claim with
 `bd update <bead> --status open --assignee ""`. The gate bead is the hold: `bd ready` hides
-the work bead until the gate resolves. Continue unrelated beads from `bd ready`. When
-nothing else is ready and only external waits remain, write the run report and exit; the
-gate bead and the next pass own the wait. `bd gate check` plus `bd ready --gated` is how the
-cleared gate is discovered, after which ordinary `bd ready --claim` acquires the reopened
-bead.
+the work bead until the gate resolves.
+
+Continue unrelated beads from `bd ready`. When nothing else is ready and only external
+waits remain, write the run report and exit; the gate bead and the next pass own the wait.
+`bd gate check` plus `bd ready --gated` is how the cleared gate is discovered, after which
+ordinary `bd ready --claim` acquires the reopened bead.
 
 Two campaign runs violated this on their final release bead: each polled a release workflow
 and a package-executing reviewer until the stream aborted, leaving that bead `in_progress`
@@ -615,6 +633,6 @@ symlink path was refused: inspect those paths and keep the run open instead of f
 deletion. The dirty primary checkout, the artifacts directory, the beads database, and the
 shared build target are never swept.
 
-Stop repository watchers before removing run-local process state. `/orchestrate-close
-<epic>` removes the active-run marker only after verifying it names this run and no child
+Stop repository watchers before removing run-local process state. `/orchestrate-stop`
+releases the lead lease and removes the active-run marker only after verifying no child
 is `in_progress`; `--force` skips the child check for a run whose beads are gone.

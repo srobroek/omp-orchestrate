@@ -1084,7 +1084,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   //
   // Checked at start only where a run is already active: the contract governs
   // orchestrated runs, and a repository that merely tracks work in beads has no
-  // claims to split until one starts. `/orchestrate-run` runs the settings check
+  // claims to split until one starts. `/orchestrate-start` runs the settings check
   // at activation, and the `task` handler below checks agents at spawn, so a
   // session that never orchestrates hears nothing. Both preflights read the settings
   // in process, so neither costs a spawn.

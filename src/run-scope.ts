@@ -3,9 +3,9 @@
  *
  * One answer for every handler in the plugin. A run scope exists iff a strictly valid
  * active-run marker is readable at the session's cwd, or at the primary checkout whose
- * `.git` a linked worktree at the cwd shares. `/orchestrate-run` writes that marker after
+ * `.git` a linked worktree at the cwd shares. `/orchestrate-start` writes that marker after
  * the run's database has been located, so marker implies a validated store;
- * `/orchestrate-close` removes it, and that is how a run ends. An isolated copy carries
+ * `/orchestrate-stop` removes it, and that is how a run ends. An isolated copy carries
  * the primary's marker, so a worker reaches its run through the same file at its own cwd;
  * an architect in a Worktrunk worktree holds none (`.orchestration/` is gitignored) and
  * reaches it through `git rev-parse --git-common-dir`, asked once per cwd per process.

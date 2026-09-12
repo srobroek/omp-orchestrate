@@ -76,28 +76,32 @@ only when a choice leaves one bead's scope.
 - `bd` present, no database → `bd init --stealth --prefix orc` (git-invisible: writes
   `.git/info/exclude`, leaves `git status` clean).
 
-At run start, `/orchestrate-run`.
-It creates `.orchestration/.active-run` with `run_id=pending` or preserves the existing
-binding on restart. Gitignore `.orchestration/`.
-Create the run epic with `run_id`, `primary_branch`, `base_sha`, `origin_actor` and an
-absolute `artifacts` directory outside every worktree.
-Bind with `/orchestrate-bind <epic-id>`, which stamps the lead lease, and read back the binding before
-dispatch; pending claims are invalid. Binding requires an active marker, permits the
-same id and refuses a different run.
+At run start the operator runs `/orchestrate-start --new "<title>"`, or
+`/orchestrate-start <epic-id>` for an epic that already exists. The command:
 
+- with `--new`, creates the run epic with `run_id`, `primary_branch`, `base_sha`,
+  `origin_actor` and an absolute `artifacts` directory under `.orchestration/<epic-id>/`
+- with an epic id, keeps that epic's metadata as written; it needs those five fields
+- writes `.orchestration/.active-run` naming the epic and the run's `.beads`
+- stamps the lead lease on the epic and records `metadata.landing`
 
-Sync discipline: the lead is the only session that runs `bd dolt push` or `bd dolt pull`
-while a run is active, and it does so once, at the barrier, after every agent has yielded:
-`bd dolt commit`, then `bd dolt push`. The routed `bd dolt` sync runs a second Dolt engine
-against the same journal from a lock domain host writers cannot see, which is how one run
-corrupted the store; G6 refuses `bd dolt push|pull|fetch|clone|sync` from every spawned
-session, and the Worktrunk `post-commit`/`post-merge` hooks skip their sync while
-`.orchestration/.active-run` exists. Also push after graph creation and before standing
-down. A git branch push does not carry `refs/dolt/data`; `bd backup` is not remote sync.
-`src/store-probe.ts` answers `free`, `locked` (naming the holder), `corrupted` (quoting the
-journal error) or `slow` for a store; a `locked` or `corrupted` store is never synced, and
-the plugin repairs neither: it starts, stops, and kills no Dolt server and never touches
-`noms/LOCK`. `dolt fsck` in the store directory is the operator's diagnosis.
+Dispatch only after the command reports the run. A claim before the marker names an epic
+is invalid.
+
+Sync discipline:
+
+- The lead is the only session that runs `bd dolt push` or `bd dolt pull` while a run is
+  active. It does so once, at the barrier, after every agent yields: `bd dolt commit`, then
+  `bd dolt push`. Also push after graph creation and before standing down.
+- The routed `bd dolt` sync runs a second Dolt engine against the same journal from a lock
+  domain host writers cannot see, which is how one run corrupted the store. G6 refuses
+  `bd dolt push|pull|fetch|clone|sync` from every spawned session, and the Worktrunk
+  `post-commit`/`post-merge` hooks skip their sync while `.orchestration/.active-run` exists.
+- A git branch push does not carry `refs/dolt/data`; `bd backup` is not remote sync.
+- `src/store-probe.ts` answers `free`, `locked` (naming the holder), `corrupted` (quoting
+  the journal error) or `slow` for a store. A `locked` or `corrupted` store is never synced.
+  The plugin repairs neither: it starts, stops, and kills no Dolt server and never touches
+  `noms/LOCK`. `dolt fsck` in the store directory is the operator's diagnosis.
 
 ## Bead type vocabulary
 
@@ -356,7 +360,7 @@ provenance, never a gate, and it is the evidence a dead-claim recovery reads fir
 
 ## Landing primitives
 
-- **Capabilities:** `/orchestrate-bind` records `metadata.landing` on the run epic:
+- **Capabilities:** `/orchestrate-start` records `metadata.landing` on the run epic:
   `repo`, `base`, `mode` (`auto` or `direct`), `auto_merge_allowed`, `squash_allowed`,
   `required_checks`, `strict`, `queue`, `viewer_permission`, `probed_at`. The sweep
   re-derives `mode` from the flags on every read.
@@ -380,7 +384,7 @@ provenance, never a gate, and it is the evidence a dead-claim recovery reads fir
 ## Read the run (status / resume / close-out)
 
 `orc_run_status` is the standard report: it rolls the run epic up through its domain epics
-and features to their tasks, at any depth, and resolves blockers via `bd blocked`. Use it
+and feature beads to their tasks, at any depth, and resolves blockers with `bd blocked`. Use it
 instead of hand-assembling a summary. `bd list --parent <id>` answers direct children only
 (bd 1.2.2), so a hand-built `--parent <epic>` query misses every task under a feature. The
 queries below are for the questions the report does not answer.
@@ -391,10 +395,9 @@ queries below are for the questions the report does not answer.
 | audit trail | `bd comments <bead>` for the verbs, plus `<spawning-session-cwd>/.orchestration/audit/*.bdlog` for every mutating command (skip rows tagged `foreign_store`) |
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
 | open waits | `bd gate list`, `bd ready --gated --json`, and the `BLOCKED landing:` comments on open merge beads |
-| unanswered patrols | `bd dep list <epic> --direction=up --type relates-to --json` filtered on `wisp_type == "patrol"` and a non-closed status. `bd list` hides ephemeral beads outright, even under `--wisp-type patrol`, and takes no `--include-ephemeral`: only `bd ready` does |
-| resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`; actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity); location = `metadata.worktree`/`branch`; surviving code = `git branch --list 'omp/task/*'` |
+| resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`. Actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity). Location = `metadata.worktree`/`branch`. Surviving code = `git branch --list 'omp/task/*'` |
 | unintegrated code | integration is cherry-pick or squash, so ancestry and `git cherry` prove nothing: under squash every branch commit reads `+`. Landing proof is tree equality, `git merge-tree --write-tree <merge>^ <head>` equal to `git rev-parse <merge>^{tree}`, or one combined patch-id, `git diff <base> <head> \| git patch-id --stable` equal to `git diff <merge>^ <merge> \| git patch-id --stable` |
-| close-out gate | `bd dep cycles` clean AND `/orchestrate-close <epic>` accepts without `--force` (it walks every level for `in_progress`) AND no `blocked` bead in the `orc_run_status` rollup AND no stranded bead AND no undrainable merge bead AND every captured branch proven landed by the row above |
+| close-out gate | `bd dep cycles` clean AND no bead beneath the epic, at any depth, is `in_progress` (the check `/orchestrate-stop` makes before it removes the marker; `--force` skips it) AND no `blocked` bead in the `orc_run_status` rollup AND no stranded bead AND no undrainable merge bead AND every captured branch proven landed by the row above |
 | stranded beads | per feature, because `--parent` is direct-only: `comm -13 <(bd ready --parent <feature> --json \| jq -r '.[].id' \| sort) <(bd list --parent <feature> --status open,blocked --no-assignee --json \| jq -r '.[].id' \| sort)`, which lists beads that are unassigned but not ready. Then check each nonempty `assignee` in the `orc_run_status` rollup against a live actor |
 
 A bead that is neither ready nor claimed counts as stranded. The store never reports a dead
