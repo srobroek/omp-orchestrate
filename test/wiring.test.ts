@@ -102,7 +102,7 @@ async function verdict(
 
 /**
  * A run pinned to `dir`: the marker in its `.orchestration/` and the process pin on a
- * `.beads` beside it, which is how `/orchestrate-run` leaves a lead session.
+ * `.beads` beside it, which is how `/orchestrate-start` leaves a lead session.
  */
 async function pinnedRun(dir: string, body = JSON.stringify({ schema_version: 1, run_id: "run-wiring" })): Promise<void> {
  await fs.mkdir(path.join(dir, ".orchestration"), { recursive: true });
