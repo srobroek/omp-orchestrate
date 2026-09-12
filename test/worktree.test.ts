@@ -20,7 +20,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { getWorktreesDir, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
@@ -32,10 +32,16 @@ let claims = createClaimState();
 // Restore each export without leaving a process-wide module mock for later suites.
 const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async (id: string) => beads[id] ?? null);
 const listSpy = spyOn(actualBd, "bdList").mockResolvedValue([]);
+/** `logger.warn` calls, so a fail-open verdict can be asserted to have named its cause. */
+let warned: { message: string; data?: Record<string, unknown> }[] = [];
+const warnSpy = spyOn(logger, "warn").mockImplementation(((message: string, data?: Record<string, unknown>) => {
+ warned.push({ message, data });
+}) as typeof logger.warn);
 
 afterAll(() => {
  showSpy.mockRestore();
  listSpy.mockRestore();
+ warnSpy.mockRestore();
 });
 
 const BEAD = "orc-42";
@@ -125,6 +131,7 @@ afterAll(async () => {
 
 beforeEach(() => {
  claims = createClaimState();
+ warned = [];
  beads = { [BEAD]: { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned } } };
  // Disable isolated-root discovery outside the isolation-specific cases.
  process.env.OMP_WORKTREE_DIR = path.join(root, "no-such-isolation-base");
@@ -335,24 +342,23 @@ describe("G2 metadata.scope territory", () => {
   beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api/**"] } };
  });
 
- test.each(["src/**", "/src/**"])("scope %s grants matching writes and detects a competing owner", async scope => {
+ test.each(["src/**", "/src/**"])("scope %s grants matching writes and refuses the rest of the tree", async scope => {
   beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: [scope] } };
   expect(await writing("src/api.ts")).toBeUndefined();
   expect((await writing("docs/api.ts"))?.block).toBe(true);
-  listSpy.mockResolvedValueOnce([
-   { id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["src/**"] } },
-  ]);
-  expect((await writing("src/api.ts"))?.reason).toContain("scope conflict");
  });
 
  test.each(["", "/"])("whole-tree scope %j grants in-tree writes but not escapes", async scope => {
   beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: [scope] } };
   expect(await writing("docs/api.ts")).toBeUndefined();
   expect((await writing("../foreign/src/api.ts"))?.reason).toContain("metadata.worktree");
-  listSpy.mockResolvedValueOnce([
-   { id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["docs/**"] } },
-  ]);
-  expect((await writing("docs/api.ts"))?.reason).toContain("scope conflict");
+ });
+
+ test("reads no in-flight peers: scope friction is judged once, at claim", async () => {
+  // The per-write friction check was the read amplification the audit measured; G2
+  // now compares the target against the claimed territory and lists nothing.
+  expect(await writing("src/api/handler.ts")).toBeUndefined();
+  expect(listSpy).not.toHaveBeenCalled();
  });
 
  test("allows a write the scope globs name", async () => {
@@ -475,11 +481,12 @@ describe("G2 ownership freshness", () => {
   ["write", () => writing("src/api.ts")],
   ["edit", () => editing(path.join(owned, "src", "api.ts"))],
   ["bash", () => fromBash(owned, "touch src/api.ts")],
- ])("rejects the superseded actor's ordinary %s mutation", async (_tool, mutate) => {
+ ])("rejects the superseded actor's ordinary %s mutation, naming the new owner", async (_tool, mutate) => {
   const result = await mutate();
   expect(result?.block).toBe(true);
-  expect(result?.reason).toContain("in_progress");
   expect(result?.reason).toContain(BEAD);
+  expect(result?.reason).toContain(successor);
+  expect(result?.reason).toContain("mutating product files");
  });
 
  test("allows the currently assigned actor to mutate the same scope", async () => {
@@ -491,14 +498,38 @@ describe("G2 ownership freshness", () => {
  });
 
  test.each([
-  ["released", { status: "open", assignee: actor }],
-  ["reassigned", { status: "in_progress", assignee: successor }],
-  ["unreadable", undefined],
- ])("rejects ordinary mutation with %s ownership evidence", async (_state, bead) => {
-  if (bead === undefined) delete beads[BEAD];
-  else beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned, scope: ["src/**"] } };
+  ["reopened and still assigned to this actor", { status: "open", assignee: actor }],
+  ["released", { status: "open", assignee: "" }],
+  ["blocked", { status: "blocked", assignee: actor }],
+ ])("allows product mutation while the bead is %s: nobody else holds it", async (_state, bead) => {
+  // Only proof of loss refuses: a released bead is taken from nobody, and a worker
+  // bounced by G4 after its release must be able to repair its evidence.
+  beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned, scope: ["src/**"] } };
 
-  expect((await writing("src/api.ts"))?.block).toBe(true);
+  expect(await writing("src/api.ts")).toBeUndefined();
+  expect(warned).toEqual([]);
+ });
+
+ test.each([
+  ["timeout", "did not answer in time"],
+  ["unavailable", "bd could not be run"],
+  ["budget", "read budget is spent"],
+  ["missing", "no such bead"],
+  [undefined, "could not be read"],
+ ])("allows product mutation and warns with the cause when the bead cannot be read (%s)", async (kind, cause) => {
+  // Uncertainty is not evidence: the store under load must not lock a worker out of
+  // its own tree, and the reason lands in the log rather than in a refusal.
+  delete beads[BEAD];
+  const failure = spyOn(actualBd, "lastBdFailure").mockReturnValue(kind as actualBd.BdFailure | undefined);
+  try {
+   expect(await writing("src/api.ts")).toBeUndefined();
+   expect(await fromBash(owned, "touch src/api.ts")).toBeUndefined();
+  } finally {
+   failure.mockRestore();
+  }
+  expect(warned.length).toBeGreaterThan(0);
+  expect(warned.every(entry => entry.data?.bead === BEAD && String(entry.data?.cause).includes(cause))).toBe(true);
+  expect(claims.observedClaim()).toBeDefined();
  });
 
  test("keeps a recognized Beads read control path safe after reassignment", async () => {
@@ -508,17 +539,16 @@ describe("G2 ownership freshness", () => {
  test.each([
   ["a cleared assignee", ""],
   ["no assignee", undefined],
- ])("allows the terminal comment on the claimed bead after its release leaves %s", async (_state, assignee) => {
+ ])("allows the terminal comment and later product work on the claimed bead after its release leaves %s", async (_state, assignee) => {
   // The documented completion writes REPORTED and then releases; a worker that releases
-  // first must still be able to report, or G4 sends it after a comment G2 refuses.
+  // first must still be able to report, and one bounced by G4 must be able to repair.
   beads[BEAD] = { id: BEAD, status: "in_progress", metadata: { worktree: owned, scope: ["src/**"] } };
   if (assignee !== undefined) beads[BEAD]!.assignee = assignee;
 
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd comment ${BEAD} "REPORTED done"`)).toBeUndefined();
   expect(await fromBash(owned, `BD_ACTOR=${actor} bd comments add ${BEAD} "REPORTED done"`)).toBeUndefined();
-  // The release admits the comment alone: product work on a released bead is still stale.
-  expect((await fromBash(owned, "git log -1"))?.block).toBe(true);
-  expect((await writing("src/api.ts"))?.block).toBe(true);
+  expect(await fromBash(owned, "git log -1")).toBeUndefined();
+  expect(await writing("src/api.ts")).toBeUndefined();
  });
 
  test("refuses the comment once the bead belongs to a successor, without calling it a product file", async () => {
@@ -682,11 +712,6 @@ describe("G2 standalone ownership controls", () => {
   beads[BEAD]!.status = "open";
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim --json`)).toBeUndefined();
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim`)).toBeUndefined();
-  beads[BEAD]!.status = "in_progress";
-  listSpy.mockResolvedValueOnce([
-   { id: "orc-other", status: "in_progress", assignee: foreignActor, metadata: { scope: ["src/api/**"] } },
-  ]);
-  expect((await fromBash(owned, "touch src/api.ts"))?.block).toBe(true);
  });
 
  test("allows the observed actor to hand a reopened bead back instead of reclaiming it", async () => {
@@ -695,10 +720,12 @@ describe("G2 standalone ownership controls", () => {
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee ""`)).toBeUndefined();
  });
 
- test("does not read a reclaim with extra flags as the reclaim control", async () => {
+ test("a reclaim with extra flags is product work on an open bead this actor holds, and passes", async () => {
+  // Not the reclaim control, so no grammar applies; and an open bead assigned to this
+  // actor proves no loss.
   beads[BEAD] = { id: BEAD, status: "open", assignee: actor, metadata: { worktree: owned } };
 
-  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim --status in_progress`))?.block).toBe(true);
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim --status in_progress`)).toBeUndefined();
  });
 
  test("allows matching structured BEADS_DIR for standalone recovery", async () => {
@@ -717,11 +744,9 @@ describe("G2 standalone ownership controls", () => {
  });
 
  test.each([
-  ["reopen missing", `bd reopen ${BEAD}`, undefined],
   ["reopen unassigned", `bd reopen ${BEAD}`, { status: "closed" }],
   ["reopen foreign owner", `bd reopen ${BEAD}`, { status: "closed", assignee: foreignActor }],
   ["reopen wrong status", `bd reopen ${BEAD}`, { status: "open", assignee: actor }],
-  ["reclaim missing", `bd update ${BEAD} --claim`, undefined],
   ["reclaim unassigned", `bd update ${BEAD} --claim --json`, { status: "open" }],
   ["reclaim foreign owner", `bd update ${BEAD} --claim`, { status: "open", assignee: foreignActor }],
   ["reclaim wrong status", `bd update ${BEAD} --claim`, { status: "closed", assignee: actor }],
@@ -737,9 +762,6 @@ describe("G2 standalone ownership controls", () => {
   ["a wrapped reopen", "closed", `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`],
   ["a compound reopen", "closed", `BEADS_ACTOR=${actor} bd reopen ${BEAD}; true`],
   ["a foreign actor reclaim", "open", `BEADS_ACTOR=${foreignActor} bd update ${BEAD} --claim`],
-  ["a wrapped reclaim", "open", `BEADS_ACTOR=${actor} sh -c 'bd update ${BEAD} --claim'`],
-  ["a compound reclaim", "open", `BEADS_ACTOR=${actor} bd update ${BEAD} --claim; true`],
-  ["the command bd does not have", "open", `BEADS_ACTOR=${actor} bd claim ${BEAD}`],
   ["a foreign bead", "closed", `BEADS_ACTOR=${actor} bd reopen orc-foreign`],
  ])("refuses recovery through %s", async (_label, status, command) => {
   beads[BEAD] = { id: BEAD, status, assignee: actor, metadata: { worktree: owned } };
@@ -749,7 +771,6 @@ describe("G2 standalone ownership controls", () => {
 
  test.each([
   ["after reassignment", { status: "closed", assignee: foreignActor }],
-  ["when the bead is missing", undefined],
   ["while open and unassigned", { status: "open" }],
  ])("refuses a pure release %s", async (_state, bead) => {
   if (bead === undefined) delete beads[BEAD];
@@ -807,11 +828,6 @@ describe("G2 standalone ownership controls", () => {
    beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
    expect(await fromBash(owned, `bd update ${BEAD} --assignee ""`)).toBeUndefined();
    delete process.env.BEADS_ACTOR;
-   beads[BEAD] = { id: BEAD, status: "in_progress", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
-   listSpy.mockResolvedValueOnce([
-    { id: "orc-other", status: "in_progress", assignee: foreignActor, metadata: { scope: ["src/**"] } },
-   ]);
-   expect((await fromBash(owned, `bd comment ${BEAD} "ordinary note"`))?.block).toBe(true);
   } finally {
    if (priorActor === undefined) delete process.env.BEADS_ACTOR;
    else process.env.BEADS_ACTOR = priorActor;
@@ -834,10 +850,12 @@ describe("G2 fail-open", () => {
   expect(await writing(path.join(foreign, "src", "api.ts"))).toBeUndefined();
  });
 
- test("an unreadable bead blocks product mutation", async () => {
+ test("an unreadable bead names no tree, so the cwd and target comparisons are skipped", async () => {
+  // Nothing read is nothing proven: the mutation proceeds and the cause is logged.
   beads = {};
-  expect((await fromBash(foreign))?.block).toBe(true);
-  expect((await writing(path.join(foreign, "src", "api.ts")))?.block).toBe(true);
+  expect(await fromBash(foreign)).toBeUndefined();
+  expect(await writing(path.join(foreign, "src", "api.ts"))).toBeUndefined();
+  expect(warned.map(entry => entry.data?.bead)).toEqual([BEAD, BEAD]);
  });
 
  test("a bead declaring no scope allows any target inside the tree", async () => {
@@ -1025,101 +1043,6 @@ describe("G2 effective bash cwd and edit modes", () => {
   })).toBeUndefined();
  });
 
- test("blocks work when the acquired queue candidate overlaps an active claim", async () => {
-  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api/**"] } };
-  listSpy.mockResolvedValueOnce([{ id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { scope: ["src/api/**"] } }]);
-  expect((await writing("src/api/x.ts"))?.reason).toContain("scope conflict");
- });
-});
-
-describe("G2 conflicting owners can reconcile without writing product files", () => {
- const actor = "orc-impl-1";
- beforeEach(() => {
-  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: actor, metadata: { role: "implementer", worktree: owned, scope: ["src/api/**"] } };
-  listSpy.mockResolvedValue([{ id: "orc-other", status: "in_progress", assignee: "other-worker", metadata: { role: "implementer", scope: ["src/api/**"] } }]);
- });
- afterEach(() => listSpy.mockResolvedValue([]));
-
- test("refuses product edits while both overlapping owners remain live", async () => {
-  expect((await editing("src/api/x.ts"))?.block).toBe(true);
- });
-
- test.each([
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE overlapping owner; coordinating release"`,
-  `BEADS_ACTOR=${actor} bd comments add ${BEAD} "REPORTED findings"`,
-  `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee "" --json`,
-  `BEADS_ACTOR=${actor} bd update ${BEAD} --status open --assignee ""`,
-  `bd show ${BEAD} --json`,
-  `bd comments ${BEAD}`,
-  "bd list --json",
-  `env BD_ACTOR='${actor}' b'd' comment ${BEAD} 'literal $(touch changed.ts); > \`cmd\` \\ $HOME'`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} pre" quoted "'literal'`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} ''`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} 'line one\nline two'`,
- ])("allows a standalone reconciliation operation: %s", async (command) => {
-  expect(await fromBash(owned, command)).toBeUndefined();
- });
-
- test.each([
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE conflict"; touch changed.ts`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE conflict" > changed.ts`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE $(touch changed.ts)"`,
-  `BEADS_ACTOR=other-worker bd comment ${BEAD} "NOTE conflict"`,
-  `BEADS_ACTOR=${actor} bd comment orc-other "NOTE conflict"`,
-  `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee "" --title hijacked`,
-  `BEADS_ACTOR=${actor} bd create "unrelated work"`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "$HOME"`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "\`touch changed.ts\`"`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} "escaped \\"quote"`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} escaped\\ word`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} 'unterminated`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} ok\nbd list`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} *`,
-  `BEADS_ACTOR=${actor} bd comment ${BEAD} ok # comment`,
-  `sh -c 'bd list'`,
- ])("refuses side effects or authority outside reconciliation: %s", async (command) => {
-  expect((await fromBash(owned, command))?.block).toBe(true);
- });
-
- test("bounds late-forbidden control parsing in a killable subprocess", async () => {
-  const childFlag = "OMP_WORKTREE_CONTROL_ADVERSARY";
-  if (process.env[childFlag] === "1") {
-   // No command is executed: only the gate sees these adversarial strings.
-   // An unquoted run has exponentially many partitions in the former regex.
-   const prefix = `BEADS_ACTOR=${actor} bd comment ${BEAD} ${"a".repeat(32_768)}`;
-   const started = performance.now();
-   for (const suffix of ["; touch changed.ts", " > changed.ts", '"$(touch changed.ts)"']) {
-    expect((await fromBash(owned, prefix + suffix))?.block).toBe(true);
-   }
-   // Exclude child startup and fixtures. The old regex may eventually fall back
-   // instead of hanging, but still spends seconds parsing these three refusals.
-   expect(performance.now() - started).toBeLessThan(2_000);
-   return;
-  }
-  // A test timeout cannot interrupt synchronous regex backtracking. The parent
-  // stays responsive and kills the separate Bun process even on the old code.
-  const result = await promisify(execFile)(process.execPath, [
-   "test", import.meta.path, "--test-name-pattern",
-   "bounds late-forbidden control parsing in a killable subprocess",
-  ], {
-   env: { ...process.env, [childFlag]: "1" },
-   timeout: 10_000,
-   killSignal: "SIGKILL",
-  });
-  expect(result.stderr + result.stdout).toContain("1 pass");
- }, 15_000);
-
- test("does not exempt a release after the observed owner lost the claim", async () => {
-  beads[BEAD]!.assignee = "replacement";
-  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee ""`))?.block).toBe(true);
- });
-
- test("does not allow an execution-environment hook with a control command", async () => {
-  expect((await gateWorktreeScope(claims, ctxAt(owned), "bash", {
-   command: `bd comment ${BEAD} "NOTE conflict"`,
-   env: { BEADS_ACTOR: actor, BASH_ENV: "/tmp/mutating-hook" },
-  }))?.block).toBe(true);
- });
 });
 
 describe("G2 scope of the check", () => {

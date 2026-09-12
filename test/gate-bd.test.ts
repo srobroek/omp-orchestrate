@@ -29,6 +29,7 @@ function only(command: string): BdInvocation {
 /** Mutating subcommands require attribution; queue acquisition is exempt. */
 const UNATTRIBUTED = [
 	"bd update orc-1 --claim",
+	"bd update orc-1 --claim=true",
 	"bd close orc-1",
 	'bd comment orc-1 "REPORTED done"',
 	'bd create "x" --type task',
@@ -79,9 +80,16 @@ describe("the identity notice", () => {
 
 	test("the claiming queue pull is exempt, because it precedes the identity", () => {
 		// A queue pull cannot read metadata.actor until it knows which bead it acquired.
-		const pull = "bd -C /run/repo ready --label agent:implementer --unassigned --claim --json";
-		expect(actorNotice(only(pull))).toBeUndefined();
+		// Both claim spellings are the same pull; the `=` form used to read as a plain
+		// `bd ready`, which is exempt for the wrong reason.
+		for (const pull of [
+			"bd -C /run/repo ready --label agent:implementer --unassigned --claim --json",
+			"bd -C /run/repo ready --label agent:implementer --unassigned --claim=true --json",
+		]) {
+			expect(actorNotice(only(pull)), pull).toBeUndefined();
+		}
 		expect(actorNotice(only("bd -C /run/repo update orc-1 --claim"))).toContain("WARN bd identity");
+		expect(actorNotice(only("bd -C /run/repo update orc-1 --claim=true"))).toContain("WARN bd identity");
 	});
 
 	test.each([
@@ -121,8 +129,7 @@ describe("the identity notice", () => {
 		["dolt push", "bd dolt push"],
 		["help", "bd help close"],
 		["codex-hook", "bd codex-hook SessionStart"],
-		// The tokeniser expands no redirections, so this presents `2>&1` where a
-		// subcommand would be. The command prints help.
+		// A redirection is not a word, so this is a bare `bd`. The command prints help.
 		["a redirection where a subcommand would be", "bd 2>&1 | head -20"],
 	])("leaves %s alone", (_label, command) => {
 		expect(actorNotice(only(command))).toBeUndefined();
@@ -584,6 +591,7 @@ describe("G6 inside a run", () => {
 
 	test.each([
 		["update --claim", "bd update orc-1 --claim"],
+		["update --claim=true", "bd update orc-1 --claim=true"],
 		["top-level claim", "bd claim orc-1"],
 	])("leaves unattributed %s to the beads blocking gate", async (_label, command) => {
 		const handled = installActorNoticeArbiter();
@@ -627,11 +635,14 @@ describe("G6 inside a run", () => {
 		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
 
-	test("an env flag taking an operand remains outside parser coverage", async () => {
-		// The parser does not know env flag arities and treats FOO as the executable.
-		expect(await gate("env -u FOO bd update orc-1 --claim")).toEqual(SILENT);
+	test.each([
+		["env -u", "env -u FOO bd update orc-1 --claim"],
+		["env -C", "env -C /tmp bd update orc-1 --claim"],
+		["env -S", "env -S 'bd update orc-1 --claim'"],
+	])("sees an unattributed mutation behind %s", async (_label, command) => {
+		// The env walk used to read the flag's operand as the executable and see no bd at all.
+		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
-
 
 	test("says one thing once when a chain repeats the same defect", async () => {
 		const outcome = await gate(

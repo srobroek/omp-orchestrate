@@ -6,11 +6,25 @@
  * actor may claim any bead, so nothing stops a reviewer claiming an implementation
  * task, or the lead claiming anything at all.
  *
- * This gate supplies eligibility, and replaces v19's deleted lead-never-claims rule
- * with something stronger. `orchestrator-claim-deny.py` compared `BEADS_ACTOR` and
- * `BD_ACTOR` against a regex for "looks like a worker, not a lead", which a
- * cooperative name defeated. Here the lead simply declares no `ORC-ROLE`, so it
- * fails every eligibility check and can claim nothing.
+ * This gate supplies eligibility. A role-marked session pulls only its own queue and
+ * claims only a bead routed to its role, one bead at a time, with the claim report left
+ * on stdout for the observer, while the run has capacity for another code-writing claim,
+ * and only where the candidate's scope is disjoint from every held code-writing claim
+ * outside its own lineage. A session declaring no role under a pinned run is the lead,
+ * or a helper, and claims nothing. v19's `orchestrator-claim-deny.py` compared actor
+ * names against a regex for "looks like a worker, not a lead", which a cooperative name
+ * defeated; here the refusal keys on the absent `ORC-ROLE` marker and the run pin,
+ * neither of which the agent writes.
+ *
+ * Two checks are on writes rather than claims, because the write is where the authority
+ * is spent: a routing re-point of `metadata.role`, and an architect's `scope` that
+ * overlaps a live node outside the bead's own lineage. Scope disjointness is judged at
+ * decomposition and at claim, never per write: G2 compares each write against the
+ * claimed territory and reads nothing else.
+ *
+ * Every refusal is on evidence. A `bd` that does not answer -- missing, slow, over
+ * budget -- proves nothing, so the check that needed it logs the cause and lets the
+ * command run; `bd` still enforces exclusivity on its own.
  *
  * It does not record the claim. Doing so from the command was wrong twice over: a
  * queue pull names no bead, and a named claim's outcome is unknown until it runs, so a
@@ -18,28 +32,18 @@
  * report instead, and the worktree gate reads that.
  */
 
+import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../bd";
-import { bdFailureText, bdList, bdShow, lastBdFailure } from "../bd";
+import { bdFailureText, bdList, bdShow, lastBdFailure, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
+import { readActiveRunStrict } from "../run-state";
 import { scopeOf, scopesOverlap } from "../scope";
-import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments } from "../shell";
-
-/**
- * A flag token split into its name and its inline `=` operand, when it carries one.
- *
- * Every flag this gate reads has two spellings, `--flag value` and `--flag=value`, and a
- * matcher that knows only the first is a matcher that can be walked past.
- */
-function splitFlag(token: string): { flag: string; inline?: string } {
- if (!token.startsWith("-")) return { flag: token };
- const cut = token.indexOf("=");
- if (cut === -1) return { flag: token };
- return { flag: token.slice(0, cut), inline: token.slice(cut + 1) };
-}
+import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments, splitFlag } from "../shell";
+import { pinnedRunActive } from "./readonly";
 
 /** A queue filter on a `bd ready`, resolved to the role it pulls for. */
 interface QueueFilter {
@@ -122,18 +126,24 @@ const METADATA_WRITE_FLAGS: Record<string, true> = {
  */
 const ROUTING_WRITE_EXEMPT: Record<string, true> = { create: true };
 
-/** Whether a `--metadata` JSON object names `role` as its own key. */
-function jsonCarriesRouting(value: string): boolean {
- if (!value.trimStart().startsWith("{")) return false;
- try {
-  const parsed: unknown = JSON.parse(value);
-  // Own-property test: `JSON.parse` output inherits `Object.prototype`, so a map
-  // carrying no `role` key must read as carrying none.
-  return parsed !== null && typeof parsed === "object" && Object.hasOwn(parsed, ROUTING_KEY);
- } catch {
-  // Unparseable JSON is no write this gate can attribute, and `bd` will reject it.
-  return false;
+/**
+ * The keys a metadata write flag's operand sets, with their values.
+ *
+ * `--metadata` takes JSON, the only form `create` accepts; `--set-metadata` takes
+ * `key=value`. Both spellings are read for both flags: a `key=value` handed to
+ * `--metadata` is a write bd rejects, and a JSON object handed to `--set-metadata` is one
+ * bd stores under a nonsense key, but a matcher that knows only the documented pairing
+ * is a matcher that can be walked past. Own keys only: `JSON.parse` output inherits
+ * `Object.prototype`, so a map carrying no `role` key must read as carrying none.
+ * Unparseable JSON is no write this gate can attribute, and bd will reject it.
+ */
+function metadataPairs(value: string): [string, unknown][] {
+ if (value.trimStart().startsWith("{")) {
+  const record = metadataRecord(value);
+  return record === undefined ? [] : Object.entries(record);
  }
+ const cut = value.indexOf("=");
+ return cut === -1 ? [] : [[value.slice(0, cut), value.slice(cut + 1)]];
 }
 
 /**
@@ -145,8 +155,8 @@ function jsonCarriesRouting(value: string): boolean {
  * `-C <run repo>` pin irrelevant to the match, which is the spelling every call carries.
  *
  * Three spellings write the key: `--set-metadata role=<v>`, `--unset-metadata role`, and
- * `--metadata` carrying a `role` key -- as JSON, the only form `create` takes, or as
- * `key=value`. Clearing counts as a write: a bead with no route reaches no queue.
+ * `--metadata` carrying a `role` key. Clearing counts as a write: a bead with no route
+ * reaches no queue.
  */
 function routingMetadataWrite(invocation: BdInvocation): string | undefined {
  if (ROUTING_WRITE_EXEMPT[invocation.subcommand] === true) return undefined;
@@ -163,11 +173,7 @@ function routingMetadataWrite(invocation: BdInvocation): string | undefined {
    continue;
   }
 
-  // `key=value` first, then JSON. A JSON payload can itself contain `=` inside a
-  // value, so the key test must fail before the shape test runs.
-  const cut = value.indexOf("=");
-  if (cut !== -1 && value.slice(0, cut) === ROUTING_KEY) return `${flag} ${value}`;
-  if (jsonCarriesRouting(value)) return `${flag} ${value}`;
+  if (metadataPairs(value).some(([key]) => key === ROUTING_KEY)) return `${flag} ${value}`;
  }
  return undefined;
 }
@@ -202,21 +208,6 @@ function routingWriteDenial(
    `misrouted, say so on an escalation wisp rather than re-routing it yourself. Filing new work routed is ` +
    `allowed: bd create carries ${ROUTING_KEY} freely.`,
  };
-}
-
-/** A bead's metadata as a record, tolerating the JSON-string form some subcommands emit. */
-function metadataRecord(bead: BdBead | null): Record<string, unknown> | undefined {
- const raw = bead?.metadata;
- if (raw && typeof raw === "object") return raw as Record<string, unknown>;
- if (typeof raw === "string") {
-  try {
-   const parsed: unknown = JSON.parse(raw);
-   if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
-  } catch {
-   return undefined;
-  }
- }
- return undefined;
 }
 
 /** Maximum number of parent links traversed while checking claim lineage. */
@@ -271,68 +262,225 @@ async function parentChain(bead: BdBead): Promise<Lineage> {
 }
 
 /**
- * Exclusive scope friction between held code-writing claims; read-only roles and a bead's
- * own lineage keep their envelopes without reserving territory. An unrelated architect
- * envelope still counts.
- *
- * Reads are spent only where a verdict needs them. The in-flight list is one read; a peer
- * whose scope is empty or disjoint costs nothing more, because lineage is purely an
- * exemption for an overlap. Only an overlapping pair walks lineage -- the candidate's once
- * per call, the peer's once per peer -- through the dispatch-memoised show seam, so shared
- * ancestors are read once however many peers share them.
+ * The ancestry of a bead that does not exist yet: the parent it is filed under, and
+ * that parent's own chain. Filed with no parent, it has none.
  */
-export async function scopeConflict(bead: BdBead | null): Promise<ToolCallEventResult | undefined> {
- if (!bead) return undefined;
- const role = beadRouting(bead)?.role;
- if (role === "researcher" || role === "reviewer") return undefined;
- const candidate = scopeOf(metadataRecord(bead));
- if (candidate.length === 0) return undefined;
- const inFlight = await bdList(["list", "--label", "orc-node", "--status", "in_progress", "--limit", "0", "--json"]);
- const lineages = new Map<string, Promise<Lineage>>();
+async function parentChainFrom(parent: string | undefined): Promise<Lineage> {
+ if (parent === undefined) return { ancestors: new Set(), complete: true };
+ const bead = await bdShow(parent);
+ if (bead === null) return { ancestors: new Set([parent]), complete: false };
+ const chain = await parentChain(bead);
+ chain.ancestors.add(parent);
+ return chain;
+}
+
+/** A promise computed on first call and shared by every later one. */
+function once<T>(compute: () => Promise<T>): () => Promise<T> {
+ let pending: Promise<T> | undefined;
+ return () => (pending ??= compute());
+}
+
+/**
+ * The `orc-node` beads in the named statuses, or `undefined` when the list could not be
+ * read. `bdList` answers `[]` for a failed read as for an empty one; the recorded failure
+ * kind tells them apart, and an unreadable list is logged and fails open.
+ */
+async function listNodes(statuses: string, check: string): Promise<BdBead[] | undefined> {
+ const beads = await bdList(["list", "--label", "orc-node", "--status", statuses, "--limit", "0", "--json"]);
+ if (beads.length === 0) {
+  const failure = lastBdFailure();
+  if (failure !== undefined) {
+   logger.warn(`orchestrate G5: live beads could not be listed; ${check} skipped`, { cause: bdFailureText(failure) });
+   return undefined;
+  }
+ }
+ return beads;
+}
+
+/** Roles whose beads hold no territory: they read a scope, and write nothing under it. */
+const READ_ONLY_ROLES: Record<string, true> = { researcher: true, reviewer: true };
+
+/** A bead's claim on territory, as friction is judged for it. */
+interface Territory {
+ /** Set for an existing bead: it is not its own peer, and its descendants are exempt. */
+ id: string | undefined;
+ scope: string[];
+ lineage: () => Promise<Lineage>;
+}
+
+/** The peer an overlap was found with, quoted back in the refusal. */
+interface Overlap {
+ id: string;
+ scope: string[];
+}
+
+/**
+ * The first peer whose scope overlaps `subject` outside its lineage, or `undefined`.
+ *
+ * Read-only roles and a bead's own lineage keep their envelopes without reserving
+ * territory: a feature's envelope is intentionally the union of its tasks, so neither
+ * side of that parent/child relationship is friction. An unrelated architect envelope
+ * still counts. With `heldOnly`, a peer nobody holds is no peer, which is the claim-time
+ * reading; decomposition reads every live node, held or waiting.
+ *
+ * Reads are spent only where a verdict needs them. A peer whose scope is empty or
+ * disjoint costs nothing, because lineage is purely an exemption for an overlap. Only an
+ * overlapping pair walks lineage -- the subject's once per call, the peer's once per
+ * peer -- through the dispatch-memoised show seam, so shared ancestors are read once
+ * however many peers share them.
+ */
+async function overlappingPeer(subject: Territory, peers: readonly BdBead[], heldOnly: boolean): Promise<Overlap | undefined> {
+ const lineages = new Map<string, () => Promise<Lineage>>();
  const lineage = (of: BdBead): Promise<Lineage> => {
   let pending = lineages.get(of.id);
   if (pending === undefined) {
-   pending = parentChain(of);
+   pending = once(() => parentChain(of));
    lineages.set(of.id, pending);
   }
-  return pending;
+  return pending();
  };
- for (const other of inFlight) {
-  if (other.id === bead.id) continue;
-  if (typeof other.assignee !== "string" || other.assignee.trim().length === 0) continue;
+ for (const other of peers) {
+  if (other.id === subject.id) continue;
+  if (heldOnly && (typeof other.assignee !== "string" || other.assignee.trim().length === 0)) continue;
   const otherRole = beadRouting(other)?.role;
-  if (otherRole === "researcher" || otherRole === "reviewer") continue;
-  const otherScope = scopeOf(metadataRecord(other));
+  if (otherRole !== undefined && READ_ONLY_ROLES[otherRole] === true) continue;
+  const otherScope = scopeOf(metadataRecord(other.metadata));
   if (otherScope.length === 0) continue;
-  if (!scopesOverlap(candidate, otherScope)) continue;
-  // A feature's held envelope is intentionally the union of its tasks. Neither side of
-  // that parent/child relationship should turn the integration claim into friction.
-  const mine = await lineage(bead);
+  if (!scopesOverlap(subject.scope, otherScope)) continue;
+  const mine = await subject.lineage();
   if (mine.ancestors.has(other.id)) continue;
-  const theirs = await lineage(other);
-  if (theirs.ancestors.has(bead.id)) continue;
-  if (!mine.complete || !theirs.complete) {
+  let complete = mine.complete;
+  // A bead not yet created has no descendants, so the peer's chain is not consulted.
+  if (subject.id !== undefined) {
+   const theirs = await lineage(other);
+   if (theirs.ancestors.has(subject.id)) continue;
+   complete &&= theirs.complete;
+  }
+  if (!complete) {
    // An overlap whose lineage could not be read is unknown, not unrelated: refusing it
    // would turn a slow database into a false conflict between a feature and its own
    // task. Unknown fails open, as every gate's unreadable evidence does.
    logger.warn("orchestrate scope friction unresolved: lineage unreadable", {
-    bead: bead.id,
+    bead: subject.id,
     other: other.id,
-    cause: lastBdFailure(),
+    cause: bdFailureText(lastBdFailure()),
    });
    continue;
   }
-  return {
-   block: true,
-   reason:
-    `scope conflict (friction guard): '${bead.id}' [${candidate.join(", ")}] overlaps in-flight ` +
-    `'${other.id}' [${otherScope.join(", ")}]. Two agents must not share a file; wait for ` +
-    `'${other.id}' to report, or re-scope one of the beads.`,
-  };
+  return { id: other.id, scope: otherScope };
  }
  return undefined;
 }
 
+/**
+ * Exclusive scope friction between held code-writing claims, judged once, at claim.
+ * Read-only roles reserve nothing on either side.
+ */
+async function scopeConflict(bead: BdBead, inFlight: () => Promise<BdBead[] | undefined>): Promise<ToolCallEventResult | undefined> {
+ const role = beadRouting(bead)?.role;
+ if (role !== undefined && READ_ONLY_ROLES[role] === true) return undefined;
+ const candidate = scopeOf(metadataRecord(bead.metadata));
+ if (candidate.length === 0) return undefined;
+ const peers = await inFlight();
+ if (peers === undefined) return undefined;
+ const overlap = await overlappingPeer({ id: bead.id, scope: candidate, lineage: once(() => parentChain(bead)) }, peers, true);
+ if (overlap === undefined) return undefined;
+ return {
+  block: true,
+  reason:
+   `scope conflict (friction guard): '${bead.id}' [${candidate.join(", ")}] overlaps in-flight ` +
+   `'${overlap.id}' [${overlap.scope}]. Two agents must not share a file; wait for ` +
+   `'${overlap.id}' to report, or re-scope one of the beads.`,
+ };
+}
+
+/** Subcommands that file or amend a bead, and so may write its `scope`. */
+const SCOPE_WRITERS: Record<string, true> = { create: true, new: true, update: true };
+
+/** The `scope` a `create` or `update` writes, and the routing written beside it. */
+interface ScopeWrite {
+ scope: string[];
+ role: string | undefined;
+}
+
+/** The scope this invocation stamps, through `--metadata` or `--set-metadata`, or `undefined`. */
+function scopeWrite(invocation: BdInvocation): ScopeWrite | undefined {
+ if (SCOPE_WRITERS[invocation.subcommand] !== true) return undefined;
+ let scope: string[] | undefined;
+ let role: string | undefined;
+ for (let index = 0; index < invocation.rest.length; index++) {
+  const { flag, inline } = splitFlag(invocation.rest[index] as string);
+  if (flag !== "--metadata" && flag !== "--set-metadata") continue;
+  const value = inline ?? invocation.rest[index + 1];
+  if (typeof value !== "string") continue;
+  for (const [key, written] of metadataPairs(value)) {
+   if (key === "scope") scope = scopeOf({ scope: written });
+   else if (key === ROUTING_KEY && typeof written === "string") role = written;
+  }
+ }
+ return scope === undefined ? undefined : { scope, role };
+}
+
+/** The operand of the first `--parent` on the invocation, in either spelling. */
+function parentFlag(invocation: BdInvocation): string | undefined {
+ for (let index = 0; index < invocation.rest.length; index++) {
+  const { flag, inline } = splitFlag(invocation.rest[index] as string);
+  if (flag !== "--parent") continue;
+  const value = inline ?? invocation.rest[index + 1];
+  if (typeof value === "string" && !value.startsWith("-")) return value;
+ }
+ return undefined;
+}
+
+/**
+ * Refuse an architect's `scope` that overlaps a live node outside the bead's own lineage.
+ *
+ * Disjoint scopes written at decomposition are the mechanism behind every later check:
+ * the claim-time friction guard and G2's territory both assume them. So the write is
+ * where the overlap is caught, with the peer named, while the architect still has the
+ * plan in hand. Lineage is exempt in both directions -- a feature's envelope is the
+ * union of its tasks -- and read-only roles reserve nothing on either side.
+ *
+ * Fails open on every read that does not answer: the bead being amended, the parent a
+ * new bead is filed under, the live-node list. Each is logged with its cause.
+ */
+async function decompositionConflict(invocation: BdInvocation): Promise<ToolCallEventResult | undefined> {
+ const written = scopeWrite(invocation);
+ if (written === undefined || written.scope.length === 0) return undefined;
+
+ let subject: Territory;
+ let role = written.role;
+ if (invocation.subcommand === "update") {
+  const [id] = claimTargets(invocation);
+  if (id === undefined) return undefined;
+  const bead = await bdShow(id);
+  if (bead === null) {
+   logger.warn("orchestrate G5: bead being re-scoped could not be read; overlap check skipped", {
+    bead: id,
+    cause: bdFailureText(lastBdFailure()),
+   });
+   return undefined;
+  }
+  role ??= beadRouting(bead)?.role;
+  subject = { id, scope: written.scope, lineage: once(() => parentChain(bead)) };
+ } else {
+  subject = { id: undefined, scope: written.scope, lineage: once(() => parentChainFrom(parentFlag(invocation))) };
+ }
+ if (role !== undefined && READ_ONLY_ROLES[role] === true) return undefined;
+
+ const peers = await listNodes("open,in_progress", "scope overlap check");
+ if (peers === undefined) return undefined;
+ const overlap = await overlappingPeer(subject, peers, false);
+ if (overlap === undefined) return undefined;
+ const named = subject.id === undefined ? "the new bead's" : `'${subject.id}'s`;
+ return {
+  block: true,
+  reason:
+   `${named} scope [${written.scope.join(", ")}] overlaps live node '${overlap.id}' [${overlap.scope.join(", ")}]. ` +
+   `Scopes are disjoint at decomposition, or serialised with a dependency: narrow one of the two, or make ` +
+   `this bead depend on '${overlap.id}'.`,
+ };
+}
 
 /** Named targets excluding option operands, including flags interleaved between IDs. */
 function claimTargets(claim: BdInvocation): string[] {
@@ -357,6 +505,110 @@ function claimTargets(claim: BdInvocation): string[] {
   if (!targets.includes(token)) targets.push(token);
  }
  return targets;
+}
+
+/**
+ * Whether the shell would take the claim report off stdout, or merge stderr into it.
+ *
+ * The observer reads the report from stdout (`src/claim-observer.ts`); a merged stderr
+ * interleaves bd's warnings with the JSON, and `>&2` or `&>file` moves the report where
+ * the observer never looks. `2>/dev/null` and `>file` leave stdout alone: the first
+ * discards what is not read, and the second is the caller's to recover from.
+ */
+function displacesReport(claim: BdInvocation): boolean {
+ return claim.redirections.some(redirection => redirection.includes(">&") || redirection.startsWith("&>"));
+}
+
+/** Run id an activated, not yet bound, marker carries. It names no epic. */
+const PENDING_RUN = "pending";
+
+/**
+ * The epic the active-run marker binds this session to, or `undefined` when there is
+ * none. Read from the session checkout first, then from the repository beside the
+ * process pin -- the two roots `pinnedRunActive` reads, because a linked worktree or an
+ * isolated copy shares the primary checkout's marker. A malformed marker is no run.
+ */
+async function boundEpic(cwd: string): Promise<string | undefined> {
+ const pin = process.env.BEADS_DIR;
+ const roots = [cwd];
+ if (pin !== undefined && path.isAbsolute(pin) && path.dirname(pin) !== cwd) roots.push(path.dirname(pin));
+ for (const root of roots) {
+  try {
+   const marker = await readActiveRunStrict(root);
+   if (marker !== null) return marker.run_id === PENDING_RUN ? undefined : marker.run_id;
+  } catch {
+   // Not positive run authority; the next root may be.
+  }
+ }
+ return undefined;
+}
+
+/** Code-writing claims a run admits at once when its epic names no `max_inflight`. */
+const DEFAULT_MAX_INFLIGHT = 8;
+
+/** Roles whose claim is a code-writing claim: the ones the governor counts and caps. */
+const CODE_WRITING_ROLES: Record<string, true> = { implementer: true, architect: true };
+
+/**
+ * How many code-writing claims the run admits at once: `metadata.max_inflight` on the
+ * run epic, or the default when the epic is silent or names nonsense. `undefined` when
+ * there is no bound epic or it could not be read, which is logged.
+ */
+async function inflightCap(cwd: string): Promise<number | undefined> {
+ const epicId = await boundEpic(cwd);
+ if (epicId === undefined) return undefined;
+ const epic = await bdShow(epicId);
+ if (epic === null) {
+  logger.warn("orchestrate G5: run epic could not be read; capacity check skipped", {
+   epic: epicId,
+   cause: bdFailureText(lastBdFailure()),
+  });
+  return undefined;
+ }
+ const raw = metadataRecord(epic.metadata)?.max_inflight;
+ const cap = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : Number.NaN;
+ return Number.isInteger(cap) && cap > 0 ? cap : DEFAULT_MAX_INFLIGHT;
+}
+
+/**
+ * Held code-writing claims: in progress, assigned, routed to a role that writes code.
+ * Reviewers and researchers read alongside without consuming capacity, and this
+ * session's own beads are excluded, so a same-bead retry at the cap is not refused for
+ * the bead it already holds.
+ */
+function codeWritingClaims(inFlight: readonly BdBead[], own: readonly string[]): number {
+ let count = 0;
+ for (const bead of inFlight) {
+  if (own.includes(bead.id)) continue;
+  if (bead.status !== "in_progress") continue;
+  if (typeof bead.assignee !== "string" || bead.assignee.trim().length === 0) continue;
+  const role = beadRouting(bead)?.role;
+  if (role !== undefined && CODE_WRITING_ROLES[role] === true) count++;
+ }
+ return count;
+}
+
+/**
+ * Refuse a code-writing claim while the run is at capacity.
+ *
+ * The cap bounds concurrent code-writing claims, so it is read for claims that would be
+ * one: a reviewer's claim at the cap is not what the cap is for, and refusing it would
+ * stall the reviews that let implementers finish. Reads the epic once and the in-flight
+ * list once, shared with the friction check that follows.
+ */
+async function capacityRefusal(
+ cwd: string | undefined,
+ own: readonly string[],
+ inFlight: () => Promise<BdBead[] | undefined>,
+): Promise<ToolCallEventResult | undefined> {
+ if (cwd === undefined) return undefined;
+ const cap = await inflightCap(cwd);
+ if (cap === undefined) return undefined;
+ const peers = await inFlight();
+ if (peers === undefined) return undefined;
+ const held = codeWritingClaims(peers, own);
+ if (held < cap) return undefined;
+ return { block: true, reason: `run at capacity (${held}/${cap}); retry` };
 }
 
 const SHEPHERD_DENIED_STATES: Record<string, true> = {
@@ -448,20 +700,29 @@ export async function gateClaimEligibility(
  if (invocations.length === 0) return undefined;
 
  const sessionRoleName = orcRole(ctx);
+ const cwd = typeof ctx.cwd === "string" && ctx.cwd.length > 0 ? ctx.cwd : undefined;
 
- // Routing authority first, and across every invocation rather than the claiming ones: a
- // re-point rides `bd update`, which carries no `--claim` and would never reach the walk
- // below. Refusing before that walk also keeps a blocked command out of the claim record.
+ // Write authority first, and across every invocation rather than the claiming ones: a
+ // re-point or a re-scope rides `bd update`, which carries no `--claim` and would never
+ // reach the walk below. Refusing before that walk also keeps a blocked command out of
+ // the claim record.
  for (const invocation of invocations) {
   if (sessionRoleName === "shepherd" && shepherdStateWrite(invocation)) {
    return { block: true, reason: "Shepherds may consume inherited approval and reporting states, but may not author approved, changes_requested, or reported states." };
   }
   const denial = routingWriteDenial(invocation, sessionRoleName);
   if (denial) return denial;
+  if (sessionRoleName === "architect") {
+   const overlap = await decompositionConflict(invocation);
+   if (overlap) return overlap;
+  }
  }
 
  const claimInvocations = invocations.filter(invocation => invocation.hasClaim);
  if (claimInvocations.length === 0) return undefined;
+ if (sessionRoleName === undefined && cwd !== undefined && (await pinnedRunActive(cwd))) {
+  return { block: true, reason: "the lead never claims work beads; dispatch a worker through its queue" };
+ }
  if (input.async === true) {
   return { block: true, reason: "Run claims in the foreground; background completion is not delivered to the claim observer." };
  }
@@ -469,9 +730,19 @@ export async function gateClaimEligibility(
   return { block: true, reason: "Run the claiming command alone so claim observation can bind; no pipelines or additional command leaves." };
  }
  for (const claim of claimInvocations) {
+  if (sessionRoleName !== undefined && displacesReport(claim)) {
+   return { block: true, reason: "the claim report is read from stdout; do not merge stderr into it" };
+  }
   const targets = claimTargets(claim);
   if (sessionRoleName !== undefined && claim.subcommand !== "ready" && targets.length !== 1) {
-   return { block: true, reason: "A named claim must identify exactly one bead; finish or release it before claiming another." };
+   return {
+    block: true,
+    reason: targets.length === 0
+     ? "A named claim must identify exactly one bead: 'bd update <id> --claim --json'."
+     : `'bd ${claim.subcommand} --claim' names ${targets.length} beads (${targets.join(", ")}); one activation owns at ` +
+      `most one bead. Claim '${targets[0]}', finish or release it, then claim the next: parallel work belongs to ` +
+      `parallel agents, not parallel claims.`,
+   };
   }
   const previous = claims.observedClaim();
   if (previous === undefined) continue;
@@ -479,15 +750,17 @@ export async function gateClaimEligibility(
   let live = false;
   for (const beadId of previous.beadIds) {
    const bead = await bdShow(beadId);
-   if (bead === null || typeof bead.status !== "string" || (bead.status === "in_progress" && typeof bead.assignee !== "string")) {
-    if (!sameBead) {
-     // Name the cause: a database that did not answer and a bead that is genuinely
-     // gone call for different next steps, and the old single sentence sent the model
-     // to "refresh ownership" for a timeout.
-     const cause = bead === null ? bdFailureText(lastBdFailure()) : "its status is unreadable";
-     return { block: true, reason: `Cannot verify release of '${beadId}': ${cause}; no new acquisition is permitted.` };
+   if (bead === null || typeof bead.status !== "string") {
+    // Unknown is not held: refusing here sent a worker whose store hiccuped to "refresh
+    // ownership" it had already released. The claim is forgotten as a release would be;
+    // a same-bead retry keeps it, because that retry is the recovery of this very bead.
+    if (sameBead) live = true;
+    else {
+     logger.warn("orchestrate G5: held bead could not be read; allowing the new claim", {
+      bead: beadId,
+      cause: bead === null ? bdFailureText(lastBdFailure()) : "its status is unreadable",
+     });
     }
-    live = true;
     continue;
    }
    if (bead.status === "in_progress" && bead.assignee === previous.actor) live = true;
@@ -498,6 +771,8 @@ export async function gateClaimEligibility(
   if (!live) claims.forgetClaim();
  }
 
+ const inFlight = once(() => listNodes("in_progress", "capacity and friction checks"));
+ const own = claims.observedClaim()?.beadIds ?? [];
  for (const claim of claimInvocations) {
   // `bd ready --claim` selects by filter rather than naming a bead. When the
   // filter already pins a role, compare against that and skip the lookup.
@@ -506,8 +781,7 @@ export async function gateClaimEligibility(
    // Beads hands an unfiltered pull "the first ready issue", whatever role routes it,
    // and after the pull nothing compares the bead's routing to the session's: G2 scopes
    // to it and G4 judges it under the session's contract. So a role-marked session
-   // must name its queue. A role-less session is the lead or a helper, which may pull
-   // from any queue.
+   // must name its queue. A role-less session outside a run is a plain user of bd.
    if (sessionRoleName !== undefined && filters.length === 0) {
     return {
      block: true,
@@ -521,6 +795,10 @@ export async function gateClaimEligibility(
       reason: `queue '${filter.spelling}' does not match this session's role '${sessionRoleName}'; pull from your own queue`,
      };
     }
+   }
+   if (sessionRoleName !== undefined && CODE_WRITING_ROLES[sessionRoleName] === true) {
+    const capacity = await capacityRefusal(cwd, own, inFlight);
+    if (capacity) return capacity;
    }
    // Recording moved to the result: see src/claim-observer.ts. A claim's outcome is
    // not knowable here, and `bd ready --claim` names no bead at all.
@@ -542,10 +820,15 @@ export async function gateClaimEligibility(
     };
    }
 
-   const conflict = await scopeConflict(bead);
+   if (sessionRoleName !== undefined && CODE_WRITING_ROLES[sessionRoleName] === true) {
+    const capacity = await capacityRefusal(cwd, own, inFlight);
+    if (capacity) return capacity;
+   }
+
+   if (bead === null) continue;
+   const conflict = await scopeConflict(bead, inFlight);
    if (conflict) return conflict;
   }
-
  }
 
  return undefined;
