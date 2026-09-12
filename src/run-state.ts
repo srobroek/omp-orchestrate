@@ -28,13 +28,14 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { locateBeadsDir } from "./beads-mode";
 import { type BdBead, type BdComment, bdCommentsChecked, bdListChecked, bdRun, bdShow, commentVerb, metadataString, resetReadBudget } from "./bd";
 import { type LandingRecord, recordLandingCapabilities } from "./landing";
 import { type LeadLeaseRenewal, fenceRefused, leaseExpired, leaseState, leaseUntil, releaseDeadClaim } from "./lease";
+import { runScope } from "./run-scope";
 import { probeStore, type StoreProbe } from "./store-probe";
 
 /** The marker shape this plugin writes; a marker stamped with a higher number is refused. */
@@ -89,9 +90,14 @@ export function markerPath(cwd: string): string {
  * run's binding.
  */
 export async function readActiveRun(cwd: string): Promise<ActiveRun | null> {
+	return readActiveRunAt(markerPath(cwd));
+}
+
+/** `readActiveRun` for a marker file already named, as a run scope names it. */
+async function readActiveRunAt(file: string): Promise<ActiveRun | null> {
 	let raw: string;
 	try {
-		raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
+		raw = (await fs.readFile(file, "utf8")).trim();
 	} catch {
 		return null;
 	}
@@ -273,6 +279,25 @@ export interface BindResult {
  */
 export function leadActor(sessionId: string | undefined): string {
 	return sessionId === undefined ? "lead" : `lead:${sessionId}`;
+}
+
+/**
+ * Whether this session leads the run it is inside.
+ *
+ * The lead is the session the marker's `session_id` names: `/orchestrate-start` records
+ * it and `/orchestrate-resume` rewrites it, both under the marker lock, so it tracks the
+ * current lead. The epic's lease is not consulted: this answers on every gated call,
+ * where a `bd` spawn is not affordable, and the marker is proof enough. A displaced lead
+ * (its marker rewritten by an adopter) and a restarted one that has not yet resumed both
+ * read `false`, which is the fail-open side: neither holds the run. Outside a run scope,
+ * `false`. The run is resolved through `runScope`, so a lead in a linked worktree is
+ * found at the primary its `.git` belongs to.
+ */
+export async function isLeadSession(ctx: Pick<ExtensionContext, "cwd" | "sessionManager">): Promise<boolean> {
+	const scope = await runScope(ctx);
+	if (scope === null) return false;
+	const marker = await readActiveRunAt(scope.markerPath);
+	return marker !== null && marker.session_id !== undefined && marker.session_id === ctx.sessionManager.getSessionId();
 }
 
 /** Wall-clock ceiling for a write on the epic; a write, so the operation timeout. */
