@@ -145,11 +145,13 @@ describe("read budget", () => {
 });
 
 /**
- * A `bd` that answers from an in-memory store, standing in for `Bun.spawn`.
+ * A stub `bd` answering from an in-memory store, wired through `Bun.spawn`.
  *
  * Argv is the contract: `show`, `comments`, `dep list`, `list --label` and `list --id`
  * are answered from `store`; anything else exits 1. `spawned` records each argv's first
- * two words, so a test can assert what a dispatch cost and not only what it decided.
+ * two words, so a test can assert what a dispatch cost and not only what it decided. The
+ * `--db <store>` a marker-bound spawn leads with is stripped first: the store it names is
+ * asserted by the tests that care about it, and every other test reads past it.
  */
 function fakeBd(store: {
 	beads: Record<string, BdBead>;
@@ -159,7 +161,7 @@ function fakeBd(store: {
 }): { spawned: string[]; restore: () => void } {
 	const spawned: string[] = [];
 	const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
-		const args = argv.slice(1);
+		const args = argv[1] === "--db" ? argv.slice(3) : argv.slice(1);
 		spawned.push(args.slice(0, 2).join(" "));
 		let payload: unknown;
 		if (args[0] === "show") payload = store.beads[args[1]!] === undefined ? undefined : [store.beads[args[1]!]];
@@ -346,6 +348,98 @@ describe("the store token", () => {
 
 	test("is undefined where there is no store", async () => {
 		expect(storeToken(join(os.tmpdir(), "orc-no-such-store"))).toBeUndefined();
+	});
+});
+
+/**
+ * What a child `bd` is handed: this process's environment without any store selector,
+ * and the marker's store on the command line once the marker names one. bd reads a
+ * selector ahead of the working directory, so an inherited one pointed a whole run at
+ * another checkout's store.
+ */
+describe("the child environment", () => {
+	/** The argv and env of one spawn, as `Bun.spawn` received them. */
+	async function spawnOf(run: () => Promise<unknown>): Promise<{ argv: string[]; env: Record<string, string | undefined> }> {
+		let seen: { argv: string[]; env: Record<string, string | undefined> } | undefined;
+		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[], options: { env: Record<string, string | undefined> }) => {
+			seen = { argv, env: options.env };
+			return {
+				stdout: new Response("[]").body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => {},
+			} as unknown as Bun.Subprocess;
+		}) as unknown as typeof Bun.spawn);
+		try {
+			await run();
+		} finally {
+			spawn.mockRestore();
+		}
+		if (seen === undefined) throw new Error("bd was not spawned");
+		return seen;
+	}
+
+	const SELECTORS: Record<string, string> = { BEADS_DIR: "/elsewhere/.beads", BEADS_DB: "/elsewhere/.beads/embeddeddolt", BD_DB: "/elsewhere/.beads" };
+
+	async function withSelectors<T>(body: () => Promise<T>): Promise<T> {
+		const previous: Record<string, string | undefined> = {};
+		for (const [name, value] of Object.entries(SELECTORS)) {
+			previous[name] = process.env[name];
+			process.env[name] = value;
+		}
+		try {
+			return await body();
+		} finally {
+			for (const [name, value] of Object.entries(previous)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	test("carries no inherited store selector, whatever this process was started with", async () => {
+		const store = await fakeStore({ marker: false });
+		try {
+			const spawned = await withSelectors(() => spawnOf(() => bdRun(["list", "--json"])));
+			for (const name of Object.keys(SELECTORS)) expect(spawned.env).not.toHaveProperty(name);
+			expect(spawned.env.BD_JSON_ENVELOPE).toBe("1");
+			expect(spawned.env.PATH).toBe(process.env.PATH);
+		} finally {
+			await store.restore();
+		}
+	});
+
+	test("names the marker's store with --db ahead of the subcommand, on reads and writes alike", async () => {
+		const store = await fakeStore();
+		try {
+			const write = await withSelectors(() => spawnOf(() => bdRun(["comment", "orc-1", "REPORTED done"])));
+			expect(write.argv.slice(1, 4)).toEqual(["--db", store.beadsDir, "comment"]);
+			resetReadBudget();
+			const read = await spawnOf(() => bdShow("orc-1", undefined, undefined, { fresh: true }));
+			expect(read.argv.slice(1, 4)).toEqual(["--db", store.beadsDir, "show"]);
+		} finally {
+			await store.restore();
+		}
+	});
+
+	test("leaves a caller's own --db alone", async () => {
+		const store = await fakeStore();
+		try {
+			const spawned = await spawnOf(() => bdRun(["--db", "/probe/.beads", "count", "--json"]));
+			expect(spawned.argv.slice(1)).toEqual(["--db", "/probe/.beads", "count", "--json"]);
+		} finally {
+			await store.restore();
+		}
+	});
+
+	test("adds no --db while no marker names a store", async () => {
+		const store = await fakeStore({ marker: false });
+		try {
+			const spawned = await spawnOf(() => bdRun(["where", "--json"]));
+			expect(spawned.argv.slice(1)).toEqual(["where", "--json"]);
+		} finally {
+			await store.restore();
+		}
 	});
 });
 

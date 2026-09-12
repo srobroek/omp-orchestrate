@@ -43,6 +43,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { STORE_SELECTOR_VARS } from "./beads-mode";
 import { markerPath } from "./run-state";
 
 /** A bead as the gates need it. Extra fields pass through untouched. */
@@ -74,6 +75,19 @@ const BD_ENV: Record<string, string> = {
  BD_NO_PAGER: "1",
  BD_NON_INTERACTIVE: "1",
 };
+
+/**
+ * The environment a child `bd` runs in: this process's, with the store selectors bd
+ * honours removed ({@link STORE_SELECTOR_VARS}). A session inheriting one from another
+ * checkout created a run epic in that checkout's store, because bd reads the variable
+ * ahead of the working directory and the redirect. The run's store is named on the
+ * command line instead, once the marker knows it ({@link spawnBd}).
+ */
+function childEnv(): Record<string, string | undefined> {
+ const env: Record<string, string | undefined> = { ...process.env, ...BD_ENV };
+ for (const name of STORE_SELECTOR_VARS) delete env[name];
+ return env;
+}
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const OPERATION_TIMEOUT_MS = 20_000;
@@ -270,7 +284,8 @@ function generationFor(cwd: string | undefined): Generation | undefined {
  * in-session caller. It is explicit for callers that already hold a repository
  * path and may not be running inside it: `bd` resolves its database by walking up
  * from the working directory, so an inherited cwd silently writes to a different
- * run's beads.
+ * run's beads. Once the marker at `cwd` names the run's store, every call carries it
+ * as `--db`, the one selector that beats the environment and the walk alike.
  *
  * Every call through here may write, so it drops the read cache first (I4). Reads take
  * {@link readJson}, which keeps it.
@@ -295,10 +310,11 @@ async function spawnBd(args: string[], timeoutMs: number, cwd: string | undefine
  const remainingMs = budget ? budget.deadline - performance.now() : timeoutMs;
  if (remainingMs <= 0) return fail("timeout", null);
  const bin = process.env.BD_BIN ?? "bd";
+ const store = args.some(token => token === "--db" || token.startsWith("--db=")) ? undefined : runStoreDir(cwd);
  try {
-  const proc = Bun.spawn([bin, ...args], {
+  const proc = Bun.spawn([bin, ...(store === undefined ? [] : ["--db", store]), ...args], {
    ...(cwd === undefined ? {} : { cwd }),
-   env: { ...process.env, ...BD_ENV },
+   env: childEnv(),
    stdout: "pipe",
    stderr: "pipe",
   });
