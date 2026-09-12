@@ -19,14 +19,34 @@ function bead(id: string, fields: Partial<BdBead> & Record<string, unknown> = {}
 /** One epic, two features, tasks at two depths, one of them a grandchild. */
 const RUN: BdBead[] = [
 	bead("bd-1", { issue_type: "epic", title: "Ship dispatch", status: "in_progress" }),
-	bead("bd-2", { issue_type: "feature", title: "auth domain", parent: "bd-1", status: "in_progress", assignee: "arch-1" }),
+	bead("bd-2", { issue_type: "feature", title: "auth login", parent: "bd-1", status: "in_progress", assignee: "arch-1" }),
 	bead("bd-3", { title: "hash passwords", parent: "bd-2", status: "closed", metadata: { origin: "run-7" } }),
 	bead("bd-4", { title: "rotate tokens", parent: "bd-2", assignee: "impl-2", status: "in_progress" }),
 	bead("bd-5", { title: "token TTL sweep", parent: "bd-4" }),
-	bead("bd-6", { issue_type: "feature", title: "billing domain", parent: "bd-1", metadata: { role: "architect" } }),
+	bead("bd-6", { issue_type: "feature", title: "billing invoices", parent: "bd-1", metadata: { role: "architect" } }),
 	bead("bd-7", { title: "invoice totals", parent: "bd-6" }),
 	bead("bd-8", { issue_type: "chore", title: "tidy the changelog", parent: "bd-1" }),
 ];
+
+/**
+ * The documented run shape (README, `beads-store.md`): a run epic holding one epic per
+ * architect domain, each holding its features, each holding its tasks.
+ */
+const DOMAINS: BdBead[] = [
+	bead("run", { issue_type: "epic", title: "Run", status: "in_progress" }),
+	bead("dom-a", { issue_type: "epic", title: "Auth domain", parent: "run", status: "in_progress", metadata: { role: "architect", run_epic: "run", actor: "arch-a" } }),
+	bead("feat-1", { issue_type: "feature", title: "login", parent: "dom-a", status: "in_progress", assignee: "arch-a" }),
+	bead("t1", { title: "hash passwords", parent: "feat-1", status: "closed" }),
+	bead("t2", { title: "rotate tokens", parent: "feat-1", metadata: { actor: "impl-7" } }),
+	bead("dom-b", { issue_type: "epic", title: "Billing domain", parent: "run", metadata: { role: "architect", run_epic: "run" } }),
+	bead("feat-2", { issue_type: "feature", title: "invoices", parent: "dom-b" }),
+	bead("t3", { title: "invoice totals", parent: "feat-2", assignee: "impl-9" }),
+];
+
+/** A `bd set-state` event bead: a closed child recording one transition. */
+function event(id: string, parent: string, phase: string): BdBead {
+	return bead(id, { issue_type: "event", title: `State change: state → ${phase}`, parent, status: "closed" });
+}
 
 describe("buildStatusTree", () => {
 	test("groups epic -> feature -> task through parent links, flattening depth", () => {
@@ -93,6 +113,48 @@ describe("buildStatusTree", () => {
 		const epic = buildStatusTree(shuffled, [])!.epics[0]!;
 		expect(epic.features.map(f => f.id)).toEqual(["bd-2", "bd-3"]);
 		expect(epic.tasks.map(t => t.id)).toEqual(["bd-9"]);
+	});
+
+	test("an epic under an epic is a nested rollup, not a task", () => {
+		const tree = buildStatusTree(DOMAINS, []);
+		expect(tree.epics.map(e => e.id)).toEqual(["run"]);
+		const run = tree.epics[0]!;
+		expect(run.epics.map(e => e.id)).toEqual(["dom-a", "dom-b"]);
+		expect(run.features).toEqual([]);
+		expect(run.tasks).toEqual([]);
+		expect(run.epics[0]!.features.map(f => f.id)).toEqual(["feat-1"]);
+		expect(run.epics[0]!.features[0]!.tasks.map(t => t.id)).toEqual(["t1", "t2"]);
+		expect(run.epics[1]!.features[0]!.tasks.map(t => t.id)).toEqual(["t3"]);
+		expect(tree.orphans).toEqual([]);
+	});
+
+	test("a run's counts roll up through its domains", () => {
+		const run = buildStatusTree(DOMAINS, [])!.epics[0]!;
+		// dom-a: feat-1 active, t1 closed, t2 ready. dom-b: feat-2 ready, t3 claimed.
+		expect(run.epics[0]!.counts).toEqual({ active: 1, closed: 1, ready: 1 });
+		expect(run.epics[1]!.counts).toEqual({ ready: 1, claimed: 1 });
+		// The run counts both domains themselves plus everything beneath them.
+		expect(run.counts).toEqual({ active: 2, closed: 1, ready: 3, claimed: 1 });
+	});
+
+	test("set-state event beads are not tasks and do not close anything", () => {
+		const withEvents = [
+			...DOMAINS,
+			event("t2.1", "t2", "reported"),
+			event("t2.2", "t2", "in_review"),
+			event("t2.3", "t2", "approved"),
+			event("run.1", "run", "working"),
+		];
+		const tree = buildStatusTree(withEvents, []);
+		expect(tree).toEqual(buildStatusTree(DOMAINS, []));
+		expect(statusSummaryLine(tree)).toBe("3 epics · 2 features · 3 tasks · 0 blocked");
+		expect(renderStatus(tree, { full: true })).not.toContain("State change");
+	});
+
+	test("carries metadata.actor onto nodes", () => {
+		const run = buildStatusTree(DOMAINS, [])!.epics[0]!;
+		expect(run.epics[0]!.actor).toBe("arch-a");
+		expect(run.epics[0]!.features[0]!.tasks[1]!.actor).toBe("impl-7");
 	});
 });
 
@@ -189,19 +251,49 @@ describe("filterTree", () => {
 		expect(auth.tasks).toEqual([]);
 	});
 
-	test("actor filter reads metadata.role for work claimed without an assignee", () => {
-		const tree = filterTree(buildStatusTree(RUN, []), { actor: "architect" });
-		expect(tree.epics[0]!.features.map(f => f.id)).toEqual(["bd-6"]);
+	test("actor filter reads metadata.actor for work held without an assignee", () => {
+		const tree = filterTree(buildStatusTree(DOMAINS, []), { actor: "impl-7" });
+		expect(tree.epics.map(e => e.id)).toEqual(["run"]);
+		expect(tree.epics[0]!.epics.map(e => e.id)).toEqual(["dom-a"]);
+		expect(tree.epics[0]!.epics[0]!.features[0]!.tasks.map(t => t.id)).toEqual(["t2"]);
+		expect(tree.epics[0]!.counts).toEqual({ active: 2, ready: 1 });
+	});
+
+	test("a role name is routing, not holding, and matches nothing", () => {
+		// dom-a and dom-b both route to `architect`; only dom-a is held (by arch-a).
+		expect(filterTree(buildStatusTree(DOMAINS, []), { actor: "architect" }).epics).toEqual([]);
+		expect(filterTree(buildStatusTree(DOMAINS, []), { actor: "arch-a" }).epics[0]!.epics.map(e => e.id)).toEqual(["dom-a"]);
 	});
 
 	test("actor filter reads metadata that arrived as stringified JSON", () => {
 		const beads = [
 			bead("bd-1", { issue_type: "epic" }),
 			bead("bd-2", { issue_type: "feature", parent: "bd-1" }),
-			bead("bd-3", { parent: "bd-2", metadata: '{"role":"reviewer"}' as unknown as Record<string, unknown> }),
+			bead("bd-3", { parent: "bd-2", metadata: '{"actor":"rev-3"}' as unknown as Record<string, unknown> }),
 		];
-		const tree = filterTree(buildStatusTree(beads, []), { actor: "reviewer" });
+		const tree = filterTree(buildStatusTree(beads, []), { actor: "rev-3" });
 		expect(tree.epics[0]!.features[0]!.tasks.map(t => t.id)).toEqual(["bd-3"]);
+	});
+
+	test("epic filter reports a nested domain epic as the root", () => {
+		const tree = filterTree(buildStatusTree(DOMAINS, []), { epic: "dom-b" });
+		expect(tree.epics.map(e => e.id)).toEqual(["dom-b"]);
+		expect(tree.epics[0]!.features.map(f => f.id)).toEqual(["feat-2"]);
+		expect(tree.epics[0]!.counts).toEqual({ ready: 1, claimed: 1 });
+		expect(tree.orphans).toEqual([]);
+	});
+
+	test("feature filter finds a feature under a nested epic and reports its domain as the root", () => {
+		const tree = filterTree(buildStatusTree(DOMAINS, ["t2"]), { feature: "feat-1" });
+		expect(tree.epics.map(e => e.id)).toEqual(["dom-a"]);
+		expect(tree.epics[0]!.epics).toEqual([]);
+		expect(tree.epics[0]!.features.map(f => f.id)).toEqual(["feat-1"]);
+		expect(tree.epics[0]!.counts).toEqual({ active: 1, closed: 1, blocked: 1 });
+		expect(tree.blocked).toEqual(["t2"]);
+	});
+
+	test("a feature outside the named epic matches nothing", () => {
+		expect(filterTree(buildStatusTree(DOMAINS, []), { epic: "dom-a", feature: "feat-2" }).epics).toEqual([]);
 	});
 
 	test("an actor holding nothing yields an empty tree", () => {
@@ -221,6 +313,10 @@ describe("statusSummaryLine", () => {
 		expect(statusSummaryLine(buildStatusTree(RUN, ["bd-5"]))).toBe("1 epics · 2 features · 5 tasks · 1 blocked");
 	});
 
+	test("counts nested epics and their work at every depth", () => {
+		expect(statusSummaryLine(buildStatusTree(DOMAINS, ["t3"]))).toBe("3 epics · 2 features · 3 tasks · 1 blocked");
+	});
+
 	test("names unparented beads only when there are some", () => {
 		const line = statusSummaryLine(buildStatusTree([...RUN, bead("bd-50")], []));
 		expect(line).toBe("1 epics · 2 features · 5 tasks · 0 blocked · 1 unparented");
@@ -235,9 +331,20 @@ describe("renderStatus", () => {
 	test("summary mode rolls up without printing per-bead lines", () => {
 		const text = renderStatus(buildStatusTree(RUN, []));
 		expect(text).toContain("EPIC  bd-1  Ship dispatch");
-		expect(text).toContain("1/7 closed"); // features count toward the rollup, as in run-status.py
-		expect(text).toContain("auth domain");
+		expect(text).toContain("1/7 closed"); // features count toward the rollup
+		expect(text).toContain("auth login");
 		expect(text).not.toContain("hash passwords");
+	});
+
+	test("nested epics render indented under the run, blockers named once at the root", () => {
+		const text = renderStatus(buildStatusTree(DOMAINS, ["t2", "t3"]), { full: true });
+		const lines = text.split("\n");
+		expect(lines).toContain("EPIC  run  Run  [active]");
+		expect(lines).toContain("  EPIC  dom-a  Auth domain  [active]");
+		expect(lines).toContain("  EPIC  dom-b  Billing domain  [ready]");
+		expect(lines.filter(line => line.startsWith("  BLOCKED"))).toEqual(["  BLOCKED (2): t2, t3"]);
+		expect(text).toContain("actor=impl-7");
+		expect(text.indexOf("dom-a")).toBeLessThan(text.indexOf("hash passwords"));
 	});
 
 	test("full mode prints one line per bead", () => {
