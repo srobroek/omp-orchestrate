@@ -19,6 +19,7 @@ import {
  type BdBead,
  bdCommentsChecked,
  bdLinkedChecked,
+ bdShow,
  bdShowMany,
  commentVerb,
  lastBdFailure,
@@ -28,6 +29,7 @@ import {
 } from "../bd";
 import { type ClaimObservation, type ClaimState } from "../claim-state";
 import { beadRouting, orcRole } from "../identity";
+import { runScope } from "../run-scope";
 
 import architect from "../contracts/architect.json";
 import generic from "../contracts/generic.json";
@@ -142,6 +144,12 @@ export interface Evidence {
  linkedVerbs: string[];
  openEscalation?: boolean;
  artifactContained?: boolean;
+ /** The commit the bead's work started from: its own `base_sha`, else the run epic's. Absent when neither is known. */
+ baseSha?: string;
+ /** Some `REPORTED` comment on the bead names a changed path. */
+ reportedPath?: boolean;
+ /** The worker wrote `NOTE no-change: <reason>`: the task needed no edit, and says so. */
+ noChangeNoted?: boolean;
 }
 
 const SUPPORTED_KINDS: Record<string, readonly string[]> = {
@@ -174,13 +182,89 @@ export function contractPaused(contract: { pause?: string[] }, evidence: Evidenc
   && evidence.openEscalation === true;
 }
 
-/** Evaluate one supported `require` predicate; unknown predicates fail closed. */
+/**
+ * A commit as a worker or the sweep writes it: seven to forty hex digits.
+ *
+ * Two shas name the same commit when one is a prefix of the other, because `head_sha` is
+ * often stamped short while `base_sha` is stamped full. Anything that is not a sha compares
+ * as text: the exit contract never judged what a `head_sha` value is, and does not start.
+ */
+const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
+
+export function sameCommit(a: string, b: string): boolean {
+ const left = a.trim().toLowerCase();
+ const right = b.trim().toLowerCase();
+ if (!COMMIT_SHA.test(left) || !COMMIT_SHA.test(right)) return left === right;
+ return left.startsWith(right) || right.startsWith(left);
+}
+
+/**
+ * A token that names a file: a slash-separated path with a letter in it, or a dotted
+ * file name such as `README.md`. Generous on purpose: a false path counts a comment as
+ * evidence, which fails open, while a real path missed would refuse honest work.
+ */
+const PATH_TOKEN = /^(?=.*[A-Za-z])(?:[\w.@+-]+\/)+[\w.@+-]*$|^[\w@+-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*$/;
+
+/** Decoration around a token: brackets, quotes, backticks, and the punctuation a sentence hangs on it. */
+const TOKEN_TRIM = /^[[(`'"<{,;:]+|[\])`'">}:,;.!?]+$/g;
+
+/**
+ * Whether a comment names a changed path. Tokens are read as written, decoration
+ * stripped, `key=value` read for its value and comma lists for each entry, so
+ * `REPORTED docs/faq.md changed; head_sha d4ca85f`, `files=src/a.ts,src/b.ts` and
+ * `` `README.md` `` all count. A URL is not a path.
+ */
+export function namesPath(text: string): boolean {
+ for (const raw of text.split(/\s+/)) {
+  let token = raw.replace(TOKEN_TRIM, "");
+  const cut = token.indexOf("=");
+  if (cut !== -1) token = token.slice(cut + 1);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) continue;
+  if (token.split(",").some(entry => PATH_TOKEN.test(entry))) return true;
+ }
+ return false;
+}
+
+/** The text after a comment's verb, or `undefined` when the comment is the verb alone. */
+const AFTER_VERB = /^[\s\-*+>`_~]*\S+\s+([\s\S]*)$/;
+
+/**
+ * `NOTE no-change: <reason>`, the bead id optionally between the verb and the marker.
+ * The reason is required: a bare marker states nothing the gate can quote back.
+ */
+export function noChangeNote(comment: string, beadId: string): boolean {
+ if (commentVerb(comment) !== "NOTE") return false;
+ let rest = AFTER_VERB.exec(comment)?.[1]?.trim() ?? "";
+ if (rest.startsWith(`${beadId} `)) rest = rest.slice(beadId.length).trimStart();
+ return /^no-change\b[:\s]\s*\S/i.test(rest);
+}
+
+/**
+ * Evaluate one supported `require` predicate; unknown predicates fail closed.
+ *
+ * `A or B` is either predicate; no supported predicate contains the word ` or `, so the
+ * split is safe at the top level and a `label ~` pattern must not spell it.
+ */
 export function satisfies(predicate: string, evidence: Evidence): boolean {
  const { bead, verbs, linkedVerbs } = evidence;
  const trimmed = predicate.trim();
 
+ const alternatives = trimmed.split(/\s+or\s+/);
+ if (alternatives.length > 1) return alternatives.some(alternative => satisfies(alternative, evidence));
+
  const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
  if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
+
+ if (trimmed === "metadata.head_sha != base_sha") {
+  // Proof only: with no head the delivery check speaks, and with no base there is
+  // nothing to compare against, so both are unknown rather than unmet.
+  const head = metadataString(bead, "head_sha");
+  if (head === undefined || evidence.baseSha === undefined) return true;
+  return !sameCommit(head, evidence.baseSha);
+ }
+
+ if (trimmed === "comment.REPORTED names a path") return evidence.reportedPath === true;
+ if (trimmed === "comment.NOTE no-change") return evidence.noChangeNoted === true;
 
  if (trimmed === "assignee cleared") {
   return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
@@ -217,20 +301,23 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
 }
 
 /**
- * What a contract reads off the beads linked to the node, so the evaluator can skip the
+ * What a contract reads beyond the bead's own comments, so the evaluator can skip the
  * reads it will never consult.
  *
  * `verbs`: some `require` names `linked.comment.verb`, so every linked bead's comments
  * are read (researcher, reviewer). `escalation`: the contract pauses on an open
  * escalation wisp, so every linked bead's status is read (architect, implementer). A
- * contract wanting neither (shepherd, generic) reads no link at all.
+ * contract wanting neither (shepherd, generic) reads no link at all. `base`: some
+ * `require` compares the head against `base_sha`, so the run epic is read for its base
+ * when the bead carries none of its own (implementer).
  */
 export interface LinkedEvidenceNeeds {
  verbs: boolean;
  escalation: boolean;
+ base: boolean;
 }
 
-const ALL_LINKED_EVIDENCE: LinkedEvidenceNeeds = { verbs: true, escalation: true };
+const ALL_LINKED_EVIDENCE: LinkedEvidenceNeeds = { verbs: true, escalation: true, base: true };
 
 export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  const requires = (contract.completion ?? []).map(check => check.require);
@@ -238,6 +325,7 @@ export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  return {
   verbs: requires.some(predicate => predicate.trim().startsWith("linked.")),
   escalation: contract.pause?.includes("open-escalation-wisp-linked-to-node") === true,
+  base: requires.some(predicate => predicate.includes("base_sha")),
  };
 }
 
@@ -246,13 +334,34 @@ export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  *
  * Read cost, with L linked beads: one `comments`, then -- only when `needs` asks for
  * anything linked -- two `dep list` and one `bd list --id` hydrating every link at
- * once, then one `comments` per link only when `needs.verbs`. Absent `needs`, everything
- * is read, which is what a caller judging an unknown contract must do.
+ * once, then one `comments` per link only when `needs.verbs`; then one `show` of the run
+ * epic only when `needs.base`, the bead stamps a head but no base of its own, and a run
+ * epic is bound. Absent `needs`, everything is read, which is what a caller judging an
+ * unknown contract must do.
+ *
+ * An unreadable run epic is logged and leaves the base unknown rather than voiding the
+ * evidence: the rest of the contract is still judged, and the one predicate that wanted
+ * the base fails open on its own.
  */
-export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNeeds = ALL_LINKED_EVIDENCE): Promise<Evidence | null> {
+export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNeeds = ALL_LINKED_EVIDENCE, runEpic?: string): Promise<Evidence | null> {
  const comments = await bdCommentsChecked(bead.id);
  if (comments === null) return null;
  const verbs = comments.map(comment => commentVerb(comment.text));
+ const reportedPath = comments.some((comment, index) => verbs[index] === "REPORTED" && namesPath(comment.text));
+ const noChangeNoted = comments.some(comment => noChangeNote(comment.text, bead.id));
+ let baseSha = metadataString(bead, "base_sha");
+ if (baseSha === undefined && needs.base && runEpic !== undefined && metadataString(bead, "head_sha") !== undefined) {
+  const epic = await bdShow(runEpic);
+  if (epic === null) {
+   logger.warn("orchestrate exit contract: run epic could not be read; head-versus-base check skipped", {
+    bead: bead.id,
+    epic: runEpic,
+    cause: lastBdFailure(),
+   });
+  } else {
+   baseSha = metadataString(epic, "base_sha");
+  }
+ }
  const linkedVerbs: string[] = [];
  let openEscalation = false;
  const direction = linkedEvidenceDirection(bead);
@@ -311,7 +420,7 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
    }
   }
  }
- return { bead, verbs, linkedVerbs, openEscalation, artifactContained };
+ return { bead, verbs, linkedVerbs, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted };
 }
 
 interface ExitGuardState {
@@ -434,7 +543,11 @@ async function gateClaimedExit(
  const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
  if (contract === undefined) return undefined;
 
- const evidence = await collectExitEvidence(bead, linkedEvidenceNeeds(contract));
+ // The base a git head is compared against, when the bead stamps none: the run epic's,
+ // named by the marker. `pending` names no epic yet.
+ const scope = await runScope(ctx);
+ const runEpic = scope === null || scope.runId === "pending" ? undefined : scope.runId;
+ const evidence = await collectExitEvidence(bead, linkedEvidenceNeeds(contract), runEpic);
  if (evidence === null) {
   logger.warn("orchestrate exit contract unevaluated: evidence unreadable", {
    bead: beadId,

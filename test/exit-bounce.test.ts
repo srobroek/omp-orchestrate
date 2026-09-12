@@ -1,21 +1,29 @@
-import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, symlink, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead, BdComment } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
 import { createExitGuard } from "../src/gates/exit";
+import { markerPath } from "../src/run-state";
 
 const BEAD = "orc-42";
+/** The run epic's recorded base: the commit every worker's head is compared against. */
+const BASE = "72c609ac23fba9be420212169d05f8a9c2f49911";
 const CTX = { getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
 let bead: BdBead | null;
 let comments: BdComment[] | null;
 let linked: string[] | null;
 let linkedBead: BdBead | null;
 let linkedComments: BdComment[] | null;
+/** The run epic `bd show orc-run` answers with; `null` models an unreadable epic. */
+let epic: BdBead | null;
 let issued: string[][];
+let shown: string[];
+let warned: Record<string, unknown>[];
 let fixture: string;
 let claims = createClaimState();
 let gateExitContract: ReturnType<typeof createExitGuard>;
@@ -41,6 +49,13 @@ const spies = [
   issued.push(args);
   return { code: 0, stdout: "", stderr: "" };
  }),
+ spyOn(actualBd, "bdShow").mockImplementation(async (id: string) => {
+  shown.push(id);
+  return id === "orc-run" ? epic : null;
+ }),
+ spyOn(logger, "warn").mockImplementation(((_message: string, data?: Record<string, unknown>) => {
+  warned.push(data ?? {});
+ }) as typeof logger.warn),
 ];
 afterAll(() => { for (const spy of spies) spy.mockRestore(); });
 afterEach(async () => { claims = createClaimState(); await rm(fixture, { recursive: true, force: true }); });
@@ -51,11 +66,14 @@ beforeEach(async () => {
  claims = createClaimState();
  gateExitContract = createExitGuard(claims);
  issued = [];
+ shown = [];
+ warned = [];
  bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git" } };
  comments = [];
  linked = [];
  linkedBead = null;
  linkedComments = [];
+ epic = { id: "orc-run", status: "in_progress", metadata: { base_sha: BASE } };
  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
 });
 
@@ -164,7 +182,7 @@ describe("G4 checked evidence", () => {
  });
  test("a git implementer can report and release before host branch capture", async () => {
   bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc123" } };
-  comments = [{ text: "REPORTED committed abc123" }];
+  comments = [{ text: "REPORTED src/api.ts committed abc123" }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   delete bead.metadata!.head_sha;
   expect((await gateExitContract(CTX))?.block).toBe(true);
@@ -232,6 +250,136 @@ describe("G4 checked evidence", () => {
   comments = [{ text: "BLOCKED missing prerequisite" }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(issued).toEqual([]);
+ });
+});
+
+/**
+ * Git work is judged as work. Found by a run in which a worker wrote REPORTED, added the
+ * handoff label, stamped `head_sha` equal to the base commit, released, and was accepted
+ * at the first attempt with nothing changed.
+ */
+describe("G4 zero-work report", () => {
+ const HEAD = "d4ca85f1e2b3c4d5e6f708192a3b4c5d6e7f8091";
+ /** A checkout under a bound run: its marker names `orc-run`, so the epic's base is read. */
+ let runRoot: string;
+ let priorMarker: string | undefined;
+
+ beforeAll(async () => {
+  runRoot = await realpath(await mkdtemp(path.join(tmpdir(), "orc-exit-run-")));
+  await mkdir(path.dirname(markerPath(runRoot)), { recursive: true });
+  await writeFile(markerPath(runRoot), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
+  priorMarker = process.env.ORCHESTRATE_MARKER_FILE;
+  delete process.env.ORCHESTRATE_MARKER_FILE;
+ });
+ afterAll(async () => {
+  if (priorMarker !== undefined) process.env.ORCHESTRATE_MARKER_FILE = priorMarker;
+  await rm(runRoot, { recursive: true, force: true });
+ });
+
+ function ctxIn(root: string): ExtensionContext {
+  return { cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
+ }
+ function checks(result: ToolCallEventResult | undefined): string[] {
+  expect(result?.block).toBe(true);
+  const verdict: { failed_checks: { check: string }[] } = JSON.parse(result!.reason!);
+  return verdict.failed_checks.map(failure => failure.check);
+ }
+ /** A released, handed-off git bead at `head`, with its own `base_sha` when `ownBase` is given. */
+ function released(head: string, ownBase?: string): BdBead {
+  return {
+   id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"],
+   metadata: { execution_kind: "git", head_sha: head, ...(ownBase === undefined ? {} : { base_sha: ownBase }) },
+  };
+ }
+
+ test("a head equal to the run epic's base with no changed path is refused on both counts", async () => {
+  bead = released(BASE);
+  comments = [{ text: `REPORTED ${BEAD} head_sha=${BASE.slice(0, 7)}` }];
+  expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["work", "changed_paths"]);
+  // The base came from the run epic, read once through the marker's run id.
+  expect(shown).toEqual(["orc-run"]);
+ });
+
+ test("a moved head naming a changed path passes", async () => {
+  bead = released(HEAD);
+  comments = [{ text: `REPORTED docs/faq.md changed; head_sha ${HEAD.slice(0, 7)}` }];
+  expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
+ });
+
+ test("the bead's own base_sha wins, and costs no epic read", async () => {
+  bead = released(HEAD, HEAD.slice(0, 7));
+  comments = [{ text: "REPORTED src/x.ts" }];
+  expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["work"]);
+  expect(shown).toEqual([]);
+ });
+
+ test.each([
+  ["a path in a key=value list", "REPORTED files=src/a.ts,src/b.ts head_sha=abc"],
+  ["a backticked file name", "REPORTED updated `README.md`"],
+  ["a bracketed path", "REPORTED [docs/guide/install.md] rewritten"],
+ ])("%s counts as a changed path", async (_label, text) => {
+  bead = released(HEAD);
+  comments = [{ text }];
+  expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
+ });
+
+ test.each([
+  ["a sha and a count", "REPORTED 3 files, head_sha=abc1234, tests green"],
+  ["a URL alone", "REPORTED see https://example.com/pr/2"],
+  ["a version number", "REPORTED bumped to 1.2.3"],
+ ])("%s is not a changed path", async (_label, text) => {
+  bead = released(HEAD);
+  comments = [{ text }];
+  expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["changed_paths"]);
+ });
+
+ test.each([
+  `NOTE no-change: the faq already documents the new input format`,
+  `NOTE ${BEAD} no-change: nothing to edit after reading the spec`,
+  `- **NOTE** no-change: verified in place`,
+ ])("an explicit no-change note waives both checks: %s", async note => {
+  bead = released(BASE);
+  comments = [{ text: note }, { text: `REPORTED ${BEAD} nothing changed` }];
+  expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
+ });
+
+ test.each(["NOTE no-change:", "NOTE no-change", "NOTE nothing changed, no-change: really"])(
+  "a note that states no reason, or buries the marker, waives nothing: %s",
+  async note => {
+   bead = released(BASE);
+   comments = [{ text: note }, { text: `REPORTED ${BEAD} done` }];
+   expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["work", "changed_paths"]);
+  },
+ );
+
+ test("no recorded base anywhere leaves the head comparison unknown", async () => {
+  epic = { id: "orc-run", status: "in_progress" };
+  bead = released(BASE);
+  comments = [{ text: "REPORTED src/x.ts" }];
+  expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
+ });
+
+ test("an unreadable run epic fails the comparison open, says why, and still judges the rest", async () => {
+  epic = null;
+  bead = released(BASE);
+  comments = [{ text: `REPORTED ${BEAD} done` }];
+  expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["changed_paths"]);
+  expect(warned.map(entry => entry.epic)).toEqual(["orc-run"]);
+ });
+
+ test("outside a bound run there is no epic to read", async () => {
+  bead = released(BASE);
+  comments = [{ text: "REPORTED src/x.ts" }];
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(shown).toEqual([]);
+ });
+
+ test("a bead without a head spends no epic read: delivery already speaks", async () => {
+  bead = released(HEAD);
+  delete bead.metadata!.head_sha;
+  comments = [{ text: "REPORTED src/x.ts" }];
+  expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["delivery"]);
+  expect(shown).toEqual([]);
  });
 });
 
