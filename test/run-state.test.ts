@@ -6,8 +6,11 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { BdBead, BdComment, BdResult } from "../src/bd";
 import * as bd from "../src/bd";
+import * as beadsMode from "../src/beads-mode";
+import type { StoreOrigin } from "../src/beads-mode";
 import * as landing from "../src/landing";
 import type { LandingRecord } from "../src/landing";
+import { leadContract, leadSummary } from "../src/contract";
 import * as storeProbe from "../src/store-probe";
 import type { StoreProbe } from "../src/store-probe";
 import {
@@ -16,6 +19,8 @@ import {
 	bindRun,
 	closeRun,
 	isBoundRunActive,
+	isLeadSession,
+	LEAD_CONTRACT_MESSAGE,
 	markerPath,
 	readActiveRun,
 	readActiveRunStrict,
@@ -82,6 +87,17 @@ const probeSpy = spyOn(storeProbe, "probeStore").mockImplementation(async beadsD
 	if (probe instanceof Error) throw probe;
 	return probe;
 });
+/**
+ * Where the run's store came from: this checkout's `.beads` unless a test says the
+ * environment named it, an operator's `--store` path as explicit, or no workspace at all.
+ */
+let storeFrom: StoreOrigin = "checkout";
+const storeSpy = spyOn(beadsMode, "storeOrigin").mockImplementation(async (_cwd, explicit) => {
+	if (noWorkspace) return { ok: false, reason: "no active Beads workspace was found" };
+	if (explicit !== undefined) return { ok: true, path: explicit, origin: "explicit" };
+	return { ok: true, path: join(cwd, ".beads"), origin: storeFrom };
+});
+
 afterAll(() => {
 	showSpy.mockRestore();
 	listSpy.mockRestore();
@@ -89,15 +105,17 @@ afterAll(() => {
 	runSpy.mockRestore();
 	landingSpy.mockRestore();
 	probeSpy.mockRestore();
+	storeSpy.mockRestore();
 });
 
 let cwd: string;
 const SESSION = "session-t";
 const LEAD = `lead:${SESSION}`;
 
-/** A run epic Beads shows with `status`. */
+/** A run epic Beads shows with `status`. A dotted id is a child of the id before its last dot, as Beads numbers them. */
 function epic(id: string, status = "open", extra: Partial<BdBead> = {}): void {
-	epics[id] = { id, status, ...extra };
+	const dot = id.lastIndexOf(".");
+	epics[id] = { id, status, ...(dot > 0 ? { parent: id.slice(0, dot) } : {}), ...extra };
 }
 
 /** A lease still live at any `now` a test uses, or long lapsed. */
@@ -124,6 +142,7 @@ beforeEach(async () => {
 	probe = { state: "free", lock: "LOCK", ms: 300 };
 	probeCalls.length = 0;
 	showSpy.mockClear();
+	storeFrom = "checkout";
 	commentsSpy.mockClear();
 });
 
@@ -217,12 +236,14 @@ describe("readActiveRunStrict", () => {
 		expect(await readActiveRunStrict(cwd)).toEqual({ schema_version: 1, run_id: "orc-7", session_id: SESSION, beads_dir: join(cwd, ".beads") });
 	});
 
-	test("a legacy marker reads: a bare id, a quoted id, or JSON without schema_version", async () => {
+	test("a legacy marker reads: a bare id, a quoted id, JSON without schema_version, or schema 0", async () => {
 		await seed("orc-legacy\n");
 		expect(await readActiveRunStrict(cwd)).toEqual({ schema_version: 1, run_id: "orc-legacy" });
 		await seed('"orc-legacy"');
 		expect(await readActiveRunStrict(cwd)).toEqual({ schema_version: 1, run_id: "orc-legacy" });
 		await seed('{"run_id":"orc-legacy"}');
+		expect(await readActiveRunStrict(cwd)).toEqual({ schema_version: 1, run_id: "orc-legacy" });
+		await seed('{"schema_version":0,"run_id":"orc-legacy"}');
 		expect(await readActiveRunStrict(cwd)).toEqual({ schema_version: 1, run_id: "orc-legacy" });
 	});
 
@@ -235,7 +256,8 @@ describe("readActiveRunStrict", () => {
 		["broken JSON", "{broken"],
 		["a list", "[]"],
 		["a non-integer schema", '{"schema_version":"1","run_id":"orc-7"}'],
-		["schema zero", '{"schema_version":0,"run_id":"orc-7"}'],
+		["a negative schema", '{"schema_version":-1,"run_id":"orc-7"}'],
+		["an unknown store origin", '{"schema_version":1,"run_id":"orc-7","store_origin":"guess"}'],
 		["a non-identifier run id", '{"schema_version":1,"run_id":"has space"}'],
 		["a blank session", '{"schema_version":1,"run_id":"orc-7","session_id":""}'],
 		["a relative database", '{"schema_version":1,"run_id":"orc-7","beads_dir":"rel/.beads"}'],
@@ -252,6 +274,42 @@ describe("readActiveRunStrict", () => {
 			await expect(readActiveRunStrict(cwd)).rejects.toThrow("permission denied");
 		} finally {
 			read.mockRestore();
+		}
+	});
+});
+
+describe("isLeadSession", () => {
+	/** A gate's context: the seat and the session, nothing else. */
+	const seat = (at: string, session = SESSION) => ({ cwd: at, sessionManager: { getSessionId: () => session } }) as never;
+
+	test("false with no run, and for a session the marker does not name", async () => {
+		expect(await isLeadSession(seat(cwd))).toBe(false);
+		await seed(bound("orc-7", "session-other"));
+		expect(await isLeadSession(seat(cwd))).toBe(false);
+		await seed('{"schema_version":1,"run_id":"orc-7"}');
+		expect(await isLeadSession(seat(cwd))).toBe(false);
+	});
+
+	test("true for the session that started or last resumed the run", async () => {
+		await seed(bound("orc-7"));
+		expect(await isLeadSession(seat(cwd))).toBe(true);
+		expect(await isLeadSession(seat(cwd, "session-other"))).toBe(false);
+	});
+
+	test("a lead seated in a linked worktree is found through the primary's marker", async () => {
+		const linked = join(cwd, "..", `${cwd.split("/").pop()}-linked`);
+		const git = (args: string[]) => execFileAsync("git", ["-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, timeout: 5000 });
+		await git(["init", "-q", "-b", "main"]);
+		await writeFile(join(cwd, ".gitignore"), ".orchestration/\n");
+		await git(["add", ".gitignore"]);
+		await git(["commit", "-q", "-m", "init"]);
+		await git(["worktree", "add", "-q", "-b", "feature", linked]);
+		try {
+			await seed(bound("orc-7"));
+			expect(await isLeadSession(seat(linked))).toBe(true);
+			expect(await isLeadSession(seat(linked, "session-other"))).toBe(false);
+		} finally {
+			await rm(linked, { recursive: true, force: true });
 		}
 	});
 });
@@ -477,7 +535,7 @@ describe("startRun", () => {
 		const started = await startRun(cwd, SESSION, { epic: "orc-7" });
 		expect(started).toMatchObject({ run: "orc-7", created: false, lease: "written", stamp: "written", probe: { state: "free" } });
 		expect(probeCalls).toEqual([join(cwd, ".beads")]);
-		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-7", session_id: SESSION, beads_dir: join(cwd, ".beads") });
+		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-7", session_id: SESSION, beads_dir: join(cwd, ".beads"), store_origin: "checkout" });
 		expect(fenced()).toEqual([["orc-7", "--actor", LEAD, "--claim"]]);
 		// An adopted epic keeps the operator's metadata; only the schema is stamped.
 		expect(writes.find(argv => argv[0] === "update" && !argv.includes("--claim"))).toEqual(["update", "orc-7", "--metadata", '{"schema":1}']);
@@ -543,6 +601,18 @@ describe("startRun", () => {
 		expect(await readActiveRun(cwd)).toBeNull();
 	});
 
+	test("refuses a store the environment named, unless --store names it on purpose", async () => {
+		storeFrom = "env";
+		await expect(startRun(cwd, SESSION, { title: "x" })).rejects.toThrow(new RegExp(`run not started: bd resolved its database to ${join(cwd, ".beads")} through a store selector.*pass --store ${join(cwd, ".beads")}`));
+		expect(writes).toEqual([]);
+		expect(await readActiveRun(cwd)).toBeNull();
+		const elsewhere = join(cwd, "elsewhere", ".beads");
+		const started = await startRun(cwd, SESSION, { epic: "orc-7" }, { store: elsewhere });
+		expect(started.store).toEqual({ path: elsewhere, origin: "explicit" });
+		expect(probeCalls).toEqual([elsewhere]);
+		expect(await readActiveRun(cwd)).toMatchObject({ run_id: "orc-7", beads_dir: elsewhere, store_origin: "explicit" });
+	});
+
 	test.each([
 		["locked", { state: "locked", lock: "LOCK", holder: "bd[123]" } satisfies StoreProbe, /is locked by bd\[123\]; stop that writer first/],
 		["corrupted", { state: "corrupted", lock: "LOCK", detail: "corrupted journal at 4096" } satisfies StoreProbe, /is corrupted \(corrupted journal at 4096\); recover it first/],
@@ -597,7 +667,7 @@ describe("resumeRun", () => {
 	});
 
 	test("adopts a lapsed lead lease, records this session on the marker, sweeps lapsed claims", async () => {
-		await seed(bound("orc-7", "session-old"));
+		await seed(JSON.stringify({ schema_version: 1, run_id: "orc-7", session_id: "session-old", beads_dir: join(cwd, ".beads"), store_origin: "checkout" }));
 		epic("orc-7", "in_progress", { assignee: "lead:session-old", updated_at: LAPSED_AT, metadata: { lease_until: LAPSED_AT } });
 		store = [
 			{ id: "orc-7.1", status: "open", parent: "orc-7" },
@@ -616,7 +686,7 @@ describe("resumeRun", () => {
 			kind: "resumed", run: "orc-7", adopted: true, from: "lead:session-old", migrated: false,
 			sweep: { released: ["orc-7.1.1"], kept: ["orc-7.1.2", "orc-7.1.3"], failed: [] },
 		});
-		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-7", session_id: SESSION, beads_dir: join(cwd, ".beads") });
+		expect(await readActiveRun(cwd)).toEqual({ schema_version: 1, run_id: "orc-7", session_id: SESSION, beads_dir: join(cwd, ".beads"), store_origin: "checkout" });
 		expect(fenced()).toEqual([
 			["orc-7", "--actor", "lead:session-old", "--claim"],
 			["orc-7", "--actor", LEAD, "--claim"],
@@ -745,10 +815,26 @@ describe("answerBead", () => {
 		},
 	};
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		registry = {};
 		wakes = [];
 		wakeOutcome = { outcome: "revived" };
+		await seed(bound("orc-7"));
+	});
+
+	test("refuses a bead outside the run, one whose ancestry cannot be read, and a checkout with no run -- nothing written", async () => {
+		epic("orc-other", "blocked", { assignee: "arch-9" });
+		await expect(answerBead(cwd, SESSION, "orc-other", "blue", deps)).rejects.toThrow(/orc-other is not under run orc-7; \/orchestrate-answer writes only to the run's beads/);
+		epics["orc-deep"] = { id: "orc-deep", status: "blocked", parent: "orc-gone" };
+		await expect(answerBead(cwd, SESSION, "orc-deep", "blue", deps)).rejects.toThrow(/orc-deep's ancestry could not be read.*nothing recorded/);
+		// Two levels down is still the run's: the chain is walked, not the direct parent compared.
+		epic("orc-7.1.4", "blocked");
+		epic("orc-7.1", "open");
+		expect(await answerBead(cwd, SESSION, "orc-7.1.4", "blue", deps)).toMatchObject({ kind: "kept" });
+		expect(writes.filter(argv => argv[0] === "comment").map(argv => argv[1])).toEqual(["orc-7.1.4"]);
+		await rm(markerPath(cwd));
+		await expect(answerBead(cwd, SESSION, "orc-7.1.4", "blue", deps)).rejects.toThrow(/no active run at .*; nothing recorded/);
+		expect(writes.filter(argv => argv[0] === "comment")).toHaveLength(1);
 	});
 
 	function ask(id: string, author: string, ...more: string[]): void {
@@ -875,6 +961,7 @@ describe("runStatusReport", () => {
 			`run: bound to orc-7 (marker ${markerPath(cwd)}, session ${SESSION})`,
 			"epic orc-7: in_progress",
 			`lead: ${LEAD}, lease live until 2999-01-01T00:00:00.000Z`,
+			`store: ${join(cwd, ".beads")}`,
 			"attention: none",
 		]);
 		expect(probeCalls).toEqual([join(cwd, ".beads")]);
@@ -898,10 +985,10 @@ describe("runStatusReport", () => {
 	});
 
 	describe("attention", () => {
-		/** The attention lines of a healthy bound run, without the three header lines. */
+		/** The attention lines of a healthy bound run, without the four header lines. */
 		async function attention(): Promise<string[]> {
 			const report = await runStatusReport(cwd, NOW);
-			return report.lines.slice(3);
+			return report.lines.slice(4);
 		}
 
 		beforeEach(async () => {
@@ -923,12 +1010,13 @@ describe("runStatusReport", () => {
 			expect(await attention()).toEqual(["attention:", line]);
 		});
 
-		test("a probe that throws, and a marker without a database, are said and skipped respectively", async () => {
+		test("a probe that throws is said; a marker without a database is not probed, and is an attention item", async () => {
 			probe = new Error("bd could not be run");
 			expect(await attention()).toEqual(["attention:", "- store probe failed: bd could not be run"]);
 			await seed(JSON.stringify({ schema_version: 1, run_id: "orc-7", session_id: SESSION }));
 			probeCalls.length = 0;
-			expect(await attention()).toEqual(["attention: none"]);
+			expect(await attention()).toEqual(["attention:", "- marker names no beads_dir: isolated copies cannot reach the run's database; /orchestrate-start orc-7 records it"]);
+			expect((await runStatusReport(cwd, NOW)).lines[3]).toBe("store: none recorded on the marker");
 			expect(probeCalls).toEqual([]);
 		});
 
@@ -1007,18 +1095,21 @@ describe("runStatusReport", () => {
 
 describe("registerRunCommands", () => {
 	type Handler = (args: string, ctx: unknown) => Promise<void>;
-
-	function rig(onActivate?: (cwd: string) => Promise<unknown>, deps?: Partial<AnswerDeps>) {
+	function rig(onActivate?: (cwd: string) => Promise<unknown>, deps?: Partial<AnswerDeps>, seat?: () => string) {
 		const handlers = new Map<string, Handler>();
 		const notices: Array<[string, string]> = [];
+		const sent: Array<Record<string, unknown>> = [];
 		const pi = {
 			registerCommand: (name: string, spec: { handler: Handler }) => {
 				handlers.set(name, spec.handler);
 			},
+			sendMessage: (message: Record<string, unknown>) => {
+				sent.push(message);
+			},
 		} as unknown as ExtensionAPI;
 		registerRunCommands(pi, onActivate, deps);
 		const ctx = {
-			sessionManager: { getCwd: () => cwd, getSessionId: () => SESSION },
+			sessionManager: { getCwd: seat ?? (() => cwd), getSessionId: () => SESSION },
 			ui: { notify: (text: string, level: string) => notices.push([level, text]) },
 		};
 		const command = (name: string) => {
@@ -1034,6 +1125,7 @@ describe("registerRunCommands", () => {
 			answer: command("orchestrate-answer"),
 			stop: command("orchestrate-stop"),
 			notices,
+			sent,
 		};
 	}
 
@@ -1041,10 +1133,12 @@ describe("registerRunCommands", () => {
 		expect(rig().registered).toEqual(["orchestrate-start", "orchestrate-resume", "orchestrate-status", "orchestrate-answer", "orchestrate-stop"]);
 	});
 
+	const USAGE = 'usage: /orchestrate-start [<epic-id> | --new "<title>"] [--store <path>]';
 	test.each([
-		["start", "--new", 'usage: /orchestrate-start <epic-id> | --new "<title>"'],
-		["start", "orc-7 orc-8", 'usage: /orchestrate-start <epic-id> | --new "<title>"'],
-		["start", "--bogus", 'usage: /orchestrate-start <epic-id> | --new "<title>"'],
+		["start", "--new", USAGE],
+		["start", "orc-7 orc-8", USAGE],
+		["start", "--bogus", USAGE],
+		["start", "orc-7 --store", USAGE],
 		["answer", "orc-7", "usage: /orchestrate-answer <bead> <text>"],
 		["answer", "", "usage: /orchestrate-answer <bead> <text>"],
 		["stop", "orc-7", "usage: /orchestrate-stop [--force]"],
@@ -1057,20 +1151,54 @@ describe("registerRunCommands", () => {
 		expect(probeCalls).toEqual([]);
 	});
 
-	test("/orchestrate-start with an epic: one notice with the run, the lease, the landing mode, then the readiness hook", async () => {
+	test("/orchestrate-start with an epic: one notice with the run, the store, the lease, the landing mode, the lead's three sentences, then the readiness hook; the lead contract goes to the model", async () => {
 		landingRecord = { ok: true, level: "info", notice: "landing mode direct for o/r (main): auto-merge off, required checks none", caps: {} as never };
 		const seen: Array<string | null> = [];
-		const { start, notices } = rig(async hookCwd => {
+		const { start, notices, sent } = rig(async hookCwd => {
 			seen.push((await readActiveRun(hookCwd))?.run_id ?? null);
 		});
 		await start("orc-7");
 		expect(notices).toEqual([["info", [
 			"orchestrate run bound: orc-7",
+			`store: ${join(cwd, ".beads")} (checkout)`,
 			"lead lease stamped",
 			"landing mode direct for o/r (main): auto-merge off, required checks none",
+			...leadSummary("orc-7"),
 		].join("\n")]]);
 		expect(seen).toEqual(["orc-7"]);
 		expect((await readActiveRun(cwd))?.beads_dir).toBe(join(cwd, ".beads"));
+		expect(sent).toEqual([{ customType: LEAD_CONTRACT_MESSAGE, content: leadContract("orc-7"), display: false, attribution: "user" }]);
+		expect(leadContract("orc-7")).toContain("spawn orc-architect");
+	});
+
+	test("/orchestrate-start --store <path> binds the named store and records it as explicit", async () => {
+		const elsewhere = join(cwd, "shared", ".beads");
+		const { start, notices } = rig();
+		await start(`orc-7 --store ${elsewhere}`);
+		expect(notices[0]?.[1]).toContain(`store: ${elsewhere} (explicit)`);
+		expect(await readActiveRun(cwd)).toMatchObject({ beads_dir: elsewhere, store_origin: "explicit" });
+	});
+
+	test("/orchestrate-status and /orchestrate-stop from a linked worktree act on the primary's run", async () => {
+		const linked = join(cwd, "..", `${cwd.split("/").pop()}-linked`);
+		const git = (args: string[]) => execFileAsync("git", ["-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, timeout: 5000 });
+		await git(["init", "-q", "-b", "main"]);
+		await writeFile(join(cwd, ".gitignore"), ".orchestration/\n");
+		await git(["add", ".gitignore"]);
+		await git(["commit", "-q", "-m", "init"]);
+		await git(["worktree", "add", "-q", "-b", "feature", linked]);
+		try {
+			await seed(bound("orc-7"));
+			epic("orc-7", "in_progress", { assignee: LEAD, metadata: LIVE });
+			const { status, stop, notices } = rig(undefined, undefined, () => linked);
+			await status();
+			expect(notices.at(-1)?.[1]).toContain(`run: bound to orc-7 (marker ${markerPath(cwd)}`);
+			await stop();
+			expect(notices.at(-1)?.[1]).toContain("orchestrate run orc-7 stopped; marker removed");
+			expect(await readActiveRun(cwd)).toBeNull();
+		} finally {
+			await rm(linked, { recursive: true, force: true });
+		}
 	});
 
 	test('/orchestrate-start --new "<title>" quotes the title whole, reports creation', async () => {
@@ -1104,10 +1232,12 @@ describe("registerRunCommands", () => {
 		await start("orc-7");
 		expect(notices).toEqual([["warning", [
 			"orchestrate run bound: orc-7",
+			`store: ${join(cwd, ".beads")} (checkout)`,
 			"store slow: one read took 2500 ms",
 			"lead lease not stamped: store locked",
 			"epic not stamped: store locked",
 			"landing capabilities not recorded on orc-7: not probed in this test; the sweep lands directly on CLEAN",
+			...leadSummary("orc-7"),
 			"readiness check failed: omp config unreadable",
 		].join("\n")]]);
 		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
@@ -1124,7 +1254,7 @@ describe("registerRunCommands", () => {
 			hooked += 1;
 		});
 		await resume();
-		expect(notices).toEqual([["info", "orchestrate run orc-7 adopted from lead:session-old\nclaims: 1 released (orc-7.1), 1 kept"]]);
+		expect(notices).toEqual([["info", ["orchestrate run orc-7 adopted from lead:session-old", "claims: 1 released (orc-7.1), 1 kept", ...leadSummary("orc-7")].join("\n")]]);
 		expect(hooked).toBe(1);
 
 		epic("orc-7", "in_progress", { assignee: "lead:session-old", metadata: LIVE });
@@ -1139,10 +1269,10 @@ describe("registerRunCommands", () => {
 		store = null;
 		const { resume, notices } = rig();
 		await resume();
-		expect(notices).toEqual([["warning", "orchestrate run orc-7 adopted from no recorded lead\nmarker migrated to schema 1\nin-flight claims could not be read; none released"]]);
+		expect(notices).toEqual([["warning", ["orchestrate run orc-7 adopted from no recorded lead", "marker migrated to schema 1", "in-flight claims could not be read; none released", ...leadSummary("orc-7")].join("\n")]]);
 	});
 
-	test("/orchestrate-status prints the report at the level its health warrants", async () => {
+	test("/orchestrate-status prints the report at the level its health warrants, and warns when the marker names no store", async () => {
 		const { status, notices } = rig();
 		await status();
 		expect(notices.at(-1)).toEqual(["warning", `no active run: ${markerPath(cwd)} is absent; /orchestrate-start starts one`]);
@@ -1150,10 +1280,16 @@ describe("registerRunCommands", () => {
 		epic("orc-7", "in_progress", { assignee: LEAD, metadata: LIVE });
 		await status();
 		expect(notices.at(-1)?.[0]).toBe("info");
+		expect(notices.at(-1)?.[1]).toContain(`store: ${join(cwd, ".beads")}`);
 		expect(notices.at(-1)?.[1]).toEndWith("attention: none");
+		await seed('{"schema_version":1,"run_id":"orc-7","session_id":"session-t"}');
+		await status();
+		expect(notices.at(-1)?.[1]).toContain("store: none recorded on the marker");
+		expect(notices.at(-1)?.[1]).toContain("- marker names no beads_dir: isolated copies cannot reach the run's database; /orchestrate-start orc-7 records it");
 	});
 
 	test("/orchestrate-answer <bead> <text>: the text is everything after the id, and the hold's fate is reported", async () => {
+		await seed(bound("orc-7"));
 		epic("orc-7.1", "blocked", { assignee: "impl-1", dependencies: [{ id: "orc-g1", issue_type: "gate", status: "open", await_type: "human" }] });
 		comments["orc-7.1"] = [{ text: "ASK orc-7.1 which?", author: "impl-1" }];
 		const wakes: string[] = [];
