@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { DISPATCH_CONTRACT } from "../src/contract";
 import grammar from "../src/contracts/grammar.json";
 import { commentVerbNotice } from "../src/gates/bd";
 import { type BdInvocation, bdInvocations } from "../src/shell";
@@ -24,6 +25,8 @@ function noticeOn(text: string): string | undefined {
 }
 
 const declared = grammar.verbs.map(entry => entry.verb);
+const writable = grammar.verbs.filter(entry => !entry.writers.includes("extension")).map(entry => entry.verb);
+const extensionOnly = declared.filter(verb => !writable.includes(verb));
 
 test("the live protocol table documents exactly the declared verbs", () => {
 	const reference = readFileSync(join(ROOT, "skills/orchestrate/references/message-grammar.md"), "utf8");
@@ -33,10 +36,31 @@ test("the live protocol table documents exactly the declared verbs", () => {
 	expect(documented).toEqual(new Set(declared));
 });
 
+describe("the dispatch contract", () => {
+	// The contract is the one copy a worker reads without opening grammar.json, so its
+	// list is asserted against the grammar by construction rather than by a count typed
+	// beside it: a verb added to one and not the other fails here, in either direction.
+	const sentence = /Verbs you may write \((\d+)\): ([A-Z_ \n]+?)\./.exec(DISPATCH_CONTRACT);
+	const listed = (sentence?.[2] ?? "").split(/\s+/).filter(token => token.length > 0);
+
+	test("lists exactly the verbs an agent may write, in the grammar's order", () => {
+		expect(listed).toEqual(writable);
+		expect(Number(sentence?.[1])).toBe(writable.length);
+	});
+
+	test("names the full set and the extension's share by the grammar's counts", () => {
+		expect(DISPATCH_CONTRACT).toContain(`The full set of ${declared.length} lives in`);
+		const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+		expect(DISPATCH_CONTRACT).toContain(`The other ${words[extensionOnly.length]} are the extension's`);
+	});
+
+	test("never hands an agent an extension verb", () => {
+		for (const verb of extensionOnly) expect(listed).not.toContain(verb);
+	});
+});
+
 describe("the gate", () => {
-	test("admits every declared verb, prefix pairs included", () => {
-		// BOUNCE is a prefix of BOUNCED. Comparing the sets as text would not catch a
-		// normalisation change that lets the shorter one shadow the longer.
+	test("admits every declared verb", () => {
 		for (const verb of declared) {
 			expect({ verb, notice: noticeOn(`${verb} something happened`) }).toEqual({ verb, notice: undefined });
 		}
@@ -45,9 +69,11 @@ describe("the gate", () => {
 	test("refuses a token no grammar entry defines", () => {
 		// The shapes a cut verb leaves behind, and the near-misses of live ones. Each
 		// must nag: a stale verb that still passes is a contract nothing can review.
-		// BRIEF is here because it is the one verb the deleted regex admitted with no use
-		// site anywhere in this repository: the single place the acceptance set narrowed.
-		for (const token of ["ACK", "DONE", "OK", "PROGRESS", "REVIEWED", "NO", "WORK", "CLAIM", "WAIT", "BRIEF"]) {
+		// NO_WORK is the yield token, not a comment: an empty queue leaves no bead to
+		// write on, so a comment leading with it is a slip the gate must name.
+		const retired = ["ADVICE", "CONFLICT", "IDLE", "LOCAL_DECISION", "BOUNCE", "RECLAIM", "NO_WORK"];
+		const nearMisses = ["ACK", "DONE", "OK", "PROGRESS", "REVIEWED", "NO", "WORK", "CLAIM", "WAIT", "BRIEF"];
+		for (const token of [...retired, ...nearMisses]) {
 			expect({ token, fires: noticeOn(`${token} something happened`) !== undefined }).toEqual({
 				token,
 				fires: true,
@@ -57,7 +83,7 @@ describe("the gate", () => {
 });
 
 describe("the verbs with a use site", () => {
-	test("every verb a role contract requires is declared, and the gate admits it", () => {
+	test("every verb a role contract requires is declared, writable, and admitted by the gate", () => {
 		// Nagging one of these would nag the comment that satisfies the contract demanding
 		// it, which is how an advisory teaches agents to ignore it.
 		const required = new Set<string>();
@@ -71,9 +97,9 @@ describe("the verbs with a use site", () => {
 		// The predicates are the point: an empty set would make this pass vacuously.
 		expect(required.size).toBeGreaterThan(0);
 		for (const verb of required) {
-			expect({ verb, declared: declared.includes(verb), notice: noticeOn(`${verb} done`) }).toEqual({
+			expect({ verb, writable: writable.includes(verb), notice: noticeOn(`${verb} done`) }).toEqual({
 				verb,
-				declared: true,
+				writable: true,
 				notice: undefined,
 			});
 		}

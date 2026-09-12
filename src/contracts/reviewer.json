@@ -11,7 +11,7 @@
   },
   "escape": {
     "state": "blocked",
-    "require": "comment.verb in [FAILED, BLOCKED]"
+    "require": "comment.verb in [FAILED, BLOCKED, ASK]"
   },
   "bounce": { "max_attempts": 3 }
 }

@@ -2,8 +2,8 @@
  * omp-orchestrate — Beads-backed multi-agent orchestration for OMP.
  *
  * Registers one `tool_call` handler, the worker-side protocol injection, and the
- * slash commands. Everything else this plugin contributes — the skill, the
- * agents, the formulas — is data OMP discovers from the package tree.
+ * slash commands. Everything else this plugin contributes — the skill and the
+ * agents — is data OMP discovers from the package tree.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";

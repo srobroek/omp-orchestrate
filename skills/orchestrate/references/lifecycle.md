@@ -1,22 +1,22 @@
 # Lifecycle: states, dispatch, wakes, review, supervision, ambiguity, cleanup
 
-Agent lifetime and bead state share one vocabulary, tracked on the bead:
-`bd set-state <bead> state=<name> --reason "<why>"` plus bead status per the mapping table in
-`references/beads-store.md`.
+Agent lifetime and bead state share one vocabulary, tracked on the bead: `status`,
+`assignee` and labels hold the state, and one comment verb records each transition. The
+phase table in `references/beads-store.md` says how a reader derives the finer phase.
 
 ## State diagram
 
 ```
                  ┌────────── ASK (question) ──► waiting_human ──(answer)──┐
                  │                                                         ▼
-pending ─ready─► working ─(BLOCKED wisp→researcher ADVICE)─► working ─► reported ─► in_review
+pending ─ready─► working ─(BLOCKED wisp→researcher NOTE)─► working ─► reported ─► in_review
    ▲ pulled +                                                               │
    │ scope disjoint                             changes_requested ◄─────────┤ verdict=changes
    │                                                    │                   │ verdict=approve
    └──────────── deps closed + scope free ──────────────┘                   ▼
                                                                          approved
                                              git: merge bead → shepherd   │ non-git: evidence accepted
-                                    CONFLICT ─► working (rebase)          │
+                          BOUNCED reason=conflict ─► working (rebase)     │
                                                  │                        ▼
                                                  └────────► merged ───► dismissed
                                             (any state) ───────────────► failed
@@ -33,22 +33,22 @@ never stored as a bead state.
 | `ready → working` | a worker pulls it: `bd ready … --claim` returns the bead, atomically and first-wins, and the worker adopts what it was given |
 | `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED`, then releases with a single `bd update <id> --assignee ""`. The release comes last: it clears the ownership every other write on the bead is checked against, and only the terminal comment is admitted after it. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
 | `reported → in_review` | the architect collects the successful terminal task result, verifies the captured branch and head, integrates it, then creates review-wisp shells. A pre-yield report alone is not capture proof |
-| `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with `ADVICE` |
+| `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with a `NOTE` on the node |
 
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
 | `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead; the shepherd claims it, proves CI and the bot round, serializes on the merge slot, merges, stamps, releases, closes |
-| `approved → dismissed` | non-git evidence only: the architect records the accepted evidence, sets `state=dismissed`, and closes |
-| `waiting_human` | an agent raised `ASK`. The question is recorded on the bead and the bead is held. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
-| `waiting_gate` | only an external machine gate remains (CI, a release workflow, a bot round). The bead is parked with the awaited identifier and a resume instruction, and nobody polls it |
-| `failed` | unrecoverable: `state:failed` plus status `blocked`, with the error recorded and surfaced |
+| `approved → dismissed` | non-git evidence only: the architect records the accepted evidence and closes with `--reason dismissed` |
+| `waiting_human` | an agent raised `ASK` on the bead and set its status `blocked`. The question is recorded in that comment. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
+| `waiting_gate` | only an external machine gate remains (CI, a release workflow, a bot round). A gate bead blocks the work bead, `BLOCKED` names it and how to resume, the claim is released, and nobody polls it |
+| `failed` | unrecoverable: status `blocked` plus a `FAILED` comment, with the error recorded and surfaced |
 The lead has the same terminal duty as a claimed worker: it must finish or explicitly terminate every held bead before its session settles. Because the lead has no `yield` tool, G4 cannot intercept an incomplete final turn; the lead-exit watch checks the bound run and claim state after `agent_end`, then gives the lead up to three follow-ups when its final text has no terminal grammar verb. The lead must finish the held work and end with a terminal verb, or write `ESCALATED`/`BLOCKED` with the reason required by the grammar.
 
 Review and escalation evidence is version-bound when either endpoint names a version.
-Stamp `head_sha=<value>` and `review_round=<value>` on linked-node `REVIEW`/`ADVICE`
+Stamp `head_sha=<value>` and `review_round=<value>` on linked-node `REVIEW`/`NOTE`
 comments using the claimed wisp's fields, falling back per field to the linked node.
 Omit a token only when neither endpoint carries it.
 
-An answered escalation ends only after the researcher verifies both `ADVICE` writes,
+An answered escalation ends only after the researcher verifies both `NOTE` writes,
 closes and releases its wisp, then notifies the architect. The architect collects
 the paused worker's actual terminal result and any successful capture. Resuming
 unfinished work requires exclusive-window reconciliation of its retained claim;
@@ -80,11 +80,19 @@ commit, a placeholder branch, or a fake merge requirement.
 ### Review and merge handoff
 
 After verifying terminal capture and integrating branches, the architect creates all
-required review-wisp shells before dispatch and opens the draft PR. Choose dimensions
-for material risks and project policy, not a mandatory specialist roster. Reviewers
-remain independent. The final approving reviewer closes the final wisp and makes the PR ready.
+required review-wisp shells before dispatch and opens the PR as a draft. Choose dimensions
+for material risks and project policy, not a mandatory specialist roster. Reviewers remain
+independent.
 
-For CHANGES, follow `mol-land-branch`'s `collect-verdicts` route:
+Two edges hold the handoff:
+
+- The draft is the interlock. The merge eligibility probe ignores drafts, so nothing can
+  land before review.
+- Readiness follows every required verdict, never a fix round alone. The final approving
+  reviewer closes the final wisp and makes the PR ready; that edge keeps an unreviewed PR
+  from going ready.
+
+For CHANGES:
 
 1. Collect every required dimension's verdict at the current head and review round.
    Any `changes` verdict requires a fix round; preserve the union of actionable findings.
@@ -97,8 +105,8 @@ For CHANGES, follow `mol-land-branch`'s `collect-verdicts` route:
 4. Dispatch a fresh implementer to pull its queue, never activate it with a bead-id
    message. A changed head starts a new review round.
 
-`changes_requested` records the review disposition, not readiness to claim.
-Its mapped `in_progress` status stays out of `bd ready` until the explicit reopen.
+A `REVIEW … verdict=changes` comment records the review disposition, not readiness to
+claim. The node stays `in_progress` and out of `bd ready` until the explicit reopen.
 
 Create the merge bead with label `pr:merge`, metadata `role=shepherd`, and no parent.
 Do not use type `merge-request`: it is a ready-filter alias, not a creatable type.
@@ -122,8 +130,9 @@ a provider. The request tool accepts only allowlisted commands, verifies the exa
 and uses provider/mode/head markers for replay-safe deduplication. The tool does not lock
 GitHub comments, so the architect serializes calls under sole PR-update ownership. The
 shepherd requires the probe's request marker for each configured provider and probes that
-provider separately. An absent, pending or stale result stays IDLE for ten minutes from
-`requestedAt`; after ten minutes without provider evidence, record BLOCKED. Missing
+provider separately. For ten minutes from `requestedAt`, an absent, pending or stale result
+is a wait: the shepherd records BLOCKED naming the provider and releases; after ten minutes
+without provider evidence, BLOCKED names the missing evidence instead. Missing
 markers or timestamps are BLOCKED. Manual requests, clean verdicts and external waits do
 not increment remediation rounds.
 
@@ -139,14 +148,16 @@ Before creating a fix bead, call `orc_review_round_policy` with total completed 
 and only issues actionable in the current exact-head round. A `decision=escalate`
 result produces ESCALATED instead of another fix. An invalid result is BLOCKED. The
 escalation record names the exhausted bound, completed rounds, issue identities,
-attempts, prior heads, fix beads, thread URLs, one human question and the resume
-transition. Set `state=waiting_human`, release the merge slot, preserve the PR and
-feature tree, and notify `Main` through `hub` with only the merge bead id. No unrelated
-queue waits.
+attempts, prior heads, fix beads, thread URLs, and the `ASK` fields: one human question,
+its impact and the resume transition. Set the merge bead's status to `blocked`, release
+the merge slot, preserve the PR and feature tree, and notify `Main` through `hub` with only
+the merge bead id. No unrelated queue waits.
 
 When both limits permit a fix, the shepherd records BOUNCED, creates one unassigned fix
-bead for the aggregated round, and wakes the owning architect with the bead id. The
-architect dispatches a fresh implementer through the queue. After capture, the architect
+bead for the aggregated round, and wakes the owning architect with the bead id. When two
+shepherds raced and both created one, the oldest open fix bead stands and the newer closes
+as a duplicate. The architect dispatches a fresh implementer through the queue. After
+capture, the architect
 integrates and pushes the fix, increments `bot_rounds_completed` once, increments each
 addressed issue count once, replies where a rejection needs evidence, resolves addressed
 threads with GitHub's `resolveReviewThread` mutation, and reads back `isResolved=true`.
@@ -207,8 +218,8 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    liveness, and whether the patrol is armed; or `bd list --type epic --json`, matched on
    `metadata.run_id`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
-   the actor in `assignee`, the location in `metadata.worktree`/`branch`, and the
-   fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`.
+   the actor in `assignee`, the location in `metadata.worktree`/`branch`, and its last
+   verb in `bd comments`. Confirm every stamped checkout with `wt list --format=json`.
 3. If a stamped path is missing or the runtime root mismatches, execute
    `planning.md`'s **Canonical checkout recovery** in one explicit exclusive
    claim/dispatch/branch-writer window. Inventory the owning epic's stamped branch/path
@@ -292,8 +303,8 @@ Age is a diagnostic, not proof of death. `bd stale --status in_progress` may pro
 candidates, but there is no lease expiry and no daemon. Never steal a claim because a
 timestamp is old.
 
-1. Read the bead, its comments, the audit trail (`.beads/interactions.jsonl` plus
-   `<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog`, skipping rows tagged
+1. Read the bead, its comments, the ledger
+   (`<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog`, skipping rows tagged
    `foreign_store`), the actor handle, the branch or worktree, and the last verification
    evidence.
 2. Establish holder death, then an exclusive recovery window: all claim, dispatch and
@@ -309,12 +320,11 @@ timestamp is old.
    failure.
 3. Preserve the worktree, the captured branch, artifacts, comments, and external resource
    references. Do not sweep them during recovery.
-4. Only while that exclusive window remains held, record the recovery with a bead comment
-   and `orc.recover` audit event, then release and reopen:
+4. Only while that exclusive window remains held, record the recovery as a `NOTE` on the
+   bead naming the dead holder and the evidence, then release and reopen:
 
 ```
 bd update <bead> --assignee "" --status open
-bd set-state <bead> state=pending --reason "dead claim verified; redispatch"
 ```
 
 5. Restore one compatible `role=<role>` key -- the architect that owns the epic, or the lead,
@@ -323,7 +333,8 @@ bd set-state <bead> state=pending --reason "dead claim verified; redispatch"
 
 If holder death or exclusivity is uncertain, preserve the assignment and every branch,
 report recovery unresolved, and record a revisit trigger. Do not execute a blind release.
-A contested claim runs `mol-dead-claim-recovery`; its human gate does not replace exclusion.
+A contested claim is held behind a `human` gate that the lead alone resolves; the gate does
+not replace exclusion.
 
 ## Failure propagation
 
@@ -380,17 +391,32 @@ resume: <exact state transition, gate action, and actor to wake>
 ```
 
 Every field is nonempty. The question cannot delegate discovery back to the human or ask for
-general approval. Record `orc.ask`; a shepherd review-loop escalation also records
-ESCALATED with the repeated issue evidence. Run `bd set-state <bead> state=waiting_human
---reason "<question summary>"`, and keep status `in_progress`. The resulting
-`state:waiting_human` label is the durable hold. A bead that had not started also receives
+general approval. Then set the hold: `bd update <bead> --status blocked`. Status `blocked`
+plus the `ASK` comment is the durable hold; `bd ready` skips it and no dependent clears. A
+shepherd whose review loop exhausted its limit writes `ESCALATED` carrying these same fields
+instead of a separate `ASK`. A bead that had not started also receives
 `bd gate create --type=human --blocks <bead> --reason "<question>"`.
 
 Nobody polls the human or the held worker. Unrelated ready beads continue. On an answer,
-promote any message into a work-bead comment or decision bead, resolve the human gate when
-one exists, and follow the stored `resume` instruction. A started bead returns to
-`state=working`, status `in_progress`. An unstarted bead returns to `state=pending`, status
-`open`, and normal dispatch.
+promote it into a work-bead comment or decision bead, resolve the human gate when one
+exists, and follow the stored `resume` instruction: reopen the bead unassigned with
+`bd update <bead> --status open --assignee ""`. Normal dispatch re-offers it, and the next
+claimant reads the answer on the bead.
+
+## Ordering and waits are bead primitives
+
+No step list or poured molecule carries the process. Two invariants replace what one might
+have enforced:
+
+- **Ordering is an edge on the work bead.** Any "X before Y" the process needs is
+  `bd dep add <Y> <X>` between real work beads; no step beads exist beside them. Check:
+  `bd list --status all --json` holds no `issue_type: molecule` this run created, and
+  `orc_run_status` reports zero orphans from it.
+- **An external wait is a gate on the bead that waits.** CI, PR and human waits are
+  `bd gate create --type=<kind> --blocks <work bead>`, created by the actor that discovered
+  the wait. `bd gate check --type=gh` runs at the top of each shepherd patrol until the
+  landing design removes the CI gate. Timer semantics live in the plugin sweep, never in a
+  timer gate.
 
 ## Waiting on an external machine gate
 
@@ -398,14 +424,15 @@ The same rule applies when the wait is on a machine rather than a person: a CI r
 release workflow, a release PR's checks, a review bot's round, or a long-running reviewer.
 Nobody polls it and nobody holds a session open for it.
 
-Park the bead instead. Record what is awaited with `bd set-state <bead> state=waiting_gate
---reason "<what is awaited and how to resume>"`, add `bd gate create --type=gh:run --blocks
-<bead> --await-id <run-id>` for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR,
-then release the phase-one claim with `bd update <bead> --status open --assignee ""`. Continue
-unrelated beads from `bd ready`. When nothing else is ready and only external waits remain,
-write the run report and exit; the gate bead and the next pass own the wait. `bd gate check`
-plus `bd ready --gated` is how the cleared gate is discovered, after which ordinary
-`bd ready --claim` acquires the reopened bead.
+Park the bead instead. Add `bd gate create --type=gh:run --blocks <bead> --await-id <run-id>`
+for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR, comment `BLOCKED` naming the
+gate bead and how to resume, then release the phase-one claim with
+`bd update <bead> --status open --assignee ""`. The gate bead is the hold: `bd ready` hides
+the work bead until the gate resolves. Continue unrelated beads from `bd ready`. When
+nothing else is ready and only external waits remain, write the run report and exit; the
+gate bead and the next pass own the wait. `bd gate check` plus `bd ready --gated` is how the
+cleared gate is discovered, after which ordinary `bd ready --claim` acquires the reopened
+bead.
 
 Two campaign runs violated this on their final release bead: each polled a release workflow
 and a package-executing reviewer until the stream aborted, leaving that bead `in_progress`
@@ -415,13 +442,13 @@ stream.
 
 ## Reversible local defaults, revisit, and late evidence
 
-Before applying a reversible bead-local default, write a provisional `LOCAL_DECISION`
+Before applying a reversible bead-local default, write a provisional `NOTE decision`
 comment using the contract in `references/beads-store.md`. Its objective `revisit` trigger
 defines when the default becomes stale. A choice affecting another bead, agent, package,
 shared contract, ordering rule, or later work uses a decision bead instead.
 
 At the recorded trigger, the owner re-reads the cited evidence before any further use of the
-default, then supersedes the provisional comment with an accepted `LOCAL_DECISION`, creates
+default, then supersedes the provisional comment with an accepted `NOTE decision`, creates
 a decision bead, or enters `waiting_human`. Routing changes only while the bead is
 unassigned.
 
@@ -431,8 +458,8 @@ supersession. Duplicate, conflicting, superseded, and partially linked decisions
 deterministic rules in `references/decisions.md`; chronology alone never selects policy.
 
 Restart recovery reads work-bead comments, decision beads, their dispositions and links, and
-`state:waiting_human` before resuming anything. Wisps and artifacts supply coordination and
-evidence only -- an unpromoted material message is not replay authority.
+every `blocked` bead carrying `ASK` before resuming anything. Wisps and artifacts supply
+coordination and evidence only -- an unpromoted material message is not replay authority.
 
 Late evidence follows the same revisit flow. If the affected bead is closed, append the
 evidence and disposition to that closed bead or its decision bead. When behaviour must
@@ -503,8 +530,8 @@ bd create "<what is broken>" --type bug --parent <owning-epic> \
   --metadata '{"role":"implementer","scope":["<glob>"],"execution_kind":"git","origin_bead":"<your-bead>"}' --silent
 ```
 
-Then comment `NOTE` with the new id on your own bead, and record `orc.note`. The history then
-shows how a bead the architect never decomposed arrived under its epic.
+Then comment `NOTE` with the new id on your own bead. The history then shows how a bead the
+architect never decomposed arrived under its epic.
 
 The wake is content-free and last:
 

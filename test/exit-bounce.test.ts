@@ -59,20 +59,30 @@ beforeEach(async () => {
  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
 });
 
-test("released shepherd preserves inherited approval on an exact-head IDLE exit", async () => {
+test("a released shepherd exit with a BLOCKED wait mutates nothing it inherited", async () => {
  bead = {
   id: BEAD,
   status: "open",
   assignee: "",
-  labels: ["orc-merge", "state:approved"],
+  labels: ["orc-merge", "pr:merge"],
   metadata: { role: "shepherd", execution_kind: "git", head_sha: "abc123" },
  };
- comments = [{ text: `IDLE ${BEAD} head_sha=abc123 waiting for merge window` }];
+ comments = [{ text: `BLOCKED ${BEAD} head_sha=abc123 gate=gate-7 waiting for merge window` }];
  const shepherd = { getSystemPrompt: () => ["ORC-ROLE: shepherd"] } as unknown as ExtensionContext;
  expect(await gateExitContract(shepherd)).toBeUndefined();
- expect(bead.labels).toContain("state:approved");
+ expect(bead.labels).toEqual(["orc-merge", "pr:merge"]);
  expect(bead.assignee).toBe("");
  expect(issued).toEqual([]);
+});
+
+test("a held bead is a valid exit: status blocked plus ASK, claim retained", async () => {
+ // The human hold has one carrier. Without ASK in the escape clause the worker that
+ // parked its bead correctly would be refused for lacking REPORTED.
+ bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git" } };
+ comments = [{ text: `ASK ${BEAD} question: which API?` }];
+ expect(await gateExitContract(CTX)).toBeUndefined();
+ comments = [{ text: `NOTE ${BEAD} leaning towards the old API` }];
+ expect((await gateExitContract(CTX))?.block).toBe(true);
 });
 
 describe("G4 activation refusal budget", () => {
@@ -147,7 +157,7 @@ describe("G4 checked evidence", () => {
   linked = null;
   const shepherd = { getSystemPrompt: () => ["ORC-ROLE: shepherd"] } as unknown as ExtensionContext;
   expect((await gateExitContract(shepherd))?.block).toBe(true);
-  comments = [{ text: `IDLE ${BEAD} waiting for merge window` }];
+  comments = [{ text: `BLOCKED ${BEAD} gate=gate-7 waiting for merge window` }];
   bead.assignee = "";
   expect(await gateExitContract(shepherd)).toBeUndefined();
   expect(issued).toEqual([]);
@@ -172,7 +182,7 @@ describe("G4 checked evidence", () => {
   bead = { id: BEAD, ephemeral: true, wisp_type: kind, assignee: "", status: "closed" };
   linked = ["node"];
   linkedBead = { id: "node" };
-  linkedComments = [{ text: kind === "review" ? "REVIEW approved" : "ADVICE use the existing API" }];
+  linkedComments = [{ text: kind === "review" ? "REVIEW approved" : "NOTE use the existing API" }];
   const role = kind === "review" ? "reviewer" : "researcher";
   const ctx = { getSystemPrompt: () => [`ORC-ROLE: ${role}`] } as unknown as ExtensionContext;
   expect(await gateExitContract(ctx)).toBeUndefined();

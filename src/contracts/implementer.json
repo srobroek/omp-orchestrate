@@ -46,7 +46,7 @@
   },
   "escape": {
     "state": "blocked",
-    "require": "comment.verb in [FAILED, BLOCKED]"
+    "require": "comment.verb in [FAILED, BLOCKED, ASK]"
   },
   "pause": [
     "open-escalation-wisp-linked-to-node"

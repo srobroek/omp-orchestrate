@@ -28,7 +28,7 @@ Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop 
        REVIEW <node-id> dimension=<examined dimension> verdict=approve|changes
 
    Apply the injected contract's exact-head/review-round tokens; never reuse historical evidence for another version.
-4. Before changing review lifecycle state, LOAD `skill://orchestrate/references/lifecycle.md`. Close the review wisp as required; the final approving reviewer makes the draft PR ready only after all required review dimensions approve.
+4. Your `REVIEW` comment is the review outcome: nobody stores it again as a label or state. Before closing or releasing the wisp, LOAD `skill://orchestrate/references/lifecycle.md`. Close the review wisp as required; the final approving reviewer makes the draft PR ready only after all required review dimensions approve.
 
 ## Rules
 

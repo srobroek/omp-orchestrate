@@ -24,10 +24,10 @@ Claim errors follow the injected retry/stop rules. Read the claimed bead to choo
 Research node → use its declared evidence mode. Artifacts stay under stamped `artifacts_dir`; comment/external work needs a verifiable reference. Stamp `metadata.output_ref`, add `agent:reviewer`, clear your assignee and comment `REPORTED` under the injected contract.
 
 Escalation wisp → answer the linked node, then complete the escalation:
-1. Write `ADVICE <node-id> <answer and evidence>` on the linked node and the same answer on the wisp. Apply the injected contract's exact-head/review-round tokens to the linked-node advice; historical advice for another version is insufficient.
+1. Write `NOTE <node-id> <answer and evidence>` on the linked node and the same answer on the wisp. Apply the injected contract's exact-head/review-round tokens to the linked-node answer; a historical answer for another version is insufficient.
 2. Verify both comments were stored, then close and release in separate commands:
 
-       bd close <wisp-id> --reason "answered; ADVICE recorded on linked node and wisp"
+       bd close <wisp-id> --reason "answered; NOTE recorded on linked node and wisp"
        bd update <wisp-id> --assignee ""
 
 3. Read back terminal status and released assignee. Notify the owning architect with a content-free `hub` message naming the wisp id. Do not retry a failed send. A still-live requester may receive a courtesy ping, but only the architect coordinates safe replacement/resumption.
@@ -43,5 +43,5 @@ Use bash only for evidence and Beads duties; its file-mutation capability does n
 
 ## Output
 
-Begin your reply with `VERDICT: REPORTED|ADVISED|BLOCKED|NO_WORK — <reason>`.
-CAP 100w. Cite the artifact or advice; never reprint code, diffs, file contents, the assignment or bead history.
+Begin your reply with `VERDICT: REPORTED|NOTE|BLOCKED|NO_WORK — <reason>`.
+CAP 100w. Cite the artifact or the answer; never reprint code, diffs, file contents, the assignment or bead history.

@@ -89,7 +89,7 @@ export function orcRole(ctx: ExtensionContext): OrcRole | undefined {
  * exit contract — `reviewer.json` requires `linked.comment.verb in [REVIEW,
  * BLOCKED]`, `researcher.json` requires a `REPORTED` comment plus
  * `metadata.output_ref`, and `shepherd.json` requires
- * `comment.verb in [LANDED, BOUNCED, CONFLICT, IDLE, BLOCKED]`. Since `BD_READONLY=1` blocks
+ * `comment.verb in [LANDED, BOUNCED, ESCALATED, BLOCKED]`. Since `BD_READONLY=1` blocks
  * `bd comment`, sandboxing any of them would make their contracts unsatisfiable and
  * every worker would bounce.
  */
