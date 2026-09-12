@@ -116,8 +116,25 @@ hand is never observed. G6 and the contract injection require the pinned run its
 
 ## Rules
 
-Before a command runs, four TTSR rules in `rules/` check its arguments for protocol slips.
-Each rule is advisory or tool-only, never a security boundary.
+Five TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
+reminder on a protocol slip. None is a security boundary.
+
+The host matches the raw tool-argument JSON as the model streams it (`session/ttsr-coordinator.ts`,
+`export/ttsr.ts` in the pinned `@oh-my-pi/pi-coding-agent`). Consequences for rule authors:
+
+- Each `toolcall_delta` appends the provider's `partial_json` to a per-call buffer. Every condition runs against the whole buffer again.
+- Only `edit` and `write` expose a `matcherDigest` with the file content. `bash`, `eval`, `task`, and `hub` match the argument JSON itself.
+- A bash rule therefore sees `{"command":"bd ready …"}`. `bd` follows `"`. A shell newline is the two characters `\n`. A quote is `\"`. `^` never precedes a command.
+- Anchor on `\b` or on the `\n`/`\t` escape. "Same line" ends at the next `\n` escape or the closing `"`.
+- A rule that asserts a key is absent (`orc-spawn-isolated`) must wait for the object to close. Until the last delta the buffer is a prefix.
+
+`interruptMode` sets the cost of a match. `never` lets the call run and folds the rule
+text into its result. `tool-only` aborts the assistant message, discards it, injects the
+rule, and continues. Either way a rule fires once per session (`repeatMode: once`). The
+`bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
+harmless (an empty queue, a doomed process) and the reminder arrives with the result.
+`orc-spawn-isolated` uses `tool-only`, because its reminder is useless after the worker
+has run.
 
 The run pins one absolute `BEADS_DIR` to its embedded database. G1 uses that process-local
 pin and a valid marker in the session checkout or pinned repository before sandboxing a
@@ -125,9 +142,11 @@ generic helper. Each copied checkout inherits the pin. Discovering a local datab
 not share state. G6 and G7 check Beads discipline during a run.
 
 The host has a separate regex engine. Python accepting a pattern does not prove the
-host accepts it. After editing a rule, run `sh scripts/validate-rules.sh`.
-It checks one firing case and one quiet case per rule through `omp ttsr test`.
-This local check needs an installed `omp`, so CI does not run it.
+host accepts it. After editing a rule, run `sh scripts/validate-rules.sh`. It feeds
+`omp ttsr test` the shape the host matches: bash snippets wrapped as
+`{"command":"…"}`, `task` and `hub` argument objects verbatim, including partial
+buffers for the stream-sensitive rule. This local check needs an installed `omp`, so CI
+does not run it.
 
 ## Commands
 
