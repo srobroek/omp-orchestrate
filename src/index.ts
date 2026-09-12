@@ -4,6 +4,10 @@
  * Registers one `tool_call` handler, the worker-side protocol injection, and the
  * slash commands. Everything else this plugin contributes — the skill and the
  * agents — is data OMP discovers from the package tree.
+ *
+ * Every handler opens with `runScope` (`src/run-scope.ts`). Outside a run scope the plugin
+ * spawns no process, writes no file, sends no message and refuses no tool call; the slash
+ * commands, the five tools, the agents and the skill are its whole surface there.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -17,11 +21,12 @@ import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { createLeadExitWatch } from "./gates/lead-exit";
-import { gateBeadWriteFree, pinnedRunActive, rebuildBashInput } from "./gates/readonly";
+import { gateBeadWriteFree, rebuildBashInput } from "./gates/readonly";
 import { gateImplementerIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
+import { runScope } from "./run-scope";
 import { isBoundRunActive, registerRunCommands } from "./run-state";
 import { bdInvocations } from "./shell";
 import { registerSupervision } from "./supervision";
@@ -34,18 +39,6 @@ import { preflightSettings, registerWatchers } from "./watchers";
 
 /** Tools any gate inspects. Everything else returns before doing work. */
 const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true, task: true };
-
-/**
- * Whether this session is under orchestration: it declares an `ORC-ROLE`, or an
- * orchestrate run marks its checkout (G1's predicate, shared through `pinnedRunActive`).
- *
- * Every refusing check below hangs off this. Without it the plugin's mere installation
- * refused `git worktree add` and every edit after a hand-closed bead, in repositories
- * no run ever touched. The role check comes first because it costs no read.
- */
-async function orchestrated(ctx: ExtensionContext): Promise<boolean> {
- return orcRole(ctx) !== undefined || (await pinnedRunActive(ctx.cwd));
-}
 
 export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claims = createClaimState();
@@ -74,11 +67,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  /**
   * One handler for every gate, dispatching on tool name.
   *
+  * The run scope is read once, first: with none, no gate runs and nothing is read. Role
+  * is not an input; a declared `ORC-ROLE` in a checkout no run has marked is a prompt's
+  * claim about itself, not run authority.
+  *
   * Blocking gates run before G1's rewrite, because a handler returns a single
   * result: a refusal must win over a revision of an input that will not run.
-  *
-  * G3, G6, G2, the spawn gate and the in-flight claim mark run only under
-  * orchestration. G5 scopes itself by the session's role, and G1 by its own run read.
   *
   * The whole body is wrapped, because a throwing `tool_call` handler blocks the
   * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`). A bug here
@@ -88,21 +82,19 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   if (GATED_TOOLS[event.toolName] !== true) return undefined;
 
   try {
+   if ((await runScope(ctx)) === null) return undefined;
    resetReadBudget();
    let input = event.input as Record<string, unknown>;
    let inputRevised = false;
 
    if (event.toolName === "yield") return await gateExitContract(ctx, input);
-
-   const scoped = await orchestrated(ctx);
-
-   if (event.toolName === "task") return scoped ? gateImplementerIsolation(input) : undefined;
+   if (event.toolName === "task") return gateImplementerIsolation(input);
 
    // Whether this call claims a bead, whatever else it does. Read after G6, whose
    // actor prefix moves no `--claim`.
    let claiming = false;
 
-   if (event.toolName === "bash" && scoped) {
+   if (event.toolName === "bash") {
     // An isolated copy whose first session_start predates this plugin, or whose store
     // came back with a Worktrunk hook, is repaired before its bd call runs. While the
     // copy still holds a private store, a bd read there answers from the wrong data and
@@ -134,24 +126,21 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     if (claiming && claimInFlight.active()) {
      return { block: true, reason: "a claim is already in flight this turn; wait for its result before claiming again" };
     }
-   }
 
-   if (event.toolName === "bash") {
     const eligibility = await gateClaimEligibility(claims, ctx, input);
     if (eligibility) return eligibility;
    }
 
-   if (scoped && GATED_WRITE_TOOLS[event.toolName] === true) {
+   if (GATED_WRITE_TOOLS[event.toolName] === true) {
     // G2 needs the input: its containment check is on the path the tool
     // names, not only on the cwd the session sits in.
     const scope = await gateWorktreeScope(claims, ctx, event.toolName, input);
     if (scope) return scope;
    }
 
-   // Last, and only for `bash`: G1 reads the active-run marker. A sandboxed helper whose
-   // command edits the sandbox variable is refused; otherwise the call leaves with the
-   // readonly flag added. A missing or invalid marker fails open, while blocking gates
-   // above still win.
+   // Last, and only for `bash`: G1. A sandboxed helper whose command edits the sandbox
+   // variable is refused; otherwise the call leaves with the readonly flag added, while
+   // blocking gates above still win.
    if (event.toolName === "bash") {
     const sandbox = await gateBeadWriteFree(pi, ctx, input);
     if (sandbox?.block) return sandbox;
@@ -180,12 +169,15 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * (`session/messages.ts:654`), and the contract must read as authority rather
   * than as something the model said to itself.
   *
-  * The run is read for one reason only: it is the run gate. The marker's `repo_root`
-  * used to be substituted into the contract for a `bd -C` pin; the copy's redirect makes
+  * The run scope is the gate for both steps. Measured without it: a plain subagent
+  * spawned in this repository received the protocol, obeyed it over its own brief,
+  * pulled an empty queue for a role that does not exist, and yielded NO_WORK -- the
+  * injected text outranked the task it was actually given. The copy's redirect makes
   * every `bd` call reach the run's database, so a worker needs no path per call.
   */
  pi.on("session_start", async (_event, ctx) => {
   if (sessionRole(pi) === "lead") return;
+  if ((await runScope(ctx)) === null) return;
   const adoption = await adoptAtCwd(pi, ctx.cwd);
   if (adoption?.kind === "refused") {
    pi.sendMessage(
@@ -194,11 +186,6 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    );
   }
   if (orcRole(ctx) === undefined) return;
-  // No run, no contract. Measured without this guard: a plain subagent spawned in
-  // this repository received the protocol, obeyed it over its own brief, pulled an
-  // empty queue for a role that does not exist, and yielded NO_WORK -- the injected
-  // text outranked the task it was actually given.
-  if (!(await pinnedRunActive(ctx.cwd))) return;
   pi.sendMessage(
    {
     customType: "com.srobroek.omp-orchestrate.contract",
@@ -212,13 +199,13 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
  // A queue claim names no bead, so its id exists only in the result. Without this the
  // exit contract took its no-bead branch for every session that pulled work normally,
- // and every check that hangs off the claimed bead went unevaluated. Armed only under
- // orchestration: a plain session that claims by hand is not held to G2, G4 or G5.
+ // and every check that hangs off the claimed bead went unevaluated. Armed only inside a
+ // run scope: a plain session that claims by hand is not held to G2, G4 or G5.
  // Awaited: the host holds the result until every handler settles, so a claim resolved
  // from the store is recorded before the next `tool_call` asks about it.
  pi.on("tool_result", async (event, ctx) => {
   claimInFlight.settle(event.toolCallId);
-  if (!(await orchestrated(ctx))) return;
+  if ((await runScope(ctx)) === null) return;
   await observeClaimResult(pi, claims, event);
  });
 
