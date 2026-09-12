@@ -145,11 +145,14 @@ Once the command reports the run, describe the goal to the lead. The lead follow
 
 **Attention** lists what needs you:
 
-- open `ASK` comments on run beads
-- lapsed leases, with their holder
-- `BOUNCED` landings
-- refused adoptions
-- a store probe that is not `free`
+- `ASK <bead> (<author>): <question>` for every open question on a run bead
+- `lead lease lapsed` and `lease lapsed: <bead> held by <holder>`
+- `landing BOUNCED: <merge> (fix <id>)` and `landing BLOCKED: <merge>`
+- `adoption refused`
+- `store locked by <holder>`
+- the last `WARN` from the settings or agent preflight
+
+With nothing open it prints `attention: none`.
 
 For one bead, `bd show <bead>` and `bd comments <bead>` hold its story. Every transition
 is one comment whose first word is a verb: `REPORTED`, `BLOCKED`, `ASK`, `LANDED`.
@@ -173,11 +176,16 @@ bead's state:
 /orchestrate-stop [--force]
 ```
 
-The command reads the run from the marker. While any bead beneath the run epic, at any
-depth, is `in_progress`, it refuses. `--force` skips that check for a run whose beads are
-gone. On success it releases this session's lead lease and removes the marker and its lock
-file `.orchestration/.active-run.lock`. The lead's close-out procedure in the skill comes
-first; stopping is the last step.
+The command reads the run from the marker. It refuses in two cases:
+
+- another session's lead lease is live: `run <epic> is leased to <holder> (lease live until
+  <time>); that lead stops it, or pass --force`
+- any bead beneath the run epic, at any depth, is `in_progress`
+
+`--force` skips both checks and writes `NOTE run stopped with --force` on the epic, naming
+the in-progress beads. On success the command releases this session's lead lease and
+removes the marker and its lock file `.orchestration/.active-run.lock`. The lead's close-out
+procedure in the skill comes first; stopping is the last step.
 
 ## Resume
 
@@ -186,8 +194,9 @@ in the same checkout, started with the overlay. The lease lasts 15 minutes witho
 (`ORC_LEASE_TTL_MS`). The command:
 
 - refuses while the previous lead lease is live, naming the holder and the deadline
-- refuses a marker whose `schema_version` is newer than the plugin's
-- migrates an older marker in place
+- refuses a marker whose schema is newer than the plugin's: `upgrade the plugin before
+  resuming`
+- rewrites an older marker as schema 1 and prints `marker migrated to schema 1`
 - takes over the run once the lease lapses
 - reads every `in_progress` bead beneath the epic and releases each one with a lapsed
   lease, writing `RECOVERED` on it. It names a live lease in the summary and keeps it
@@ -210,17 +219,20 @@ atomically, and a parked architect gets a wake.
 
 ### `/orchestrate-start` refuses
 
-- `another session's run is active`: `/orchestrate-status` names the holder and the lease.
-  Stop it from that session. Once its lease lapses, `/orchestrate-resume` takes it over.
-- `no beads workspace`: run `bd init --stealth --prefix orc` in the checkout.
-- `locked` or `corrupted`: read [Store probe states](#store-probe-states).
+- `a run is already active in this checkout: <epic>, started by session <sid>`: stop it from
+  that session. Once its lead lease lapses, `/orchestrate-resume` adopts it.
+- `no active Beads workspace was found`: run `bd init --stealth --prefix orc` in the
+  checkout.
+- `run not started: the store at <dir> is locked by <holder>` or `is corrupted`: read
+  [Store probe states](#store-probe-states).
 
 ### Refused adoption
 
 `/orchestrate-resume` prints one of three refusals:
 
-- `run epic <id> is leased to <holder>; lease live until <time>`: the previous lead still
-  renews, or its lease has time left. Wait for the deadline or stop that session.
+- `resume refused: run epic <id> is leased to <holder>; lease live until <time>`: the
+  previous lead still renews, or its lease has time left. Wait for the deadline or stop
+  that session. The epic also gets a `NOTE adoption refused` comment.
 - `another lead adopted <id> first`: two sessions resumed at once; the other one leads.
 - `run epic <id> could not be read`: `bd show <id>` fails. Check the store probe.
 
@@ -270,6 +282,8 @@ agents, the skill, and three rules. A run scope exists only while a valid marker
 
 A marker left behind by a finished run keeps the plugin active: it injects the protocol
 into every `orc-*` session and sandboxes generic helpers. `/orchestrate-stop` removes it.
+A marker written by an older plugin version that names no epic reads the same way:
+`/orchestrate-start <epic-id>` adopts it, `/orchestrate-stop` removes it.
 
 ### Worker copies and the redirect
 
