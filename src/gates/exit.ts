@@ -14,7 +14,19 @@ import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdCommentsChecked, bdLinkedChecked, bdShow, commentVerb, metadataString } from "../bd";
+import { logger } from "@oh-my-pi/pi-utils";
+import {
+ type BdBead,
+ bdCommentsChecked,
+ bdLinkedChecked,
+ bdShow,
+ bdShowMany,
+ commentVerb,
+ lastBdFailure,
+ metadataString,
+ readBudgetExhausted,
+ resetReadBudget,
+} from "../bd";
 import { type ClaimObservation, type ClaimState } from "../claim-state";
 import { beadRouting, orcRole } from "../identity";
 
@@ -205,25 +217,66 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
  return false;
 }
 
-/** Null is incomplete evidence, never proof of a failed completion contract. */
-export async function collectExitEvidence(bead: BdBead): Promise<Evidence | null> {
+/**
+ * What a contract reads off the beads linked to the node, so the evaluator can skip the
+ * reads it will never consult.
+ *
+ * `verbs`: some `require` names `linked.comment.verb`, so every linked bead's comments
+ * are read (researcher, reviewer). `escalation`: the contract pauses on an open
+ * escalation wisp, so every linked bead's status is read (architect, implementer). A
+ * contract wanting neither (shepherd, generic) reads no link at all.
+ */
+export interface LinkedEvidenceNeeds {
+ verbs: boolean;
+ escalation: boolean;
+}
+
+const ALL_LINKED_EVIDENCE: LinkedEvidenceNeeds = { verbs: true, escalation: true };
+
+export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
+ const requires = (contract.completion ?? []).map(check => check.require);
+ if (contract.escape?.require !== undefined) requires.push(contract.escape.require);
+ return {
+  verbs: requires.some(predicate => predicate.trim().startsWith("linked.")),
+  escalation: contract.pause?.includes("open-escalation-wisp-linked-to-node") === true,
+ };
+}
+
+/**
+ * Null is incomplete evidence, never proof of a failed completion contract.
+ *
+ * Read cost, with L linked beads: one `comments`, then -- only when `needs` asks for
+ * anything linked -- two `dep list` and one `bd list --id` hydrating every link at
+ * once, then one `comments` per link only when `needs.verbs`. Absent `needs`, everything
+ * is read, which is what a caller judging an unknown contract must do.
+ */
+export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNeeds = ALL_LINKED_EVIDENCE): Promise<Evidence | null> {
  const comments = await bdCommentsChecked(bead.id);
  if (comments === null) return null;
  const verbs = comments.map(comment => commentVerb(comment.text));
  const linkedVerbs: string[] = [];
  let openEscalation = false;
  const direction = linkedEvidenceDirection(bead);
- const visited = new Set<string>();
- for (const type of ["relates-to", "replies-to"]) {
-  const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
-  if (linked === null) return null;
-  for (const linkedId of linked) {
-   if (visited.has(linkedId)) continue;
-   visited.add(linkedId);
+ // An escalation pauses the node it hangs off, so only outgoing links can carry one.
+ const wantEscalation = needs.escalation && direction === "up";
+ if (needs.verbs || wantEscalation) {
+  const linkedIds: string[] = [];
+  for (const type of ["relates-to", "replies-to"]) {
+   const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
+   if (linked === null) return null;
+   for (const linkedId of linked) {
+    if (!linkedIds.includes(linkedId)) linkedIds.push(linkedId);
+   }
+  }
+  const linkedBeads = linkedIds.length === 0 ? new Map<string, BdBead>() : await bdShowMany(linkedIds);
+  if (linkedBeads === null) return null;
+  for (const linkedId of linkedIds) {
+   const linkedBead = linkedBeads.get(linkedId);
+   if (linkedBead === undefined) return null;
+   if (wantEscalation) openEscalation ||= isOpenEscalation(linkedBead);
+   if (!needs.verbs) continue;
    const linkedComments = await bdCommentsChecked(linkedId);
    if (linkedComments === null) return null;
-   const linkedBead = await bdShow(linkedId);
-   if (linkedBead === null) return null;
    const version = ["head_sha", "review_round"].map(key => {
     const value = bead.metadata?.[key] ?? linkedBead.metadata?.[key];
     return { key, value: typeof value === "number" || typeof value === "string" ? String(value) : undefined };
@@ -234,7 +287,6 @@ export async function collectExitEvidence(bead: BdBead): Promise<Evidence | null
      linkedVerbs.push(commentVerb(comment.text));
     }
    }
-   if (direction === "up") openEscalation ||= isOpenEscalation(linkedBead);
   }
  }
  let artifactContained = false;
@@ -269,10 +321,20 @@ interface ExitGuardState {
  refusalCount: number;
 }
 
+/**
+ * Reads one `yield` may spend.
+ *
+ * Twice the per-tool-call cap: the exit contract runs once per session rather than on
+ * every tool call, and its reads are the verdict, not a side check. The 20 s dispatch
+ * deadline still bounds it, because OMP kills a `tool_call` handler at 30 s.
+ */
+const EXIT_READ_BUDGET = 24;
+
 /** Create an exit guard with reminder and refusal budgets private to one factory invocation. */
 export function createExitGuard(claims: ClaimState): (ctx: ExtensionContext, input?: Record<string, unknown>) => Promise<ToolCallEventResult | undefined> {
  const state: ExitGuardState = { unclaimedReminded: false, refusalClaim: undefined, refusalCount: 0 };
  return async (ctx, input) => {
+  resetReadBudget(EXIT_READ_BUDGET);
   const claim = claims.observedClaim();
   if (claim === undefined || claim.beadIds.length === 0) return await gateUnclaimedExit(state, ctx, input);
   for (const beadId of claim.beadIds) {
@@ -332,7 +394,8 @@ async function gateUnclaimedExit(
  *
  * Fails open on every unknown: an unreadable bead, or no contract for the role. A
  * session holding no claim is handled by {@link gateUnclaimedExit} instead, because
- * every check here hangs off a bead.
+ * every check here hangs off a bead. Each fail-open is logged with the cause, because
+ * an exit accepted unevaluated is otherwise indistinguishable from one that passed.
  */
 
 async function gateClaimedExit(
@@ -343,7 +406,10 @@ async function gateClaimedExit(
 ): Promise<ToolCallEventResult | undefined> {
 
  const bead = await bdShow(beadId);
- if (bead === null) return undefined;
+ if (bead === null) {
+  logger.warn("orchestrate exit contract unevaluated: claimed bead unreadable", { bead: beadId, cause: lastBdFailure() });
+  return undefined;
+ }
  if (bead.assignee && bead.assignee !== claim?.actor) return undefined;
 
  const routing = beadRouting(bead);
@@ -360,8 +426,16 @@ async function gateClaimedExit(
  const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
  if (contract === undefined) return undefined;
 
- const evidence = await collectExitEvidence(bead);
- if (evidence === null) return undefined;
+ const evidence = await collectExitEvidence(bead, linkedEvidenceNeeds(contract));
+ if (evidence === null) {
+  logger.warn("orchestrate exit contract unevaluated: evidence unreadable", {
+   bead: beadId,
+   role,
+   cause: lastBdFailure(),
+   readBudgetExhausted: readBudgetExhausted(),
+  });
+  return undefined;
+ }
  const status = (bead.status ?? "").toLowerCase();
 
  // Escape first: a genuine failure declared as such is a valid exit, not a
