@@ -22,10 +22,12 @@
  *
  * A push to `omp/task/<id>`, to the branch a session made, or to any other branch by name
  * passes, as does every read. Where the destination depends on `HEAD`, the branch is read
- * with one `git symbolic-ref` at the checkout the command addresses (`-C` honoured); a
- * detached or unreadable `HEAD` is no proof and passes, and git itself fails such a push.
- * The primary branch is read from the run epic; an unreadable epic, or an unbound marker,
- * means the default.
+ * with one `git symbolic-ref` at the checkout the command addresses (`-C` honoured). After
+ * a `cd` or `pushd` in the same line, or with `--git-dir`/`--work-tree`, that read would
+ * name a tree git is not pushing from, so such a push is refused and the explicit-refspec
+ * form is named. A detached or unreadable `HEAD` is no proof and passes, and git itself
+ * fails such a push. The primary branch is read from the run epic; an unreadable epic, or
+ * an unbound marker, means the default.
  *
  * Matching is on parsed argv (`src/shell.ts`), so a comment that mentions `git push` does
  * not trip the gate and `git log --grep push` is a read. Parsing costs nothing that spawns;
@@ -222,6 +224,35 @@ async function pushedBranches(push: Push, cwd: string): Promise<string[]> {
 	return branches;
 }
 
+/**
+ * Whether the branches a push writes depend on the checkout's `HEAD`: a bare push, a `HEAD`
+ * destination, or a `<src>:` with the destination left off. Every other refspec names its
+ * destination in the command line itself.
+ */
+function dependsOnHead(push: Push): boolean {
+	if (push.tagsOnly || push.everyBranch) return false;
+	if (push.refspecs.length === 0) return true;
+	return push.refspecs.some(refspec => {
+		const colon = refspec.indexOf(":");
+		const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
+		return destination === "HEAD" || (colon !== -1 && destination.length === 0);
+	});
+}
+
+/**
+ * Whether the command line moves the shell, or the push names another tree, so that the
+ * `HEAD` this gate would read is not the one git pushes from. `cd` and `pushd` anywhere in
+ * the line count, whatever segment they sit in: the shell is not modelled past its
+ * operators. A `-C` does not count, because `repositoryDir` follows it.
+ */
+function movesCheckout(command: string, push: Push): boolean {
+	if (commandInvocations(command, ["cd"]).length > 0 || commandInvocations(command, ["pushd"]).length > 0) return true;
+	return push.globals.some(global => {
+		const { flag } = splitFlag(global);
+		return flag === "--git-dir" || flag === "--work-tree";
+	});
+}
+
 /** The run's primary branch: `metadata.primary_branch` on the run epic, else the default. */
 async function primaryBranch(scope: RunScope): Promise<string> {
 	if (scope.runId === PENDING_RUN) return DEFAULT_PRIMARY;
@@ -257,6 +288,18 @@ export async function gatePush(ctx: ExtensionContext, input: Record<string, unkn
 		}
 	}
 	if (pushes.length === 0) return undefined;
+
+	// Measured: a worker in its copy ran `cd <primary> && git push`, and `HEAD` read at the
+	// copy named the task branch while the shell pushed main. Opaque, so refused: the same
+	// rule the scope gates apply to a `$VAR` path.
+	for (const push of pushes) {
+		if (dependsOnHead(push) && movesCheckout(command, push)) {
+			return {
+				block: true,
+				reason: "destination cannot be resolved after a directory change; push with an explicit refspec (`git -C <dir> push origin <src>:<dst>`)",
+			};
+		}
+	}
 
 	const primary = await primaryBranch(scope);
 	for (const push of pushes) {

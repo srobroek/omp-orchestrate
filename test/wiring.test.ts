@@ -673,5 +673,23 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    expect(errors).toEqual([]);
    expect(result?.block).toBeUndefined();
   });
+
+  test("a worker's bare push after a cd is blocked as unresolvable, before any bead is read", async () => {
+   const show = spyOn(actualBd, "bdShow").mockResolvedValue(null);
+   try {
+    await pinnedRun(dir);
+    const { pi, handlers, errors } = workerApi();
+    ompOrchestrate(pi);
+
+    const result = await verdict(handlers, call("worker-cd-push", `cd ${dir} && git push`), { cwd: dir, role: "implementer" });
+
+    expect(errors).toEqual([]);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("destination cannot be resolved after a directory change");
+    expect(show).not.toHaveBeenCalled();
+   } finally {
+    show.mockRestore();
+   }
+  });
  });
 });

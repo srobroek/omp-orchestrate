@@ -101,15 +101,54 @@ describe("G7 refuses a worker's push to the primary branch", () => {
 		expect(await gatePush(seat(task, { role: "implementer" }), { command: "git push" })).toBeUndefined();
 	});
 
-	test("a -C addressing the primary checkout is read from there", async () => {
+	test("a -C is followed: the branch is read at the checkout it names", async () => {
 		expect((await gatePush(seat(task, { role: "implementer" }), { command: `git -C ${primary} push origin HEAD` }))?.block).toBe(true);
+		expect((await gatePush(seat(task, { role: "implementer" }), { command: `git -C ${primary} push` }))?.reason).toContain("main");
 		expect(await gatePush(seat(primary, { role: "implementer" }), { command: `git -C ${task} push origin HEAD` })).toBeUndefined();
+		expect(await gatePush(seat(primary, { role: "implementer" }), { command: `git -C ${task} push` })).toBeUndefined();
 	});
 
 	test("a generic helper is refused like a role", async () => {
 		const result = await gatePush(seat(task), { command: "git push origin HEAD:main" });
 
 		expect(result?.block).toBe(true);
+	});
+});
+
+describe("G7 refuses a HEAD-dependent push once the line has moved the shell", () => {
+	/** The bypass the campaign's fix wave found: HEAD read at the copy, pushed from the primary. */
+	test.each([
+		["a bare push after cd", "cd /x && git push"],
+		["HEAD after cd", "cd /x && git push origin HEAD"],
+		["a source with its destination left off", "cd /x && git push origin omp/task/t1:"],
+		["a cd in an earlier segment", "cd /x; git status; git push -u origin HEAD"],
+		["pushd", "pushd /x && git push origin HEAD"],
+		["--git-dir", "git --git-dir=/x/.git push"],
+		["--work-tree with a separate operand", "git --work-tree /x push origin HEAD"],
+	])("refuses %s", async (_label, command) => {
+		const result = await gatePush(seat(task, { role: "implementer" }), { command });
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("destination cannot be resolved after a directory change");
+		expect(show).not.toHaveBeenCalled();
+	});
+
+	test.each([
+		["an explicit destination after cd", "cd /x && git push origin feat:feat"],
+		["an explicit destination that is not the primary", `cd ${primary} && git push origin HEAD:omp/task/t1`],
+		["tags only after cd", "cd /x && git push origin --tags"],
+		["a cd with no push", "cd /x && git status"],
+	])("allows %s", async (_label, command) => {
+		expect(await gatePush(seat(task, { role: "implementer" }), { command })).toBeUndefined();
+	});
+
+	test("an explicit destination after cd is still judged: the primary is refused", async () => {
+		expect((await gatePush(seat(task, { role: "implementer" }), { command: "cd /x && git push origin HEAD:main" }))?.reason).toContain("main");
+	});
+
+	test("the lead, and a checkout no run has marked, are not held to it", async () => {
+		expect(await gatePush(seat(primary, { session: LEAD }), { command: `cd ${primary} && git push` })).toBeUndefined();
+		expect(await gatePush(seat(unmarked, { role: "implementer" }), { command: "cd /x && git push" })).toBeUndefined();
 	});
 });
 
