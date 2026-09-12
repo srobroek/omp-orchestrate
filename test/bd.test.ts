@@ -401,9 +401,10 @@ describe("dispatch read cost", () => {
 	test.each([
 		["scope-less", () => undefined],
 		["disjoint scopes", (index: number) => [`src/other${index}/**`]],
-	])("a write from a claimed implementer with three in-flight peers (%s) costs at most four spawns", async (_label, siblingScope) => {
+	])("a write from a claimed implementer with three in-flight peers (%s) costs exactly the freshness show", async (_label, siblingScope) => {
 		// Measured before the memo and the lineage short-circuit: 10 spawns at N=3, 12 at
-		// N=5 (the cap), the same for scope-less and scoped peers.
+		// N=5 (the cap), the same for scope-less and scoped peers. Scope friction has since
+		// moved to claim time, so a write no longer lists peers at all.
 		const beads = run(3, siblingScope);
 		const bd = fakeBd({ beads, inFlight: Object.values(beads) });
 		try {
@@ -412,14 +413,14 @@ describe("dispatch read cost", () => {
 			resetReadBudget();
 			const ctx = await ctxFor("implementer");
 			expect(await gateWorktreeScope(claims, ctx, "write", { path: `${ctx.cwd}/src/mod1/x.ts`, content: "x" })).toBeUndefined();
-			expect(bd.spawned.length).toBeLessThanOrEqual(4);
-			expect(bd.spawned).toEqual(["show orc-task-1", "list --label"]);
+			expect(bd.spawned.length).toBeLessThanOrEqual(1);
+			expect(bd.spawned).toEqual(["show orc-task-1"]);
 		} finally {
 			bd.restore();
 		}
 	});
 
-	test("an architect envelope over six overlapping grandchildren is exempt in three spawns", async () => {
+	test("an architect envelope over six overlapping grandchildren costs one spawn: friction is not re-judged per write", async () => {
 		// Measured before: 12 spawns and a false "scope conflict" block at N=6, because the
 		// sixth grandchild's lineage walk was the read the budget refused.
 		const beads = run(6, index => [`src/other${index}/**`]);
@@ -431,7 +432,7 @@ describe("dispatch read cost", () => {
 			resetReadBudget();
 			const ctx = await ctxFor("architect");
 			expect(await gateWorktreeScope(claims, ctx, "write", { path: `${ctx.cwd}/src/x.ts`, content: "x" })).toBeUndefined();
-			expect(bd.spawned).toEqual(["show orc-feat-1", "list --label", "show orc-epic-1"]);
+			expect(bd.spawned).toEqual(["show orc-feat-1"]);
 		} finally {
 			bd.restore();
 		}
