@@ -643,4 +643,35 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    expect(result?.block).toBeUndefined();
   });
  });
+
+ describe("G7 refusals reach the verdict", () => {
+  test("a worker's push to the primary branch under an active marker is blocked", async () => {
+   const show = spyOn(actualBd, "bdShow").mockResolvedValue(null);
+   try {
+    await pinnedRun(dir);
+    const { pi, handlers, errors } = workerApi();
+    ompOrchestrate(pi);
+
+    const result = await verdict(handlers, call("worker-push", "git push origin HEAD:main"), { cwd: dir, role: "implementer" });
+
+    expect(errors).toEqual([]);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("pushing to main is the lead's landing step");
+   } finally {
+    show.mockRestore();
+   }
+  });
+
+  test("the lead's own push to the primary branch passes G7", async () => {
+   // The marker names this session, which is what `/orchestrate-start` records for the lead.
+   await pinnedRun(dir, JSON.stringify({ schema_version: 1, run_id: "run-wiring", session_id: "wiring-session" }));
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(handlers, call("lead-push", "git push origin HEAD:main"), { cwd: dir });
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBeUndefined();
+  });
+ });
 });
