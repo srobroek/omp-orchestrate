@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -1090,6 +1091,22 @@ describe("registerWatchers", () => {
 		expect(entries.map(entry => JSON.parse(entry).argv)).toEqual(["bd update bd-7 --status open"]);
 		await rig.fire("session_shutdown", {});
 		expect(rig.sweeps).toEqual([]);
+	});
+
+	test("W2 self-ignores the tree it creates, with no activation at all", async () => {
+		// This subscription is live from session_start and checks no marker, so the
+		// audit path can be the only thing that ever creates `.orchestration/`.
+		// Without the ignore, a repository whose children merely ran bd keeps an
+		// untracked directory that shows in git status for every actor.
+		execFileSync("git", ["init", "-q"], { cwd });
+		const rig = harness();
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		await rig.emit("task:subagent:event", bashStart("kid-1", "bd update bd-7 --status open"));
+		await rig.emit("task:subagent:event", bashEnd("kid-1"));
+
+		await readFile(join(cwd, ".orchestration", "audit", "kid-1.bdlog"), "utf8");
+		expect(execFileSync("git", ["status", "--porcelain=v1"], { cwd, encoding: "utf8" }).trim()).toBe("");
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {
