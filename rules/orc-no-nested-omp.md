@@ -2,7 +2,7 @@
 description: "a role launched as a nested omp process instead of a task subagent"
 condition:
   - "\"application\"\\s*:\\s*\"omp\""
-  - "\"args\"\\s*:\\s*\\[[^\\]]*\"(?:[^\"]*\\s)?omp(?:\\s|\")"
+  - "\"args\"\\s*:\\s*\\[[^\\]]{0,300}\"(?:[^\"]*\\s)?omp(?:\\s|\")"
 scope: "tool:hub"
 interruptMode: "never"
 ---
@@ -22,9 +22,12 @@ Recover instead:
    actor export) and re-dispatch with `task` and `isolated: true`.
 3. When the cause is outside the run, write the escalation wisp and stop the wave.
 
-Both conditions read the `hub start` arguments. The shell form (`omp -p`, `--print`,
-`--cwd`, `--session-dir` from `bash`) is a G6 notice in `src/gates/bd.ts`: a rule cannot
-see whether a run is active, and this one fired on `omp -p` probes in sessions no run
-ever touched. The notice inherits G6's run gate and exempts
-`--config <plugin-root>/config/orchestrate.overlay.yml`, the lead's rooted re-entry
-documented in `planning.md`.
+Both conditions read the `hub start` arguments. The second looks for an `omp` word in an
+`args` element that opens within 300 characters of the array's `[`. Unbounded, every
+`"args"` in a stream that never closed its array started a scan to the end of the buffer.
+
+The shell form (`omp -p`, `--print`, `--cwd`, `--session-dir` from `bash`) is a G6 notice
+in `src/gates/bd.ts`: a rule cannot see whether a run is active, and this one fired on
+`omp -p` probes in sessions no run ever touched. The notice inherits G6's run gate and
+exempts `--config <plugin-root>/config/orchestrate.overlay.yml`, the lead's rooted
+re-entry documented in `planning.md`.

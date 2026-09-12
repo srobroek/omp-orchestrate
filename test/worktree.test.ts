@@ -13,6 +13,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -54,6 +55,16 @@ let foreign: string;
 let isolationBase: string;
 let isolated: string;
 let priorWorktreeDir: string | undefined;
+
+/** Whether the temp volume folds case, as the macOS default does; probed, not assumed from the platform. */
+const CASE_INSENSITIVE_TMP = (() => {
+ const tmp = realpathSync(os.tmpdir());
+ try {
+  return realpathSync(tmp.toUpperCase()) === tmp;
+ } catch {
+  return false;
+ }
+})();
 
 /** `ExtensionContext` as this gate consumes it: a cwd, and nothing else. */
 function ctxAt(cwd: string): ExtensionContext {
@@ -309,6 +320,37 @@ describe("G2 target paths that escape the claimed tree", () => {
   });
 
   expect(result?.block).toBe(true);
+ });
+});
+
+/**
+ * On a volume that folds case (the macOS default) `OWNED/SRC` is the claimed tree's
+ * `src`, and the write lands there; the gate used to compare the model's spelling
+ * byte-for-byte against the realpath'd tree and refuse it as another actor's. Only a
+ * folding volume has this property, so the cases are skipped on any other.
+ */
+describe.skipIf(!CASE_INSENSITIVE_TMP)("G2 spelling on a case-insensitive volume", () => {
+ beforeEach(() => {
+  beads[BEAD] = { id: BEAD, status: "in_progress", assignee: "orc-impl-1", metadata: { worktree: owned, scope: ["src/api/**"] } };
+ });
+
+ test("a bash cwd spelled in another case is inside the tree", async () => {
+  expect(await fromBash(path.join(root, "OWNED", "SRC"))).toBeUndefined();
+ });
+
+ test("a relative target spelled in another case is named by the scope", async () => {
+  expect(await writing("SRC/API/handler.ts")).toBeUndefined();
+ });
+
+ test("an absolute target spelled in another case is inside the tree and its scope", async () => {
+  expect(await writing(path.join(root, "OWNED", "src", "api", "new.ts"))).toBeUndefined();
+ });
+
+ test("a refusal names the filesystem's spelling of where the write lands", async () => {
+  const result = await writing(path.join("..", "FOREIGN", "src", "x.ts"));
+
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain(path.join(foreign, "src", "x.ts"));
  });
 });
 

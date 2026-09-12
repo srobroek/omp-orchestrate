@@ -413,6 +413,41 @@ describe("transparent runners and wrapper shells", () => {
 		expect(invokesCommand(`bd comment x "run sh -c 'git worktree add y'"`, ["git", "worktree"])).toBe(false);
 		expect(bdInvocations(`git commit -m "bd update orc-1 --claim"`)).toEqual([]);
 	});
+
+	test("a program spelled in another case is the same program", () => {
+		// The default filesystems here (APFS, NTFS) resolve PATH case-insensitively, so
+		// `BD update` runs bd; a case-exact match let it walk past every bash gate. One
+		// fold covers the program, `env`, the runners, the wrapper shells and `eval`.
+		for (const command of [
+			`BD update orc-1 --claim`,
+			`/usr/local/bin/BD update orc-1 --claim`,
+			`Bd update orc-1 --claim`,
+			`ENV BEADS_ACTOR=x ${CLAIM}`,
+			`/usr/bin/ENV -u FOO ${CLAIM}`,
+			`NOHUP ${CLAIM} &`,
+			`Timeout 5 ${CLAIM}`,
+			`SH -c '${CLAIM}'`,
+			`Bash -lc '${CLAIM}'`,
+			`EVAL '${CLAIM}'`,
+			`echo orc-1 | XARGS bd update --claim`,
+		]) {
+			const found = bdInvocations(command);
+			expect(found, command).toHaveLength(1);
+			expect(found[0]?.subcommand, command).toBe("update");
+			expect(found[0]?.hasClaim, command).toBe(true);
+		}
+		expect(invokesCommand("GIT worktree add ../x", ["git", "worktree"])).toBe(true);
+		expect(invokesCommand("NOHUP git worktree add ../x &", ["git", "worktree"])).toBe(true);
+		expect(invokesCommand("GH pr checkout 12", ["gh", "pr", "checkout"])).toBe(true);
+	});
+
+	test("subcommands and flags keep their case; only the program folds", () => {
+		// bd, git and gh are case-exact about their own grammar, so `BD Update` is not a
+		// write and `git Worktree add` is not a worktree command.
+		expect(bdInvocations("BD Update orc-1 --claim")[0]?.subcommand).toBe("Update");
+		expect(bdInvocations("BD update orc-1 --CLAIM")[0]?.hasClaim).toBe(false);
+		expect(invokesCommand("git Worktree add ../x", ["git", "worktree"])).toBe(false);
+	});
 });
 
 describe("invokesCommand", () => {
