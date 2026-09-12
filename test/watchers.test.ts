@@ -1473,6 +1473,13 @@ describe("registerWatchers", () => {
 
 	test("W4 clearing a failed goal cancels managed retries", async () => {
 		await fakeBd();
+		// Complete settings, or the lead's session_start pin makes the settings preflight
+		// warn (it does on Linux, where the tmpdir has no symlink) and the message
+		// assertion below would not be W4's alone.
+		await stubSettings({
+			"task.isolation.enabled": true, "task.isolation.merge": "branch", "task.isolation.apply": false,
+			"task.enableEffort": true, "bash.autoBackground.enabled": false, modelRoles: { reviewer: "x/y" },
+		});
 		await mkdir(join(cwd, ".orchestration"));
 		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
