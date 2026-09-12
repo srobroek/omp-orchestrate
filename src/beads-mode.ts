@@ -33,10 +33,12 @@ export type StoreLocation = { ok: true; path: string; origin: StoreOrigin } | { 
 
 /**
  * Environment variables bd reads as a store selector, measured on bd 1.2.2: each one
- * overrides the walk up from the working directory. `BEADS_DIR` names the `.beads`
- * directory, `BEADS_DB` the database beneath it.
+ * overrides the walk up from the working directory and a `.beads/redirect`; `--db` or `-C`
+ * on the command line beats it. `BEADS_DIR` names the `.beads` directory; `BEADS_DB` and
+ * `BD_DB` accept either that directory or the `embeddeddolt` database beneath it.
+ * `src/bd.ts` strips every one of them from the children it spawns.
  */
-export const STORE_SELECTOR_VARS: readonly string[] = ["BEADS_DIR", "BEADS_DB"];
+export const STORE_SELECTOR_VARS: readonly string[] = ["BEADS_DIR", "BEADS_DB", "BD_DB"];
 
 /** The first store selector set in this process, with its value. */
 export function inheritedStoreSelector(env: NodeJS.ProcessEnv = process.env): { name: string; value: string } | undefined {
@@ -93,7 +95,8 @@ export async function storeOrigin(cwd: string, explicit?: string): Promise<Store
 	}
 	const selector = inheritedStoreSelector();
 	if (selector !== undefined) {
-		const named = selector.name === "BEADS_DB" ? path.dirname(selector.value) : selector.value;
+		// bd accepts the database directory for the `.beads` it sits in.
+		const named = path.basename(selector.value) === "embeddeddolt" ? path.dirname(selector.value) : selector.value;
 		const canonical = await fs.realpath(named).catch(() => null);
 		if (canonical === null) return { ok: false, reason: `${selector.name} in this session's environment names ${selector.value}, which does not exist` };
 		return { ok: true, path: canonical, origin: "env" };
