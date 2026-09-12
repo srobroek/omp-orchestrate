@@ -10,6 +10,8 @@ import { ensurePatrolWisp } from "../src/supervision";
 interface Call { args: string[]; cwd: string | undefined }
 let calls: Call[] = [];
 let linked: BdBead[] | null = [];
+/** What `bd show orc-1` answers; binding reads the epic before it writes. */
+let epic: BdBead | null = { id: "orc-1", status: "open" };
 let cwd: string;
 let createFails = false;
 const runSpy = spyOn(actualBd, "bdRun").mockImplementation(async (args, _timeout, directory) => {
@@ -23,18 +25,24 @@ const listSpy = spyOn(actualBd, "bdListChecked").mockImplementation(async (args,
  calls.push({ args, cwd: directory });
  return linked;
 });
-afterAll(() => { runSpy.mockRestore(); listSpy.mockRestore(); });
+const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async (id, _timeout, directory) => {
+ calls.push({ args: ["show", id], cwd: directory });
+ return epic;
+});
+afterAll(() => { runSpy.mockRestore(); listSpy.mockRestore(); showSpy.mockRestore(); });
 beforeEach(async () => {
  cwd = await mkdtemp(join(tmpdir(), "orc-patrol-"));
  calls = []; linked = []; createFails = false;
+ epic = { id: "orc-1", status: "open" };
  delete process.env.ORCHESTRATE_MARKER_FILE;
 });
 afterEach(async () => { await rm(cwd, { recursive: true, force: true }); });
 
 describe("patrol arming", () => {
- test("bind creates and confirms the deterministic patrol in the run repository", async () => {
+ test("bind reads the epic, then creates and confirms the deterministic patrol in the run repository", async () => {
   await activateRun(cwd);
-  await bindRun(cwd, "orc-1");
+  expect(await bindRun(cwd, "orc-1")).toEqual({ patrol: "armed" });
+  expect(calls[0]).toEqual({ args: ["show", "orc-1"], cwd });
   const creates = calls.filter(call => call.args[0] === "create");
   expect(creates).toHaveLength(1);
   expect(creates[0]?.args).toContain("orc-1-patrol");
@@ -82,11 +90,18 @@ describe("patrol arming", () => {
   listSpy.mockImplementationOnce(async () => [{ id: "orc-1-patrol", status: "open", ephemeral: true, wisp_type: "patrol", metadata: { patrol_epic: "other-run" } }]);
   await expect(ensurePatrolWisp("orc-1", cwd)).rejects.toThrow(/not confirmed/);
  });
- test("binding survives unavailable patrol storage", async () => {
+ test("binding survives unavailable patrol storage and returns the failure to its caller", async () => {
   linked = null;
   await activateRun(cwd);
-  await bindRun(cwd, "orc-1");
+  expect(await bindRun(cwd, "orc-1")).toEqual({ patrol: { failed: "Patrol orc-1 lookup unknown; creation refused" } });
   expect((await readActiveRun(cwd))?.run_id).toBe("orc-1");
   expect(calls.filter(call => call.args[0] === "create")).toEqual([]);
+ });
+ test("an epic bd cannot show refuses the bind before any patrol read", async () => {
+  epic = null;
+  await activateRun(cwd);
+  await expect(bindRun(cwd, "orc-1")).rejects.toThrow(/could not be read from Beads; binding refused/);
+  expect((await readActiveRun(cwd))?.run_id).toBe("pending");
+  expect(calls.map(call => call.args[0])).toEqual(["show"]);
  });
 });

@@ -92,11 +92,11 @@ describe("extension factory", () => {
 		);
 	});
 
-	test("registers the four commands and five schema-visible tools", () => {
+	test("registers the five commands and five schema-visible tools", () => {
 		const { pi, seen } = recordingApi();
 		ompOrchestrate(pi);
 		expect(seen.commands.sort()).toEqual(
-			["orchestrate-bind", "orchestrate-roster", "orchestrate-run", "orchestrate-status"].sort(),
+			["orchestrate-bind", "orchestrate-close", "orchestrate-roster", "orchestrate-run", "orchestrate-status"].sort(),
 		);
 		expect(seen.tools.sort()).toEqual(
 			["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_review_round_policy", "orc_run_status"].sort(),

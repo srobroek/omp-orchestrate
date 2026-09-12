@@ -203,8 +203,9 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
 
 ## Resume after compaction or crash
 
-1. Find the run epic: `bd list --type epic --json`, matched on `metadata.run_id`, or read the
-   binding from `/orchestrate-status`.
+1. Find the run epic: `/orchestrate-status` prints the marker binding, the epic's
+   liveness, and whether the patrol is armed; or `bd list --type epic --json`, matched on
+   `metadata.run_id`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
    the actor in `assignee`, the location in `metadata.worktree`/`branch`, and the
    fine-grained `state:` label. Confirm every stamped checkout with `wt list --format=json`.
@@ -244,19 +245,23 @@ in the loop.
 
 **In-process reaper.** The extension subscribes to the subagent lifecycle bus in every
 session that spawns. On a child's terminal event it reads that child's claimed beads, its
-metadata, and its `omp/task/<id>` branches, then re-runs *the same contract evaluator the
+metadata, and its `omp/task/<id>` branch, then re-runs *the same contract evaluator the
 exit gate uses* against live bead state:
 
 | Case | Condition | Action |
 |---|---|---|
-| clean exit | `completed`, contract re-check passes, claim released | observe capture; no automatic branch metadata writes |
+| clean exit | `completed`, contract re-check passes, claim released | no NOTE, whether or not a branch was captured; the branch state is logged |
 | paused writer | positively open linked escalation | preserve the claim; architect reconciles resumption after the escalation closes |
 | semantic incompletion | `completed` but contract incomplete or ownership unresolved | append `NOTE recovery needed` with observations; no owner, status or metadata changes |
-| technical death or unknown evidence | `failed`/`aborted`, or failed evidence read | append recovery-needed `NOTE`; branch observed, absent or unknown is reported distinctly. Absence is not proof of no work |
+| technical death or unknown evidence | `failed`/`aborted`, or failed evidence read | append recovery-needed `NOTE`; the branch is reported as `found`, `absent`, `stale` (its tip predates the child, so it is an earlier run's leftover) or `unknown`. Absence is not proof of no work |
 
 `completed` means successful task termination, not accepted work. Parent-side capture
 exists only after successful completion and can include uncommitted delta. Failed isolated
 runs may lose local commits and uncommitted work. The reaper reports, never reclaims.
+Each child is reaped once per session: a revived agent's follow-up turns re-emit the
+terminal frame, and a parked architect is not re-noted on every wake. When the run's
+liveness cannot be read at a child's exit, the reaper skips and sends the same
+`orchestrate-recovery-needed` notice a failed reap does.
 
 **Patrol wisps** cover process death. The extension creates the deterministic
 `<epic-id>-patrol` id and verifies its type, ephemeral flag and epic link. Concurrent
@@ -273,7 +278,7 @@ patch-id containment is the primitive:
 | all `-` | terminal | cleanup candidate; only explicit exclusive-window cleanup may delete and stamp integration |
 | all `-` | open | integrated early -- flag it; the bead belongs in reported or review |
 | any `+` | open / `in_progress` | pending integration -- the architect's duty; teardown blocks on it |
-| any `+` | closed | inconsistency: closed but unmerged. Comment, treat as a reopen candidate, and surface it in `/orchestrate-status` |
+| any `+` | closed | inconsistency: closed but unmerged. Comment on the bead and treat it as a reopen candidate; the comment is the record, since neither `/orchestrate-status` nor `orc_run_status` runs the scan |
 
 The architect runs the scan before teardown and during patrol reconciliation.
 The observer never stamps integration or deletes branches. Before explicit cleanup,
@@ -563,5 +568,6 @@ symlink path was refused: inspect those paths and keep the run open instead of f
 deletion. The dirty primary checkout, the artifacts directory, the beads database, and the
 shared build target are never swept.
 
-Stop repository watchers before removing run-local process state, and remove the active-run
-marker only after verifying it names this run.
+Stop repository watchers before removing run-local process state. `/orchestrate-close
+<epic>` removes the active-run marker only after verifying it names this run and no child
+is `in_progress`; `--force` skips the child check for a run whose beads are gone.

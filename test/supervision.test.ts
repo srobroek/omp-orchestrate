@@ -82,10 +82,23 @@ function bead(fields: Record<string, unknown> = {}): BdBead {
  } as BdBead;
 }
 
-/** A git seam that answers `branch --list` with `branches` and nothing else. */
-function gitWith(branches: string[]): Exec {
+/** Epoch seconds a test treats as "the child started"; captures at or after it are fresh. */
+const STARTED_AT_S = 1_700_000_000;
+
+/** `reapChild` options for a child that started at {@link STARTED_AT_S}. */
+function at(exec: Exec): { cwd: string; exec: Exec; startedAtMs: number } {
+ return { cwd: "/repo", exec, startedAtMs: STARTED_AT_S * 1000 };
+}
+
+/**
+ * A git seam that answers `for-each-ref` with `branches`, each tip committed at
+ * `committedAt` (epoch seconds), and nothing else.
+ */
+function gitWith(branches: string[], committedAt = STARTED_AT_S + 60): Exec {
  return async (argv: string[]): Promise<ExecResult | null> => {
-  if (argv[1] === "branch") return { code: 0, stdout: branches.map(name => `  ${name}\n`).join(""), stderr: "" };
+  if (argv[1] === "for-each-ref") {
+   return { code: 0, stdout: branches.map(name => `refs/heads/${name}\t${committedAt}\n`).join(""), stderr: "" };
+  }
   return null;
  };
 }
@@ -126,7 +139,7 @@ describe("reapChild recovery observations", () => {
   });
   world.stamped = [approved];
   world.comments["orc-1"] = [`IDLE head_sha=${head}`];
-  const outcome = await reapChild({ id: "shepherd-1", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+  const outcome = await reapChild({ id: "shepherd-1", status: "completed" }, at(gitWith([])));
   expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "clean", failures: [], recovery: "not-needed" }]);
   expect(approved.labels).toContain("state:approved");
   expect(approved.assignee).toBe("");
@@ -137,13 +150,11 @@ describe("reapChild recovery observations", () => {
  test("a successor claiming during git discovery is never overwritten", async () => {
   const current = bead({ assignee: "impl-7" });
   world.claimed = [{ ...current }];
-  const outcome = await reapChild({ id: "impl-7", status: "failed" }, {
-   cwd: "/repo", exec: async () => {
-    current.assignee = "successor";
-    current.status = "closed";
-    return { code: 0, stdout: "omp/task/impl-7", stderr: "" };
-   },
-  });
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(async () => {
+   current.assignee = "successor";
+   current.status = "closed";
+   return { code: 0, stdout: `refs/heads/omp/task/impl-7\t${STARTED_AT_S + 60}`, stderr: "" };
+  }));
   expect(current.assignee).toBe("successor");
   expect(current.status).toBe("closed");
   expect(update()).toBeUndefined();
@@ -154,41 +165,65 @@ describe("reapChild recovery observations", () => {
  test("unreadable completion evidence is unknown, never missing", async () => {
   world.stamped = [bead({ status: "open", assignee: null })];
   world.comments["orc-1"] = null;
-  const result = await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+  const result = await reapChild({ id: "impl-7", status: "completed" }, at(gitWith([])));
   expect(result.reaped[0]).toMatchObject({ case: "unknown", failures: [], recovery: "recorded" });
   expect(update()).toBeUndefined();
  });
 
  test.each([null, { code: 1, stdout: "", stderr: "git failed" }])("git failure is not evidence of no work", async result => {
   world.claimed = [bead({ assignee: "impl-7" })];
-  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: async () => result });
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(async () => result));
   expect(outcome.branchState).toBe("unknown");
-  expect(outcome.reaped[0]?.case).toBe("unknown");
+  expect(outcome.reaped[0]?.case).toBe("died");
+  expect(comment()).toContain("captured branch unknown");
   expect(update()).toBeUndefined();
  });
 
  test("positive absence and positive branch evidence remain distinct", async () => {
   world.claimed = [bead({ assignee: "impl-7" })];
-  const absent = await reapChild({ id: "impl-7", status: "aborted" }, { cwd: "/repo", exec: gitWith([]) });
-  const found = await reapChild({ id: "impl-7", status: "aborted" }, { cwd: "/repo", exec: gitWith(["omp/task/impl-7"]) });
+  const absent = await reapChild({ id: "impl-7", status: "aborted" }, at(gitWith([])));
+  const found = await reapChild({ id: "impl-7", status: "aborted" }, at(gitWith(["omp/task/impl-7"])));
   expect(absent.branchState).toBe("absent");
+  expect(absent.reaped[0]?.case).toBe("died");
   expect(found.branch).toBe("omp/task/impl-7");
   expect(found.branchState).toBe("found");
+  expect(found.reaped[0]?.case).toBe("died");
   expect(update()).toBeUndefined();
  });
 
- test("clean completion does not stamp over concurrent metadata", async () => {
+ test("a branch whose tip predates the child is a stale leftover, not its capture", async () => {
+  // OMP allocates ids per session and force-overwrites `omp/task/<id>`, so a branch
+  // from run N can carry run N+1's child id until the capture replaces it.
+  world.claimed = [bead({ assignee: "impl-7" })];
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(gitWith(["omp/task/impl-7"], STARTED_AT_S - 3600)));
+  expect(outcome.branchState).toBe("stale");
+  expect(outcome.branch).toBeUndefined();
+  expect(comment()).toContain("predates this child");
+  expect(comment()).toContain("not proof of no work");
+ });
+
+ test("another child's branch with a longer id is not this child's", async () => {
+  world.claimed = [bead({ assignee: "impl-7" })];
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(gitWith(["omp/task/impl-70"])));
+  expect(outcome.branchState).toBe("absent");
+ });
+
+ test("a clean completion that captured its branch needs no recovery", async () => {
+  // The documented success outcome of every isolated task; a NOTE here trained the
+  // architect to ignore the channel real deaths arrive on.
   world.stamped = [bead({ status: "open", labels: [], metadata: { actor: "impl-7" }, assignee: null })];
   world.comments["orc-1"] = ["REPORTED delivered"];
-  const outcome = await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith(["omp/task/impl-7"]) });
-  expect(outcome.reaped[0]?.case).toBe("clean");
+  const outcome = await reapChild({ id: "impl-7", status: "completed" }, at(gitWith(["omp/task/impl-7"])));
+  expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "clean", failures: [], recovery: "not-needed" }]);
+  expect(outcome.branchState).toBe("found");
+  expect(comment()).toBeUndefined();
   expect(update()).toBeUndefined();
  });
 
  test("failed evidence persistence never reports recovery recorded", async () => {
   world.claimed = [bead({ assignee: "impl-7" })];
   const failing = spyOn(realBd, "bdRun").mockResolvedValueOnce({ code: 1, stdout: "", stderr: "write refused" });
-  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(gitWith([])));
   expect(outcome.reaped[0]?.recovery).toBe("record-failed");
   expect(update()).toBeUndefined();
   failing.mockImplementation(async args => { ran.push(args); return { code: 0, stdout: "", stderr: "" }; });
@@ -197,7 +232,7 @@ describe("reapChild recovery observations", () => {
  test("discovers open, blocked, deferred claims and review wisps without truncation", async () => {
   world.claimed = [bead({ id: "orc-open", status: "open", assignee: "impl-7" }), bead({ id: "orc-blocked", status: "blocked", assignee: "impl-7" })];
   world.wisps = [bead({ id: "orc-review", status: "deferred", assignee: "impl-7", ephemeral: true })];
-  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(gitWith([])));
   expect(outcome.reaped.map(row => row.bead)).toEqual(["orc-open", "orc-blocked", "orc-review"]);
   expect(ran[0]).toContain("--include-infra");
   expect(ran[0]).toContain("open,in_progress,blocked,deferred");
@@ -206,14 +241,14 @@ describe("reapChild recovery observations", () => {
 
  test("partial candidate lookup is reported, not an empty successful sweep", async () => {
   world.wisps = null;
-  const outcome = await reapChild({ id: "impl-7", status: "failed" }, { cwd: "/repo", exec: gitWith([]) });
+  const outcome = await reapChild({ id: "impl-7", status: "failed" }, at(gitWith([])));
   expect(outcome.discoveryUnknown).toBe(true);
  });
 
  test("a nonterminal child and an already reassigned bead cause no writes", async () => {
   world.stamped = [bead({ assignee: "successor" })];
-  await reapChild({ id: "impl-7", status: "started" }, { cwd: "/repo", exec: gitWith([]) });
-  await reapChild({ id: "impl-7", status: "completed" }, { cwd: "/repo", exec: gitWith([]) });
+  await reapChild({ id: "impl-7", status: "started" }, at(gitWith([])));
+  await reapChild({ id: "impl-7", status: "completed" }, at(gitWith([])));
   expect(comment()).toBeUndefined();
   expect(update()).toBeUndefined();
  });
@@ -392,16 +427,70 @@ describe("registerSupervision", () => {
   expect(api.messages).toEqual([]);
  });
 
- test("an unavailable liveness check does not allege child recovery", async () => {
+ test("an unavailable liveness check alleges no recovery but tells the architect", async () => {
   const api = recordingApi();
   registerSupervision(api.pi, async () => {
-   throw new Error("marker unreadable");
+   throw new Error("run liveness unavailable: bound run orc-1 status could not be verified");
   });
   api.sessionStart(ctx);
   await api.deliver({ id: "impl-7", status: "failed" });
   expect(ran).toEqual([]);
-  expect(api.messages).toEqual([]);
   expect(api.errors).toEqual(["orchestrate run liveness check unavailable; recovery skipped"]);
+  // The same outage as a failed reap gets the same notice; a log line alone left
+  // the child's claims held with nobody told.
+  expect(api.messages).toHaveLength(1);
+  expect(api.messages[0]).toContain("impl-7");
+  expect(api.messages[0]).toContain("bound run orc-1 status could not be verified");
+  expect(api.messages[0]).toContain("explicitly reconcile");
+ });
+
+ test("a revived child's repeat terminal frame is not reaped again", async () => {
+  // Every follow-up turn of a parked agent ends in the same terminal frame as a
+  // first run; the architect holding its epic mid-run would otherwise collect a
+  // NOTE and a notice on every wake.
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+  world.claimed = [bead({ id: "orc-epic", assignee: "arch-1" })];
+  await api.deliver({ id: "arch-1", status: "completed" });
+  await api.deliver({ id: "arch-1", status: "completed" });
+  await api.deliver({ id: "arch-1", status: "failed" });
+  expect(ran.filter(args => args[0] === "comment")).toHaveLength(1);
+  expect(api.messages.filter(message => message.includes("orc-epic"))).toHaveLength(1);
+ });
+
+ test("a child that had nothing to reap is still reaped when it later dies holding work", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+  await api.deliver({ id: "helper-1", status: "completed" });
+  expect(ran.filter(args => args[0] === "comment")).toEqual([]);
+  world.claimed = [bead({ id: "orc-late", assignee: "helper-1" })];
+  await api.deliver({ id: "helper-1", status: "failed" });
+  expect(ran.filter(args => args[0] === "comment")).toHaveLength(1);
+ });
+
+ test("a branch captured before this session saw the child start is stale", async () => {
+  const api = recordingApi();
+  registerSupervision(api.pi, bound);
+  api.sessionStart(ctx);
+  world.claimed = [bead({ assignee: "impl-7" })];
+  const branchAt = (seconds: number) => `refs/heads/omp/task/impl-7\t${seconds}`;
+  const oldTip = Math.floor(Date.now() / 1000) - 3600;
+  const spawn = spyOn(Bun, "spawn").mockImplementation(() => ({
+   stdout: new Response(`${branchAt(oldTip)}\n`).body,
+   stderr: new Response("").body,
+   exited: Promise.resolve(0),
+   kill: () => { },
+  }) as unknown as Bun.Subprocess);
+  try {
+   await api.deliver({ id: "impl-7", status: "started" });
+   await api.deliver({ id: "impl-7", status: "failed" });
+  } finally {
+   spawn.mockRestore();
+  }
+  expect(api.messages[0]).toContain("branch: stale");
+  expect(comment()).toContain("predates this child");
  });
 
  test("unread candidate discovery notifies the spawning session with a reconciliation action", async () => {

@@ -113,18 +113,51 @@ exit 0`);
 		expect(process.env.BEADS_DIR).toBeUndefined();
 	});
 
-	test("an inherited BEADS_DIR is left exactly as it arrived", async () => {
+	test("a valid inherited BEADS_DIR is kept, canonicalised, and never re-resolved", async () => {
 		// The run resolved it; re-resolving inside an isolated checkout would replace a correct
 		// value with a local one, which is the whole failure this module exists to prevent.
-		process.env.BEADS_DIR = "/run/owned/.beads";
+		const owned = path.join(dir, "run-owned", ".beads");
+		await fs.mkdir(owned, { recursive: true });
+		const alias = path.join(dir, "alias");
+		await fs.symlink(path.join(dir, "run-owned"), alias, "dir");
+		process.env.BEADS_DIR = path.join(alias, ".beads");
 		await stub(`echo "$@" >> "$ARGV_LOG"
 echo "/somewhere/else/.beads"
 exit 0`);
 
 		expect(await ensureBeadsPath(dir)).toEqual({ ok: true });
-		expect(process.env.BEADS_DIR).toBe("/run/owned/.beads");
+		// Canonical, so it compares equal to the paths the gates canonicalise.
+		expect(process.env.BEADS_DIR).toBe(await fs.realpath(owned));
 		// bd is not consulted at all, so an inherited answer costs nothing.
 		expect(await argv()).toEqual([]);
+	});
+
+	test.each([
+		["relative", ".beads", "not an absolute path"],
+		["nonexistent", "/definitely/not/here/.beads", "does not exist"],
+	])("an inherited BEADS_DIR that is %s is refused, not trusted", async (_label, value, reason) => {
+		// G1, the runtime-override gate, and the mismatch report all require an absolute pin;
+		// accepting this value reported the run active with every one of them disarmed.
+		process.env.BEADS_DIR = value;
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "/somewhere/else/.beads"
+exit 0`);
+
+		const result = await ensureBeadsPath(dir);
+		expect(result.ok).toBe(false);
+		expect(result.ok === false && result.reason).toContain(reason);
+		expect(process.env.BEADS_DIR).toBe(value);
+		expect(await argv()).toEqual([]);
+	});
+
+	test("an inherited BEADS_DIR naming a file is refused", async () => {
+		const file = path.join(dir, "not-a-dir");
+		await fs.writeFile(file, "");
+		process.env.BEADS_DIR = file;
+
+		const result = await ensureBeadsPath(dir);
+		expect(result.ok).toBe(false);
+		expect(result.ok === false && result.reason).toContain("is not a directory");
 	});
 
 	test("a database resolved outside the checkout is refused, not adopted", async () => {
