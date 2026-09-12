@@ -11,6 +11,7 @@ import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdListChecked, resetReadBudget } from "./bd";
 import { observeClaimResult } from "./claim-observer";
 import { createClaimInFlight, createClaimState } from "./claim-state";
+import { adoptAtCwd, adoptionRefusalNotice } from "./clone-adopt";
 import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
@@ -105,6 +106,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    let claiming = false;
 
    if (event.toolName === "bash" && scoped) {
+    // An isolated copy whose first session_start predates this plugin, or whose store
+    // came back with a Worktrunk hook, is repaired before its bd call runs.
+    await adoptAtCwd(pi, ctx.cwd);
+
     const runtimeDatabase = await normalizeRuntimeBeadsDir(ctx, input);
     if (!runtimeDatabase.ok) return runtimeDatabase.refusal;
     input = runtimeDatabase.input;
@@ -168,7 +173,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  });
 
  /**
-  * Inject the protocol into every worker before its first prompt.
+  * Adopt the run's database, then inject the protocol into every worker before its
+  * first prompt. The executor awaits this handler before the first turn, so the copy's
+  * `.beads/redirect` exists before the worker's first `bd` call.
   *
   * `attribution: "user"` is required: any other value normalises to `"agent"`
   * (`session/messages.ts:654`), and the contract must read as authority rather
@@ -181,7 +188,15 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * isolated worker whose own cwd holds none.
   */
  pi.on("session_start", async (_event, ctx) => {
-  if (sessionRole(pi) === "lead" || orcRole(ctx) === undefined) return;
+  if (sessionRole(pi) === "lead") return;
+  const adoption = await adoptAtCwd(pi, ctx.cwd);
+  if (adoption?.kind === "refused") {
+   pi.sendMessage(
+    { customType: "com.srobroek.omp-orchestrate.store", content: adoptionRefusalNotice(adoption.reason), display: false, attribution: "user" },
+    { triggerTurn: false },
+   );
+  }
+  if (orcRole(ctx) === undefined) return;
   // No run, no contract. Measured without this guard: a plain subagent spawned in
   // this repository received the protocol, obeyed it over its own brief, pulled an
   // empty queue for a role that does not exist, and yielded NO_WORK -- the injected

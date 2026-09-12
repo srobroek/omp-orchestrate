@@ -149,7 +149,7 @@ exit 0`);
 echo "/somewhere/else/.beads"
 exit 0`);
 
-		expect(await ensureBeadsPath(dir)).toEqual({ ok: true });
+		expect(await ensureBeadsPath(dir)).toEqual({ ok: true, beadsDir: await fs.realpath(owned) });
 		// Canonical, so it compares equal to the paths the gates canonicalise.
 		expect(process.env.BEADS_DIR).toBe(await fs.realpath(owned));
 		// bd is not consulted at all, so an inherited answer costs nothing.

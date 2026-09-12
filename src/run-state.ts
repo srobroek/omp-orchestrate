@@ -35,17 +35,20 @@ import { ensurePatrolWisp, patrolState } from "./supervision";
 /**
  * The marker's on-disk shape.
  *
- * A `repo_root` field was written here and read by nothing after the `bd -C` pin was
- * retired. Its rationale was the embedded database `bd` finds by walking up from the cwd,
- * and that hazard is real: it is closed once here instead of on every call, by pinning
- * BEADS_DIR at activation. Every child inherits the environment, so an isolated worker
- * reaches the run's database with no flag of its own. `asActiveRun`
- * keeps only the fields below, so a marker written by an older version still reads.
+ * `beads_dir` is the run's `.beads`, canonical and absolute, as `bd where` answered at
+ * activation. It is what an isolated copy redirects its own `.beads` to
+ * (`src/clone-adopt.ts`): the copy carries this marker, so the run's database travels
+ * with it and nothing has to be re-established when a lead restarts. A marker written
+ * before the field existed reads without it, and W5 asks for a re-activation to record it.
+ *
+ * A `repo_root` field was written here once and read by nothing; `asActiveRun` keeps
+ * only the fields below, so a marker written by an older version still reads.
  */
 export interface ActiveRun {
  schema_version: 1;
  run_id: string;
  session_id?: string;
+ beads_dir?: string;
 }
 
 /** Run id written before the run epic exists. Bindable; never treated as bound. */
@@ -102,9 +105,11 @@ function asActiveRun(value: unknown): ActiveRun | null {
  const record = value as Record<string, unknown>;
  const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
  const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
+ const beadsDir = typeof record.beads_dir === "string" && path.isAbsolute(record.beads_dir) ? record.beads_dir : undefined;
  // An unknown key is dropped rather than carried: see the note on ActiveRun.
  const state: ActiveRun = { schema_version: 1, run_id: runId };
  if (sessionId !== undefined) state.session_id = sessionId;
+ if (beadsDir !== undefined) state.beads_dir = beadsDir;
  return state;
 }
 
@@ -133,11 +138,13 @@ export async function readActiveRunStrict(cwd: string): Promise<ActiveRun | null
  const record = parsed as Record<string, unknown>;
  if (typeof record.run_id !== "string" || !RUN_ID_RE.test(record.run_id)
   || (record.schema_version !== undefined && record.schema_version !== 1)
-  || (record.session_id !== undefined && (typeof record.session_id !== "string" || record.session_id.length === 0))) {
+  || (record.session_id !== undefined && (typeof record.session_id !== "string" || record.session_id.length === 0))
+  || (record.beads_dir !== undefined && (typeof record.beads_dir !== "string" || !path.isAbsolute(record.beads_dir)))) {
   throw new Error("Active-run marker is malformed or unsupported; reconcile it before activation or binding");
  }
  const state: ActiveRun = { schema_version: 1, run_id: record.run_id };
  if (typeof record.session_id === "string") state.session_id = record.session_id;
+ if (typeof record.beads_dir === "string") state.beads_dir = record.beads_dir;
  return state;
 }
 
@@ -224,15 +231,17 @@ async function withMarkerLock<T>(cwd: string, action: () => Promise<T>): Promise
 
 /**
  * Put this repository under the run protocol, preserving any existing binding.
- * `sessionId` names the activating session; an omitted one keeps whatever the
- * previous activation recorded.
+ * `sessionId` names the activating session and `beadsDir` the run's `.beads`; an
+ * omitted one keeps whatever the previous activation recorded.
  */
-export async function activateRun(cwd: string, sessionId?: string): Promise<ActiveRun> {
+export async function activateRun(cwd: string, sessionId?: string, beadsDir?: string): Promise<ActiveRun> {
  return withMarkerLock(cwd, async () => {
   const existing = await readActiveRunStrict(cwd);
   const session = sessionId ?? existing?.session_id;
+  const beads = beadsDir ?? existing?.beads_dir;
   const state: ActiveRun = { schema_version: 1, run_id: existing?.run_id ?? PENDING };
   if (session !== undefined) state.session_id = session;
+  if (beads !== undefined) state.beads_dir = beads;
   await writeMarker(markerPath(cwd), state);
   return state;
  });
@@ -421,7 +430,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
    }
    if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
    try {
-    const state = await activateRun(cwd, ctx.sessionManager.getSessionId());
+    const state = await activateRun(cwd, ctx.sessionManager.getSessionId(), beads.beadsDir);
     ctx.ui.notify(
      state.run_id === PENDING
       ? "orchestrate run active, awaiting a run epic (/orchestrate-bind <run-id>)"

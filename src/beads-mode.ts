@@ -35,7 +35,9 @@ const execFileAsync = promisify(execFile);
  * which broke the Dolt sync that had worked under embedded mode. Embedded plus `BEADS_DIR`
  * gives the same guarantee -- one database, shared by every client -- and spawns nothing.
  */
-export type BeadsReadiness = { ok: true; tracked?: boolean; note?: string } | { ok: false; reason: string };
+export type BeadsReadiness =
+	| { ok: true; tracked?: boolean; note?: string; beadsDir?: string }
+	| { ok: false; reason: string };
 
 function firstLine(text: string | undefined): string {
 	const line = (text ?? "").split("\n").find(entry => entry.trim().length > 0);
@@ -107,8 +109,9 @@ export async function ensureBeadsPath(cwd: string): Promise<BeadsReadiness> {
 		const stat = await fs.stat(inherited).catch(() => null);
 		if (stat === null) return { ok: false, reason: `inherited BEADS_DIR ${inherited} does not exist` };
 		if (!stat.isDirectory()) return { ok: false, reason: `inherited BEADS_DIR ${inherited} is not a directory` };
-		process.env.BEADS_DIR = await canonicalPath(inherited);
-		return { ok: true };
+		const canonicalInherited = await canonicalPath(inherited);
+		process.env.BEADS_DIR = canonicalInherited;
+		return { ok: true, beadsDir: canonicalInherited };
 	}
 
 	// `bd where` answers with the resolved directory on its first line, which is bd's own
@@ -146,5 +149,5 @@ export async function ensureBeadsPath(cwd: string): Promise<BeadsReadiness> {
 	}
 
 	process.env.BEADS_DIR = canonicalResolved;
-	return { ok: true, note: `pointed this session at the run's database at ${resolved}` };
+	return { ok: true, note: `pointed this session at the run's database at ${resolved}`, beadsDir: canonicalResolved };
 }

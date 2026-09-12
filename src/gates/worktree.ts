@@ -57,7 +57,7 @@ interface Target {
  * Comparing unresolved paths would let a symlink into another agent's tree pass, so
  * an unresolvable path fails open rather than comparing something misleading.
  */
-async function realpathOrUndefined(target: string): Promise<string | undefined> {
+export async function realpathOrUndefined(target: string): Promise<string | undefined> {
  try {
   return await fs.realpath(target);
  } catch {
@@ -155,7 +155,7 @@ export async function normalizeRuntimeBeadsDir(
 }
 
 /** Whether `child` is `parent` or sits beneath it. Both must already be resolved. */
-function within(child: string, parent: string): boolean {
+export function within(child: string, parent: string): boolean {
  return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
 }
 
