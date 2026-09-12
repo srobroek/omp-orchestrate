@@ -132,7 +132,7 @@ describe("import", () => {
 });
 
 describe("reapChild recovery observations", () => {
- test("released shepherd IDLE preserves inherited approval and is a clean exit", async () => {
+ test("released shepherd BLOCKED wait preserves inherited labels and is a clean exit", async () => {
   const head = "a".repeat(40);
   const approved = bead({
    status: "open",
@@ -141,7 +141,7 @@ describe("reapChild recovery observations", () => {
    metadata: { actor: "shepherd-1", role: "shepherd", execution_kind: "git", head_sha: head },
   });
   world.stamped = [approved];
-  world.comments["orc-1"] = [`IDLE head_sha=${head}`];
+  world.comments["orc-1"] = [`BLOCKED head_sha=${head} gate=gate-7`];
   const outcome = await reapChild({ id: "shepherd-1", status: "completed" }, at(gitWith([])));
   expect(outcome.reaped).toEqual([{ bead: "orc-1", case: "clean", failures: [], recovery: "not-needed" }]);
   expect(approved.labels).toContain("state:approved");

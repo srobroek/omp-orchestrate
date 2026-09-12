@@ -1,11 +1,11 @@
 {
   "agent": "shepherd",
   "tier": "T2",
-  "_comment": "Merge shepherds consume inherited review and reporting states. Authoring those states is denied at the mutation seam. Completion requires a disposition; shepherds may write merge_sha/pr and close merge beads.",
+  "_comment": "Merge shepherds read review outcomes from the linked REVIEW comments and never author them; state authoring is denied at the mutation seam. Completion requires one disposition on the merge bead: LANDED on merge, BOUNCED when a fix bead goes back to the origin (bot findings, drift or conflict), ESCALATED when the review loop exhausted its limit, BLOCKED when the landing waits on a gate, provider or slot the comment names. Shepherds may write merge_sha/pr and close merge beads.",
   "completion": [
     {
       "check": "disposition",
-      "require": "comment.verb in [LANDED, BOUNCED, CONFLICT, IDLE, ESCALATED, BLOCKED]"
+      "require": "comment.verb in [LANDED, BOUNCED, ESCALATED, BLOCKED]"
     }
   ],
   "authority": {
@@ -16,7 +16,7 @@
   },
   "escape": {
     "state": "blocked",
-    "require": "comment.verb in [FAILED, BLOCKED]"
+    "require": "comment.verb in [FAILED, BLOCKED, ASK]"
   },
   "bounce": {
     "max_attempts": 3

@@ -17,7 +17,7 @@ The tool checks the exact PR head before every mutation. Comment requests contai
 
 Use `metadata.bot_review_requests` as a provider-to-mode object, for example `{"codex":"review","coderabbit":"full"}`. An empty object requests no manual reviews. Include a provider only when the originating request, repository policy, or a recorded material-risk decision requires that second opinion. The architect alone invokes the request tool while retaining sole PR-update ownership.
 
-A manual request does not prove availability. The architect records `requested` or `already_requested` evidence before shepherd handoff. The shepherd reads the probe's exact-head marker and provider result. Treat `pending`, `stale`, or `absent` as IDLE for ten minutes from `requestedAt`. After ten minutes without provider evidence, record BLOCKED with the request URL and provider. Missing markers or timestamps are BLOCKED.
+A manual request does not prove availability. The architect records `requested` or `already_requested` evidence before shepherd handoff. The shepherd reads the probe's exact-head marker and provider result. For ten minutes from `requestedAt`, treat `pending`, `stale`, or `absent` as a wait: record BLOCKED naming the provider, release, and let the next pass re-probe. After ten minutes without provider evidence, record BLOCKED with the request URL and provider as missing evidence. Missing markers or timestamps are BLOCKED.
 
 Provider commands and plan limits can change. Verify an adapter against the provider's official documentation before changing its command:
 

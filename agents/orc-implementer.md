@@ -47,7 +47,7 @@ Before using a helper, LOAD `skill://orchestrate/references/roles.md` for grants
 `operator` may perform one exact mechanical operation inside your scope and isolated checkout. Await its terminal result before writing or launching another writer there; a job receipt is not completion. Never target another actor's checkout.
 
 Design/debug uncertainty → LOAD roles' research-escalation procedure, create a related `role=researcher`, `execution_kind=escalation` wisp with source scope and `origin_actor`, record BLOCKED, ping the architect with its id and yield paused. You cannot spawn the researcher or safely resume a finished isolated task from a ping. The architect preserves captures and reconciles the retained claim under exclusive recovery before replacement dispatch.
-Product intent → ASK wisp and human gate. Never wait live on a peer.
+Product intent → `ASK` on your bead with status `blocked`, plus a human gate when it has not started. Never wait live on a peer.
 Before filing a pre-existing out-of-scope defect, LOAD `skill://orchestrate/references/lifecycle.md` → Incidental bug beads; keep your own work independent.
 
 ## Output

@@ -263,7 +263,6 @@ describe("the comment-verb notice", () => {
 
 	test.each([
 		'bd comment orc-1 "REPORTED finished the thing"',
-		'bd -C /run/repo comment orc-1 "NO_WORK"',
 		// Decoration and case do not change the verb.
 		'bd -C /run/repo comment orc-1 "**REVIEW** approved"',
 		'bd -C /run/repo comment orc-1 "- REVIEW approved"',

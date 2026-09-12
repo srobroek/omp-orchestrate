@@ -61,7 +61,7 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 - **Integrated work still gets one independent `orc-reviewer` wisp.** Add another
   specialist only for a material risk or project policy; never dispatch a fixed roster.
 - **Design or debug uncertainty routes to `role=researcher`.** The researcher's contract is
-  one durable `ADVICE` comment on the bead. Never answer your own escalation.
+  one durable `NOTE` answer on the bead. Never answer your own escalation.
 - **Product intent is an `ASK` wisp plus a human gate.** Neither a reviewer nor researcher
   may decide it.
 
@@ -73,7 +73,7 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 | Architect | its feature tree, commits, draft PR, review requests, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-tree and PR-content mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures; never merges a PR |
 | Implementer | code inside `metadata.scope`, in its isolated copy | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
 | Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree without editing code; dispatch determines checkout isolation |
-| Researcher | comments (`ADVICE`), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
+| Researcher | comments (`NOTE` answers), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
 | Shepherd | PR state, `pr` and `merge_sha`, fix beads, merge-slot | nothing | observes provider requests and reviews; the only role that may merge; never edits or pushes content |
 | Helper | only explicitly scoped files in its spawner's checkout when write-capable | only its own allowlist within the depth limit | no bead, no commit, no PR, no worktree. An architect's helper outcome is promoted to a feature comment before its trace wisp can be compacted |
 
@@ -132,7 +132,7 @@ A worker cannot spawn a bead-claiming role. Its architect owns dispatch and resu
    `role=researcher`, `execution_kind=escalation`, source scope and `origin_actor`.
    It records `BLOCKED` and yields paused, retaining the source claim.
 2. The architect dispatches `orc-researcher` on that queue.
-3. The researcher verifies version-matching `ADVICE` on both node and wisp, closes
+3. The researcher verifies the version-matching `NOTE` answer on both node and wisp, closes
    and releases the answered wisp, then notifies the architect with its id. A ping to
    a still-live requester is optional; it cannot resume a finished isolated task.
 4. The architect collects both actual terminal results and preserves any successful
@@ -215,7 +215,7 @@ Do not change the global ceiling to handle one model.
    pulls the wisp (`--include-ephemeral`) and completes the four-step escalation
    lifecycle above, including closure and architect-owned safe resumption.
 3. **A dispute that durable evidence does not settle** gets one fresh read-only researcher
-   at `effort: "hi"` on the escalation wisp. Its `ADVICE` is promoted to a comment before
+   at `effort: "hi"` on the escalation wisp. Its `NOTE` answer is promoted to a comment before
    anyone acts on it.
 4. **Product intent, or anything outside the brief,** becomes an `ASK` wisp plus
    `bd gate create --type=human`. No agent decides it.

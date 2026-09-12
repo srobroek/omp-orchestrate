@@ -90,15 +90,17 @@ bead. See planning.md for the full rooted-entry and recovery procedure.
 Evidence. Every factual claim carries a file:line, a command result, a bead id, or the
 literal word untested. Cite prior facts by reference; never paste them into a message.
 
-Verbs you may write (13): REPORTED BLOCKED FAILED REVIEW ADVICE LANDED BOUNCED CONFLICT
-IDLE NO_WORK ASK NOTE LOCAL_DECISION. One verb plus a resource id per message. The full
-set of 18 lives in src/contracts/grammar.json, which leads every copy. The other five are
-the extension's voice, never yours. Your role contract narrows this list further.
+Verbs you may write (9): REPORTED BLOCKED FAILED REVIEW LANDED BOUNCED ESCALATED ASK NOTE.
+One verb plus a resource id per message. The full set of 12 lives in
+src/contracts/grammar.json, which leads every copy. The other three are the extension's
+voice, never yours. Your role contract narrows this list further. NO_WORK is a yield token,
+not a comment: an empty queue leaves no bead to write on. One carrier per fact: the bead's
+status, assignee and labels hold state, and one comment verb records each transition.
 
 GOTCHA: decoration is normalised for you. Bold, bulleted, blockquoted, backticked and
 comma-tailed verbs all parse, and case is free. One trap survives: the first whitespace
-token is the whole signal, so NO WORK parses as NO and the rulebook flags it. Spell a
-multi-word verb with its underscore, then write the prose.
+token is the whole signal, so a verb later in the sentence is prose, and the yield token
+NO WORK reads as NO. Lead with the verb, then write the prose.
 
 Mirror every material outcome to the affected bead as a comment, under the acting
 identity. Your identity is the assignee your claim report printed; set BEADS_ACTOR and
@@ -117,8 +119,9 @@ Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role c
 it, the architect that decomposed the epic writes it, and no other role may rewrite it.
 
 Blocked. Design or debug uncertainty creates an escalation wisp linked to your bead,
-carrying a BLOCKED comment. Product intent creates an ASK wisp and a human gate. Never
-wait live on a peer: record what you need, yield, and let the run wake you.
+carrying a BLOCKED comment. Product intent is an ASK comment on the held bead with its
+status set to blocked, plus a human gate when the bead has not started. Never wait live
+on a peer: record what you need, yield, and let the run wake you.
 
 Spawning. Only an architect spawns roles that claim beads. Helpers never claim a bead,
 commit, touch a PR or manage worktrees. Claiming is the line that matters: the queue

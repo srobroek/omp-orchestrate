@@ -35,13 +35,14 @@ Handle it in this order:
 No promotion means no policy action and no closure based on that message. A restart puts
 comments and decision beads first in recovery. Message wisps and artifacts come second.
 
-## Local decision comments
+## Bead-local defaults
 
-Set `BEADS_ACTOR` to the choosing actor. Add this record to the work bead. Before acting,
-read it back with `bd comments <bead> --json`:
+A reversible default that a reviewer must know to judge the work is recorded as a `NOTE`
+on the work bead, under the choosing actor's `BEADS_ACTOR`. Before acting on it, read it
+back with `bd comments <bead> --json`:
 
 ```text
-LOCAL_DECISION
+NOTE decision
 owner: <actor>
 scope: <work-bead and owned resource>
 decision: <chosen implementation behavior>
@@ -60,11 +61,9 @@ requires one nonempty trigger:
 - an RFC3339 deadline
 
 `later`, `if needed`, and elapsed time without an observable condition are not triggers.
-Record the operation as `orc.note` in the audit trail.
 
-A readable comment is the local truth. A failed audit write after a successful comment
-needs a retry before closing, never a duplicate comment. A failed comment write or read-back
-means the choice does not apply.
+A readable comment is the local truth, and the only record: nothing is written twice. A
+failed comment write or read-back means the choice does not apply.
 
 A cross-boundary choice needs a `decision` bead instead. Its creation contract, edge-type
 rendering, and duplicate/supersession resolution are in `references/decisions.md`; read that
@@ -76,11 +75,8 @@ only when a choice leaves one bead's scope.
   alternate checkout mechanism exists. A failed database read is not proof no database exists.
 - `bd` present, no database → `bd init --stealth --prefix orc` (git-invisible: writes
   `.git/info/exclude`, leaves `git status` clean).
-- The recovery and landing formulas are read from `<beads-dir>/formulas/` and
-  `.beads/formulas/`. Copy the plugin's `formulas/*.formula.toml` there once per repository;
-  a linked package contributes none of them by itself.
 
-At run start, verify copied formulas with `bd formula list`, then `/orchestrate-run`.
+At run start, `/orchestrate-run`.
 It creates `.orchestration/.active-run` with `run_id=pending` or preserves the existing
 binding on restart. Gitignore `.orchestration/`.
 Create the run epic with `run_id`, `primary_branch`, `base_sha`, `origin_actor` and an
@@ -156,45 +152,42 @@ bd dep add "$T3" "$T1"        # t3 depends on t1
 bd dep cycles                 # must stay clean
 ```
 
-The label MUST be `orc-node` (hyphen, plain label). `bd set-state` owns the `state:` label
-dimension: each transition deletes the previous `state:<value>` label, adds the new one, and
-emits an event bead -- the transition record.
+The label MUST be `orc-node` (hyphen, plain label). No `state:` label exists: a bead's
+`status`, `assignee` and labels hold its state, and one comment verb records each
+transition. Nothing writes a second record of the same fact.
 
-## State mapping -- 11-state enum → bead status + `state:` label
+## Phase derivation -- bead status + fields → the phase a reader needs
 
-Beads statuses are coarse and drive `bd ready`. The `state:` label carries the review-round
-sub-state. One place per transition sets both:
+Beads statuses are coarse and drive `bd ready`. The finer phase is never stored; a reader
+derives it from the fields below, and `orc_run_status` renders the same derivation. Only
+`status` and `assignee` are ever written for a transition, and only where they change.
 
-```
-bd set-state <bead> state=<name> --reason "<why>"     # label + event bead
-bd update <bead> --status <status>                    # only where status changes
-```
-
-| Enum state | Bead status | `state:` label | Set by / how |
+| Phase | Bead status | Derived from | Written by |
 |---|---|---|---|
-| `pending` | `open` | `state:pending` | creator at `bd create` (lead for epics, architect for features and tasks) |
-| `ready` | `open` | -- (derived, never stored) | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` |
-| `working` | `in_progress` | `state:working` | the claimant itself: `bd ready … --claim` (atomic, first-wins, sets assignee) then `set-state` |
-| `reported` | `in_progress` | `state:reported` | worker stamps pre-yield evidence; parent verifies capture only after successful terminal task result |
-| `in_review` | `in_progress` | `state:in_review` | architect, when it creates the review wisps |
-| `changes_requested` | `in_progress` | `state:changes_requested` | architect on `REVIEW verdict=changes` |
-| `approved` | `in_progress` | `state:approved` | architect on `REVIEW verdict=approve` |
-| `merged` | `closed` | `state:merged` | shepherd: `set-state` then `bd close <bead> --reason merged` |
-| `dismissed` | `closed` | `state:dismissed` | architect: `set-state` then `bd close <bead> --reason dismissed` |
-| `failed` | `blocked` | `state:failed` | claimant: `set-state` then `bd update <bead> --status blocked` |
-| `waiting_human` | `in_progress` | `state:waiting_human` | any role on `ASK`. When the node has not started yet, add `bd gate create --type=human --blocks <bead>` |
+| `pending` | `open` | no assignee, `bd ready` does not list it (a dependency or gate is open) | creator at `bd create` |
+| `ready` | `open` | no assignee and `bd ready --parent <epic> --metadata-field role=<role> --unassigned` lists it | derived, never stored |
+| `working` | `in_progress` | assignee set | the claimant: `bd ready … --claim` (atomic, first-wins, sets assignee) |
+| `reported` | `in_progress` | assignee cleared, label `agent:reviewer`, last verb `REPORTED` | the worker, before yield; the parent verifies capture after the terminal task result |
+| `in_review` | `in_progress` | an open review wisp linked to the node | the architect, when it creates the review wisps |
+| `changes_requested` | `in_progress` | `REVIEW … verdict=changes` on the node at the current head and round | the reviewer's comment |
+| `approved` | `in_progress` | every required `REVIEW … verdict=approve` at the current head and round; the wisps closed | the reviewers' comments |
+| `merged` | `closed` | `LANDED` and `metadata.merge_sha` on the merge bead; `bd close <bead> --reason merged` on the node | shepherd |
+| `dismissed` | `closed` | `bd close <bead> --reason dismissed` after accepted non-git evidence | architect |
+| `failed` | `blocked` | `FAILED` comment; `bd update <bead> --status blocked` | claimant |
+| `waiting_human` | `blocked` | `ASK` comment (or a shepherd's `ESCALATED` carrying the same fields); a human gate when the bead had not started | the holding actor |
+| `waiting_gate` | `open` | a gate bead blocks it; `BLOCKED` names the gate; assignee cleared | the actor that discovered the wait |
 
 Semantics that fall out of the status column:
 
 - **Deps clear on `closed`.** A dependent becomes ready only once its upstreams are
   `merged`/`dismissed`.
 - **Pick the dependency type from what the dependent waits for.** `blocks` waits for the
-  shepherd's merge. A pre-yield `reported` state does not prove parent-side branch capture.
+  shepherd's merge. A pre-yield `reported` phase does not prove parent-side branch capture.
   - Needs upstream CODE: first verify successful task completion and its captured branch,
     then use a non-blocking type and stamp `base_ref=<upstream branch>` on the dependent.
   - Needs the upstream DECISION to land first: keep `blocks`, which gates `bd ready`.
   - A `base_ref` dependent rebases when the upstream takes review changes. That rebase
-    returns through the existing CONFLICT bounce-back path.
+    returns through the `BOUNCED reason=conflict` path.
 - **`failed` = `blocked` status** → never satisfies a dependency, never reappears in
   `bd ready`. Stranded downstream = `bd dep tree <bead>`.
 - **`bd ready` excludes** gated beads, `in_progress`, `blocked`, `deferred`, and (by
@@ -327,38 +320,34 @@ and never consults other claims. Both overlap checks are friction, not a boundar
 the honest mistake and are bypassable by construction. Disjoint `scope` globs written at
 decomposition time are the real mechanism.
 
-## Events: audit records + comments
+## Events: one comment per transition
 
-`reported blocked failed review advice landed bounced conflict idle no_work ask note
-local_decision` -- the 13 verbs an acting agent may write. `src/contracts/grammar.json` leads
-the set; the other five are the extension's voice. The acting agent records each material
-verb as two writes, with identity from `BEADS_ACTOR=<actor>`:
+`REPORTED BLOCKED FAILED REVIEW LANDED BOUNCED ESCALATED ASK NOTE` -- the nine verbs an
+acting agent may write. `src/contracts/grammar.json` leads the set; the other three are the
+extension's voice. Each material transition is one write, with identity from
+`BEADS_ACTOR=<actor>`:
 
 ```
-bd audit record --actor <actor> --kind tool_call --tool-name orc.<verb> \
-  --issue-id <bead> --exit-code 0                    # append-only .beads/interactions.jsonl
 bd comment <bead> "<VERB> <node> field=… output_ref=<abs artifact path>"
 ```
 
-- **Audit record** = machine-parsable, append-only trail. `--tool-name orc.<verb>` carries
-  the verb. Failures use `--exit-code 1` + `--error`.
-- **Comment** = human-readable payload (the message fields), citing artifact paths instead
-  of inlining long text.
+- **Comment** = the record. Human-readable fields, citing artifact paths instead of inlining
+  long text. Where the transition also changes `status` or `assignee`, that field changes in
+  the same batch; nothing else is written for it. `bd audit record` and `bd set-state` are
+  not part of the protocol: nothing reads either, and the ledger below is the trail.
 - **Artifacts**: full briefs and reports go to
   `<artifacts>/<node>-<verb>-<resource>-<n>.md`, where `<resource>` is the id of the claimed
   bead or wisp. Every dimension reviewer of one node writes its REVIEW artifact at the same
   time, and the resource id is what keeps those filenames apart.
-- State-carrying verbs additionally flip status and label per the mapping table;
-  `bd set-state` emits its own event bead, so transitions are double-anchored.
 
-Alongside these voluntary records, the extension keeps an involuntary one: every child's
+Alongside these voluntary comments, the extension keeps an involuntary record: every child's
 mutating `bd` command is appended to
 `<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog` as
 `ts, child, argv, exitCode, store`. `store` is the beads directory the command wrote to. A
 row whose store is not the run's pinned database also carries `foreign_store: true`; it is
 provenance of a sandbox or another run, not a run mutation, and a reader counting the run's
-writes skips it. The ledger is passive provenance, never a gate, and it is the evidence the
-`read-evidence` step of `mol-dead-claim-recovery` wants.
+writes skips it. The ledger is passive provenance, never a gate, and it is the evidence a
+dead-claim recovery reads first.
 
 ## Shepherd primitives
 
@@ -387,7 +376,7 @@ queries below are for the questions the report does not answer.
 | Question | Command |
 |---|---|
 | one bead's story | `bd show <bead> --json` + `bd comments <bead>` |
-| audit trail | filter `.beads/interactions.jsonl` by `issue_id`/`actor`, plus `<spawning-session-cwd>/.orchestration/audit/*.bdlog` (skip rows tagged `foreign_store`) |
+| audit trail | `bd comments <bead>` for the verbs, plus `<spawning-session-cwd>/.orchestration/audit/*.bdlog` for every mutating command (skip rows tagged `foreign_store`) |
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
 | open waits | `bd gate list`, `bd merge-slot check`, `bd ready --gated --json` |
 | unanswered patrols | `bd dep list <epic> --direction=up --type relates-to --json` filtered on `wisp_type == "patrol"` and a non-closed status. `bd list` hides ephemeral beads outright, even under `--wisp-type patrol`, and takes no `--include-ephemeral`: only `bd ready` does |
@@ -431,5 +420,5 @@ filter on the marker a bead is missing can never find it.
 A poured SpecKit molecule already IS a dependency-aware run DAG. When one drives the work,
 its implement-step children ARE the node beads. Never pour a second molecule and never build
 a second graph: add the `orc-node` label, stamp one `role=<role>` routing key, and stamp
-`scope` metadata on the existing step beads. The claim rule, the state mapping, and the
+`scope` metadata on the existing step beads. The claim rule, the phase derivation, and the
 anchor contract then apply unchanged.
