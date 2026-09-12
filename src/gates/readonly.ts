@@ -6,6 +6,13 @@
  * the run database and the repository beside it owns a valid active-run marker;
  * only then does G1 impose `BD_READONLY=1` on the helper's shell calls.
  *
+ * The variable rides on the tool's `env`, which is a default the command text can
+ * override: `BD_READONLY=0 bd ...`, `env -u BD_READONLY bd ...`, `unset BD_READONLY;
+ * bd ...`. So under the sandbox a command that sets or unsets the variable is refused,
+ * with a reason that names the sandbox. That is the one refusal here; everything else
+ * is a revision. bd's own error (`operation 'update' is not allowed in read-only mode`)
+ * names the variable, so editing it is the plausible next slip, not only an evasion.
+ *
  * The run and pin checks are deliberate. A helper in an unrelated OMP process,
  * or a process sharing the same cwd without the process-local pin, remains
  * writable. Contract-bound `orc-*` roles remain writable because their exit
@@ -24,6 +31,10 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { isBeadWriteFree } from "../identity";
 import { readActiveRunStrict } from "../run-state";
+import { editsVariable, effectiveSegments } from "../shell";
+
+/** The variable the sandbox sets, so the refusal can name it. */
+const SANDBOX_VARIABLE = "BD_READONLY";
 
 /**
  * Real `bash` parameters, used to rebuild the replacement input.
@@ -140,3 +151,39 @@ export function reviseBashEnv(
 
 	return { input: revised };
 }
+
+/**
+ * Whether the command sets or unsets the sandbox variable in any segment the shell will
+ * run, wrapper shells included. Read only when the sandbox is on: a session G1 leaves
+ * writable may say what it likes about the variable.
+ */
+function escapesSandbox(command: unknown): boolean {
+	if (typeof command !== "string") return false;
+	return effectiveSegments(command).some(segment => editsVariable(segment, SANDBOX_VARIABLE));
+}
+
+/**
+ * G1 for one `bash` call: the sandbox refusal, or the environment revision.
+ *
+ * Returns a block when the helper is sandboxed and its command edits the sandbox
+ * variable; otherwise the single revision carrying the pin mirror and the readonly flag,
+ * or `undefined` when the call already has both.
+ */
+export async function gateBeadWriteFree(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	input: Record<string, unknown>,
+): Promise<ToolCallEventResult | undefined> {
+	const sandbox = await beadWriteFreeEnv(pi, ctx);
+	if (sandbox !== undefined && escapesSandbox(input.command)) {
+		return {
+			block: true,
+			reason:
+				`${SANDBOX_VARIABLE}=1 is the read-only sandbox this helper runs under during the orchestrate run: ` +
+				`a session without a bead contract reads beads and writes none. The command sets or unsets ` +
+				`${SANDBOX_VARIABLE}; leave the variable alone, and hand any bead write to the contract-bound role that owns it.`,
+		};
+	}
+	return reviseBashEnv(input, { ...pinAddition(input), ...sandbox });
+}
+

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createClaimState } from "../src/claim-state";
-import { beadWriteFreeEnv, pinAddition, rebuildBashInput, reviseBashEnv } from "../src/gates/readonly";
+import { gateBeadWriteFree, pinAddition, rebuildBashInput, reviseBashEnv } from "../src/gates/readonly";
 import { markerPath } from "../src/run-state";
 
 function api(toolNames: string[]): ExtensionAPI {
@@ -19,11 +19,6 @@ function context(prompt: string, cwd = "/tmp/unrelated-helper"): ExtensionContex
 }
 
 const WORKER_TOOLS = ["bash", "read", "yield"];
-
-/** G1 as `index.ts` applies it: pin mirror plus environment decision, then the shared revision builder. */
-async function gateBeadWriteFree(pi: ExtensionAPI, ctx: ExtensionContext, input: Record<string, unknown>) {
-	return reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(pi, ctx)) });
-}
 
 /** The readonly flag a revision carries, if any; the pin mirror alone is not a readonly decision. */
 function readonlyFlag(revision: { input?: unknown } | undefined): string | undefined {
@@ -248,6 +243,71 @@ describe("G1 bead-write-free sandbox", () => {
 			const once = await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd show x", env: { BD_READONLY: "1" } });
 			expect((once?.input as { env: Record<string, string> }).env).toEqual({ BD_READONLY: "1", BEADS_DIR: pin });
 			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd show x", env: { BD_READONLY: "1", BEADS_DIR: pin } })).toBeUndefined();
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("G1 refuses a sandboxed command that edits the sandbox variable", () => {
+	test.each([
+		["an inline assignment", "BD_READONLY=0 bd update x --status closed"],
+		["an empty inline assignment", "BD_READONLY= bd update x --status closed"],
+		["an env assignment", "env BD_READONLY=0 bd update x --status closed"],
+		["env -u", "env -u BD_READONLY bd update x --status closed"],
+		["env --unset=", "env --unset=BD_READONLY bd update x --status closed"],
+		["unset in an earlier segment", "unset BD_READONLY; bd update x --status closed"],
+		["export in an earlier segment", "export BD_READONLY=0 && bd update x --status closed"],
+		["a wrapper shell", "sh -c 'BD_READONLY=0 bd update x --status closed'"],
+		["env -S carrying the assignment", "env -S 'BD_READONLY=0 bd update x --status closed'"],
+	])("refuses %s", async (_label, command) => {
+		const { root } = await activeRun();
+		try {
+			const result = await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command });
+			expect(result?.block, command).toBe(true);
+			expect(result?.reason, command).toContain("BD_READONLY=1 is the read-only sandbox");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a structured env override is rewritten back to the sandbox, not refused", async () => {
+		const { root } = await activeRun();
+		try {
+			const result = await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: "bd update x", env: { BD_READONLY: "0" } });
+			expect(result?.block).toBeUndefined();
+			expect(readonlyFlag(result)).toBe("1");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a read that names the variable is a read", async () => {
+		const { root } = await activeRun();
+		try {
+			for (const command of ["printenv BD_READONLY", "echo $BD_READONLY && bd show x", "bd show x"]) {
+				const result = await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command });
+				expect(result?.block, command).toBeUndefined();
+				expect(readonlyFlag(result), command).toBe("1");
+			}
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("only the sandboxed helper is refused", async () => {
+		const { root } = await activeRun();
+		const escape = "env -u BD_READONLY bd update x --status closed";
+		try {
+			// A contract-bound role is never sandboxed, so the text is its own business.
+			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("ORC-ROLE: implementer", root), { command: escape })).toEqual({
+				input: { command: escape, env: { BEADS_DIR: process.env.BEADS_DIR } },
+			});
+			// Without the run, G1 fails open on the text as it does on the environment.
+			await rm(markerPath(root));
+			expect(await gateBeadWriteFree(api(WORKER_TOOLS), context("helper", root), { command: escape })).toEqual({
+				input: { command: escape, env: { BEADS_DIR: process.env.BEADS_DIR } },
+			});
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
