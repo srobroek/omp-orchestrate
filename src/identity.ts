@@ -43,6 +43,21 @@ const ORC_ROLES: Record<string, true> = {
 const ROLE_MARKER = /^ORC-ROLE:[ \t]*([a-z][a-z-]*)[ \t]*$/m;
 
 /**
+ * The first line of the system-prompt element OMP builds for a spawned agent
+ * (`prompts/system/subagent-system-prompt.md`): the heading, then the agent body.
+ *
+ * `ctx.getSystemPrompt()` is an array whose other elements carry text this plugin
+ * did not write — the core prompt, and the repository's context files (`CLAUDE.md`,
+ * `.cursor/rules`) rendered as project rules. A marker in one of those must not
+ * declare a role, whichever side of the agent body OMP places it on; so the marker
+ * is read from the agent's element alone whenever one is present. The lead's prompt
+ * has no such element and declares no role in any case; a prompt without one is
+ * still scanned whole so a legacy or hand-built session keeps its marker.
+ * `test/identity.test.ts` pins the heading against the installed template.
+ */
+export const AGENT_BLOCK_HEADING = "§ Role\n";
+
+/**
  * `"worker"` when the hidden `yield` tool is present, `"lead"` otherwise.
  *
  * `yield` is added to the registry only when `session.requireYieldTool === true`
@@ -63,7 +78,9 @@ export function sessionRole(pi: ExtensionAPI): SessionRole {
  * (`scout`, `sonic`, `task`) — none of which carry a bead contract.
  */
 export function orcRole(ctx: ExtensionContext): OrcRole | undefined {
-	const match = ROLE_MARKER.exec(ctx.getSystemPrompt().join("\n"));
+	const prompt = ctx.getSystemPrompt();
+	const agentBlock = prompt.find(element => element.startsWith(AGENT_BLOCK_HEADING));
+	const match = ROLE_MARKER.exec(agentBlock ?? prompt.join("\n"));
 	const declared = match?.[1];
 	// `=== true`, not truthiness: the marker text is untrusted, and `ORC_ROLES` is an
 	// object literal, so `ORC-ROLE: constructor` would otherwise resolve through
