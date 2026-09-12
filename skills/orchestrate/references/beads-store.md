@@ -301,24 +301,31 @@ Flag forms: `bd update --metadata` takes a JSON string or `@file.json`, and
 
 ## Ready front + scope disjointness
 
-Beads does not know about file scopes, so disjointness is checked beside it. The claim rule
-in the extension reads the candidate's `scope` and every live claim's `scope` and applies a
-conservative glob-overlap test (prefix containment in either direction; a bare `**`
-conflicts with everything). A claim that overlaps a live one is refused with both bead ids
-named.
+Beads does not know about file scopes, so disjointness is checked beside it, at two points.
+
+At decomposition, when an architect's `bd create` or `bd update` writes a `scope`, the
+extension refuses one that overlaps an open or in-progress `orc-node` of the same run
+outside the bead's own lineage. Fix the globs and write again.
+
+At claim, when a worker names a bead (`bd update <id> --claim`), the extension reads that
+bead's `scope` and every live claim's `scope` and applies a conservative glob-overlap test
+(prefix containment in either direction; a bare `**` conflicts with everything). A claim
+that overlaps a live one is refused with both bead ids named. On a refusal, leave the bead
+alone and report the overlap as a decomposition defect; do not route around it.
 
 ```
 bd ready --parent <epic> --metadata-field role=<role> --unassigned --claim --json
 ```
 
 That is one command, not a list-then-pick: the claim is atomic and first-wins, and an actor
-accepts whatever the claim returns rather than cherry-picking a candidate. On a refusal,
-leave the bead alone and pull again -- the overlap is a decomposition defect to report, not
-an obstacle to route around.
+accepts whatever the claim returns rather than cherry-picking a candidate. A queue pull names
+no bead before it runs, so no overlap test runs on it; the decomposition check is what keeps
+a queue's beads disjoint from each other.
 
-The overlap check is friction, not a boundary: it catches the honest mistake and is
-bypassable by construction. Disjoint `scope` globs written at decomposition time are the
-real mechanism.
+No check runs per write. G2 confines a mutation to the claimed worktree and `metadata.scope`
+and never consults other claims. Both overlap checks are friction, not a boundary: they catch
+the honest mistake and are bypassable by construction. Disjoint `scope` globs written at
+decomposition time are the real mechanism.
 
 ## Events: audit records + comments
 
@@ -371,9 +378,11 @@ writes skips it. The ledger is passive provenance, never a gate, and it is the e
 
 ## Read the run (status / resume / close-out)
 
-`orc_run_status` is the standard report: it rolls each epic up through its features to their
-tasks and resolves blockers via `bd blocked`. Use it instead of hand-assembling a summary.
-The queries below are for the questions it does not answer.
+`orc_run_status` is the standard report: it rolls the run epic up through its domain epics
+and features to their tasks, at any depth, and resolves blockers via `bd blocked`. Use it
+instead of hand-assembling a summary. `bd list --parent <id>` answers direct children only
+(bd 1.2.2), so a hand-built `--parent <epic>` query misses every task under a feature. The
+queries below are for the questions the report does not answer.
 
 | Question | Command |
 |---|---|
@@ -382,14 +391,14 @@ The queries below are for the questions it does not answer.
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
 | open waits | `bd gate list`, `bd merge-slot check`, `bd ready --gated --json` |
 | unanswered patrols | `bd dep list <epic> --direction=up --type relates-to --json` filtered on `wisp_type == "patrol"` and a non-closed status. `bd list` hides ephemeral beads outright, even under `--wisp-type patrol`, and takes no `--include-ephemeral`: only `bd ready` does |
-| resume after crash | in-flight = `bd list --parent <epic> --status in_progress --json`; actor = `assignee`; location = `metadata.worktree`/`branch`; surviving code = `git branch --list 'omp/task/*'` |
-| unintegrated code | `git cherry <feature-branch> omp/task/<id>` -- `+` per commit not yet upstream, `-` per patch-equivalent already integrated. Ancestry checks are useless here, because integration is cherry-pick |
-| close-out gate | `bd dep cycles` clean AND `bd list --parent <epic> --status in_progress,blocked --json` empty AND no stranded bead AND no undrainable merge bead AND every captured branch scanning all `-` |
-| stranded beads | `comm -13 <(bd ready --parent <epic> --json \| jq -r '.[].id' \| sort) <(bd list --parent <epic> --status open,blocked --no-assignee --json \| jq -r '.[].id' \| sort)`, which lists beads that are unassigned but not ready. Then run `bd list --parent <epic> --status in_progress --json` and check each nonempty `assignee` against a live actor |
+| resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`; actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity); location = `metadata.worktree`/`branch`; surviving code = `git branch --list 'omp/task/*'` |
+| unintegrated code | integration is cherry-pick or squash, so ancestry and `git cherry` prove nothing: under squash every branch commit reads `+`. Landing proof is tree equality, `git merge-tree --write-tree <merge>^ <head>` equal to `git rev-parse <merge>^{tree}`, or one combined patch-id, `git diff <base> <head> \| git patch-id --stable` equal to `git diff <merge>^ <merge> \| git patch-id --stable` |
+| close-out gate | `bd dep cycles` clean AND `/orchestrate-close <epic>` accepts without `--force` (it walks every level for `in_progress`) AND no `blocked` bead in the `orc_run_status` rollup AND no stranded bead AND no undrainable merge bead AND every captured branch proven landed by the row above |
+| stranded beads | per feature, because `--parent` is direct-only: `comm -13 <(bd ready --parent <feature> --json \| jq -r '.[].id' \| sort) <(bd list --parent <feature> --status open,blocked --no-assignee --json \| jq -r '.[].id' \| sort)`, which lists beads that are unassigned but not ready. Then check each nonempty `assignee` in the `orc_run_status` rollup against a live actor |
 
 A bead that is neither ready nor claimed counts as stranded. The store never reports a dead
 actor, so the stranded query is the only signal. Two measured cases, both of which pass the
-`in_progress,blocked` gate:
+in-progress and blocked checks of the close-out gate:
 
 - A provider 403 killed two test shepherds before they wrote any claim or comment. Three
   merge beads stayed claimable after both actors died.

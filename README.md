@@ -11,17 +11,44 @@ This plugin coordinates agents in OMP. It stores work in
 | | |
 | --- | --- |
 | Status | Prerelease. OMP reports the version it installs. |
-| Requires | `bd` (Beads) and `wt` (Worktrunk) on `PATH` |
+| Requires | the tools and plugins under [Prerequisites](#prerequisites) |
 | Install | `omp plugin marketplace add srobroek/omp-orchestrate` then `omp plugin install orchestrate@omp-orchestrate` |
 | Install for development | `omp plugin link /path/to/omp-orchestrate` |
 
-For development, run `./scripts/install-agnix-hooks.sh` once in each checkout. It preserves
-an existing hook path and validates staged instruction files; Git does not install tracked
-hooks automatically.
+Development checkouts need the agnix hook. In each checkout, run
+`./scripts/install-agnix-hooks.sh`. It preserves an existing hook path and validates staged
+instruction files. Git does not install tracked hooks automatically.
 
 After either command, restart the session. OMP loads a new extension module only at startup, so
 `/reload-plugins` does not find it. Claude Code reads the same catalog from
 `.claude-plugin/marketplace.json`.
+
+## Prerequisites
+
+Before the first run, put these on `PATH`:
+
+| Tool | Version | Used by |
+| --- | --- | --- |
+| `bd` (Beads) | 1.2.x | every claim, comment, and status read. `bd` embeds the database, so no server runs |
+| `wt` (Worktrunk) | current | architect feature worktrees. G3 refuses `git worktree` commands that bypass it |
+| `gh` | current | `orc_conflict_probe`, the review probes, and the shepherd's merge |
+| `git` | 2.x | every worktree, capture, and integration step |
+| `python3` | 3.x | `scripts/worktree-sweep.sh` |
+| `jq` | current | the close-out and stranded-bead queries in `beads-store.md` |
+
+The architect and implementer may spawn seven helpers. `scout` and `security-reviewer`
+ship with OMP. The other five come from three plugins in the `srobroek-omp` marketplace:
+
+| Plugin | Agents |
+| --- | --- |
+| `build` | `operator` |
+| `delivery` | `pr-reviewer` |
+| `quality` | `adversarial-challenger`, `docs-guard`, `lint-guard` |
+
+Two commands install them. `omp plugin marketplace add srobroek/omp-plugins` registers the
+marketplace. `omp plugin install <plugin>@srobroek-omp` installs one plugin. When a spawn
+names an agent that is not installed, the task fails with an unknown-agent error. Before
+that, agent discovery preflight reports the missing helper.
 
 ## Agents
 
@@ -52,7 +79,7 @@ Tool lists are not sandboxes: runtime-added tools and Bash can permit mutation.
 Reviewer and researcher code-edit restrictions remain behavioral contracts.
 
 The optional `pr-reviewer` checks PR-wide risks. It does not replace `orc-reviewer`'s
-required bead verdict or authorize a merge. Skip it when no separate PR risk needs review.
+required bead verdict or authorize a merge. When no separate PR risk needs review, skip it.
 
 Per-spawn `effort` selects the lowest (`lo`), middle (`med`) or highest (`hi`)
 supported thinking level. With only low and medium available, both `lo` and `med`
@@ -60,18 +87,31 @@ select low; `hi` selects medium. It never requests an unsupported literal high.
 
 ## Required configuration
 
-| Setting | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `modelRoles.reviewer` | model selector | none | Defines the model used by the independent review role. Configure it before dispatch. |
-| `task.maxRecursionDepth` | number | `2` | A helper runs at depth 3. At `2` no worker can spawn one. Set `3`. |
-| `bash.autoBackground.enabled` | boolean | set explicitly to `false` | Claim results must stay foreground so the observer can bind them. Never set `async: true` on a claim. |
+The settings preflight runs at activation and before each wave. It checks these effective
+values. OMP's defaults satisfy none of the six `task` and `bash` rows, so set each one.
+
+| Setting | Required value | When it deviates |
+| --- | --- | --- |
+| `task.isolation.enabled` | `true` | workers share the architect's tree, so two claims can edit one file |
+| `task.isolation.merge` | `branch` | commits replay as a patch, so no `omp/task/<id>` branch survives to integrate or to recover after a crash |
+| `task.isolation.apply` | `false` | OMP merges child work into the spawning tree, so the architect never owns integration |
+| `task.enableEffort` | `true` | OMP ignores the per-spawn effort, so every agent runs at the session default |
+| `task.maxRecursionDepth` | `3` or more | a worker's helper sits at depth 3, so at the default `2` no worker can spawn one |
+| `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
+| `modelRoles.reviewer` | a model selector | the independent review role falls back to the session model or fails selection |
+| `BEADS_DIR` | one absolute path to the run's `.beads` in every child | a worker's clone holds a private copy of `.beads/`, and its `bd` writes land there |
+
+Isolation clones the whole checkout, `.beads/` included. A worker that discovers a
+database by walking up from its cwd finds a private copy that no other agent reads.
+`/orchestrate-run` pins the database, and every child inherits the pin. The `apply: false`
+row keeps integration with the architect, who cherry-picks each captured branch.
 
 The extension reports deviations through `WARN settings` notices and a comment on
 the bound epic. Preflight never creates or rewrites project configuration.
 
 Agent discovery preflight reports missing core roles, incorrect role markers and
-unresolved model aliases. It checks optional helpers when a task requests them.
-Warnings include the resolved definition path when one exists.
+unresolved model aliases. When a task requests an optional helper, preflight checks it.
+When a definition path resolves, the warning names it.
 
 If `/agents` and task dispatch disagree, check the effective `extensions` roots.
 With the `claude-plugins` source disabled, list the installed package root in `extensions`
@@ -142,29 +182,31 @@ The host matches the raw tool-argument JSON as the model streams it (`session/tt
 - Only `edit` and `write` expose a `matcherDigest` with the file content. `bash`, `eval`, `task`, and `hub` match the argument JSON itself.
 - A bash rule therefore sees `{"command":"bd ready …"}`. `bd` follows `"`. A shell newline is the two characters `\n`. A quote is `\"`. `^` never precedes a command.
 - Anchor on `\b` or on the `\n`/`\t` escape. "Same line" ends at the next `\n` escape or the closing `"`.
-- A rule that asserts a key is absent (`orc-spawn-isolated`) must wait for the object to close. Until the last delta the buffer is a prefix.
 
 `interruptMode` sets the cost of a match. `never` lets the call run and folds the rule
 text into its result. `tool-only` aborts the assistant message, discards it, injects the
-rule, and continues. Either way a rule fires once per session (`repeatMode: once`). The
+rule, and continues. In both modes a rule fires one time per session (`repeatMode: once`). The
 `bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
 harmless (an empty queue, a doomed process) and the reminder arrives with the result.
-`orc-spawn-isolated` uses `tool-only`, because its reminder is useless after the worker
-has run.
 
 The run pins one absolute `BEADS_DIR` to its embedded database. G1 uses that process-local
 pin and a valid marker in the session checkout or pinned repository before sandboxing a
 generic helper. Each copied checkout inherits the pin. Discovering a local database does
-not share state. G6 and G7 check Beads discipline during a run.
+not share state. G6 checks Beads discipline during a run.
 
 The host has a separate regex engine. Python accepting a pattern does not prove the
 host accepts it. After editing a rule, run `sh scripts/validate-rules.sh`. It feeds
 `omp ttsr test` the shape the host matches: bash snippets wrapped as
-`{"command":"…"}`, `task` and `hub` argument objects verbatim, including partial
-buffers for the stream-sensitive rule. This local check needs an installed `omp`, so CI
-does not run it.
+`{"command":"…"}`, `task` and `hub` argument objects verbatim. This local check needs an
+installed `omp`, so CI does not run it.
 
 ## Commands
+
+Bootstrap a run in three steps, all in the lead session:
+
+1. `/orchestrate-run`. It pins the database and writes a `pending` marker.
+2. `bd create --type epic ...` with the run metadata that `beads-store.md` lists.
+3. `/orchestrate-bind <epic>`. It arms the patrol. After this step, dispatch.
 
 | Command | Does |
 | --- | --- |
@@ -172,7 +214,7 @@ does not run it.
 | `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp. When the patrol did not arm, it warns |
 | `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and whether the patrol armed |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
-| `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no child is `in_progress`. `--force` skips the child check. `/orchestrate-close pending` undoes an activation that never bound |
+| `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no bead beneath it, at any depth, is `in_progress`. `--force` skips that check. `/orchestrate-close pending` undoes an activation that never bound |
 
 The pin lives in the OMP process environment. After a restart, a lead session that
 finds the marker re-pins at start and reports a pin it cannot establish. Re-issue
@@ -183,12 +225,12 @@ the next bind until `/orchestrate-close` removes it, together with the lock file
 
 ## Development
 
-Run `bun install --frozen-lockfile` before `bun run typecheck` or `bun test`, and
-again after every pull that changes `bun.lock`. The lockfile pins the
-`@oh-my-pi/pi-coding-agent` release the source compiles against; a `node_modules`
-left over from an older release fails with missing-export errors in
-`src/agent-preflight.ts` and `src/worktree.ts` and a missing `pi-natives` export in
-`test/wiring.test.ts`, while CI, which installs fresh, stays green.
+Before `bun run typecheck` or `bun test`, run `bun install --frozen-lockfile`. After
+every pull that changes `bun.lock`, run it again. The lockfile pins the
+`@oh-my-pi/pi-coding-agent` release the source compiles against. A `node_modules` left
+over from an older release fails in two places: missing-export errors in
+`src/agent-preflight.ts` and `src/gates/worktree.ts`, and a missing `pi-natives` export in
+`test/wiring.test.ts`. CI installs fresh, so it stays green.
 
 ## License
 

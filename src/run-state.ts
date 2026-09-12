@@ -289,36 +289,69 @@ export async function bindRun(cwd: string, runId: string): Promise<BindResult> {
 }
 
 /**
+ * The `in_progress` beads beneath `rootId` at any depth.
+ *
+ * `bd list --parent` answers direct children only (measured on bd 1.2.2), and a run's
+ * claims sit on tasks two levels below the run epic, under features that stay `open`
+ * while their tasks are worked. So the store is read once and walked here. A parent
+ * cycle is stopped by `seen`, and a closed container still carries the chain, which is
+ * why the read below asks for every status.
+ */
+export function inFlightDescendants(beads: readonly BdBead[], rootId: string): BdBead[] {
+	const childrenOf = new Map<string, BdBead[]>();
+	for (const bead of beads) {
+		if (typeof bead.parent !== "string") continue;
+		const siblings = childrenOf.get(bead.parent);
+		if (siblings) siblings.push(bead);
+		else childrenOf.set(bead.parent, [bead]);
+	}
+	const inFlight: BdBead[] = [];
+	const seen = new Set<string>([rootId]);
+	const queue = [rootId];
+	for (let next = 0; next < queue.length; next++) {
+		for (const child of childrenOf.get(queue[next]!) ?? []) {
+			if (seen.has(child.id)) continue;
+			seen.add(child.id);
+			if (child.status === "in_progress") inFlight.push(child);
+			queue.push(child.id);
+		}
+	}
+	return inFlight;
+}
+
+/**
  * End a run: remove the marker once it names `runId`.
  *
  * A marker outliving its run keeps injecting the protocol into every `orc-*` session
- * in the repository and refuses the next bind, so this is how a run ends. Children
- * still `in_progress` are the reason to refuse: their claims would lose the supervision
- * the marker arms. `force` skips that check for a run whose beads are already gone or
- * unreadable. The lock is released, and its file removed, by the same exclusion that
- * guards every marker write.
+ * in the repository and refuses the next bind, so this is how a run ends. Beads still
+ * `in_progress` anywhere beneath the epic are the reason to refuse: their claims would
+ * lose the supervision the marker arms. `force` skips that check for a run whose beads
+ * are already gone or unreadable. The lock is released, and its file removed, by the
+ * same exclusion that guards every marker write.
  */
 export async function closeRun(cwd: string, runId: string, options: { force?: boolean } = {}): Promise<void> {
- if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
- await withMarkerLock(cwd, async () => {
-  const existing = await readActiveRunStrict(cwd);
-  if (existing === null) throw new Error("no active-run marker to close");
-  if (existing.run_id !== runId) {
-   throw new Error(existing.run_id === PENDING
-    ? `active-run marker is pending, not bound to ${runId}; close it as ${PENDING}`
-    : `active-run marker is bound to ${existing.run_id}, not ${runId}`);
-  }
-  // A pending marker has no epic and so no children to protect.
-  if (options.force !== true && runId !== PENDING) {
-   resetReadBudget();
-   const inFlight = await bdListChecked(["list", "--parent", runId, "--status", "in_progress", "--limit", "0", "--json"], undefined, cwd);
-   if (inFlight === null) throw new Error(`in-flight children of ${runId} could not be read; pass --force to close without that check`);
-   if (inFlight.length > 0) {
-    throw new Error(`${inFlight.length} child${inFlight.length === 1 ? "" : "ren"} of ${runId} still in_progress (${inFlight.map(bead => bead.id).join(", ")}); pass --force to close anyway`);
-   }
-  }
-  await fs.rm(markerPath(cwd), { force: true });
- });
+	if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
+	await withMarkerLock(cwd, async () => {
+		const existing = await readActiveRunStrict(cwd);
+		if (existing === null) throw new Error("no active-run marker to close");
+		if (existing.run_id !== runId) {
+			throw new Error(existing.run_id === PENDING
+				? `active-run marker is pending, not bound to ${runId}; close it as ${PENDING}`
+				: `active-run marker is bound to ${existing.run_id}, not ${runId}`);
+		}
+		// A pending marker has no epic and so no children to protect.
+		if (options.force !== true && runId !== PENDING) {
+			resetReadBudget();
+			// Event beads are `bd set-state`'s closed transition records; they never carry a claim.
+			const beads = await bdListChecked(["list", "--status", "all", "--exclude-type", "event", "--limit", "0", "--json"], undefined, cwd);
+			if (beads === null) throw new Error(`in-flight beads under ${runId} could not be read; pass --force to close without that check`);
+			const inFlight = inFlightDescendants(beads, runId);
+			if (inFlight.length > 0) {
+				throw new Error(`${inFlight.length} bead${inFlight.length === 1 ? "" : "s"} under ${runId} still in_progress (${inFlight.map(bead => bead.id).join(", ")}); pass --force to close anyway`);
+			}
+		}
+		await fs.rm(markerPath(cwd), { force: true });
+	});
 }
 
 /** What `/orchestrate-status` prints. `healthy` is bound, epic active, patrol armed -- nothing less. */
@@ -439,7 +472,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
  });
 
  pi.registerCommand("orchestrate-close", {
-  description: "End the run: remove the marker once it names <epic> and no child is in_progress (--force skips the check)",
+  description: "End the run: remove the marker once it names <epic> and no bead beneath it, at any depth, is in_progress (--force skips the check)",
   handler: async (args, ctx) => {
    const words = args.trim().split(/\s+/).filter(word => word.length > 0);
    const ids = words.filter(word => word !== "--force");

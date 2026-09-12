@@ -20,6 +20,19 @@ let dir: string;
 let previousBin: string | undefined;
 let previousBeadsDir: string | undefined;
 
+/** A fresh repository with one commit and no host hooks, signing, or identity lookups. */
+const GIT_QUIET = ["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "user.email=test@example.com", "-c", "user.name=Test"];
+async function git(...args: string[]): Promise<void> {
+	await execFileAsync("git", [...GIT_QUIET, ...args]);
+}
+async function initRepo(root: string): Promise<void> {
+	await fs.mkdir(root, { recursive: true });
+	await git("init", "-q", root);
+	await git("-C", root, "commit", "-q", "--allow-empty", "-m", "init");
+}
+/** Long enough for three git spawns on a loaded host; short enough to name a hang. */
+const GIT_TIMEOUT_MS = 15_000;
+
 async function stub(script: string): Promise<void> {
 	const bin = path.join(dir, "bd-stub");
 	await fs.writeFile(bin, `#!/bin/sh\nARGV_LOG='${path.join(dir, "argv.log")}'\n${script}\n`);
@@ -33,10 +46,10 @@ async function argv(): Promise<string[]> {
 }
 
 beforeEach(async () => {
-	// Built under $HOME rather than os.tmpdir(): the resolution guard compares the answer
-	// against the working directory, and macOS reports /tmp as /private/tmp, which would make
-	// a correct answer look like it landed outside the checkout.
-	dir = await fs.mkdtemp(path.join(process.env.HOME ?? os.homedir(), ".orc-beads-"));
+	// Canonical from the start: the guard compares bd's answer with the working directory
+	// after resolving symlinks, and macOS reports the temp root through /private. A fixture
+	// under the raw os.tmpdir() would then expect the uncanonical spelling back.
+	dir = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "orc-beads-"));
 	previousBin = process.env.BD_BIN;
 	// This module assigns BEADS_DIR deliberately, so it is saved and restored rather than left
 	// to leak into every later test in the process.
@@ -68,15 +81,30 @@ exit 0`);
 		expect(await argv()).toEqual(["where"]);
 	});
 
+	test("a database bd names beneath a symlinked checkout is pinned even before it exists", async () => {
+		// `bd where` answers `<cwd>/.beads` as bd spells the cwd, and on macOS a run started
+		// under /var is spelled /private/var once resolved. A missing `.beads` has no realpath,
+		// so the raw answer was compared with the canonical cwd and every such run was refused.
+		const real = path.join(dir, "checkout");
+		await fs.mkdir(real);
+		const alias = path.join(dir, "alias");
+		await fs.symlink(real, alias, "dir");
+		const answered = path.join(alias, ".beads");
+		await stub(`echo "$@" >> "$ARGV_LOG"
+echo "${answered}"
+exit 0`);
+
+		const result = await ensureBeadsPath(alias);
+
+		expect(result.ok).toBe(true);
+		expect(process.env.BEADS_DIR).toBe(path.join(real, ".beads"));
+	});
+
 	test("a linked worktree pins the primary checkout database", async () => {
 		const primary = path.join(dir, "primary");
 		const worktree = path.join(dir, "linked");
-		await fs.mkdir(primary);
-		await execFileAsync("git", ["init", primary]);
-		await execFileAsync("git", ["-C", primary, "config", "user.email", "test@example.com"]);
-		await execFileAsync("git", ["-C", primary, "config", "user.name", "Test"]);
-		await execFileAsync("git", ["-C", primary, "commit", "--allow-empty", "-m", "init"]);
-		await execFileAsync("git", ["-C", primary, "worktree", "add", "-b", "linked", worktree]);
+		await initRepo(primary);
+		await git("-C", primary, "worktree", "add", "-q", "-b", "linked", worktree);
 		const primaryBeads = path.join(primary, ".beads");
 		await fs.mkdir(primaryBeads);
 		await stub(`echo "$@" >> "$ARGV_LOG"
@@ -87,19 +115,15 @@ exit 0`);
 
 		expect(result.ok).toBe(true);
 		expect(process.env.BEADS_DIR).toBe(primaryBeads);
-	});
+	}, GIT_TIMEOUT_MS);
 
 	test("a worktree attached to a bare repository cannot adopt an ancestor database", async () => {
 		const source = path.join(dir, "source");
 		const bare = path.join(dir, "remote.git");
 		const worktree = path.join(dir, "bare-linked");
-		await fs.mkdir(source);
-		await execFileAsync("git", ["init", source]);
-		await execFileAsync("git", ["-C", source, "config", "user.email", "test@example.com"]);
-		await execFileAsync("git", ["-C", source, "config", "user.name", "Test"]);
-		await execFileAsync("git", ["-C", source, "commit", "--allow-empty", "-m", "init"]);
-		await execFileAsync("git", ["clone", "--bare", source, bare]);
-		await execFileAsync("git", ["--git-dir", bare, "worktree", "add", "-b", "linked", worktree]);
+		await initRepo(source);
+		await git("clone", "-q", "--bare", source, bare);
+		await git("--git-dir", bare, "worktree", "add", "-q", "-b", "linked", worktree);
 		const ancestorBeads = path.join(dir, ".beads");
 		await fs.mkdir(ancestorBeads);
 		await stub(`echo "$@" >> "$ARGV_LOG"
@@ -111,7 +135,7 @@ exit 0`);
 		expect(result.ok).toBe(false);
 		expect(result.ok === false && result.reason).toContain("does not belong to this checkout");
 		expect(process.env.BEADS_DIR).toBeUndefined();
-	});
+	}, GIT_TIMEOUT_MS);
 
 	test("a valid inherited BEADS_DIR is kept, canonicalised, and never re-resolved", async () => {
 		// The run resolved it; re-resolving inside an isolated checkout would replace a correct

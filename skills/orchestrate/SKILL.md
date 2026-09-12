@@ -68,8 +68,12 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 | Architect domain (an epic under the run) | `epic: <id>`; one feature beneath it: `feature: <id>` |
 | One actor's held work | `actor: <name>` |
 
-`/orchestrate-status` shows the marker binding, the run epic's liveness, and whether the
-patrol is armed. `/orchestrate-roster` shows ready-queue depth per role, wisps included.
-`/orchestrate-close <epic>` ends a run by removing the marker; it refuses while any child
-is `in_progress` unless `--force`.
+Slash commands, typed by the lead:
+
+- `/orchestrate-run` pins the database and writes the `pending` marker. Run it first.
+- `/orchestrate-bind <epic>` binds the marker to the run epic and arms the patrol. After it, dispatch.
+- `/orchestrate-status` shows the marker binding, the run epic's liveness, and whether the patrol armed.
+- `/orchestrate-roster` shows ready-queue depth per role, wisps included.
+- `/orchestrate-close <epic>` ends a run by removing the marker. With any bead beneath the epic still `in_progress`, it refuses. `--force` skips that check.
+
 Final assistant verdicts and durable comment verbs are separate channels.
