@@ -8,9 +8,10 @@
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs/promises";
+import { join } from "node:path";
 import { DISPATCH_CONTRACT } from "../src/contract";
 
-const REFERENCE = "skills/orchestrate/references/dispatch-contract.md";
+const REFERENCE = join(import.meta.dir, "..", "skills", "orchestrate", "references", "dispatch-contract.md");
 
 describe("dispatch contract parity", () => {
  test("the skill reference reproduces the injected contract verbatim", async () => {

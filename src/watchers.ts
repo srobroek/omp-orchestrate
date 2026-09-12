@@ -834,6 +834,13 @@ interface SettingRequirement {
  consequence: string;
 }
 
+/**
+ * The shipped overlay that satisfies every requirement below. Applied to a session
+ * with `omp --config <file>`, a layer above the operator's global and project
+ * config, which is why the preflight can name a repair without rewriting either.
+ */
+export const OVERLAY_FILE = path.resolve(import.meta.dir, "..", "config", "orchestrate.overlay.yml");
+
 const REQUIRED_SETTINGS: readonly SettingRequirement[] = [
  {
   key: "task.isolation.enabled",
@@ -926,7 +933,7 @@ const OBSERVED_SETTINGS: readonly SettingPath[] = [
  * nothing, and a caller that treated `{}` as an answer would mark a check done that
  * never ran.
  */
-function readSettings(): Record<string, unknown> | null {
+export function readSettings(): Record<string, unknown> | null {
  const instance = findScopedSettings();
  if (instance === undefined) return null;
  const observed: Record<string, unknown> = {};
@@ -959,7 +966,7 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  let deviations: SettingDeviation[] = [];
  if (observed === null) {
   lines.push(
-   "the effective settings could not be read (no settings instance is live for this session), so the required task settings are unverified; the check runs again on the next /orchestrate-run",
+   "the effective settings could not be read (no settings instance is live for this session), so the required task settings are unverified; the check runs again on the next /orchestrate-start",
   );
  } else {
   settingsChecked = true;
@@ -993,14 +1000,14 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  const scope = await runScope({ cwd });
  if (scope !== null && scope.beadsDir === undefined) {
   lines.push(
-   "the run marker names no beads database, so an isolated worker resolves its own store rather than this run's: run /orchestrate-run again to record it",
+   "the run marker names no beads database, so an isolated worker resolves its own store rather than this run's: run /orchestrate-start again to record it",
   );
  }
 
  if (lines.length === 0) return deviations;
 
  const tail =
-  "Fix and restart the run, or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.";
+  `Restart the lead session with \`omp --config ${OVERLAY_FILE}\` (the shipped overlay; /orchestrate-doctor prints this command), or accept that captured branches, deliberate integration, and cross-worker claim exclusion are unavailable.`;
 
  pi.sendMessage({
   customType: SETTINGS_PREFLIGHT_MESSAGE,

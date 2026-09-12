@@ -15,7 +15,7 @@
   ]
  },
  "pluginAgents": {
-  "note": "Spawn-allowlist names that neither a bundled OMP agent nor this repo provides, keyed by the package that must be installed for the grant to be spawnable. Two install layouts are accepted: <plugins>/node_modules/<package>, and the marketplace cache's <marketplace>___<plugin>___<version>.",
+  "note": "Spawn-allowlist names that neither a bundled OMP agent nor this repo provides, keyed by the package that must be installed for the grant to be spawnable. Two install layouts are accepted: <plugins>/node_modules/<package>, and the marketplace cache's <marketplace>___<plugin>___<version>. `PLUGIN_AGENTS_BY_PACKAGE` in src/agent-preflight.ts carries the same table for orc_doctor; test/doctor.test.ts asserts the two agree so neither can drift alone.",
   "byPackage": {
    "@srobroek/build": [
     "operator"
