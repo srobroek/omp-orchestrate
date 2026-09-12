@@ -42,8 +42,27 @@ function firstLine(text: string | undefined): string {
 	return line === undefined ? "no output" : line.trim();
 }
 
+/**
+ * The canonical form of a path that may not exist yet.
+ *
+ * `bd where` and the shared-checkout guess both name a `.beads` that a fresh run has not
+ * created, and `realpath` refuses a missing leaf outright. Comparing that raw answer with a
+ * canonicalised cwd refused every run started under macOS's `/var` -> `/private/var` symlink.
+ * So the longest existing ancestor is canonicalised and the missing tail re-joined: both
+ * sides of every comparison below then resolve the same symlinks.
+ */
 async function canonicalPath(value: string): Promise<string> {
-	return fs.realpath(value).catch(() => path.resolve(value));
+	const absolute = path.resolve(value);
+	const missing: string[] = [];
+	for (let probe = absolute; ; probe = path.dirname(probe)) {
+		try {
+			const real = await fs.realpath(probe);
+			return missing.length === 0 ? real : path.join(real, ...missing.reverse());
+		} catch {
+			if (path.dirname(probe) === probe) return absolute;
+			missing.push(path.basename(probe));
+		}
+	}
 }
 
 async function sharedCheckoutBeadsDir(cwd: string): Promise<string | null> {

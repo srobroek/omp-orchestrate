@@ -10,17 +10,17 @@ import { activateRun, bindRun, closeRun, isBoundRunActive, markerPath, readActiv
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 /**
- * What Beads answers. `bd show <id>` returns `epics[id]`, `null` when unknown; `bd list
- * --parent <id>` returns `children`, `null` for an unreadable store. Spied once for the
- * file, so a test that restores would not strip the default from the tests after it.
+ * What Beads answers. `bd show <id>` returns `epics[id]`, `null` when unknown; `bd list`
+ * returns `store`, `null` for an unreadable one. Spied once for the file, so a test that
+ * restores would not strip the default from the tests after it.
  */
 let epics: Record<string, BdBead | null> = {};
-let children: BdBead[] | null = [];
+let store: BdBead[] | null = [];
 let listArgs: string[][] = [];
 const showSpy = spyOn(bd, "bdShow").mockImplementation(async id => epics[id] ?? null);
 const listSpy = spyOn(bd, "bdListChecked").mockImplementation(async args => {
 	listArgs.push(args);
-	return children;
+	return store;
 });
 let patrol: "armed" | "absent" | "unknown" = "armed";
 let arming: Error | undefined;
@@ -49,7 +49,7 @@ beforeEach(async () => {
 	// Every id a test binds below is an open epic unless the test says otherwise.
 	epics = {};
 	for (const id of ["orc-1", "orc-2", "orc-7", "orc-42", "orc-a", "orc-b", "orc-legacy", "orc-new", "orc-other", "orc.run_1:2-3"]) epic(id);
-	children = [];
+	store = [];
 	listArgs = [];
 	patrol = "armed";
 	arming = undefined;
@@ -384,7 +384,7 @@ describe("closeRun", () => {
 		await closeRun(cwd, "orc-7");
 		expect(await readActiveRun(cwd)).toBeNull();
 		expect(await readdir(join(cwd, ".orchestration"))).toEqual([]);
-		expect(listArgs).toEqual([["list", "--parent", "orc-7", "--status", "in_progress", "--limit", "0", "--json"]]);
+		expect(listArgs).toEqual([["list", "--status", "all", "--exclude-type", "event", "--limit", "0", "--json"]]);
 	});
 
 	test("refuses an id the marker does not name", async () => {
@@ -395,18 +395,43 @@ describe("closeRun", () => {
 		expect(listArgs).toEqual([]);
 	});
 
-	test("refuses while children are in_progress, naming them", async () => {
+	test("refuses while beads under the run are in_progress, naming them", async () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-7");
-		children = [{ id: "orc-7.1", status: "in_progress" }, { id: "orc-7.4", status: "in_progress" }];
-		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/2 children of orc-7 still in_progress \(orc-7\.1, orc-7\.4\); pass --force/);
+		store = [{ id: "orc-7.1", status: "in_progress", parent: "orc-7" }, { id: "orc-7.4", status: "in_progress", parent: "orc-7" }];
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/2 beads under orc-7 still in_progress \(orc-7\.1, orc-7\.4\); pass --force/);
 		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+	});
+
+	test("finds in_progress tasks below features, through a closed feature, and ignores other runs", async () => {
+		// `bd list --parent` is direct-only (bd 1.2.2), and claims live on tasks two levels
+		// down while their feature stays open; a close that read direct children only would
+		// strip supervision from every worker still holding one.
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		store = [
+			{ id: "orc-7", status: "in_progress" },
+			{ id: "orc-7.1", status: "open", parent: "orc-7" },
+			{ id: "orc-7.1.1", status: "in_progress", parent: "orc-7.1" },
+			{ id: "orc-7.2", status: "closed", parent: "orc-7" },
+			{ id: "orc-7.2.1", status: "in_progress", parent: "orc-7.2" },
+			{ id: "orc-7.3", status: "open", parent: "orc-7" },
+			{ id: "orc-7.3.1", status: "closed", parent: "orc-7.3" },
+			{ id: "orc-9", status: "in_progress" },
+			{ id: "orc-9.1", status: "in_progress", parent: "orc-9" },
+		];
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/2 beads under orc-7 still in_progress \(orc-7\.1\.1, orc-7\.2\.1\); pass --force/);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		// Another run's in-flight work in the same store is not this run's reason to stay open.
+		store = [{ id: "orc-9", status: "in_progress" }, { id: "orc-9.1", status: "in_progress", parent: "orc-9" }];
+		await closeRun(cwd, "orc-7");
+		expect(await readActiveRun(cwd)).toBeNull();
 	});
 
 	test("refuses when the children cannot be read, unless forced", async () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-7");
-		children = null;
+		store = null;
 		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/could not be read; pass --force/);
 		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
 		await closeRun(cwd, "orc-7", { force: true });
@@ -416,7 +441,7 @@ describe("closeRun", () => {
 	test("force skips the children check entirely", async () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-7");
-		children = [{ id: "orc-7.1", status: "in_progress" }];
+		store = [{ id: "orc-7.1", status: "in_progress", parent: "orc-7" }];
 		await closeRun(cwd, "orc-7", { force: true });
 		expect(await readActiveRun(cwd)).toBeNull();
 		expect(listArgs).toEqual([]);
@@ -652,7 +677,7 @@ describe("registerRunCommands", () => {
 		expect(notices.at(-1)).toEqual(["error", "usage: /orchestrate-close <epic> [--force]"]);
 		await close("orc-7 orc-8");
 		expect(notices.at(-1)).toEqual(["error", "usage: /orchestrate-close <epic> [--force]"]);
-		children = [{ id: "orc-7.1", status: "in_progress" }];
+		store = [{ id: "orc-7.1", status: "in_progress", parent: "orc-7" }];
 		await close("orc-7");
 		expect(notices.at(-1)?.[0]).toBe("error");
 		expect(notices.at(-1)?.[1]).toContain("still in_progress");
