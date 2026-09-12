@@ -88,11 +88,8 @@ jobs:
           tar -xzf "$RUNNER_TEMP/vale/vale_3.17.1_Linux_64-bit.tar.gz" -C "$RUNNER_TEMP/vale"
           echo "$RUNNER_TEMP/vale" >> "$GITHUB_PATH"
 
-      # `_test_*.py` matches neither of pytest's default collection patterns.
-      # Run the stdlib unittest scripts directly.
-      - name: Worktree cleanup tests
-        run: python3 skills/orchestrate/scripts/_test_worktree_sweep.py
-
+      # The py job is the prose gate alone: slopvac is a Python package, so its regression
+      # suite and the gate run under `uvx`. Every runtime script is TypeScript under bun.
       - name: Prose checker regression
         run: uvx --from slopvac==1.0.1 python scripts/_test_prose_gate.py
 
