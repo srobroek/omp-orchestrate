@@ -19,6 +19,14 @@
  * grammar. Uninspectable edit payloads are refused rather than silently reduced to a
  * cwd-only check.
  *
+ * Every path is compared in the filesystem's own spelling. The declared tree comes from
+ * `fs.realpath`; a cwd or target the tool named is walked component by component and
+ * then its longest existing prefix is passed through `fs.realpath` too, so on a
+ * case-insensitive volume (the macOS default) a path the model spells `SRC/new.ts`
+ * compares as `src/new.ts`, which is where the write lands, and on a case-sensitive
+ * volume the two stay the distinct paths they are. No platform branch: realpath answers
+ * for the volume it is asked about.
+ *
  * Scope disjointness between claims is judged once, at claim, by G5. This gate reads
  * only the claimed beads and compares each write against the territory they name.
  *
@@ -122,8 +130,8 @@ const MAX_HOPS = 32;
 const URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
 
 /**
- * Resolve a declared path to where it would actually land, or `undefined` when it cannot
- * be resolved at all.
+ * Resolve a declared path to where it would actually land, in the filesystem's own
+ * spelling, or `undefined` when it cannot be resolved at all.
  *
  * Walked one component at a time rather than handed to `fs.realpath`, for two reasons.
  *
@@ -139,6 +147,9 @@ const URI_TARGET = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
  * writes outside `tree`. Verified against the filesystem, not inferred. So `..` is
  * applied to the already-resolved prefix here, which is the kernel's order, and
  * `POSIX realpath(3)` agrees.
+ *
+ * Only after the walk is `fs.realpath` asked, and only about the longest prefix that
+ * exists: with no link and no `..` left, all it can change is the spelling.
  */
 async function resolveTarget(cwd: string, declared: string): Promise<string | undefined> {
  // Neither of these can be turned into a path this gate should compare: a NUL is
@@ -187,7 +198,25 @@ async function resolveTarget(cwd: string, declared: string): Promise<string | un
   pending.push(...link.slice(linkRoot.length).split(path.sep).reverse());
  }
 
- return resolved;
+ return canonical(resolved);
+}
+
+/**
+ * `resolved` with its longest existing prefix in the filesystem's own spelling and the
+ * rest appended as written. A prefix the filesystem will not resolve for any other
+ * reason than absence keeps its spelling; that is the fail-open side of this gate.
+ */
+async function canonical(resolved: string): Promise<string> {
+ let existing = resolved;
+ const rest: string[] = [];
+ for (;;) {
+  const real = await realpathOrUndefined(existing);
+  if (real !== undefined) return rest.length === 0 ? real : path.join(real, ...rest.reverse());
+  const parent = path.dirname(existing);
+  if (parent === existing) return resolved;
+  rest.push(path.basename(existing));
+  existing = parent;
+ }
 }
 
 function declaredTargets(toolName: string, input: Record<string, unknown>): string[] | undefined {

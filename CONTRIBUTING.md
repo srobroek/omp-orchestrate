@@ -198,6 +198,13 @@ cause and lets the call run. A check refuses only what it read and can prove:
   - a role started as a nested `omp` process: `omp -p`, `--print`, `--prompt`, `--cwd`, `--agent` or `--session-dir` from a shell. `--config` on the same command exempts it
 - **G8 (every tool, notice):** in a worker session, compares the agent's `ORC-ROLE` and live model against the core contract once. On a mismatch it sends one notice naming the expected model, the live model, and the parking commands. G8 accepts a model that OMP moved the session onto through retry fallback. When G8 cannot read the model, it logs the cause and stays silent.
 
+### Spelling and scan bounds
+
+- **Role marker.** `orcRole` reads `ORC-ROLE:` from the system-prompt element OMP builds for the spawned agent, the one that opens with `§ Role`. A marker in a repository context file (`CLAUDE.md`, `.cursor/rules`) sets no role, whichever side of the agent body OMP renders it on. A prompt without that element is scanned whole. `test/identity.test.ts` pins the heading against the installed template.
+- **Program spelling.** The shell parser folds the program word's basename to lower case before every lookup: `bd`, `env`, the runner prefixes, the wrapper shells, `eval`, and the `git`/`gh` head. APFS and NTFS resolve `PATH` case-insensitively, so `BD update` runs bd there. Subcommands and flags keep their case.
+- **Path spelling.** G2 compares paths in the filesystem's own spelling. After the component walk, the longest existing prefix of a cwd or target passes through `fs.realpath`. On a case-insensitive volume `SRC/new.ts` compares as `src/new.ts`; on a case-sensitive volume it stays a distinct path. There is no platform branch.
+- **Rule scan bounds.** Each same-line span in the `bd ready` rules and the `args` window in `orc-no-nested-omp` read at most 300 characters (`{0,300}`, not `*`). Unbounded, one `test` over a 100k buffer of repeated `bd ready` cost 480 ms, and past 50k the engine hit its match limit and reported no match. `test/rules.test.ts` times every condition on a 100k buffer.
+
 ## Rules
 
 Three TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
@@ -210,7 +217,7 @@ Consequences for rule authors:
 - Each `toolcall_delta` appends the provider's `partial_json` to a per-call buffer. Every condition runs against the whole buffer again.
 - Only `edit` and `write` expose a `matcherDigest` with the file content. `bash`, `eval`, `task`, and `hub` match the argument JSON itself.
 - A bash rule therefore sees `{"command":"bd ready …"}`. `bd` follows `"`. A shell newline is the two characters `\n`. A quote is `\"`. `^` never precedes a command.
-- Anchor on `\b` or on the `\n`/`\t` escape. "Same line" ends at the next `\n` escape or the closing `"`.
+- Anchor on `\b` or on the `\n`/`\t` escape. "Same line" ends at the next `\n` escape or the closing `"`, and reads at most 300 characters: `{0,300}`, never `*`. Every `bd ready` on a line starts its own scan, so an unbounded span is quadratic.
 
 `interruptMode` sets the cost of a match. `never` lets the call run and folds the rule text
 into its result. `tool-only` aborts the assistant message, discards it, injects the rule,

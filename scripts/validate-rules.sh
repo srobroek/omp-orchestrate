@@ -80,6 +80,8 @@ check orc-ready-ephemeral.md miss bash 'bd ready --claim --json\nbd list --label
 check orc-ready-ephemeral.md miss bash 'sbd ready --label agent:reviewer --claim --json'
 # --include-ephemeral in another field of the same call must not silence the rule.
 check orc-ready-ephemeral.md fire bash-json '{"command":"bd ready --label agent:reviewer --claim --json","description":"with --include-ephemeral"}'
+# The same-line read is bounded at 300 characters; a long real pull line stays inside it.
+check orc-ready-ephemeral.md fire bash 'bd ready --parent orc-epic-1 --unassigned --limit 1 --sort priority --order asc --format json --label agent:reviewer --claim --json'
 
 # orc-shepherd-no-parent
 check orc-shepherd-no-parent.md fire bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
@@ -90,6 +92,7 @@ check orc-shepherd-no-parent.md miss bash 'bd ready --metadata-field role=shephe
 check orc-shepherd-no-parent.md miss bash 'bd ready --parent orc-1 --metadata-field role=implementer --claim --json'
 check orc-shepherd-no-parent.md fire bash 'cd /x && bd ready --parent orc-1 --label pr:merge --claim --json'
 check orc-shepherd-no-parent.md miss bash 'bd ready --parent orc-1 --json\nbd ready --label pr:merge --json'
+check orc-shepherd-no-parent.md fire bash 'bd ready --parent orc-epic-1 --unassigned --limit 1 --sort priority --order asc --format json --metadata-field role=shepherd --label pr:merge --claim --json'
 
 # orc-no-nested-omp: both conditions read hub start. The bash shape is G6's notice.
 check orc-no-nested-omp.md fire hub '{"op":"start","name":"arch","application":"omp","args":["-p","hi"]}'

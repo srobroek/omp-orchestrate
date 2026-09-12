@@ -340,7 +340,7 @@ const SHELL_OPTION_OPERAND: Record<string, true> = {
 function skipTransparentPrefix(segment: readonly string[], from: number): number {
 	let index = from;
 	while (index < segment.length) {
-		const name = basename(segment[index] as string);
+		const name = programName(segment[index] as string);
 		// Own keys only. An arbitrary token indexing this literal otherwise reaches
 		// `Object.prototype`, so `valueOf bd ready --claim` would be seen through as if
 		// `valueOf` were a runner prefix.
@@ -412,7 +412,7 @@ function skipEnvPrefix(segment: readonly string[], from: number, edits?: EnvEdit
 		index += 1;
 	}
 	const env = segment[index];
-	if (env === undefined || basename(env) !== "env") return index;
+	if (env === undefined || programName(env) !== "env") return index;
 	index += 1;
 	while (index < segment.length) {
 		const token = segment[index] as string;
@@ -532,11 +532,11 @@ function leafSegments(command: string, depth: number): Segment[] {
 		}
 
 		let payload: string | undefined;
-		if (basename(program) === "eval") {
+		if (programName(program) === "eval") {
 			// `eval` concatenates its operands into one command line.
 			const joined = words.slice(head + 1).join(" ");
 			if (joined.length > 0) payload = joined;
-		} else if (WRAPPER_SHELLS[basename(program)] === true) {
+		} else if (WRAPPER_SHELLS[programName(program)] === true) {
 			payload = wrapperPayload(words, head);
 		}
 		if (payload === undefined) {
@@ -556,9 +556,22 @@ export function effectiveSegments(command: string): string[][] {
 	return leafSegments(command, 0).map(segment => segment.words);
 }
 
-function basename(p: string): string {
-	const cut = p.lastIndexOf("/");
-	return cut === -1 ? p : p.slice(cut + 1);
+/**
+ * The program a command word names: its basename, case-folded.
+ *
+ * Every lookup that decides what a word runs -- `bd`, `env`, a runner prefix, a wrapper
+ * shell, `eval`, and the `git`/`gh` head `invokesCommand` is asked about -- goes through
+ * here, so one spelling rule covers them all. Folded because the default filesystems
+ * this plugin runs on (APFS, NTFS) resolve `PATH` case-insensitively: `BD update …` and
+ * `NOHUP bd update …` run bd there and a case-exact match let both walk past every
+ * bash gate. The fold is unconditional rather than a platform branch: on a case-sensitive
+ * filesystem the folded spelling names no program and the command fails on its own, so
+ * reading it as bd refuses nothing that would have run. Subcommands and flags are not
+ * folded; bd, git and gh are case-exact about their own grammar.
+ */
+function programName(word: string): string {
+	const cut = word.lastIndexOf("/");
+	return (cut === -1 ? word : word.slice(cut + 1)).toLowerCase();
 }
 
 /**
@@ -628,7 +641,7 @@ export function parseBdInvocation(segment: readonly string[], redirections: read
 	const edits = noEnvEdits();
 	const index = programIndex(segment, edits);
 	const head = segment[index];
-	if (head === undefined || basename(head) !== "bd") return null;
+	if (head === undefined || programName(head) !== "bd") return null;
 
 	const rest = segment.slice(index + 1);
 
@@ -715,7 +728,7 @@ export function invokesCommand(command: string, argv: readonly string[]): boolea
 	for (const segment of effectiveSegments(command)) {
 		const index = programIndex(segment);
 		const head = segment[index];
-		if (head === undefined || basename(head) !== argv[0]) continue;
+		if (head === undefined || programName(head) !== argv[0]) continue;
 		if (argv.length === 1) return true;
 
 		// Both git and gh spell a subcommand as the first positionals after their own
