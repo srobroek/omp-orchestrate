@@ -22,7 +22,9 @@ answers the questions it raises, and stops it. Agents claim their own work from 
 
 ## Prerequisites
 
-`/orchestrate-doctor` reports every row below with its version and a pass, warn, or fail.
+`/orchestrate-doctor` reports every row below except `omp`, which it runs inside, with a
+version and a pass, warn, or fail. A fail breaks a run started now; a warn degrades a later
+step and names it.
 
 | Tool | Version | Used by |
 | --- | --- | --- |
