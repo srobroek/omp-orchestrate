@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.3.15](https://github.com/srobroek/omp-orchestrate/compare/v0.3.14...v0.3.15) (2026-09-12)
+
+
+### Features
+
+* land approved PRs from the lead session's landing sweep ([#116](https://github.com/srobroek/omp-orchestrate/issues/116)) ([64cb28b](https://github.com/srobroek/omp-orchestrate/commit/64cb28b1dc164dd7fcc916ce87f22024a2f557ef))
+* lease-based claim recovery and a fenced lead lease ([#117](https://github.com/srobroek/omp-orchestrate/issues/117)) ([5539406](https://github.com/srobroek/omp-orchestrate/commit/553940618c58100d76afa87eea7f4fade88944d0))
+* refuse a worker's push to the primary branch and every force push ([#123](https://github.com/srobroek/omp-orchestrate/issues/123)) ([1113e16](https://github.com/srobroek/omp-orchestrate/commit/1113e160f5aea0843fa3a8f92a0ec021aa9bb715))
+* runtime scripts to Bun, close-out gate in orc_run_status, drop python3 and jq ([#121](https://github.com/srobroek/omp-orchestrate/issues/121)) ([4adb0cb](https://github.com/srobroek/omp-orchestrate/commit/4adb0cbf328951c462a1c050267ea86c9f2b07dc))
+* shipped settings overlay, orc_doctor, errors-only prose gate, hardened workflows ([#120](https://github.com/srobroek/omp-orchestrate/issues/120)) ([9674a82](https://github.com/srobroek/omp-orchestrate/commit/9674a82fd978ec826d13e334969c4b674a8db453))
+* verify binds, report run health, close runs, and reap each child once ([#104](https://github.com/srobroek/omp-orchestrate/issues/104)) ([1b3409f](https://github.com/srobroek/omp-orchestrate/commit/1b3409f83f1e23a50c05fd4c11f570b72d6a0d34))
+
+
+### Bug Fixes
+
+* bind claims the host truncated and say so when it cannot ([#101](https://github.com/srobroek/omp-orchestrate/issues/101)) ([e76abbc](https://github.com/srobroek/omp-orchestrate/commit/e76abbc333d6a8bf29ccb39971fb08eaf944c381))
+* close the deferred hardening rows (marker scope, program case, rule scan bounds, path spelling) ([#122](https://github.com/srobroek/omp-orchestrate/issues/122)) ([4d202e7](https://github.com/srobroek/omp-orchestrate/commit/4d202e7702977d89487a852b2e3d868b080740ee))
+* close-run walks every level, pin a database before it exists, and document the run bootstrap ([#108](https://github.com/srobroek/omp-orchestrate/issues/108)) ([9ade497](https://github.com/srobroek/omp-orchestrate/commit/9ade497b7c96364267677e4ad25f3fe02808ed59))
+* cut per-call bd reads, name bd failures, close two G5 gaps ([#103](https://github.com/srobroek/omp-orchestrate/issues/103)) ([f70d98a](https://github.com/srobroek/omp-orchestrate/commit/f70d98a614d8c684a6f7c4e8d1c584b03be55294))
+* every bd write carries the seat's actor and the run's store, and leases renew on the clock ([#126](https://github.com/srobroek/omp-orchestrate/issues/126)) ([b517471](https://github.com/srobroek/omp-orchestrate/commit/b5174715d9a12ac98847a80a0e932869ac1fa52c))
+* gates refuse on evidence only; G5 governs capacity, decomposition scope, lead and merged-stderr claims ([#110](https://github.com/srobroek/omp-orchestrate/issues/110)) ([cbbcb8b](https://github.com/srobroek/omp-orchestrate/commit/cbbcb8bef6f06406dac888dd01adbf52382c30d0))
+* keep the beads store in one lock domain during a run ([#112](https://github.com/srobroek/omp-orchestrate/issues/112)) ([5daf88f](https://github.com/srobroek/omp-orchestrate/commit/5daf88f774886aed84f4adefb1e4b1e716d7184c))
+* lead session plans only, slash commands follow the run scope, store origin on the marker, one doctor row per model role ([#125](https://github.com/srobroek/omp-orchestrate/issues/125)) ([6e70f19](https://github.com/srobroek/omp-orchestrate/commit/6e70f193eecbbc8c8d9d3cce8079595923114009))
+* ledger records every bd write and its store, model mismatch warns instead of bricking the worker ([#107](https://github.com/srobroek/omp-orchestrate/issues/107)) ([3e81ac1](https://github.com/srobroek/omp-orchestrate/commit/3e81ac1e034a1d55c9ab1d3ba3b0cc5433b1d16c))
+* match TTSR rules against the streamed tool JSON ([#98](https://github.com/srobroek/omp-orchestrate/issues/98)) ([4083c02](https://github.com/srobroek/omp-orchestrate/commit/4083c02154030530e794275cbcbc3d73ef048ead))
+* one carrier per fact, a nine-verb grammar, and no formulas ([#111](https://github.com/srobroek/omp-orchestrate/issues/111)) ([8546d0b](https://github.com/srobroek/omp-orchestrate/commit/8546d0b032b8252b394933b23b95a3f2792e6b6a))
+* read redirections, groups and compound commands the way the shell does ([#99](https://github.com/srobroek/omp-orchestrate/issues/99)) ([7019786](https://github.com/srobroek/omp-orchestrate/commit/7019786bf63cfa52bf8429d770aa0ac9a000fed8))
+* redirect isolated copies to the run's beads database and drop the pin ([#114](https://github.com/srobroek/omp-orchestrate/issues/114)) ([68a1e22](https://github.com/srobroek/omp-orchestrate/commit/68a1e22822ac80cc4f1e2fba52f1d61280a0939a))
+* refuse a second claim per turn, gate implementer spawns, and drop G7 ([#109](https://github.com/srobroek/omp-orchestrate/issues/109)) ([a2d7f65](https://github.com/srobroek/omp-orchestrate/commit/a2d7f6529bf42b3c3b6a42e042835364381e314d))
+* refuse opaque scopes, unlanded closes, governance rewrites from roles, and zero-work reports ([#124](https://github.com/srobroek/omp-orchestrate/issues/124)) ([4d49892](https://github.com/srobroek/omp-orchestrate/commit/4d49892f800a413e05f1bc979097c87831245465))
+* replace run/bind/close with start, resume, answer and stop; add an Attention section to status ([#119](https://github.com/srobroek/omp-orchestrate/issues/119)) ([d82b16d](https://github.com/srobroek/omp-orchestrate/commit/d82b16dbae6e71bc7e0db53ceaf0d2da91566b84))
+* run-scope the refusing gates, admit the terminal comment after release, recognise the real reclaim ([#102](https://github.com/srobroek/omp-orchestrate/issues/102)) ([ac6b8ed](https://github.com/srobroek/omp-orchestrate/commit/ac6b8ed6fc7441fd65a0d24570c326c02aad3378))
+* see the bd command behind env flags and refuse a helper that edits its sandbox ([#106](https://github.com/srobroek/omp-orchestrate/issues/106)) ([4d5bf83](https://github.com/srobroek/omp-orchestrate/commit/4d5bf833f542549472edbf60aa494af5a24fbd61))
+* the plugin is dormant outside a run scope ([#115](https://github.com/srobroek/omp-orchestrate/issues/115)) ([07e0199](https://github.com/srobroek/omp-orchestrate/commit/07e0199b1800874ffcce75001f79464e09dd067d))
+* **tools:** correct bot-review-probe classification, run-status tree shape and filters, and conflict-probe CI exits ([#100](https://github.com/srobroek/omp-orchestrate/issues/100)) ([cf9f64c](https://github.com/srobroek/omp-orchestrate/commit/cf9f64cc97a84f96f9ad9d3d644475d2f0dcdcf0))
+
+
+### Performance Improvements
+
+* store-token read cache, batched bd reads, in-process settings ([#113](https://github.com/srobroek/omp-orchestrate/issues/113)) ([dd90531](https://github.com/srobroek/omp-orchestrate/commit/dd905312b0061da9956a348a040195ab071cb4a0))
+
 ## [0.3.14](https://github.com/srobroek/omp-orchestrate/compare/v0.3.13...v0.3.14) (2026-09-10)
 
 
