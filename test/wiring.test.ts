@@ -441,6 +441,18 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
   expect(result?.input).toEqual({ command: "echo ok", env: { BEADS_DIR: path.join(dir, ".beads"), BD_READONLY: "1" } });
  });
 
+ test("a generic helper that sets the sandbox variable inline is refused by G1", async () => {
+  await pinnedRun(dir);
+  const { pi, handlers, errors } = workerApi();
+  ompOrchestrate(pi);
+
+  const result = await verdict(handlers, call("helper-escape", "BD_READONLY=0 bd update orc-1 --status closed"), { cwd: dir });
+
+  expect(errors).toEqual([]);
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("BD_READONLY=1 is the read-only sandbox");
+ });
+
  test("a gate that throws fails the call open and logs the cause", async () => {
   const show = spyOn(actualBd, "bdShow").mockImplementation(async () => { throw new Error("boom from bdShow"); });
   try {

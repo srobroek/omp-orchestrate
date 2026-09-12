@@ -16,7 +16,7 @@ import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { createLeadExitWatch } from "./gates/lead-exit";
-import { beadWriteFreeEnv, pinAddition, pinnedRunActive, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
+import { gateBeadWriteFree, pinnedRunActive, rebuildBashInput } from "./gates/readonly";
 import { gateImplementerIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
@@ -145,15 +145,16 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    }
 
    // Last, and only for `bash`: G1 asynchronously checks the process-local pin and
-   // active-run marker before the shared builder adds its environment revision. A
-   // missing or invalid marker fails open, while blocking gates above still win.
+   // active-run marker. A sandboxed helper whose command edits the sandbox variable is
+   // refused; otherwise the call leaves with the pin mirror and the readonly flag added.
+   // A missing or invalid marker fails open, while blocking gates above still win.
    if (event.toolName === "bash") {
-    const revision = reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(pi, ctx)) });
+    const sandbox = await gateBeadWriteFree(pi, ctx, input);
+    if (sandbox?.block) return sandbox;
     // Marked only now, once every refusal above has had its say: a refused claim runs
     // nothing and would leave a mark no result ever lifts.
     if (claiming) claimInFlight.begin(event.toolCallId);
-    if (revision) return { input: rebuildBashInput(revision.input as Record<string, unknown>) };
-    return inputRevised ? { input: rebuildBashInput(input) } : undefined;
+    return sandbox ?? (inputRevised ? { input: rebuildBashInput(input) } : undefined);
    }
 
    return undefined;

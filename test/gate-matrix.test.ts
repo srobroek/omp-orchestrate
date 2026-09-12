@@ -31,7 +31,7 @@ import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
-import { beadWriteFreeEnv, pinAddition, reviseBashEnv } from "../src/gates/readonly";
+import { gateBeadWriteFree } from "../src/gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "../src/gates/worktree";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
 
@@ -72,6 +72,7 @@ let owned: string;
 /** A tree no claimed bead names. */
 let foreign: string;
 let priorWorktreeDir: string | undefined;
+let priorBeadsDir: string | undefined;
 
 /**
  * `ExtensionContext` as the gates consume it: a cwd and a system prompt.
@@ -119,9 +120,9 @@ async function gateChain(
   const scope = await gateWorktreeScope(claims, ctx, toolName, input);
   if (scope) return scope;
  }
- // The environment gate contributes to one revision, as in `index.ts`.
+ // G1 last, as in `index.ts`: its refusal or its environment revision.
  if (toolName === "bash") {
-  return reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(WORKER, ctx)) });
+  return gateBeadWriteFree(WORKER, ctx, input);
  }
  return undefined;
 }
@@ -140,11 +141,17 @@ beforeAll(async () => {
  await fs.mkdir(path.join(owned, "src"), { recursive: true });
  await fs.mkdir(path.join(foreign, "src"), { recursive: true });
  priorWorktreeDir = process.env.OMP_WORKTREE_DIR;
+ // Every row states its own run scope; the ambient shell's pin must not supply one,
+ // or G1 mirrors it onto every bash row that expects no revision.
+ priorBeadsDir = process.env.BEADS_DIR;
+ delete process.env.BEADS_DIR;
 });
 
 afterAll(async () => {
  if (priorWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
  else process.env.OMP_WORKTREE_DIR = priorWorktreeDir;
+ if (priorBeadsDir === undefined) delete process.env.BEADS_DIR;
+ else process.env.BEADS_DIR = priorBeadsDir;
  await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -479,7 +486,7 @@ describe("G2 mutations against the claimed tree", () => {
  });
 });
 
-describe("G1 refuses nothing", () => {
+describe("G1 outside its sandbox", () => {
  test("a contract-bound role is left entirely alone", async () => {
   // Every `orc-*` role must write beads to satisfy its exit contract, and
   // `bd comment` is blocked under BD_READONLY, so sandboxing one would make its
@@ -490,15 +497,8 @@ describe("G1 refuses nothing", () => {
  });
 
  test("a contract-free helper without an active pinned run fails open", async () => {
-  const priorBeadsDir = process.env.BEADS_DIR;
-  delete process.env.BEADS_DIR;
-  try {
-   const result = await bash("bd update orc-1 --status closed", ctxAt(owned, null));
-   expect(result?.block).toBeUndefined();
-   expect(result?.input?.env).toBeUndefined();
-  } finally {
-   if (priorBeadsDir === undefined) delete process.env.BEADS_DIR;
-   else process.env.BEADS_DIR = priorBeadsDir;
-  }
+  const result = await bash("bd update orc-1 --status closed", ctxAt(owned, null));
+  expect(result?.block).toBeUndefined();
+  expect(result?.input?.env).toBeUndefined();
  });
 });
