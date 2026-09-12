@@ -92,7 +92,7 @@ describe("extension factory", () => {
 		const { pi, seen } = recordingApi();
 		ompOrchestrate(pi);
 		expect(seen.commands.sort()).toEqual(
-			["orchestrate-bind", "orchestrate-close", "orchestrate-roster", "orchestrate-run", "orchestrate-status", "orchestrate-stop"].sort(),
+			["orchestrate-answer", "orchestrate-resume", "orchestrate-roster", "orchestrate-start", "orchestrate-status", "orchestrate-stop"].sort(),
 		);
 		expect(seen.tools.sort()).toEqual(
 			["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_review_round_policy", "orc_run_status"].sort(),
