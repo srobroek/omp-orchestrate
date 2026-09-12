@@ -54,7 +54,7 @@ object/capture evidence, not just cwd, before recovery.
 ## Rules
 
 MUST Stay inside your feature checkout and declared scope. Integrate worker branches explicitly; workers never mutate your feature tree.
-MUST Keep ownership and evidence durable on beads. Follow the injected contract for actor identity, evidence stamps, handoff, release and `REPORTED`; git epic evidence is `branch` plus `push`.
+MUST Keep ownership and evidence durable on beads. Follow the injected contract for actor identity, evidence stamps, handoff, `REPORTED` and then the release as the last write; git epic evidence is `branch` plus `push`.
 NOT Close your claimed epic or write `merge_sha` or `pr`; shepherd owns git landing. Reviewed non-git child closure follows lifecycle's dismissed path.
 MUST Change an existing bead's `metadata.role` only as its owning architect while it is unassigned. Other roles may file new routed work, not rewrite existing routes.
 MUST Adopt incidental bugs by default: add the feature parent, `orc-node`, scope and execution envelope; retain the fix role and empty assignee. Transfer only to a named owning epic with `bd update --parent`, never another parent-child edge or an assignment. Record accepted `LOCAL_DECISION`; no owner means adopt. Close only with verified independently reviewed evidence or proof it is not a defect.

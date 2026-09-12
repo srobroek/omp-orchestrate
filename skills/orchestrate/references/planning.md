@@ -137,8 +137,15 @@ Scope choice decides whether beads can run concurrently.
   `external:<system>/<resource>`, so overlap is checked the same way as file ownership.
 
 Overlapping scopes are what produce the merge conflicts an architect then has to arbitrate.
-Spend the effort here rather than there: the claim rule's overlap check is friction that
-catches the honest mistake, not a substitute for disjoint globs.
+Spend the effort here rather than there. The extension checks overlap at two points and
+nowhere else. When an architect writes a `scope` with `bd create` or `bd update`, the gate
+refuses one that overlaps an open or in-progress `orc-node` of the same run outside the
+bead's own lineage. When a worker claims a named bead (`bd update <id> --claim`), the gate
+compares that bead's `scope` with every live claim's `scope`. A queue pull (`bd ready …
+--claim`) names no bead, so nothing is compared there; the decomposition check is what
+keeps the queue's beads disjoint. No per-write check exists: G2 confines a write to the
+claimed worktree and `metadata.scope`, and does not consult other claims. Friction catches
+the honest mistake. It is not a substitute for disjoint globs.
 
 A feature bead's scope may be the union of its tasks: a bead's own parent chain and children are exempt from the friction check, so an architect can hold the feature envelope while its workers hold task scopes. An unrelated architect's envelope still counts as friction. Architects never take a code-writing claim over task territory; their feature claim is for integration and coordination, not editing.
 

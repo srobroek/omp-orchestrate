@@ -2,14 +2,16 @@
 
 The review-request tool accepts only the providers and modes in this table. The probe reports `observed` only from a provider check, review, review comment, or issue comment. `unknown` means the repository data does not prove whether the integration is installed.
 
-| Provider | Request | Probe identity | Availability rule |
-|---|---|---|---|
-| Codex | `provider=codex`, `mode=review` posts `@codex review` | `chatgpt-codex-connector` | The repository must have Code review enabled. Automatic reviews may remain disabled. |
-| CodeRabbit | `provider=coderabbit`, `mode=incremental` posts `@coderabbitai review`; `mode=full` posts `@coderabbitai full review` | `coderabbitai` | Each command consumes the provider's configured review allowance. |
-| GitHub Copilot | `provider=copilot`, `mode=review` requests `copilot-pull-request-reviewer[bot]` through GitHub's requested-reviewers endpoint | `copilot-pull-request-reviewer` | Endpoint acceptance proves the reviewer is requestable for that PR. |
-| Gemini Code Assist | `provider=gemini`, `mode=review` posts `/gemini review` | `gemini-code-assist` | A provider response or review proves observation. |
-| Qodo | no request mode | `qodo-merge` or `qodo-merge-pro` | Observe only. Current Code Review documentation does not publish a manual trigger. |
-| Greptile | `provider=greptile`, `mode=review` posts `@greptileai` | `greptile-apps` | A provider response or review proves observation. |
+| Provider | Request | Probe identity | In the probe default | Availability rule |
+|---|---|---|---|---|
+| Codex | `provider=codex`, `mode=review` posts `@codex review` | `chatgpt-codex-connector` | yes | The repository must have Code review enabled. Automatic reviews may remain disabled. |
+| CodeRabbit | `provider=coderabbit`, `mode=incremental` posts `@coderabbitai review`; `mode=full` posts `@coderabbitai full review` | `coderabbitai` | yes | Each command consumes the provider's configured review allowance. |
+| GitHub Copilot | `provider=copilot`, `mode=review` requests `copilot-pull-request-reviewer[bot]` through GitHub's requested-reviewers endpoint | `copilot-pull-request-reviewer` | yes | Endpoint acceptance proves the reviewer is requestable for that PR. |
+| Gemini Code Assist | `provider=gemini`, `mode=review` posts `/gemini review` | `gemini-code-assist` | no | A provider response or review proves observation. |
+| Qodo | no request mode | `qodo-merge` or `qodo-merge-pro` | no | Observe only. Current Code Review documentation does not publish a manual trigger. |
+| Greptile | `provider=greptile`, `mode=review` posts `@greptileai` | `greptile-apps` | yes | A provider response or review proves observation. |
+
+`orc_bot_review_probe` grades only the slugs in its `bots` list. Without `bots`, it reads `$PR_REVIEW_BOTS`, and without that it uses `DEFAULT_BOTS` from `src/tools/bot-review-probe.ts`: `coderabbitai,chatgpt-codex-connector,copilot-pull-request-reviewer,greptile-apps`. A repository that relies on Gemini or Qodo must pass `bots` naming those slugs, or the round reads `absent` while the availability line still reports them `observed`.
 
 The tool checks the exact PR head before every mutation. Comment requests contain a hidden provider, mode, and head marker. Only a marker authored by the active GitHub identity deduplicates a request after restart. The marker check is not an atomic lock. The architect's sole PR-update ownership serializes request calls. Copilot deduplication reads requested reviewers and exact-head reviews.
 

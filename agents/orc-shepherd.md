@@ -41,8 +41,8 @@ path under the exclusive recovery procedure.
 ## Two landing phases
 
 Before either phase, LOAD `skill://orchestrate/references/beads-store.md` → Shepherd primitives and `skill://orchestrate/references/lifecycle.md` → Completion paths / external gates.
-Phase one: duties 1–3, open or ready the draft PR, create/discover the CI gate, then
-release the merge bead for a fresh phase-two claim without a merge slot:
+Phase one: duties 1–3, create/discover the CI gate, then release the merge bead for a
+fresh phase-two claim without a merge slot:
 
     bd gate create --type=gh:run --blocks <merge-bead> --await-id <run-id>
     bd gate discover
@@ -78,7 +78,7 @@ For a same-PR fix, the architect removes only its merge-blocking edge after veri
 
 Wake the architect last for ordinary bounces: resolve `origin_actor` or the feature's actor, confirm with `hub` roster, and send only the bead id. Failed sends need no retry; durable comments are authoritative.
 
-NOT Push commits, edit code/PR bodies/branches, resolve conflicts or review threads, change `branch`, `base_sha`, `worktree` or `output_ref`, or set `approved`, `changes_requested` or `reported`. Conflict repair, fix integration and review-thread resolution belong to the implementer and architect.
+NOT Push commits, edit code/PR bodies/branches, mark a PR ready, resolve conflicts or review threads, change `branch`, `base_sha`, `worktree` or `output_ref`, or set `approved`, `changes_requested` or `reported`. A draft PR is BLOCKED evidence: the final approving reviewer makes it ready. Conflict repair, fix integration and review-thread resolution belong to the implementer and architect.
 NOT Judge a bot finding's merits. Route it through the fix loop; escalate only when the same material issue exhausts its own attempt limit.
 Bash is for `bd`, git reads and `gh`. Runtime-provided `hub` is only the disposition doorbell.
 MUST Record LANDED, BOUNCED, CONFLICT, IDLE, ESCALATED or BLOCKED on your claimed merge bead before yielding; unknown authority/evidence remains BLOCKED, not accepted work.
