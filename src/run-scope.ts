@@ -2,10 +2,13 @@
  * The dormancy predicate: is this session inside an orchestrate run?
  *
  * One answer for every handler in the plugin. A run scope exists iff a strictly valid
- * active-run marker is readable at the session's cwd. `/orchestrate-run` writes that
- * marker after the run's database has been located, so marker implies a validated store;
+ * active-run marker is readable at the session's cwd, or at the primary checkout whose
+ * `.git` a linked worktree at the cwd shares. `/orchestrate-run` writes that marker after
+ * the run's database has been located, so marker implies a validated store;
  * `/orchestrate-close` removes it, and that is how a run ends. An isolated copy carries
- * the primary's marker, so a worker reaches its run through the same file at its own cwd.
+ * the primary's marker, so a worker reaches its run through the same file at its own cwd;
+ * an architect in a Worktrunk worktree holds none (`.orchestration/` is gitignored) and
+ * reaches it through `git rev-parse --git-common-dir`, asked once per cwd per process.
  *
  * Nothing else creates a scope. A declared `ORC-ROLE` is a claim the prompt makes about
  * itself, an observed claim is something the agent did by hand, and neither may switch
@@ -23,11 +26,14 @@
  * microseconds, and the parsed scope is reused while the file's identity and mtime hold.
  * Two writes within one timestamp tick would be indistinguishable, so size and inode are
  * compared too; `writeMarker` renames a fresh temporary into place, so a rewrite always
- * changes the inode.
+ * changes the inode. The git answer for a cwd never changes while the checkout exists, so
+ * it is kept for the process: a cwd with no marker costs one `git` spawn, then a stat.
  */
 
+import { execFile } from "node:child_process";
 import type { Stats } from "node:fs";
 import fs from "node:fs/promises";
+import { promisify } from "node:util";
 import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -61,9 +67,15 @@ interface Memo {
 
 const memo = new Map<string, Memo>();
 
-/** Forget every memoised scope. Tests that rewrite a marker in place within one tick call this. */
+/** The primary checkout a cwd's `.git` belongs to, by cwd; `undefined` when the cwd is its own. */
+const primaries = new Map<string, Promise<string | undefined>>();
+
+const execFileAsync = promisify(execFile);
+
+/** Forget every memoised scope and git answer. Tests that rebuild a checkout in place call this. */
 export function resetRunScopes(): void {
 	memo.clear();
+	primaries.clear();
 }
 
 /**
@@ -75,6 +87,14 @@ export function resetRunScopes(): void {
 export async function runScope(ctx: RunScopeContext): Promise<RunScope | null> {
 	const cwd = ctx.cwd;
 	if (typeof cwd !== "string" || cwd.length === 0) return null;
+	const own = await markedScope(cwd);
+	if (own !== null) return own;
+	const primary = await primaryCheckout(cwd);
+	return primary === undefined ? null : markedScope(primary);
+}
+
+/** The scope the marker at `cwd` describes, memoised on the marker file's identity. */
+async function markedScope(cwd: string): Promise<RunScope | null> {
 	const marker = markerPath(cwd);
 	let stat: Stats;
 	try {
@@ -98,6 +118,40 @@ export async function runScope(ctx: RunScopeContext): Promise<RunScope | null> {
 	}
 	memo.set(cwd, { markerPath: marker, ino: stat.ino, mtimeMs: stat.mtimeMs, size: stat.size, scope });
 	return scope;
+}
+
+/** git's exit status for a directory that is not inside any repository: a definite answer. */
+const NOT_A_REPOSITORY = 128;
+
+/**
+ * The checkout whose `.git` the cwd shares, when that is another directory: the primary
+ * of a linked worktree, or the top level above a subdirectory. A cwd that is its own top
+ * level, or no git checkout at all, answers `undefined`. Asked of git once per cwd; a
+ * verdict git could not give (a timeout, no `git` on PATH) is not kept, so the next call
+ * asks again.
+ */
+function primaryCheckout(cwd: string): Promise<string | undefined> {
+	let pending = primaries.get(cwd);
+	if (pending === undefined) {
+		pending = (async () => {
+			try {
+				const env = { ...process.env };
+				// Repository-selection overrides must not turn another checkout into authority.
+				for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
+				const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--git-common-dir"], { env, timeout: 1500, maxBuffer: 16 * 1024 });
+				const [common, real] = await Promise.all([realpathOrUndefined(path.resolve(cwd, stdout.trim())), realpathOrUndefined(cwd)]);
+				if (common === undefined || real === undefined) return undefined;
+				const primary = path.dirname(common);
+				return primary === real ? undefined : primary;
+			} catch (error) {
+				const definite = error !== null && typeof error === "object" && "code" in error && error.code === NOT_A_REPOSITORY;
+				if (!definite) primaries.delete(cwd);
+				return undefined;
+			}
+		})();
+		primaries.set(cwd, pending);
+	}
+	return pending;
 }
 
 /**

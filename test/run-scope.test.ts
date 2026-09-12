@@ -12,9 +12,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, type Mock, setSystemTime, spyOn, test } from "bun:test";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { BD_NOTICE_MESSAGE } from "../src/gates/bd";
@@ -125,6 +127,22 @@ async function fakeBd(root: string): Promise<void> {
 	const bin = path.join(root, "fake-bd");
 	await fs.writeFile(bin, `#!${process.execPath}\nconsole.log("[]");\n`, { mode: 0o755 });
 	process.env.BD_BIN = bin;
+}
+
+/** How `runScope` asks git for a cwd's primary checkout, reduced to its verb. */
+const GIT_QUERY = "git rev-parse --git-common-dir";
+
+/**
+ * Every process the plugin started, as the binary's basename plus its subcommand words with
+ * `-C <cwd>` dropped. `Bun.spawn` takes argv directly (bd) or as `{ cmd }` (node's execFile).
+ */
+function spawned(): string[] {
+	return spawn.mock.calls.map(call => {
+		const first: unknown = call[0];
+		const words = Array.isArray(first) ? first : first !== null && typeof first === "object" && "cmd" in first && Array.isArray(first.cmd) ? first.cmd : [];
+		const argv = words.map(String).filter((word, index, all) => word !== "-C" && all[index - 1] !== "-C");
+		return `${path.basename(argv[0] ?? "")} ${argv.slice(1).join(" ")}`.trim();
+	});
 }
 
 const CLAIM_REPORT = {
@@ -244,7 +262,9 @@ describe("outside a run scope the plugin is inert", () => {
 		for (const [row, outcomes] of Object.entries(results)) {
 			expect(outcomes.every(outcome => outcome === undefined), row).toBe(true);
 		}
-		expect(spawn).not.toHaveBeenCalled();
+		// The one process a dormant session may start: git, asked once per cwd whether the
+		// cwd is a linked worktree of a marked primary. Nothing else: no bd, no omp.
+		expect(spawned()).toEqual([GIT_QUERY]);
 		expect([...lead.sent, ...worker.sent, ...role.sent]).toEqual([]);
 		expect([...lead.errors, ...worker.errors, ...role.errors]).toEqual([]);
 		expect(await listing(sandbox)).toEqual(before);
@@ -265,7 +285,7 @@ describe("outside a run scope the plugin is inert", () => {
 		for (const [row, outcomes] of Object.entries(results)) {
 			expect(outcomes.every(outcome => outcome === undefined), row).toBe(true);
 		}
-		expect(spawn).not.toHaveBeenCalled();
+		expect(spawned()).toEqual([GIT_QUERY]);
 		expect([...lead.sent, ...worker.sent, ...role.sent]).toEqual([]);
 		expect(await listing(sandbox)).toEqual(before);
 	});
@@ -348,6 +368,67 @@ describe("runScope", () => {
 		} finally {
 			reads.mockRestore();
 		}
+	});
+
+	describe("a linked worktree reaches the primary's marker through git", () => {
+		const git = promisify(execFile);
+		let primary: string;
+		let linked: string;
+
+		/** A real repository with one commit and one linked worktree; `.orchestration/` is gitignored, as in this repository. */
+		beforeEach(async () => {
+			primary = path.join(sandbox, "primary");
+			linked = path.join(sandbox, "linked");
+			await fs.mkdir(primary);
+			const run = (args: string[], cwd = primary) => git("git", ["-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, timeout: 5000 });
+			await run(["init", "-q", "-b", "main"]);
+			await fs.writeFile(path.join(primary, ".gitignore"), ".orchestration/\n");
+			await run(["add", ".gitignore"]);
+			await run(["commit", "-q", "-m", "init"]);
+			await run(["worktree", "add", "-q", "-b", "feature", linked]);
+			// The fixture's own git calls are not the plugin's.
+			spawn.mockClear();
+		});
+
+		test("the primary's marker is the worktree's scope, with the primary as root", async () => {
+			await mark(primary, { schema_version: 1, run_id: "orc-run", beads_dir: path.join(primary, ".beads") });
+
+			const scope = await runScope({ cwd: linked });
+
+			expect(scope).toEqual({ runId: "orc-run", markerPath: markerPath(primary), beadsDir: path.join(primary, ".beads"), root: primary });
+			// A subdirectory of the primary resolves to the same run.
+			await fs.mkdir(path.join(primary, "src"));
+			expect((await runScope({ cwd: path.join(primary, "src") }))?.root).toBe(primary);
+		});
+
+		test("a worktree of a repository with no marker stays dormant, through the real factory", async () => {
+			const before = await listing(sandbox);
+			const lead = rig(["bash", "edit", "write", "task", "read"]);
+			withOmpExtensionRootScope([linked], "explicit-only", () => ompOrchestrate(lead.pi));
+			const ctx = ctxAt(linked, lead.sweeps);
+
+			await lead.fire("session_start", {}, ctx);
+			const worktree = await lead.fire("tool_call", { toolName: "bash", toolCallId: "wt", input: { command: "git worktree add ../scratch" } }, ctx);
+			const spawnTask = await lead.fire("tool_call", { toolName: "task", toolCallId: "t", input: { name: "Impl", agent: "orc-implementer", task: "epic orc-1" } }, ctx);
+
+			expect([...worktree, ...spawnTask].every(outcome => outcome === undefined)).toBe(true);
+			expect(spawned()).toEqual([GIT_QUERY]);
+			expect(lead.sent).toEqual([]);
+			expect(await listing(sandbox)).toEqual(before);
+			expect(await runScope({ cwd: linked })).toBeNull();
+		});
+
+		test("marking the primary arms the worktree's gates without a restart", async () => {
+			const lead = rig(["bash", "edit", "write", "task", "read"]);
+			withOmpExtensionRootScope([linked], "explicit-only", () => ompOrchestrate(lead.pi));
+			const ctx = ctxAt(linked, lead.sweeps);
+			expect(await lead.fire("tool_call", { toolName: "bash", toolCallId: "wt-1", input: { command: "git worktree add ../scratch" } }, ctx)).toEqual([undefined, undefined]);
+
+			await mark(primary);
+			const refused = await lead.fire("tool_call", { toolName: "bash", toolCallId: "wt-2", input: { command: "git worktree add ../scratch" } }, ctx);
+
+			expect(refused.some(outcome => outcome !== null && typeof outcome === "object" && "block" in outcome)).toBe(true);
+		});
 	});
 
 	test("an isolated copy answers the primary it was cloned from as root", async () => {

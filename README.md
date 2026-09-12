@@ -137,14 +137,18 @@ the cause and lets the call run. A check refuses only what it read and can prove
 - a queue that is not yours
 - a scope that overlaps a live node
 
-Every check runs only inside a run scope. A session is inside a run scope when a valid
-active-run marker `.orchestration/.active-run` exists in its checkout. `/orchestrate-run`
-writes it and `/orchestrate-close` removes it. An isolated copy carries the primary's
-marker. An `ORC-ROLE` declaration, a claim made by hand, and an observed claim create no
-scope. Outside a run scope the plugin spawns no process, writes no file, sends no message
-and refuses no tool call: a plain session in a repository that has this plugin installed
-sees the slash commands, the five tools, the agents, the skill and three rules, and
-nothing else.
+Every check runs only inside a run scope. A session is inside a run scope when one of
+these holds:
+
+- a valid active-run marker `.orchestration/.active-run` exists in its checkout. `/orchestrate-run` writes it and `/orchestrate-close` removes it
+- its checkout is an isolated copy, which carries the primary's marker
+- its checkout is a linked git worktree of a primary that holds the marker; the plugin asks `git rev-parse --git-common-dir` once per directory
+
+An `ORC-ROLE` declaration, a claim made by hand, and an observed claim create no scope.
+Outside a run scope the plugin spawns no process beyond that one `git` query, writes no
+file, sends no message and refuses no tool call. A plain session in a repository that has
+this plugin installed sees the slash commands, the five tools, the agents, the skill and
+three rules, and nothing else.
 
 - **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` when the session checkout holds a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
 - **G2 (`bash`, `edit`, `write`):** refuses a mutation outside the worktree named by the claimed bead, or outside its `metadata.scope` globs. For `bash`, G2 compares the cwd only. G2 reads the claimed bead and nothing else. G5 judges scope overlap between claims, at claim. G2 refuses a mutation when the bead is readable and assigned to another actor, or closed. A released bead refuses nothing, so a worker bounced after its release can repair its evidence. When G2 cannot read the bead, it logs the cause and lets the call run. A bead you closed yourself ends the claim: the next product edit or comment passes and the gate disarms. To recover a closed bead, run `bd reopen <id>`. Then run `bd update <id> --claim --json`. To hand a reopened bead back, run `bd update <id> --assignee ""`.
@@ -193,8 +197,9 @@ The host matches the raw tool-argument JSON as the model streams it (`session/tt
 
 `interruptMode` sets the cost of a match. `never` lets the call run and folds the rule
 text into its result. `tool-only` aborts the assistant message, discards it, injects the
-rule, and continues. In both modes a rule fires one time per session (`repeatMode: once`). The
-`bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
+rule, and continues. In both modes a rule fires one time per session (`repeatMode: once`).
+
+The `bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
 harmless (an empty queue, a doomed process) and the reminder arrives with the result.
 `orc-no-nested-omp` reads `hub start` arguments only. The shell form (`omp -p` from `bash`)
 is a G6 notice, so it fires only inside a run scope.
