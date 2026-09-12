@@ -708,7 +708,7 @@ export type ResumeOutcome =
  * fresh before the decision, so a renewal that landed since the list was taken keeps its
  * claim.
  */
-async function sweepLapsedClaims(cwd: string, run: string, actor: string, now: number): Promise<ClaimSweep | "unread"> {
+export async function sweepLapsedClaims(cwd: string, run: string, actor: string, now: number): Promise<ClaimSweep | "unread"> {
 	const beads = await bdListChecked(STORE_LIST, undefined, cwd);
 	if (beads === null) return "unread";
 	const sweep: ClaimSweep = { released: [], kept: [], failed: [] };
@@ -724,7 +724,7 @@ async function sweepLapsedClaims(cwd: string, run: string, actor: string, now: n
 			continue;
 		}
 		const released = await releaseDeadClaim(bead.id, holder, {
-			cause: `${leaseState(bead, now)}; released on adoption by ${actor}`,
+			cause: `${leaseState(bead, now)}; no live session renewed it; released by ${actor}`,
 			recoveredBy: actor,
 		}, cwd);
 		if (released === "released" || released === "comment-failed") sweep.released.push(bead.id);
