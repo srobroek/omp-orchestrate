@@ -164,10 +164,16 @@ hand is never observed. G6 and the contract injection require the pinned run its
   - a routing re-point (`metadata.role`) by any role but the architect
   - an architect's `scope` that overlaps an open or in-progress node outside the bead's own lineage
   - review and reporting states authored by shepherds
-- **G6 (`bash`):** warns without blocking. Within a pinned run, it checks for:
+- **G6 (`bash`):** within a pinned run, it refuses two things and warns about three. It refuses:
+  - `bd dolt push|pull|fetch|clone|sync` from any spawned session. Sync is the lead's barrier step: `bd dolt commit`, then `bd dolt push`, once, after every agent has yielded. The `bd` router runs those verbs in a container whose lock the host never sees, so a worker's sync is a second engine on the run's journal (`.config/wt.toml` explains the incident and skips its own hook syncs during a run)
+  - `--db <path>` or `BEADS_DB` on any `bd` call, from any seat: the run's database is the one bd resolves
+
+  It warns about:
   - writes without actors: the identity is the assignee your claim report printed
   - comments without protocol verbs
   - bug beads unreachable from queues
+
+  Store safety beyond the gate: `src/store-probe.ts` reports a run's store as `free`, `locked` (with the holder), `corrupted` (with the journal error) or `slow`. The plugin never starts, stops, or kills a Dolt server and never touches `noms/LOCK`; a `corrupted` store is the operator's `dolt fsck`.
 - **G8 (every tool, notice):** in a worker session, compares the agent's `ORC-ROLE` and live model against the core contract once. On a mismatch it sends one notice naming the expected model, the live model, and the parking commands. G8 accepts a model that OMP moved the session onto through retry fallback. When G8 cannot read the model, it logs the cause and stays silent.
 
 ## Rules

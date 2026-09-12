@@ -347,6 +347,10 @@ source of truth.
 - **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
   recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
   ephemeral ownership separately and releases each through its own path.
+- **Store sync:** only the lead syncs the beads database during a run, once, at the barrier
+  after every agent has yielded: `bd dolt commit`, then `bd dolt push`. Workers never run
+  `bd dolt push|pull` (G6 refuses it), because the routed sync is a second Dolt engine on the
+  run's journal; `references/beads-store.md` has the discipline and the store probe.
 
 ## Human-in-the-loop and safe autonomy
 
