@@ -208,6 +208,8 @@ const FORBIDDEN_CHECKOUTS: [string, string, string][] = [
  ["after a cd", "cd /repo && git worktree add ../wt", "git worktree"],
  ["second in a chain", "echo hi; git worktree add x", "git worktree"],
  ["fallback after a failure", "git worktree add x || gh pr checkout 42", "git worktree"],
+ ["argv arriving on stdin", "echo ../x | xargs git worktree add", "git worktree"],
+ ["a shell keyword before the command", "if true; then git worktree add x; fi", "git worktree"],
 ];
 
 describe("G3 refuses a checkout Worktrunk would not know about", () => {
@@ -289,17 +291,15 @@ describe("G3 shapes the parser does not reach", () => {
   ["a runner word outside the transparent list", "nice -n 10 git worktree add x"],
   ["another one", "ionice -c3 git worktree add x"],
   ["privilege escalation as the runner", "sudo git worktree add x"],
-  ["argv arriving on stdin", "xargs git worktree add"],
   ["a program named by substitution", "$(which git) worktree add x"],
   ["a program named by a variable", "g=git; $g worktree add x"],
   ["a payload piped into a shell", `printf '%s' "git worktree add x" | sh`],
-  ["a shell keyword before the command", "if true; then git worktree add x; fi"],
  ])("does not refuse %s", async (_label, command) => {
   // FINDING, pinned rather than wished away. `TRANSPARENT_PREFIXES` covers the
   // runner words an honest command line uses (`timeout`, `nohup`, `exec`,
-  // `stdbuf`, `time`, `command`), and `src/shell.ts` documents that dynamic
+  // `stdbuf`, `time`, `command`, `xargs`), and `src/shell.ts` documents that dynamic
   // construction is out of reach by design: it names no program until a shell
-  // runs, and this parser runs nothing. Widening the list to `nice`/`sudo`/`then`
+  // runs, and this parser runs nothing. Widening the list to `nice`/`sudo`
   // is a judgement call about how much evasion to chase in a layer that is
   // documented as friction rather than a boundary, so it is reported, not taken.
   expect(await bash(command)).toBeUndefined();

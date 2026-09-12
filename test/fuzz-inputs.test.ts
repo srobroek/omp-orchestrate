@@ -57,6 +57,30 @@ const HOSTILE_TEXT: readonly string[] = [
  "((()))",
  "{}",
  "!",
+ "(",
+ ")",
+ ")(",
+ "$(",
+ "$((",
+ "`",
+ "<(",
+ ">(",
+ ">",
+ ">>",
+ "<",
+ "<<",
+ "<<<",
+ "<<EOF",
+ "2>&1",
+ "2>&1|",
+ ">&-",
+ "&>",
+ "&>>",
+ ">|",
+ "<>",
+ "1>&2>&3",
+ "a>b",
+ "2>",
  "#",
  "../../etc/passwd",
  "/etc/passwd",
@@ -128,7 +152,10 @@ describe("shell parsing under hostile input", () => {
     expect(typeof invocation.subcommand, label).toBe("string");
     expect(typeof invocation.hasClaim, label).toBe("boolean");
     for (const id of invocation.positionals) expect(typeof id, label).toBe("string");
-    for (const token of invocation.rest) expect(typeof token, label).toBe("string");
+  for (const token of invocation.rest) expect(typeof token, label).toBe("string");
+  // A redirection is named by its operator, descriptor first; a word that merely
+  // looks like one never lands here because the tokeniser saw it quoted.
+  for (const redirection of invocation.redirections) expect(redirection, label).toMatch(/^(?:\d*(?:<<<|<<|>>|<&|>&|<>|>\||<|>)|&>>?)/);
    }
 
    expect(typeof invokesCommand(command, ["git", "worktree"]), label).toBe("boolean");
@@ -150,6 +177,13 @@ describe("shell parsing under hostile input", () => {
    '"'.repeat(100_000),
    "\\".repeat(100_000),
    `${"( ".repeat(50_000)}${CLAIM}`,
+   `${"(".repeat(100_000)}${CLAIM}`,
+   `${CLAIM} ${")".repeat(100_000)}`,
+   `${"$(".repeat(50_000)}${CLAIM}`,
+   "`".repeat(100_000),
+   ">".repeat(100_000),
+   `${CLAIM} ${"2>&1 ".repeat(20_000)}`,
+   `${CLAIM} ${"<<x ".repeat(25_000)}`,
    `bd update ${"**/".repeat(30_000)}x --claim`,
   ]) {
    bdInvocations(command);
@@ -171,7 +205,7 @@ describe("shell parsing under hostile input", () => {
  test("a quoted bead id keeps its shell metacharacters instead of splitting the segment", () => {
   // The whole reason the gates tokenise: a claim whose id carries `;` or `&&` must
   // arrive as one operand, or a worker could hide a second claim inside the first.
-  for (const id of ["a;b", "a&&b", "a|b", "a`b`c", "a$(b)c", `a${CONTROLS}b`, `a${ASTRAL}b`, `a${RTL}b`]) {
+  for (const id of ["a;b", "a&&b", "a|b", "a`b`c", "a$(b)c", "a(b)c", "2>&1", "a>b", "{x}", `a${CONTROLS}b`, `a${ASTRAL}b`, `a${RTL}b`]) {
    const found = bdInvocations(`bd update '${id}' --claim`);
    expect(found).toHaveLength(1);
    expect(found[0]?.positionals).toEqual([id]);
