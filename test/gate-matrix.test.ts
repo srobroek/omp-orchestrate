@@ -1,5 +1,5 @@
 /**
- * The gate matrix — both sides of it, driven through the real gate entry points.
+ * The gate matrix — both sides of it, driven through the gates' own entry points.
  *
  * A gate that refuses nothing is decoration. A gate that refuses ordinary work is
  * worse than decoration: a worker that cannot run `git status` stops working, and the
@@ -8,9 +8,12 @@
  * reason that names the right thing, and legitimate work must come back exactly
  * `undefined`.
  *
- * Calls go through `gateChain`, which is `src/index.ts`'s dispatch order rather than a
- * single gate: an ordinary command has to survive all four gates, not just the one
- * under test, and a forbidden one must be refused by whichever gate owns it.
+ * Calls go through `gateChain`, a composition of G3, G5, G2 and G1 written here for the
+ * rows: an ordinary command has to survive every gate in it, not just the one under
+ * test, and a forbidden one must be refused by whichever gate owns it. It is not
+ * `src/index.ts`. The dispatcher's own order, its runtime database check, G6, the spawn
+ * gate, the in-flight claim mark and its fail-open `catch` are exercised through the
+ * real handler in `test/wiring.test.ts`; a reordering in `index.ts` fails there, not here.
  *
  * Where the design fails open, that is what gets asserted, with the reason written
  * down. These gates are documented friction, not a security boundary: they fail closed
@@ -28,7 +31,6 @@ import type { BdBead } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
-import { gateOneClaim } from "../src/gates/one-claim";
 import { beadWriteFreeEnv, pinAddition, reviseBashEnv } from "../src/gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "../src/gates/worktree";
 import { gateWorktrunkOwnership } from "../src/gates/wt-guard";
@@ -92,12 +94,12 @@ function api(toolNames: string[]): ExtensionAPI {
 const WORKER = api(["bash", "edit", "write", "read", "yield"]);
 
 /**
- * The gates `src/index.ts` runs for one tool call, in its order: every refusal before
- * G1's revision, because a handler returns a single result and a refusal must win over
- * a revision of an input that will not run.
+ * The four gates composed for one tool call, every refusal before G1's revision, because
+ * a handler returns a single result and a refusal must win over a revision of an input
+ * that will not run.
  *
- * G6 is the one check left out: it raises notices rather than refusals, so it changes no
- * row here, and `test/gate-bd.test.ts` drives it against the corpus shapes it exists for.
+ * G6 is left out: it raises notices rather than refusals, so it changes no row here, and
+ * `test/gate-bd.test.ts` drives it against the corpus shapes it exists for.
  *
  * G2 is handed the tool name and the input, because its containment check is on the path
  * an `edit` or `write` names and not only on the cwd the session sits in.
@@ -110,8 +112,6 @@ async function gateChain(
  if (toolName === "bash") {
   const ownership = gateWorktrunkOwnership(input);
   if (ownership) return ownership;
-  const exclusivity = gateOneClaim(ctx, input);
-  if (exclusivity) return exclusivity;
   const eligibility = await gateClaimEligibility(claims, ctx, input);
   if (eligibility) return eligibility;
  }
@@ -119,7 +119,7 @@ async function gateChain(
   const scope = await gateWorktreeScope(claims, ctx, toolName, input);
   if (scope) return scope;
  }
- // Mirrors `index.ts`: the environment gate contributes to one revision.
+ // The environment gate contributes to one revision, as in `index.ts`.
  if (toolName === "bash") {
   return reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(WORKER, ctx)) });
  }
@@ -387,15 +387,14 @@ describe("G5 multi-bead claims", () => {
   expect((await gateClaimEligibility(claims, ctxAt(owned), { command }))?.block).toBe(true);
  });
 
- test("two beads in one tree are refused by the chain, and claim nothing", async () => {
-  // G7 must refuse before G5 records a claim that G2 would subsequently enforce.
+ test("two beads in one tree are refused by the chain before any bead is read", async () => {
   const result = await bash(`BEADS_ACTOR=${ACTOR} bd update ${BEAD} ${SAME_TREE} --claim`);
 
   expect(result?.block).toBe(true);
-  expect(result?.reason).toContain(SAME_TREE);
-  // Untouched: still the one bead `beforeEach` seeded, so G5 never ran.
-  expect(claims.observedClaim()?.beadIds).toEqual([BEAD]);
+  // G5 counts targets before it shows a bead, so a two-bead claim costs no read and
+  // touches nothing: the claim is still the one bead `beforeEach` seeded.
   expect(shown).toEqual([]);
+  expect(claims.observedClaim()?.beadIds).toEqual([BEAD]);
  });
 
  test("G2 contains every accumulated claim even if acquisition bypassed G5", async () => {

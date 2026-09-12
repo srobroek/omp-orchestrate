@@ -87,9 +87,15 @@ describe("extension factory", () => {
 	test("registers the lifecycle entrypoints the host dispatches", () => {
 		const { pi, seen } = recordingApi();
 		ompOrchestrate(pi);
-		expect([...new Set(seen.events)].sort()).toEqual(
-   ["agent_end", "tool_call", "session_start", "session_switch", "session_branch", "goal_updated", "tool_result", "session_shutdown"].sort(),
-		);
+		const registered = [...new Set(seen.events)];
+		// Every gate and watcher this plugin promises hangs off one of these.
+		const required = ["agent_end", "tool_call", "session_start", "session_switch", "session_branch", "goal_updated", "tool_result", "turn_end", "session_shutdown"];
+		expect(registered).toEqual(expect.arrayContaining(required));
+		// A name the host never emits registers a handler nothing calls. The two retry
+		// fallback events are the host's real names (`shared-events.ts`) and are subscribed
+		// by the assignment gate; they are known here so that registration is not a typo.
+		const known = [...required, "retry_fallback_applied", "retry_fallback_succeeded"];
+		expect(registered.filter(event => !known.includes(event))).toEqual([]);
 	});
 
 	test("registers the five commands and five schema-visible tools", () => {

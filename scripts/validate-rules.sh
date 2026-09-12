@@ -15,12 +15,13 @@
 # Local gate, deliberately not in CI: it needs an installed `omp`, which the CI
 # runners do not have. Run it after touching any rule frontmatter.
 #
-# Five bd rules used to live here -- the -C pin, the actor prefix, the comment verb, the
-# bug-bead route and the one-claim count. They are tool_call gates now, because a regex
-# cannot see whether a run is active and so nagged every session that mentioned `bd`. The
-# pin is retired as a regex rule: the run explicitly pins its embedded database with BEADS_DIR. Their corpus moved
-# to `test/gate-bd.test.ts` and `test/one-claim.test.ts`, which run in CI. Do not re-add
-# them here.
+# Six rules used to live here -- the -C pin, the actor prefix, the comment verb, the
+# bug-bead route, the one-claim count and the implementer spawn shape. They are tool_call
+# gates now, because a regex cannot see whether a run is active and so nagged every
+# session that mentioned `bd`, and a regex over streamed JSON cannot see a parsed argument.
+# The pin is retired as a regex rule: the run explicitly pins its embedded database with
+# BEADS_DIR. Their corpus moved to `test/gate-bd.test.ts`, `test/claim.test.ts` and
+# `test/wiring.test.ts`, which run in CI. Do not re-add them here.
 set -u
 cd "$(dirname "$0")/.." 2>/dev/null || exit 2
 
@@ -103,21 +104,6 @@ check orc-no-nested-omp.md miss bash 'omp --cwd \"/wt\" --config \"/overlay.yml\
 check orc-no-nested-omp.md miss bash 'omp ttsr test --rule rules/x.md snippet'
 check orc-no-nested-omp.md miss bash 'omp --version'
 check orc-no-nested-omp.md miss bash 'rg omp -p docs/'
-
-# orc-spawn-isolated: fires only on a closed object, in any key order, flat or batch.
-check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1"}'
-check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1","isolated":false}'
-check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1","isolated":true}'
-check orc-spawn-isolated.md miss task '{"isolated":true,"name":"Impl1","agent":"orc-implementer","task":"epic orc-1"}'
-check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer",'
-check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1"'
-check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"parse {\"id\": \"x\"} then }","isolated":true}'
-check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"parse {\"id\": \"x\"} then }"}'
-check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"orc-1","outputSchema":{"type":"object","properties":{"verdict":{"type":"string"}}},"isolated":true}'
-check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"orc-1","outputSchema":{"type":"object","properties":{"verdict":{"type":"string"}}}}'
-check orc-spawn-isolated.md miss task '{"context":"wave 1","tasks":[{"name":"A","agent":"orc-implementer","task":"orc-1","isolated":true},{"name":"B","agent":"orc-implementer","task":"orc-2","isolated":true}]}'
-check orc-spawn-isolated.md fire task '{"context":"wave 1","tasks":[{"name":"A","agent":"orc-implementer","task":"orc-1","isolated":true},{"name":"B","agent":"orc-implementer","task":"orc-2"}]}'
-check orc-spawn-isolated.md miss task '{"name":"Rev","agent":"orc-reviewer","task":"epic orc-1"}'
 
 check orc-wait-grammar.md fire text 'WAIT: then CLAIM the bead'
 check orc-wait-grammar.md miss text 'WAITING_HUMAN on the gate'
