@@ -3,7 +3,7 @@
 Two actors own two different plans, and neither does the other's job.
 
 - **The lead** owns which epics exist, who owns them, and what "done" means for the run.
-- **The architect** owns the decomposition inside its epic: features, tasks, scopes,
+- **The architect** owns the decomposition inside its epic: feature beads, tasks, scopes,
   dependencies. It reads the domain, because that is the part that cannot be delegated
   upward.
 
@@ -118,11 +118,11 @@ parallelism -- it reports `NO_WORK` and exits, and the spawn was wasted.
 ## Merge order is not encoded
 
 Do not encode merge order in the graph; you cannot predict which worker finishes when.
-Approved landing units integrate under the exclusive merge slot (`bd merge-slot acquire`,
-never with `--wait`). A held slot is advisory: report the holder and either enqueue as a
-waiter and yield, or retry later. Order follows successful acquisition, not a FIFO guarantee.
-The shepherd conflict-guards every integration with `orc_conflict_probe`. The graph expresses
-dependencies, not integration sequence.
+Approved landing units become `pr:merge` beads. The plugin's landing sweep merges each PR
+when GitHub reports it `CLEAN` at the reviewed head, guarded by `--match-head-commit`.
+No slot or queue orders the merges: a lost race surfaces as `BEHIND` or `DIRTY` on the
+next sweep, which refreshes or bounces it. Predict conflicts with `orc_conflict_probe`
+before a merge bead exists. The graph expresses dependencies, not integration sequence.
 
 ## Scope hygiene
 
@@ -138,14 +138,18 @@ Scope choice decides whether beads can run concurrently.
 
 Overlapping scopes are what produce the merge conflicts an architect then has to arbitrate.
 Spend the effort here rather than there. The extension checks overlap at two points and
-nowhere else. When an architect writes a `scope` with `bd create` or `bd update`, the gate
-refuses one that overlaps an open or in-progress `orc-node` of the same run outside the
-bead's own lineage. When a worker claims a named bead (`bd update <id> --claim`), the gate
-compares that bead's `scope` with every live claim's `scope`. A queue pull (`bd ready …
---claim`) names no bead, so nothing is compared there; the decomposition check is what
-keeps the queue's beads disjoint. No per-write check exists: G2 confines a write to the
-claimed worktree and `metadata.scope`, and does not consult other claims. Friction catches
-the honest mistake. It is not a substitute for disjoint globs.
+nowhere else:
+
+- When an architect writes a `scope` with `bd create` or `bd update`, the gate refuses one
+  that overlaps an open or in-progress `orc-node` of the same run outside the bead's own
+  lineage.
+- When a worker claims a named bead (`bd update <id> --claim`), the gate compares that
+  bead's `scope` with every live claim's `scope`.
+
+A queue pull (`bd ready … --claim`) names no bead, so nothing is compared there; the
+decomposition check is what keeps the queue's beads disjoint. No per-write check exists: G2
+confines a write to the claimed worktree and `metadata.scope`, and does not consult other
+claims. Friction catches the honest mistake. It is not a substitute for disjoint globs.
 
 A feature bead's scope may be the union of its tasks: a bead's own parent chain and children are exempt from the friction check, so an architect can hold the feature envelope while its workers hold task scopes. An unrelated architect's envelope still counts as friction. Architects never take a code-writing claim over task territory; their feature claim is for integration and coordination, not editing.
 
@@ -167,18 +171,14 @@ one sized past the cap simply idles against it.
 
 ## Runtime dispatch settings
 
-Before the first wave, require these effective settings; fix deviations and restart or
-obtain explicit acceptance of the reported limitations. Preflight never rewrites config.
-Claim foreground observation remains mandatory even if a settings warning is accepted.
-
-| Setting | Value |
-|---|---|
-| `task.isolation.enabled` | `true` |
-| `task.isolation.merge` | `branch` |
-| `task.isolation.apply` | `false` |
-| `task.enableEffort` | `true` for per-entry effort |
-| `task.maxRecursionDepth` | `3` for worker helpers; each spawner also needs its explicit allowlist |
-| `bash.autoBackground.enabled` | `false` |
+The required effective settings ship in the plugin's `config/orchestrate.overlay.yml`;
+the operator starts the lead session with `omp --config <plugin-root>/config/orchestrate.overlay.yml`.
+Before the first wave, preflight compares the effective values against it and reports a
+deviation as `WARN settings`. Preflight never rewrites config. On a deviation, the
+operator restarts with the overlay or explicitly accepts the reported limitations. Claim
+foreground observation remains mandatory even if a settings warning is accepted. Each
+spawner also needs its explicit `spawns:` allowlist; `task.maxRecursionDepth` alone does
+not grant a helper.
 
 Architects use persistent Worktrunk feature trees, not isolated spawns. Worker entry:
 
@@ -205,16 +205,16 @@ tool with the marker in the call's `env` field, never as an inline `NAME=value`
 
 ```json
 {
-  "command": "omp --cwd \"<canonical-worktree>\" --config \"<run-overlay>\" --print \"Lead: dispatch the loaded native orc-architect for the bound epic; preserve its role and spawn policy; collect and return the actual terminal result.\" </dev/null",
+  "command": "omp --cwd \"<canonical-worktree>\" --config \"<plugin-root>/config/orchestrate.overlay.yml\" --print \"Lead: dispatch the loaded native orc-architect for the run epic; preserve its role and spawn policy; collect and return the actual terminal result.\" </dev/null",
   "env": { "ORCHESTRATE_MARKER_FILE": "<absolute-marker-file>" }
 }
 ```
 
-Pass `--config "<run-overlay>"` when re-entry changes discovery root; otherwise retain
-the active run configuration. A supervised PTY is also valid for `--print`; closed
-stdin prevents a hanging process. Collect the actual result before replacement.
-Keep experiment-only isolation enablement in the run overlay. Do not silently
-override the user's project or global isolation preference.
+Pass `--config "<plugin-root>/config/orchestrate.overlay.yml"` when re-entry changes
+discovery root; otherwise retain the active run configuration. A supervised PTY is also
+valid for `--print`; closed stdin prevents a hanging process. Collect the actual result
+before replacement. The overlay carries the run's isolation settings; never write them
+into the user's project or global configuration.
 
 ### Canonical checkout recovery
 
@@ -279,7 +279,8 @@ preserve every one of those anchors throughout recovery.
    epic id. A mismatch, stale value, foreign binding, or unresolved read is BLOCKED;
    retain the claim, checkout, captures, and terminal evidence for explicit recovery.
 7. Only after those equality checks pass, re-enter the loaded architect through the
-   rooted `omp --cwd "<canonical-worktree>" --config "<run-overlay>"` procedure above.
+   rooted `omp --cwd "<canonical-worktree>" --config "<plugin-root>/config/orchestrate.overlay.yml"`
+   procedure above.
    A missing Git object, missing commit/capture, or source-root failure remains a
    separate setup failure and must be reported with its own evidence; cwd correction
    never proves the object exists or that dispatch succeeded.

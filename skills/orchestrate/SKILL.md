@@ -11,7 +11,7 @@ TRIGGER
 
 You are the lead. Define the run's shape and completion criteria. Architects own their epics and dispatch workers. Workers pull their queues.
 
-Before bootstrap, confirm that parallel work or durable resumption justifies the run. Once bound, every role follows its claim contract. This check never permits a bypass.
+Before bootstrap, confirm that parallel work or durable resumption justifies the run. Once the run is started, every role follows its claim contract. This check never permits a bypass.
 
 ## Workflow
 
@@ -68,12 +68,13 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 | Architect domain (an epic under the run) | `epic: <id>`; one feature beneath it: `feature: <id>` |
 | One actor's held work | `actor: <name>` |
 
-Slash commands, typed by the lead:
+Slash commands, typed by the operator in the lead session:
 
-- `/orchestrate-run` pins the database and writes the `pending` marker. Run it first.
-- `/orchestrate-bind <epic>` binds the marker to the run epic and stamps this session's lead lease on it. After it, dispatch.
-- `/orchestrate-status` shows the marker binding, the run epic's liveness, and the lead lease.
+- `/orchestrate-start --new "<title>"` or `/orchestrate-start <epic-id>` creates or adopts the run epic, writes the marker with the run's database, stamps this session's lead lease, and records landing capabilities. Dispatch after it reports the run.
+- `/orchestrate-status` shows the run epic, its liveness, the lead lease, and an Attention section: open `ASK` comments, lapsed leases, `BOUNCED` landings, refused adoptions, a store probe that is not `free`.
 - `/orchestrate-roster` shows ready-queue depth per role, wisps included.
-- `/orchestrate-close <epic>` ends a run by removing the marker. With any bead beneath the epic still `in_progress`, it refuses. `--force` skips that check.
+- `/orchestrate-answer <bead> <text>` writes an `ANSWER` note; it requeues a `FAILED`+`ASK` implementer bead and wakes a parked architect that holds the bead.
+- `/orchestrate-resume` takes over a run whose lead lease lapsed and releases in-flight claims whose lease lapsed.
+- `/orchestrate-stop [--force]` ends the run: releases the lead lease and removes the marker. With any bead beneath the epic still `in_progress`, it refuses; `--force` skips that check.
 
 Final assistant verdicts and durable comment verbs are separate channels.
