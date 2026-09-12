@@ -348,11 +348,11 @@ bd comment <bead> "<VERB> <node> field=… output_ref=<abs artifact path>"
 Alongside these voluntary comments, the extension keeps an involuntary record: every child's
 mutating `bd` command is appended to
 `<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog` as
-`ts, child, argv, exitCode, store`. `store` is the beads directory the command wrote to. A
-row whose store is not the run's pinned database also carries `foreign_store: true`; it is
-provenance of a sandbox or another run, not a run mutation, and a reader counting the run's
-writes skips it. The ledger is passive provenance, never a gate, and it is the evidence a
-dead-claim recovery reads first.
+`ts, child, argv, exitCode, store`. `store` is present only when the command named a store
+of its own (`--db`, `BEADS_DB`, `-C`) instead of letting bd resolve the run's; such a row
+also carries `foreign_store: true`. It is provenance of a sandbox or another repository, not
+a run mutation, and a reader counting the run's writes skips it. The ledger is passive
+provenance, never a gate, and it is the evidence a dead-claim recovery reads first.
 
 ## Shepherd primitives
 
