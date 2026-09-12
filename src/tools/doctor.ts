@@ -239,19 +239,19 @@ async function checkLanding(exec: Exec, cwd: string): Promise<DoctorCheck> {
 /** The whole report. Independent checks run together; the rows keep a fixed order. */
 export async function runDoctor(ctx: DoctorContext, exec: Exec = spawnExec): Promise<DoctorReport> {
 	const cwd = ctx.cwd;
-	const [bd, wt, git, gh, python3, jq, overlay, agents, store, landing] = await Promise.all([
+	const [bd, wt, git, gh, bun, overlay, agents, store, landing] = await Promise.all([
 		checkBd(exec, cwd),
 		requiredBinary(exec, "wt", cwd, "every architect and worker tree is a Worktrunk checkout"),
 		requiredBinary(exec, "git", cwd, "every capture and integration step is a git operation"),
 		checkGh(exec, cwd),
-		optionalBinary(exec, "python3", cwd, "skills/orchestrate/scripts/worktree-sweep.sh"),
-		optionalBinary(exec, "jq", cwd, "the stranded-bead and undrainable-merge queries in references/beads-store.md"),
+		// `omp` itself runs on bun, but its launcher may reach a bundled copy that is not on PATH.
+		optionalBinary(exec, "bun", cwd, "skills/orchestrate/scripts/worktree-sweep.ts at run end"),
 		checkOverlay(),
 		checkAgents(ctx),
 		checkStore(cwd),
 		checkLanding(exec, cwd),
 	]);
-	const checks = [bd, wt, git, gh, python3, jq, overlay, ...checkSettings(), ...agents, store, landing];
+	const checks = [bd, wt, git, gh, bun, overlay, ...checkSettings(), ...agents, store, landing];
 	return { ok: checks.every(check => check.status !== "fail"), checks };
 }
 
@@ -267,10 +267,10 @@ export function renderDoctor(report: DoctorReport): string {
 
 const DESCRIPTION = [
 	"Report the run prerequisites with pass/warn/fail rows: bd (1.2 or newer), wt, git, gh and its",
-	"authentication, python3 and jq for the sweep and close-out scripts, the shipped settings overlay,",
-	"the required task and bash settings and the reviewer model role, the core and borrowed agents,",
-	"the beads store probe, and the repository's landing capabilities. Reads only; never writes a",
-	"file, a bead, or a setting. Call it before /orchestrate-start, or when a run misbehaves.",
+	"authentication, bun for the worktree sweep, the shipped settings overlay, the required task and",
+	"bash settings and the reviewer model role, the core and borrowed agents, the beads store probe,",
+	"and the repository's landing capabilities. Reads only; never writes a file, a bead, or a",
+	"setting. Call it before /orchestrate-start, or when a run misbehaves.",
 ].join(" ");
 
 /** Register `orc_doctor` and `/orchestrate-doctor`. The orchestrator wires this from `src/index.ts`. */

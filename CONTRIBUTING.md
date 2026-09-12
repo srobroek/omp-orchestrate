@@ -19,6 +19,11 @@ Development checkouts need the agnix hook. In each checkout, run
 instruction files. Git does not install tracked hooks automatically. The hook needs `agnix`
 (`cargo install agnix-cli --version 0.52.2`) and `python3`.
 
+Python is a contributor tool only. The plugin ships no Python: every runtime script is
+TypeScript that `bun` runs, and `skills/orchestrate/scripts/worktree-sweep.ts` is tested by
+`bun test` like the rest. CI's `py` job runs the prose gate and its regression suite alone,
+through `uvx`, because `slopvac` is a Python package.
+
 Prose under `README.md` and `skills/orchestrate/SKILL.md` passes the prose gate in CI:
 `uvx --from slopvac==1.0.1 python scripts/prose-gate.py <files> --profile normal`. Errors
 fail the job. The job reports the score without failing on it.
