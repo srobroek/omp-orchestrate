@@ -3,7 +3,7 @@ description: "a role launched as a nested omp process instead of a task subagent
 condition:
   - "\"application\"\\s*:\\s*\"omp\""
   - "\"args\"\\s*:\\s*\\[[^\\]]*\"(?:[^\"]*\\s)?omp(?:\\s|\")"
-  - "(?m)^\\s*(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*omp\\s+(?:-p\\b|--prompt\\b|--cwd\\b|--agent\\b|--session-dir\\b)"
+  - "(?:^|[\"`;|&(]|\\\\[nt])(?:\\s|\\\\[nt])*(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*omp\\s+(?:-p\\b|--print\\b|--cwd\\b|--session-dir\\b)(?!(?:\\\\[^n]|[^\"\\\\\\n])*--config\\b)"
 scope: "tool:hub, tool:bash"
 interruptMode: "never"
 ---
@@ -23,5 +23,12 @@ Recover instead:
    actor export) and re-dispatch with `task` and `isolated: true`.
 3. When the cause is outside the run, write the escalation wisp and stop the wave.
 
-Running `omp -p` from a shell is legitimate only for probes and benchmarks that are not
-part of the run; those do not claim beads.
+Running `omp -p` from a shell is legitimate for probes and benchmarks that are not part
+of the run (those do not claim beads) and for the lead's rooted re-entry documented in
+`planning.md`, which carries `--config <run-overlay>` and is exempt from the shell
+condition.
+
+Conditions 1 and 2 read the `hub start` arguments. Condition 3 reads the streamed Bash
+JSON (`{"command":"…"}`): `omp` at command position means after the opening `"`, a
+shell separator, or the two-character `\n` escape, optionally behind `NAME=value`
+prefixes; `--config` anywhere on the same escaped line exempts the command.

@@ -5,6 +5,13 @@
 # rules: lookbehind support, `\A`/`\Z`, and named-group syntax all differ. Each case
 # asserts a positive fires and a negative does not, through `omp ttsr test`.
 #
+# The host matches a rule against the tool call's streamed argument JSON, not the
+# command text: for `bash` the buffer is `{"command":"…"}` where a shell newline is
+# the two characters `\n` and a quote is `\"`. check() wraps every bash snippet in
+# that envelope, so bash snippets below are written as the JSON string body the model
+# streams (`\n` for a newline, `\t` for a tab, `\"` for a quote). `task` and `hub`
+# snippets are the argument object itself. `text` snippets are raw prose.
+#
 # Local gate, deliberately not in CI: it needs an installed `omp`, which the CI
 # runners do not have. Run it after touching any rule frontmatter.
 #
@@ -19,19 +26,23 @@ cd "$(dirname "$0")/.." 2>/dev/null || exit 2
 
 fail=0
 
+# check <rule> <fire|miss> <kind> <snippet>
+#   bash       snippet is the command text as streamed inside `{"command":"…"}`
+#   bash-json  snippet is a complete bash argument object (to test other fields)
+#   task|hub   snippet is the tool's argument object
+#   text       snippet is prose
 check() {
 	rule="$1"
 	expect="$2"
-	src="$3"
-	tool="$4"
-	snippet="$5"
-	if [ "$src" = "text" ]; then
-		out=$(omp ttsr test --rule "rules/$rule" --source text "$snippet" 2>&1)
-		status=$?
-	else
-		out=$(omp ttsr test --rule "rules/$rule" --source tool --tool "$tool" "$snippet" 2>&1)
-		status=$?
-	fi
+	kind="$3"
+	snippet="$4"
+	case "$kind" in
+	text) out=$(omp ttsr test --rule "rules/$rule" --source text "$snippet" 2>&1) ;;
+	bash) out=$(omp ttsr test --rule "rules/$rule" --source tool --tool bash "{\"command\":\"$snippet\"}" 2>&1) ;;
+	bash-json) out=$(omp ttsr test --rule "rules/$rule" --source tool --tool bash "$snippet" 2>&1) ;;
+	*) out=$(omp ttsr test --rule "rules/$rule" --source tool --tool "$kind" "$snippet" 2>&1) ;;
+	esac
+	status=$?
 	case "$status:$out" in
 	1:*"No rules triggered."*) got=miss ;;
 	0:*) got=fire ;;
@@ -50,25 +61,66 @@ check() {
 	fi
 }
 
-check orc-ready-ephemeral.md fire tool bash 'bd ready --parent orc-1 --label agent:reviewer --unassigned --claim --json'
-check orc-ready-ephemeral.md miss tool bash 'bd ready --include-ephemeral --parent orc-1 --label agent:reviewer --unassigned --claim --json'
-check orc-ready-ephemeral.md miss tool bash 'bd ready --parent orc-1 --label agent:implementer --unassigned --claim --json'
-check orc-ready-ephemeral.md fire tool bash 'bd ready --parent orc-1 --metadata-field role=reviewer --unassigned --claim --json'
-check orc-ready-ephemeral.md fire tool bash 'bd -C /repo ready --metadata-field=role=researcher --claim --json'
-check orc-ready-ephemeral.md miss tool bash 'bd ready --metadata-field role=reviewer --include-ephemeral --claim --json'
-check orc-ready-ephemeral.md miss tool bash 'bd ready --metadata-field role=implementer --claim --json'
+# orc-ready-ephemeral: column-0 `bd` follows the envelope's opening quote.
+check orc-ready-ephemeral.md fire bash 'bd ready --parent orc-1 --label agent:reviewer --unassigned --claim --json'
+check orc-ready-ephemeral.md miss bash 'bd ready --include-ephemeral --parent orc-1 --label agent:reviewer --unassigned --claim --json'
+check orc-ready-ephemeral.md miss bash 'bd ready --parent orc-1 --label agent:implementer --unassigned --claim --json'
+check orc-ready-ephemeral.md fire bash 'bd ready --parent orc-1 --metadata-field role=reviewer --unassigned --claim --json'
+check orc-ready-ephemeral.md fire bash 'bd -C /repo ready --metadata-field=role=researcher --claim --json'
+check orc-ready-ephemeral.md miss bash 'bd ready --metadata-field role=reviewer --include-ephemeral --claim --json'
+check orc-ready-ephemeral.md miss bash 'bd ready --metadata-field role=implementer --claim --json'
+check orc-ready-ephemeral.md fire bash 'cd /repo && bd ready --label agent:reviewer --claim --json'
+check orc-ready-ephemeral.md fire bash 'BEADS_ACTOR=x bd ready --label agent:reviewer --claim --json'
+check orc-ready-ephemeral.md fire bash 'bd list --json\nbd ready --label agent:reviewer --claim --json'
+check orc-ready-ephemeral.md fire bash 'if true; then\n\tbd ready --label agent:reviewer --claim --json\nfi'
+check orc-ready-ephemeral.md fire bash 'bd ready --label agent:reviewer --claim --json\nbd ready --include-ephemeral --label agent:reviewer'
+check orc-ready-ephemeral.md miss bash 'bd ready --claim --json\nbd list --label agent:reviewer'
+check orc-ready-ephemeral.md miss bash 'sbd ready --label agent:reviewer --claim --json'
+# --include-ephemeral in another field of the same call must not silence the rule.
+check orc-ready-ephemeral.md fire bash-json '{"command":"bd ready --label agent:reviewer --claim --json","description":"with --include-ephemeral"}'
 
-check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
-check orc-shepherd-no-parent.md miss tool bash 'bd ready --label agent:integrator --unassigned --claim --json'
-check orc-shepherd-no-parent.md fire tool bash 'bd ready --parent orc-1 --metadata-field role=shepherd --label pr:merge --claim --json'
-check orc-shepherd-no-parent.md fire tool bash 'bd -C /repo ready --metadata-field=role=shepherd --parent orc-1 --claim --json'
-check orc-shepherd-no-parent.md miss tool bash 'bd ready --metadata-field role=shepherd --label pr:merge --claim --json'
-check orc-shepherd-no-parent.md miss tool bash 'bd ready --parent orc-1 --metadata-field role=implementer --claim --json'
+# orc-shepherd-no-parent
+check orc-shepherd-no-parent.md fire bash 'bd ready --parent orc-1 --label agent:integrator --unassigned --claim --json'
+check orc-shepherd-no-parent.md miss bash 'bd ready --label agent:integrator --unassigned --claim --json'
+check orc-shepherd-no-parent.md fire bash 'bd ready --parent orc-1 --metadata-field role=shepherd --label pr:merge --claim --json'
+check orc-shepherd-no-parent.md fire bash 'bd -C /repo ready --metadata-field=role=shepherd --parent orc-1 --claim --json'
+check orc-shepherd-no-parent.md miss bash 'bd ready --metadata-field role=shepherd --label pr:merge --claim --json'
+check orc-shepherd-no-parent.md miss bash 'bd ready --parent orc-1 --metadata-field role=implementer --claim --json'
+check orc-shepherd-no-parent.md fire bash 'cd /x && bd ready --parent orc-1 --label pr:merge --claim --json'
+check orc-shepherd-no-parent.md miss bash 'bd ready --parent orc-1 --json\nbd ready --label pr:merge --json'
 
-check orc-spawn-isolated.md fire tool task '{"agent":"orc-implementer","task":"epic orc-1"}'
-check orc-spawn-isolated.md miss tool task '{"agent":"orc-implementer","task":"epic orc-1","isolated":true}'
-check orc-wait-grammar.md fire text - 'WAIT: then CLAIM the bead'
-check orc-wait-grammar.md miss text - 'WAITING_HUMAN on the gate'
+# orc-no-nested-omp: conditions 1-2 read hub start, condition 3 reads the bash envelope.
+check orc-no-nested-omp.md fire hub '{"op":"start","name":"arch","application":"omp","args":["-p","hi"]}'
+check orc-no-nested-omp.md fire hub '{"op":"start","name":"arch","application":"sh","args":["-c","omp -p hi"]}'
+check orc-no-nested-omp.md miss hub '{"op":"start","name":"web","application":"bun","args":["run","dev"]}'
+check orc-no-nested-omp.md fire bash 'omp -p \"hi\"'
+check orc-no-nested-omp.md fire bash 'omp --print \"hi\"'
+check orc-no-nested-omp.md fire bash 'cd /x && omp -p \"hi\"'
+check orc-no-nested-omp.md fire bash 'FOO=1 omp -p \"hi\"'
+check orc-no-nested-omp.md fire bash 'echo start\nomp --cwd /x -p \"hi\"'
+check orc-no-nested-omp.md fire bash 'sh -c \"omp -p hi\"'
+check orc-no-nested-omp.md miss bash 'omp --cwd \"/wt\" --config \"/overlay.yml\" --print \"Lead: dispatch the loaded native orc-architect\" </dev/null'
+check orc-no-nested-omp.md miss bash 'omp ttsr test --rule rules/x.md snippet'
+check orc-no-nested-omp.md miss bash 'omp --version'
+check orc-no-nested-omp.md miss bash 'rg omp -p docs/'
+
+# orc-spawn-isolated: fires only on a closed object, in any key order, flat or batch.
+check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1"}'
+check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1","isolated":false}'
+check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1","isolated":true}'
+check orc-spawn-isolated.md miss task '{"isolated":true,"name":"Impl1","agent":"orc-implementer","task":"epic orc-1"}'
+check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer",'
+check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"epic orc-1"'
+check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"parse {\"id\": \"x\"} then }","isolated":true}'
+check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"parse {\"id\": \"x\"} then }"}'
+check orc-spawn-isolated.md miss task '{"name":"Impl1","agent":"orc-implementer","task":"orc-1","outputSchema":{"type":"object","properties":{"verdict":{"type":"string"}}},"isolated":true}'
+check orc-spawn-isolated.md fire task '{"name":"Impl1","agent":"orc-implementer","task":"orc-1","outputSchema":{"type":"object","properties":{"verdict":{"type":"string"}}}}'
+check orc-spawn-isolated.md miss task '{"context":"wave 1","tasks":[{"name":"A","agent":"orc-implementer","task":"orc-1","isolated":true},{"name":"B","agent":"orc-implementer","task":"orc-2","isolated":true}]}'
+check orc-spawn-isolated.md fire task '{"context":"wave 1","tasks":[{"name":"A","agent":"orc-implementer","task":"orc-1","isolated":true},{"name":"B","agent":"orc-implementer","task":"orc-2"}]}'
+check orc-spawn-isolated.md miss task '{"name":"Rev","agent":"orc-reviewer","task":"epic orc-1"}'
+
+check orc-wait-grammar.md fire text 'WAIT: then CLAIM the bead'
+check orc-wait-grammar.md miss text 'WAITING_HUMAN on the gate'
 
 printf '\n%s\n' "$([ "$fail" -eq 0 ] && echo 'ALL HOST-ENGINE CHECKS PASS' || echo "$fail HOST-ENGINE FAILURES")"
 exit "$fail"
