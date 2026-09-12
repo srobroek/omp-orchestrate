@@ -49,7 +49,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
  type BdBead,
  bdBlockedChecked,
@@ -60,42 +59,9 @@ import {
  metadataString,
  resetReadBudget,
 } from "./bd";
-import { type ActiveRun, markerPath, readActiveRunStrict } from "./run-state";
 import { fnmatch, normalizeScope, scopeOf } from "./scope";
 import { type Exec, type ExecResult, spawnExec } from "./tools/bot-review-probe";
 import { mergeTreeArgv, mergeTreeOid, parseMergeTreeOutput } from "./tools/conflict-probe";
-
-// ============================================================================
-// Run scope
-// ============================================================================
-
-/** The run a session is under: its epic, marker, database, and the checkout that hosts them. */
-export interface RunScope {
- runId: string;
- markerPath: string;
- beadsDir: string | undefined;
- root: string;
-}
-
-const PENDING_RUN = "pending";
-
-/**
- * The bound run at `ctx.cwd`, or `null` when the session is under none.
- *
- * TODO(S): bundle S exports this from `./run-scope` with the same signature and the
- * worker-copy root resolution; this shim reads the marker at the cwd only. Swap the
- * import in `watchers.ts` and delete this when S lands.
- */
-export async function runScope(ctx: Pick<ExtensionContext, "cwd">): Promise<RunScope | null> {
- let run: ActiveRun | null;
- try {
-  run = await readActiveRunStrict(ctx.cwd);
- } catch {
-  return null;
- }
- if (run === null || run.run_id === PENDING_RUN) return null;
- return { runId: run.run_id, markerPath: markerPath(ctx.cwd), beadsDir: run.beads_dir, root: ctx.cwd };
-}
 
 // ============================================================================
 // Capabilities

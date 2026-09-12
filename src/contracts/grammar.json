@@ -73,17 +73,24 @@
     },
     {
       "verb": "NOTE",
-      "meaning": "A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's recovery evidence.",
+      "meaning": "A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's record of a claim it preserved and why.",
       "writers": ["*"],
       "terminal": false,
-      "source": { "kind": "contract", "where": "researcher.json: completion.answer on the linked node. Every other writer is prose: references/lifecycle.md incidental bug beads, references/beads-store.md bead-local defaults, src/supervision.ts:207 reaper" }
+      "source": { "kind": "contract", "where": "researcher.json: completion.answer on the linked node. Every other writer is prose: references/lifecycle.md incidental bug beads, references/beads-store.md bead-local defaults, src/supervision.ts reapBead (NOTE claim preserved)" }
+    },
+    {
+      "verb": "RECOVERED",
+      "meaning": "The extension released a dead holder's claim under the lease: the holder's terminal frame, or registry aborted plus a lapsed lease, fenced by --claim. The bead is open and unassigned again; requeue is implicit.",
+      "writers": ["extension"],
+      "terminal": true,
+      "source": { "kind": "code", "where": "src/lease.ts releaseDeadClaim, called from src/supervision.ts reapBead" }
     },
     {
       "verb": "STALL",
       "meaning": "A claimed child went silent past its threshold. No kill -- the spawner decides.",
       "writers": ["extension"],
       "terminal": false,
-      "source": { "kind": "code", "where": "src/watchers.ts:235" }
+      "source": { "kind": "code", "where": "src/watchers.ts reportStall" }
     },
     {
       "verb": "WARN",

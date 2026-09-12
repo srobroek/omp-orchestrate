@@ -80,7 +80,7 @@ async function dispatchAll(
 ): Promise<(ToolCallEventResult | undefined)[]> {
  if (handlers.length === 0) throw new Error("no tool_call handler was registered");
  const prompt = ctx.role === undefined ? [] : [`ORC-ROLE: ${ctx.role}`];
- const runtimeCtx = { cwd: ctx.cwd, getSystemPrompt: () => prompt } as unknown as ExtensionContext;
+ const runtimeCtx = { cwd: ctx.cwd, getSystemPrompt: () => prompt, sessionManager: { getSessionId: () => "wiring-session" } } as unknown as ExtensionContext;
  const results: (ToolCallEventResult | undefined)[] = [];
  for (const handler of handlers) results.push(await handler(event, runtimeCtx));
  return results;
@@ -287,8 +287,10 @@ describe("gate dispatcher wiring", () => {
   expect(results.some(result => result?.block === true)).toBe(true);
  });
 
- test("a declared role is under orchestration without any pin: G3 refuses the checkout and names the route", async () => {
-  const { pi, handlers, errors } = runtimeApi();
+ test("a declared role in a checkout no run has marked is under no orchestration: G3 lets the checkout through", async () => {
+  // Role never activates: an `orc-*` agent spawned outside any run is a plain session,
+  // and the prompt's claim about itself is not run authority.
+  const { pi, handlers, errors, sent } = runtimeApi();
   ompOrchestrate(pi);
 
   const results = await dispatchAll(
@@ -298,8 +300,8 @@ describe("gate dispatcher wiring", () => {
   );
 
   expect(errors).toEqual([]);
-  const refusal = results.find(result => result?.block === true);
-  expect(refusal?.reason).toContain("wt switch");
+  expect(results.every(result => result === undefined)).toBe(true);
+  expect(sent).toEqual([]);
  });
 
  test("an isolated copy finds the run through the marker it carries", async () => {
@@ -345,7 +347,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
   await fs.rm(dir, { recursive: true, force: true });
  });
 
- /** One worker call; the role is what puts the session under orchestration here. */
+ /** One worker call. The marker written by `pinnedRun` is what puts the session under orchestration. */
  function call(toolCallId: string, command: string): { toolName: string; toolCallId: string; input: unknown } {
   return { toolName: "bash", toolCallId, input: { command } };
  }
@@ -353,10 +355,12 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
  test("a two-bead named claim is refused by G5 before any bead is read", async () => {
   const show = spyOn(actualBd, "bdShow").mockResolvedValue(null);
   try {
+   await pinnedRun(dir);
    const { pi, handlers, errors } = workerApi();
    ompOrchestrate(pi);
 
-   const result = await verdict(handlers, call("claim-two", "bd update orc-1 orc-2 --claim"), { cwd: dir, role: "implementer" });
+   // Attributed, so G6 has no actor to resolve and the only bead read in question is G5's.
+   const result = await verdict(handlers, call("claim-two", "BEADS_ACTOR=impl bd update orc-1 orc-2 --claim"), { cwd: dir, role: "implementer" });
 
    expect(errors).toEqual([]);
    expect(result?.block).toBe(true);
@@ -376,7 +380,8 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    id: "orc-hand", status: "in_progress", assignee: "me", metadata: { worktree: owned },
   });
   try {
-   await pinnedRun(dir);
+   // The worker sits in the tree its bead names; an isolated copy carries the marker with it.
+   await pinnedRun(owned);
    const { pi, handlers, results: observers, errors } = workerApi();
    ompOrchestrate(pi);
    const claimReport = {
@@ -462,6 +467,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
  test("a gate that throws fails the call open and logs the cause", async () => {
   const show = spyOn(actualBd, "bdShow").mockImplementation(async () => { throw new Error("boom from bdShow"); });
   try {
+   await pinnedRun(dir);
    const { pi, handlers, errors } = workerApi();
    ompOrchestrate(pi);
 
@@ -477,6 +483,8 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
  describe("one claim in flight per turn", () => {
   /** A bead routed to no role and naming no territory: G5 allows any session to claim it. */
   const plain = (id: string) => ({ id, status: "open", labels: [], metadata: {} });
+
+  beforeEach(() => pinnedRun(dir));
 
   test("a second claim while the first awaits its result is refused, and passes once the result lands", async () => {
    const show = spyOn(actualBd, "bdShow").mockImplementation(async id => plain(id));
@@ -562,6 +570,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
   });
 
   test("a batch names the entry that lacks isolation", async () => {
+   await pinnedRun(dir);
    const { pi, handlers } = runtimeApi();
    ompOrchestrate(pi);
    const input = {
@@ -585,6 +594,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    ["an isolated batch", { context: "wave 1", tasks: [{ name: "A", agent: "orc-implementer", task: "orc-1", isolated: true }] }],
    ["a plain helper", { task: "count the tests" }],
   ])("allows %s", async (_label, input) => {
+   await pinnedRun(dir);
    const { pi, handlers, errors } = runtimeApi();
    ompOrchestrate(pi);
 

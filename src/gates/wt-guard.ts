@@ -15,10 +15,11 @@
  * Matching is on parsed argv rather than substrings, so a bead comment that merely
  * mentions `git worktree` does not trip the gate.
  *
- * The dispatcher (`src/index.ts`) runs this only under orchestration: a declared
- * `ORC-ROLE`, or a pinned run. OMP's own `git worktree add` rewrite lives inside the
- * bash tool's `execute`, after `tool_call` handlers, so an unconditional refusal here
- * had made that host feature unreachable in every session that installed the plugin.
+ * The dispatcher (`src/index.ts`) runs this only inside a run scope (`src/run-scope.ts`):
+ * a valid active-run marker in the session checkout. OMP's own `git worktree add` rewrite
+ * lives inside the bash tool's `execute`, after `tool_call` handlers, so an unconditional
+ * refusal here had made that host feature unreachable in every session that installed
+ * the plugin.
  */
 
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";

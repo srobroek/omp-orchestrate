@@ -51,7 +51,7 @@ Omit a token only when neither endpoint carries it.
 An answered escalation ends only after the researcher verifies both `NOTE` writes,
 closes and releases its wisp, then notifies the architect. The architect collects
 the paused worker's actual terminal result and any successful capture. Resuming
-unfinished work requires exclusive-window reconciliation of its retained claim;
+unfinished work requires the reaper to release its retained claim under the lease;
 neither a ping nor wisp closure automatically requeues it.
 
 ## Completion paths
@@ -99,7 +99,7 @@ For CHANGES:
    Any `changes` verdict requires a fix round; preserve the union of actionable findings.
 2. Collect the prior writer's terminal result and preserve its capture and evidence
    anchors. A live writer cannot hand its node to a replacement. An unresolved retained
-   claim requires the exclusive recovery procedure below before any release or reopen.
+   claim is released only by the reaper, per `Dead-claim recovery` below.
 3. Preserve the owning epic, scope and implementer route. Re-read current ownership;
    with the prior writer terminal and its claim released, set the node to `status=open`
    with an empty assignee: `bd update <node> --status open --assignee ""`.
@@ -207,8 +207,8 @@ the bead instead. A non-isolated architect parks after `task.agentIdleTtlMs` and
 by a `hub` send.
 
 An exit allowed after the local refusal budget is not accepted work and does not release
-the claim. Inspect the terminal result and durable evidence; reconcile unresolved
-ownership through the exclusive recovery procedure before any replacement can claim.
+the claim. Inspect the terminal result and durable evidence; the reaper releases a dead
+holder's claim under the lease (`Dead-claim recovery` below), and nothing else does.
 
 ## Wakes and messages
 
@@ -242,35 +242,34 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
 ## Resume after compaction or crash
 
 1. Find the run epic: `/orchestrate-status` prints the marker binding, the epic's
-   liveness, and whether the patrol is armed; or `bd list --type epic --json`, matched on
-   `metadata.run_id`.
+   liveness, and the lead lease (`lead_actor`, `lease_until`); or `bd list --type epic
+   --json`, matched on `metadata.run_id`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
-   the actor in `assignee`, the location in `metadata.worktree`/`branch`, and its last
-   verb in `bd comments`. Confirm every stamped checkout with `wt list --format=json`.
-3. If a stamped path is missing or the runtime root mismatches, execute
-   `planning.md`'s **Canonical checkout recovery** in one explicit exclusive
-   claim/dispatch/branch-writer window. Inventory the owning epic's stamped branch/path
-   and WT rows first; preserve an existing dirty resumed checkout, captures, terminal
-   results, and all evidence. Recreate only a missing checkout with
-   `wt -C "<source-root>" switch "<branch>" --no-cd --format=json`, use its returned JSON
-   `path` as the canonical worktree, and reject an unresolved or foreign WT bead binding.
-   A missing Git object or capture is a separate setup failure, not cwd repair.
-4. While that same window remains held, stamp the updated `metadata.worktree` and WT
-   `bead` binding for the exact owning epic, read both back, and require equality before
-   actor re-entry. Do not release a retained claim merely to relocate; a mismatch
-   preserves the claim, checkout, capture, terminal result, and evidence for recovery.
-   Re-enter only through the rooted `omp --cwd "<canonical-worktree>" --config
-   "<run-overlay>"` procedure in `planning.md`, with the same absolute
-   `ORCHESTRATE_MARKER_FILE`.
+   the actor in `assignee`, the location in `metadata.worktree`/`branch`, its lease in
+   `metadata.lease_until`, and its last verb in `bd comments`. Confirm every stamped
+   checkout with `wt list --format=json`.
+3. If a stamped path is missing or the runtime root mismatches, execute `planning.md`'s
+   **Canonical checkout recovery**. Inventory the owning epic's stamped branch/path and WT
+   rows first; preserve an existing dirty resumed checkout, captures, terminal results, and
+   all evidence. Recreate only a missing checkout with `wt -C "<source-root>" switch
+   "<branch>" --no-cd --format=json`, use its returned JSON `path` as the canonical
+   worktree, and reject an unresolved or foreign WT bead binding. A missing Git object or
+   capture is a separate setup failure, not cwd repair.
+4. Stamp the updated `metadata.worktree` and WT `bead` binding for the exact owning epic,
+   read both back, and require equality before actor re-entry. Do not release a retained
+   claim merely to relocate; a mismatch preserves the claim, checkout, capture, terminal
+   result, and evidence. Re-enter only through the rooted `omp --cwd
+   "<canonical-worktree>" --config "<run-overlay>"` procedure in `planning.md`, with the
+   same absolute `ORCHESTRATE_MARKER_FILE`.
 5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
-6. Run `bd merge-slot check`. Never infer a dead holder from age or from a recycled
-   shepherd. Resume the landing transaction, or use its evidence-gated recovery path after
-   proving the exact actor lease is dead.
-7. Drain the patrol wisp for each epic (below) before dispatching anything new.
-   Replacement requires the same exclusive recovery procedure; it never starts by
-   releasing a retained claim just to re-enter the runtime.
+6. Claims whose holder died with the old lead's process are the adopting lead's to release:
+   `/orchestrate-bind <epic>` takes over a lapsed lead lease, and `/orchestrate-resume`
+   (wave 3.3) then releases each in-flight claim whose lease has lapsed, on the lease alone.
+   Until it exists, release such a claim by hand only after reading `lease_until` fresh and
+   finding it lapsed: `bd update <bead> --actor <holder> --claim --assignee "" --status
+   open`, then a `RECOVERED` comment. A live lease is a live holder until it lapses.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
 replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
@@ -278,90 +277,82 @@ in `Wakes and messages` above.
 
 ## Supervision
 
-Three layers, ordered by immediacy. The first is deterministic extension code with no model
+Two layers, ordered by immediacy. The first is deterministic extension code with no model
 in the loop.
 
 **In-process reaper.** The extension subscribes to the subagent lifecycle bus in every
-session that spawns. On a child's terminal event it reads that child's claimed beads, its
-metadata, and its `omp/task/<id>` branch, then re-runs *the same contract evaluator the
+session that spawns. On a child's terminal event it reads that child's claimed beads and
+wisps (`bd list --assignee <child> --include-infra --include-gates`), its `omp/task/<id>`
+branch, and this process's agent registry, then re-runs *the same contract evaluator the
 exit gate uses* against live bead state:
 
 | Case | Condition | Action |
 |---|---|---|
-| clean exit | `completed`, contract re-check passes, claim released | no NOTE, whether or not a branch was captured; the branch state is logged |
-| paused writer | positively open linked escalation | preserve the claim; architect reconciles resumption after the escalation closes |
-| semantic incompletion | `completed` but contract incomplete or ownership unresolved | append `NOTE recovery needed` with observations; no owner, status or metadata changes |
-| technical death or unknown evidence | `failed`/`aborted`, or failed evidence read | append recovery-needed `NOTE`; the branch is reported as `found`, `absent`, `stale` (its tip predates the child, so it is an earlier run's leftover) or `unknown`. Absence is not proof of no work |
+| clean exit | `completed`, contract re-check passes, claim released | nothing written, whether or not a branch was captured; the branch state is logged |
+| paused writer | positively open linked escalation | claim preserved, nothing written; the escalation is the record |
+| died | `failed`/`aborted` | fenced release as the holder (`--claim --assignee "" --status open`), `recovered_by` and `recovered_branch` stamped, one `RECOVERED` comment naming the frame, the registry state and the branch (`found`, `absent`, `stale`, or `unknown`; absence is not proof of no work) |
+| completed, contract unmet, holder `aborted` in this process's registry | fresh read says `lease_until` has lapsed | the same fenced release and `RECOVERED` |
+| completed, contract unmet, holder `idle`/`parked` | registry says revivable | claim preserved, nothing written, one notice in the spawner's transcript |
+| completed, contract unmet, holder absent from this process's registry, or lease live, or contract unreadable, or bead `blocked`/`deferred` | liveness unknown, or the fence cannot pass | `NOTE claim preserved` naming the registry state and the lease; no owner, status or metadata changed |
 
 `completed` means successful task termination, not accepted work. Parent-side capture
 exists only after successful completion and can include uncommitted delta. Failed isolated
-runs may lose local commits and uncommitted work. The reaper reports, never reclaims.
-Each child is reaped once per session: a revived agent's follow-up turns re-emit the
-terminal frame, and a parked architect is not re-noted on every wake. When the run's
-liveness cannot be read at a child's exit, the reaper skips and sends the same
-`orchestrate-recovery-needed` notice a failed reap does.
+runs may lose local commits and uncommitted work. The reaper never touches branches,
+worktrees, or captured refs. Each child is reaped once per session: a revived agent's
+follow-up turns re-emit the terminal frame, and a parked architect is not re-noticed on
+every wake. When the run's liveness cannot be read at a child's exit, the reaper skips and
+sends an `orchestrate-recovery` notice saying nothing was released.
 
-**Patrol wisps** cover process death. The extension creates the deterministic
-`<epic-id>-patrol` id and verifies its type, ephemeral flag and epic link. Concurrent
-creation shares that identity. A closed or mismatched record requires architect
-reconciliation, never an automatic replacement generation.
-The next architect inspects ownership and evidence, runs the merge-completeness scan,
-and explicitly reconciles the patrol. Inspection does not authorize claim mutation.
+**Leases** cover process death. Every claim carries `metadata.lease_until`, renewed by the
+plugin on the holder's tool activity (`bd update <bead> --actor <holder> --claim
+--set-metadata lease_until=<now+TTL>`, at most once per `ORC_LEASE_RENEW_MS`, default 5
+min; TTL `ORC_LEASE_TTL_MS`, default 15 min). The `--claim` fence means only the holder
+can extend a lease and a release loses to a successor's claim. A lapsed lease alone
+releases nothing: the spawner that holds the claimant in its registry decides, and a
+holder absent from that registry is unknown, never dead. The lead holds the same lease
+on the run epic (`lead_actor`, `lease_until`), renewed on its own activity; a second lead
+cannot bind while it is live, and `/orchestrate-status` prints it.
 
 **Merge-completeness scan.** Integration is cherry-pick, so ancestry proves nothing and
 patch-id containment is the primitive:
 
 | Scan result | Bead state | Verdict |
 |---|---|---|
-| all `-` | terminal | cleanup candidate; only explicit exclusive-window cleanup may delete and stamp integration |
+| all `-` | terminal | cleanup candidate; only the architect, after this scan, may delete and stamp integration |
 | all `-` | open | integrated early -- flag it; the bead belongs in reported or review |
 | any `+` | open / `in_progress` | pending integration -- the architect's duty; teardown blocks on it |
 | any `+` | closed | inconsistency: closed but unmerged. Comment on the bead and treat it as a reopen candidate; the comment is the record, since neither `/orchestrate-status` nor `orc_run_status` runs the scan |
 
-The architect runs the scan before teardown and during patrol reconciliation.
-The observer never stamps integration or deletes branches. Before explicit cleanup,
-stop every claim, dispatch and branch writer, re-read terminal state and patch
-containment, then mutate within that exclusive window. If exclusivity cannot be
-established, preserve the branch and report unresolved cleanup.
+The architect runs the scan before teardown. Only the architect stamps integration or
+deletes branches, after re-reading terminal state and patch containment; the reaper never
+does. Unreadable containment preserves the branch and reports unresolved cleanup.
 
 ## Dead-claim recovery
 
-Age is a diagnostic, not proof of death. `bd stale --status in_progress` may propose
-candidates, but there is no lease expiry and no daemon. Never steal a claim because a
-timestamp is old.
+The reaper releases dead claims; agents do not. A release needs one of two proofs: the
+holder's own terminal frame (`failed`/`aborted`) in the session that spawned it, or that
+session's registry reporting the holder `aborted` plus a fresh read showing `lease_until`
+lapsed. Age alone is neither: `bd stale --status in_progress` proposes candidates, and a
+lapsed lease on a holder no registry knows is an unknown, not a death.
 
-1. Read the bead, its comments, the ledger
-   (`<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog`, skipping rows tagged
-   `foreign_store`), the actor handle, the branch or worktree, and the last verification
-   evidence.
-2. Establish holder death, then an exclusive recovery window: all claim, dispatch and
-   branch writers must be stopped. A fresh read or human confirmation alone is not
-   exclusion. Re-read owner, status and branch evidence inside that window.
-   If checkout or runtime-root repair is needed, run `planning.md`'s **Canonical
-   checkout recovery** in this same window before any release or reopen: inventory the
-   stamped branch/path and WT rows, preserve dirty trees and all terminal/capture evidence,
-   recreate only a missing checkout with `wt -C "<source-root>" switch "<branch>" --no-cd
-   --format=json`, use its returned path, reject foreign bindings, stamp both the owning
-   epic's `metadata.worktree` and WT `bead`, and read both back for exact equality. Do not
-   release a retained claim merely to relocate; a missing Git object remains a separate
-   failure.
-3. Preserve the worktree, the captured branch, artifacts, comments, and external resource
-   references. Do not sweep them during recovery.
-4. Only while that exclusive window remains held, record the recovery as a `NOTE` on the
-   bead naming the dead holder and the evidence, then release and reopen:
+The fence bounds the worst case rather than preventing it. `--claim` conditions on the
+assignee, not on a lease version, so a live holder released in error either re-claims on
+its next renewal (one stray `RECOVERED`) or loses to a new claimant and is stopped by the
+worktree-scope gate's ownership check. Both are visible on the bead.
 
-```
-bd update <bead> --assignee "" --status open
-```
+What a release leaves behind: the bead `open` and unassigned, `metadata.recovered_by`,
+`metadata.recovered_branch` when the repository showed `omp/task/<holder>`, and a
+`RECOVERED <holder> <cause>` comment carrying the branch and contract evidence. Worktree,
+captured branch, artifacts, comments and external references are untouched. Requeue is
+implicit: the next `bd ready --claim` offers the bead, and the claimant inherits every
+preserved anchor including `recovered_branch`.
 
-5. Restore one compatible `role=<role>` key -- the architect that owns the epic, or the lead,
-   never a worker -- and leave the bead unassigned. The next worker claims it atomically and
-   inherits every preserved anchor, including `recovered_branch`.
-
-If holder death or exclusivity is uncertain, preserve the assignment and every branch,
-report recovery unresolved, and record a revisit trigger. Do not execute a blind release.
-A contested claim is held behind a `human` gate that the lead alone resolves; the gate does
-not replace exclusion.
+What the reaper leaves alone, and why: a `blocked` or `deferred` bead (bd refuses
+`--claim` on it, so the fence cannot pass; a human unblocks it and `bd ready` never offers
+it meanwhile), a holder the registry reports `idle` or `parked` (revivable), and a holder
+absent from the registry (unknown). Each gets a `NOTE claim preserved` or a notice naming
+the lease state; none gets a blind release. If checkout or runtime-root repair is needed
+before a replacement can work, run `planning.md`'s **Canonical checkout recovery** first.
 
 ## Failure propagation
 
@@ -380,8 +371,8 @@ source of truth.
   bead state carry the domain.
 - **Shepherd:** one ephemeral pass over the ordinary merge bead. Restart from the merge
   bead; nothing else holds state for it.
-- **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
-  recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
+- **Workers:** replace only after the reaper releases their claim under the lease; a
+  `NOTE claim preserved` never makes work claimable. Recovery inventories ordinary and
   ephemeral ownership separately and releases each through its own path.
 - **Store sync:** only the lead syncs the beads database during a run, once, at the barrier
   after every agent has yielded: `bd dolt commit`, then `bd dolt push`. Workers never run
@@ -610,7 +601,7 @@ Three kinds of tree exist, and only one of them is swept:
 - **Isolated worker copies** are runtime-owned. They are created and removed by OMP, and
   nothing in this package touches them.
 - **Captured branches** (`omp/task/*`) are explicit cleanup candidates only after patch
-  containment, terminal state and the exclusive-window conditions above are established.
+  containment and terminal state are established by the architect's scan above.
 - **Worktrunk feature worktrees** are inspected with `wt list` and removed with `wt remove`,
   through `scripts/worktree-sweep.sh`. Raw `git worktree` lifecycle commands are denied.
 

@@ -364,9 +364,9 @@ function parsePayload(stdout: string): unknown {
  */
 async function readJson(
  args: string[],
- timeoutMs = DEFAULT_TIMEOUT_MS,
- cwd?: string,
- generation: Generation | undefined = generationFor(cwd),
+ timeoutMs: number,
+ cwd: string | undefined,
+ generation: Generation | undefined,
 ): Promise<unknown> {
  const key = args.join("\u0000");
  const hit = generation?.payloads.get(key);
@@ -415,15 +415,25 @@ function asBead(value: unknown): BdBead | null {
  return bead;
 }
 
+/** Read options. `fresh` bypasses the cache in both directions: nothing served, nothing stored. */
+export interface BdReadOptions {
+ fresh?: boolean;
+}
+
 /**
  * One bead by id, or `null` when it does not exist or could not be read.
  *
  * `bd show --json` returns a single-element array, so both an array and a bare
  * object are accepted. Answered from the live generation when any read under the
  * current token already carried the bead; see {@link Generation.beads}.
+ *
+ * A `fresh` read spawns unconditionally and stores nothing. The token already makes a
+ * cached bead as current as a spawn issued now (I3); the lease-expiry decision in
+ * `src/lease.ts` asks for a spawn regardless, so that a release is never argued from a
+ * cached snapshot whatever the token says about it. One spawn per dead child.
  */
-export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead | null> {
- const generation = generationFor(cwd);
+export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string, options: BdReadOptions = {}): Promise<BdBead | null> {
+ const generation = options.fresh ? undefined : generationFor(cwd);
  const known = generation?.beads.get(id);
  if (known !== undefined) {
   succeed();
@@ -502,35 +512,12 @@ async function listChecked(args: string[], timeoutMs: number, cwd: string | unde
 }
 
 /**
- * Ephemeral wisp listing, or `null` when the command failed or returned malformed data.
- *
- * Unlike ordinary `bd list --json` responses, `bd mol wisp list --json` returns a
- * schema object containing the rows under `wisps`. Keep this exception at its API
- * seam so the generic list reader remains strict about array-shaped responses.
- */
-export async function bdWispListChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
- const payload = await readJson(["mol", "wisp", "list", "--json"], timeoutMs, cwd);
- if (payload === undefined) return null;
- const envelope = metadataRecord(payload);
- if (envelope === undefined || envelope.schema_version !== 1 || typeof envelope.count !== "number"
-  || !Number.isInteger(envelope.count) || envelope.count < 0 || !Array.isArray(envelope.wisps)
-  || envelope.count !== envelope.wisps.length) return fail("missing", null);
- const wisps: BdBead[] = [];
- for (const entry of envelope.wisps) {
-  const bead = asBead(entry);
-  if (!bead) return fail("missing", null);
-  wisps.push(bead);
- }
- return wisps;
-}
-
-/**
  * Ids `bd blocked --json` reports, or `null` when the read failed or the payload was
  * malformed. An empty list is a real answer: nothing is blocked. `bd` emits one object
  * per blocked bead, each carrying `id`; a lone object is accepted as a list of one.
  */
 export async function bdBlockedChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<string[] | null> {
- const payload = await readJson(["blocked", "--json"], timeoutMs, cwd);
+ const payload = await readJson(["blocked", "--json"], timeoutMs, cwd, generationFor(cwd));
  if (payload === undefined) return null;
  const ids: string[] = [];
  for (const entry of Array.isArray(payload) ? payload : [payload]) {
@@ -548,7 +535,7 @@ export async function bdComments(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Pr
 }
 
 export async function bdCommentsChecked(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[] | null> {
- const payload = await readJson(["comments", id, "--json"], timeoutMs);
+ const payload = await readJson(["comments", id, "--json"], timeoutMs, undefined, generationFor(undefined));
  if (payload === undefined) return null;
  if (!Array.isArray(payload)) return fail("missing", null);
  const comments: BdComment[] = [];
@@ -579,7 +566,7 @@ export async function bdLinkedChecked(
  timeoutMs = DEFAULT_TIMEOUT_MS,
  direction: "up" | "down" = "up",
 ): Promise<string[] | null> {
- const payload = await readJson(["dep", "list", id, `--direction=${direction}`, "--type", type, "--json"], timeoutMs);
+ const payload = await readJson(["dep", "list", id, `--direction=${direction}`, "--type", type, "--json"], timeoutMs, undefined, generationFor(undefined));
  if (payload === undefined) return null;
  if (!Array.isArray(payload)) return fail("missing", null);
  const linked: string[] = [];

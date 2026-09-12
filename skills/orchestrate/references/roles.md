@@ -137,8 +137,8 @@ A worker cannot spawn a bead-claiming role. Its architect owns dispatch and resu
    a still-live requester is optional; it cannot resume a finished isolated task.
 4. The architect collects both actual terminal results and preserves any successful
    paused-worker capture. Before releasing/requeueing the retained source claim,
-   establish an operationally exclusive window with every claim/dispatch/branch writer
-   stopped and re-read current evidence. No exclusion means no mutation: preserve
+   confirm the reaper has released it (`RECOVERED` on the bead, assignee empty) and
+   re-read current evidence. A held claim with a live lease is not yours to move: preserve
    the claim and report unresolved resumption. A replacement reads the durable advice.
 
 Findings stand on the wisp whether or not the ping lands, so the flow never depends on a

@@ -38,12 +38,12 @@ import {
 } from "./agent-preflight";
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
-import { readActiveRun } from "./run-state";
+import { runScope } from "./run-scope";
 import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
 import { type BdInvocation, bdInvocations } from "./shell";
-import { landingSweep, runScope } from "./landing";
+import { landingSweep } from "./landing";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
  Partial<Pick<ExtensionContext, "models">>;
 
@@ -96,9 +96,9 @@ function logFailure(pi: ExtensionAPI, watcher: string, error: unknown): void {
  * bound run.
  */
 async function boundEpic(cwd: string): Promise<string | undefined> {
- const run = await readActiveRun(cwd);
- if (run === null || run.run_id === PENDING_RUN) return undefined;
- return run.run_id;
+ const scope = await runScope({ cwd });
+ if (scope === null || scope.runId === PENDING_RUN) return undefined;
+ return scope.runId;
 }
 
 // ============================================================================
@@ -167,7 +167,8 @@ interface ChildActivity {
  changedMs: number;
  /** Whether it has already been reported. Reported at most once. */
  flagged: boolean;
- report?: { bead: string; notice: string; commented: boolean };
+ /** The bead and notice, resolved once; kept across sweeps until the comment lands. */
+ report?: { bead: string; notice: string };
 }
 
 const activity = new Map<string, ChildActivity>();
@@ -221,9 +222,9 @@ export function sweepStalls(atMs: number, thresholdMs: number): StallFlag[] {
 }
 
 /**
- * Report one stalled child: a `STALL` comment on the bead it holds plus one error
- * wisp linked to that bead. No kill — the spawner decides, because a silent child
- * may be sitting in a long test run.
+ * Report one stalled child: a `STALL` comment on the bead it holds, the one carrier.
+ * No kill — the spawner decides, because a silent child may be sitting in a long test
+ * run. Liveness is the lease's business (`src/lease.ts`); this measures productivity.
  *
  * `claimedBead` is the assignee query, tie-broken on `updated_at` so a stale claim
  * cannot shadow a live one. A child holding no bead is left alone: there is
@@ -235,28 +236,9 @@ async function reportStall(flag: StallFlag): Promise<void> {
  if (state.report === undefined) {
   const bead = await claimedBead(flag.child);
   if (bead === null || activity.get(flag.child) !== state) return;
-  state.report = {
-   bead: bead.id,
-   notice: `STALL child ${flag.child} silent ${flag.silentMinutes}m on ${bead.id}`,
-   commented: false,
-  };
+  state.report = { bead: bead.id, notice: `STALL child ${flag.child} silent ${flag.silentMinutes}m on ${bead.id}` };
  }
- const report = state.report;
- if (!report.commented) {
-  const result = await bdRun(["comment", report.bead, report.notice]);
-  if (result?.code !== 0) return;
-  report.commented = true;
- }
- const result = await bdRun([
-  "create",
-  report.notice,
-  "--ephemeral",
-  "--wisp-type",
-  "error",
-  "--deps",
-  `relates-to:${report.bead}`,
-  "--silent",
- ]);
+ const result = await bdRun(["comment", state.report.bead, state.report.notice]);
  if (result?.code === 0) state.flagged = true;
 }
 
@@ -1008,8 +990,8 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  // Every isolated copy redirects its own `.beads` to the `beads_dir` the marker records
  // (`src/clone-adopt.ts`); a marker written before that field existed leaves each copy
  // writing to its private store. Re-activation records it, so that is the repair named.
- const run = await readActiveRun(cwd);
- if (run !== null && run.beads_dir === undefined) {
+ const scope = await runScope({ cwd });
+ if (scope !== null && scope.beadsDir === undefined) {
   lines.push(
    "the run marker names no beads database, so an isolated worker resolves its own store rather than this run's: run /orchestrate-run again to record it",
   );
@@ -1066,8 +1048,11 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
    }),
   );
   // Returning the promise is deliberate: the managed timer contains a
-  // rejection only when it can see one (`managed-timers.ts:66-75`).
+  // rejection only when it can see one (`managed-timers.ts:66-75`). Nothing runs
+  // outside a run scope: a silent child in a plain session is not this plugin's
+  // business, and the sweep would otherwise spawn `bd list` for it every minute.
   const timer = ctx.setInterval(async () => {
+   if ((await runScope({ cwd })) === null) return;
    await sweep(pi);
    if (sessionRole(pi) === "lead") {
     await retryGoal(pi, cwd, true).catch(error => logFailure(pi, "goal retry", error));
@@ -1081,7 +1066,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   const landing = ctx.setInterval(async () => {
    if (sessionRole(pi) !== "lead") return;
    const scope = await runScope(ctx);
-   if (scope === null) return;
+   if (scope === null || scope.runId === PENDING_RUN) return;
    await landingSweep({ cwd: scope.root, runId: scope.runId }).catch(error => logFailure(pi, "landing sweep", error));
   }, LANDING_SWEEP_MS);
   unsubscribers.push(() => ctx.clearTimer(landing));
@@ -1096,7 +1081,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   // at activation, and the `task` handler below checks agents at spawn, so a
   // session that never orchestrates hears nothing. Both preflights read the settings
   // in process, so neither costs a spawn.
-  if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
+  if (sessionRole(pi) === "lead" && (await runScope(ctx)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
     logFailure(pi, "agent discovery preflight", error),
@@ -1104,11 +1089,13 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   }
   // W2. Passive provenance of every child's bead mutations. A bus handler is
   // handed no context, so the ledger is rooted at the session's cwd as it was
-  // at start.
+  // at start. Read per event: a run activated mid-session starts recording without
+  // re-subscribing, and a plain session never gains an `.orchestration/audit/`.
   unsubscribers.push(
    pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
     const mutation = bdMutationEvent(data);
     if (mutation === undefined) return;
+    if ((await runScope({ cwd })) === null) return;
     try {
      await appendAudit(auditDir(cwd), {
       ts: new Date().toISOString(),
@@ -1132,10 +1119,13 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning
   * dedupe never weakens the refusal: a known bad core request blocks every spawn.
+  * Both wait for a run scope: spawning an `orc-*` agent outside a run gets no refusal
+  * and costs no `omp config list`.
   */
  const noteAssignment = createAssignmentNotice(pi);
  pi.on("tool_call", async (event, ctx) => {
   try {
+   if ((await runScope(ctx)) === null) return undefined;
    noteAssignment(ctx, claims.observedClaim());
    if (event.toolName !== "task") return undefined;
    const requested = requestedAgentNames(event.input);

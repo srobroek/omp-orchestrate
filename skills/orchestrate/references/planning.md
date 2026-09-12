@@ -218,9 +218,9 @@ override the user's project or global isolation preference.
 
 ### Canonical checkout recovery
 
-Recovery is one ordered operation inside an explicit exclusive claim/dispatch/branch-writer
-window. Stop every claim writer, dispatch writer, and branch writer before entering it;
-do not release a retained claim merely to relocate a session. First collect the prior
+Recovery is one ordered operation. Dead-claim release belongs to the reaper under the lease
+fence (`lifecycle.md`, Dead-claim recovery); checkout repair is the architect's, and it
+never releases a retained claim merely to relocate a session. First collect the prior
 actor's terminal result, capture, dirty delta, branch, comments, and audit evidence and
 preserve every one of those anchors throughout recovery.
 

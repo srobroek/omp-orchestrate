@@ -137,11 +137,18 @@ the cause and lets the call run. A check refuses only what it read and can prove
 - a queue that is not yours
 - a scope that overlaps a live node
 
-Every refusing check runs only under orchestration. A session is under orchestration when
-it declares an `ORC-ROLE`, or when a valid active-run marker exists in its checkout. An
-isolated copy carries the primary's marker. A plain session in a repository that merely
-has this plugin installed sees no gate. A claim it makes by hand is never observed. G6 and
-the contract injection require the marked run itself.
+Every check runs only inside a run scope. A session is inside a run scope when one of
+these holds:
+
+- a valid active-run marker `.orchestration/.active-run` exists in its checkout. `/orchestrate-run` writes it and `/orchestrate-close` removes it
+- its checkout is an isolated copy, which carries the primary's marker
+- its checkout is a linked git worktree of a primary that holds the marker; the plugin asks `git rev-parse --git-common-dir` once per directory
+
+An `ORC-ROLE` declaration, a claim made by hand, and an observed claim create no scope.
+Outside a run scope the plugin spawns no process beyond that one `git` query, writes no
+file, sends no message and refuses no tool call. A plain session in a repository that has
+this plugin installed sees the slash commands, the five tools, the agents, the skill and
+three rules, and nothing else.
 
 - **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` when the session checkout holds a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
 - **G2 (`bash`, `edit`, `write`):** refuses a mutation outside the worktree named by the claimed bead, or outside its `metadata.scope` globs. For `bash`, G2 compares the cwd only. G2 reads the claimed bead and nothing else. G5 judges scope overlap between claims, at claim. G2 refuses a mutation when the bead is readable and assigned to another actor, or closed. A released bead refuses nothing, so a worker bounced after its release can repair its evidence. When G2 cannot read the bead, it logs the cause and lets the call run. A bead you closed yourself ends the claim: the next product edit or comment passes and the gate disarms. To recover a closed bead, run `bd reopen <id>`. Then run `bd update <id> --claim --json`. To hand a reopened bead back, run `bd update <id> --assignee ""`.
@@ -162,7 +169,7 @@ the contract injection require the marked run itself.
   - a routing re-point (`metadata.role`) by any role but the architect
   - an architect's `scope` that overlaps an open or in-progress node outside the bead's own lineage
   - review and reporting states authored by shepherds
-- **G6 (`bash`):** within a marked run, it refuses two things and warns about three. It refuses:
+- **G6 (`bash`):** within a marked run, it refuses two things and warns about four. It refuses:
   - `bd dolt push|pull|fetch|clone|sync` from any spawned session. Sync is the lead's barrier step: `bd dolt commit`, then `bd dolt push`, once, after every agent has yielded. The `bd` router runs those verbs in a container whose lock the host never sees, so a worker's sync is a second engine on the run's journal (`.config/wt.toml` explains the incident and skips its own hook syncs during a run)
   - `--db <path>` or `BEADS_DB` on any `bd` call, from any seat: the run's database is the one bd resolves
 
@@ -170,13 +177,14 @@ the contract injection require the marked run itself.
   - writes without actors: the identity is the assignee your claim report printed
   - comments without protocol verbs
   - bug beads unreachable from queues
+  - a role started as a nested `omp` process: `omp -p`, `--print`, `--prompt`, `--cwd`, `--agent` or `--session-dir` from a shell. `--config` on the same command exempts it
 
   Store safety beyond the gate: `src/store-probe.ts` reports a run's store as `free`, `locked` (with the holder), `corrupted` (with the journal error) or `slow`. The plugin never starts, stops, or kills a Dolt server and never touches `noms/LOCK`; a `corrupted` store is the operator's `dolt fsck`.
 - **G8 (every tool, notice):** in a worker session, compares the agent's `ORC-ROLE` and live model against the core contract once. On a mismatch it sends one notice naming the expected model, the live model, and the parking commands. G8 accepts a model that OMP moved the session onto through retry fallback. When G8 cannot read the model, it logs the cause and stays silent.
 
 ## Rules
 
-Four TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
+Three TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
 reminder on a protocol slip. None is a security boundary.
 
 The host matches the raw tool-argument JSON as the model streams it (`session/ttsr-coordinator.ts`,
@@ -189,9 +197,12 @@ The host matches the raw tool-argument JSON as the model streams it (`session/tt
 
 `interruptMode` sets the cost of a match. `never` lets the call run and folds the rule
 text into its result. `tool-only` aborts the assistant message, discards it, injects the
-rule, and continues. In both modes a rule fires one time per session (`repeatMode: once`). The
-`bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
+rule, and continues. In both modes a rule fires one time per session (`repeatMode: once`).
+
+The `bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
 harmless (an empty queue, a doomed process) and the reminder arrives with the result.
+`orc-no-nested-omp` reads `hub start` arguments only. The shell form (`omp -p` from `bash`)
+is a G6 notice, so it fires only inside a run scope.
 
 ### Run database
 
@@ -215,15 +226,15 @@ Bootstrap a run in three steps, all in the lead session:
 
 1. `/orchestrate-run`. It pins the database and writes a `pending` marker.
 2. `bd create --type epic ...` with the run metadata that `beads-store.md` lists.
-3. `/orchestrate-bind <epic>`. It arms the patrol. After this step, dispatch.
+3. `/orchestrate-bind <epic>`. It stamps this session's lead lease on the epic. After this step, dispatch.
 
 | Command | Does |
 | --- | --- |
 | `/orchestrate-run` | activates run enforcement in this repository: records the run's `.beads` from `bd where` and writes the marker `.orchestration/.active-run`, `pending` until bound |
-| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp and records the repository's landing capabilities on the epic as `metadata.landing`. When the patrol did not arm or the probe failed, it warns |
-| `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and whether the patrol armed |
+| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then stamps this session's lead lease (`lead_actor`, `lease_until`) on it and records the repository's landing capabilities on the epic as `metadata.landing`. When the lease was not stamped, another lead's lease is live, or the probe failed, it warns |
+| `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and the lead lease |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
-| `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no bead beneath it, at any depth, is `in_progress`. `--force` skips that check. `/orchestrate-close pending` undoes an activation that never bound |
+| `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no bead beneath it, at any depth, is `in_progress`. `--force` skips that check. `/orchestrate-close pending` undoes an activation that never bound. `/orchestrate-stop` is the same command under a second name |
 
 The pin lives in the OMP process environment. After a restart, a lead session that
 finds the marker re-pins at start and reports a pin it cannot establish. Re-issue

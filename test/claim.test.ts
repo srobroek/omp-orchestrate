@@ -886,17 +886,29 @@ describe("G5 claim report on stdout", () => {
  });
 });
 
-/** The lead declares no role. Under a marked run it dispatches; it never claims. */
+/**
+ * The lead declares no role. Under a marked run it dispatches; the one bead it claims is
+ * the run epic, whose assignee carries the lead lease.
+ */
 describe("G5 the lead never claims", () => {
  test.each([
   "bd ready --label agent:implementer --claim --json",
   "bd ready --claim --json",
   "BEADS_ACTOR=lead bd update orc-7 --claim",
+  "bd update orc-run orc-7 --claim",
+  "bd update orc-run --claim && bd update orc-7 --claim",
  ])("refuses a role-less claim under a marked run: %s", async command => {
   const result = await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command });
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("the lead never claims work beads");
   expect(shown).toEqual([]);
+ });
+
+ test.each([
+  "bd update orc-run --actor lead:s1 --claim --set-metadata lease_until=2030-01-01T00:00:00Z --dolt-auto-commit off",
+  'bd update orc-run --actor lead:old --claim --assignee "" --status open',
+ ])("admits the lead lease on the run epic: %s", async command => {
+  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command })).toBeUndefined();
  });
 
  test("a role-less session whose checkout holds no marker is under no run", async () => {

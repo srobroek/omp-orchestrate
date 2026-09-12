@@ -302,10 +302,14 @@ function settingsReads(): number {
 	return settingsSpy.mock.calls.length;
 }
 
-/** A run marker at `cwd`, recording the run's database unless `beadsDir` is `null`. */
-async function marked(beadsDir: string | null = join(cwd, ".beads")): Promise<void> {
+/**
+ * A run marker at `cwd`, recording the run's database unless `beadsDir` is `null`. The
+ * watchers arm on it and on nothing else; `pending` names a run activated but not bound,
+ * which arms them without giving the settings preflight an epic to comment on.
+ */
+async function marked(beadsDir: string | null = join(cwd, ".beads"), runId = "orc-w5"): Promise<void> {
 	await mkdir(join(cwd, ".orchestration"), { recursive: true });
-	await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-w5", ...(beadsDir === null ? {} : { beads_dir: beadsDir }) }));
+	await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: runId, ...(beadsDir === null ? {} : { beads_dir: beadsDir }) }));
 }
 
 describe("W5 shared-database precondition", () => {
@@ -838,6 +842,9 @@ function assignmentNotices(rig: Harness): string[] {
 }
 
 describe("assignment enforcement", () => {
+	// G8 is a run-scoped notice: every seat below sits in a marked checkout.
+	beforeEach(() => marked());
+
 	test("refuses repeated requests for a malformed core assignment but leaves helpers available", async () => {
 		await coreFixture("orc-reviewer", "researcher", "@reviewer");
 		const rig = harness(undefined, true);
@@ -993,6 +1000,7 @@ describe("assignment enforcement", () => {
 describe("registerWatchers", () => {
 	test("reports an unresolved discovery defect again in the next session", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		const rig = harness(undefined, true);
 		await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "empty-agent-fixture", omp: {} }));
 		withOmpExtensionRootScope(
@@ -1016,6 +1024,7 @@ describe("registerWatchers", () => {
 
 	test("records an already displayed discovery warning after an epic is bound", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		const rig = harness(undefined, true);
 		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
 		await rig.fire("session_start", {});
@@ -1023,8 +1032,8 @@ describe("registerWatchers", () => {
 		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
 		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([]);
 
-		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
+		// Binding rewrites the marker in place; the scope memo must see the new epic.
+		await marked(undefined, "bd-1");
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		const comments = (await bdCalls()).filter(call => call[0] === "comment");
@@ -1111,6 +1120,7 @@ describe("registerWatchers", () => {
 	});
 
 	test("repeated starts replace timers and audit subscriptions", async () => {
+		await marked(undefined, "pending");
 		const rig = harness();
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
@@ -1131,6 +1141,7 @@ describe("registerWatchers", () => {
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {
+		await marked(undefined, "pending");
 		const rig = harness();
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
@@ -1173,8 +1184,9 @@ describe("registerWatchers", () => {
 		expect(rig.failures).toEqual([]);
 	});
 
-	test("W1 comments on the stalled child's bead and raises one error wisp", async () => {
+	test("W1 comments STALL on the stalled child's bead, once, and creates nothing", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
 
 		const rig = harness();
@@ -1188,14 +1200,9 @@ describe("registerWatchers", () => {
 		await rig.sweeps[0]!();
 
 		const calls = await bdCalls();
-		const comment = calls.find(argv => argv[0] === "comment");
-		expect(comment).toEqual(["comment", "bd-7", "STALL child kid-1 silent 20m on bd-7"]);
-
-		const create = calls.find(argv => argv[0] === "create");
-		expect(create).toBeDefined();
-		expect(create).toContain("--ephemeral");
-		expect(create?.[create.indexOf("--wisp-type") + 1]).toBe("error");
-		expect(create?.[create.indexOf("--deps") + 1]).toBe("relates-to:bd-7");
+		expect(calls.find(argv => argv[0] === "comment")).toEqual(["comment", "bd-7", "STALL child kid-1 silent 20m on bd-7"]);
+		// The STALL comment is the one carrier: no error wisp beside it.
+		expect(calls.find(argv => argv[0] === "create")).toBeUndefined();
 
 		// No kill, and no second report on the next sweep.
 		await rig.sweeps[0]!();
@@ -1204,6 +1211,7 @@ describe("registerWatchers", () => {
 
 	test("W1 eventually reports stalls beyond the read budget", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		const beads = Array.from({ length: 13 }, (_, i) => ({ id: `bd-${i}`, status: "in_progress", assignee: `kid-${i}` }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify(beads);
 		const rig = harness();
@@ -1216,8 +1224,9 @@ describe("registerWatchers", () => {
 		expect((await bdCalls()).filter(call => call[0] === "comment").map(call => call[1]).sort()).toEqual(beads.map(bead => bead.id).sort());
 	});
 
-	test("W1 retries failed writes without duplicating a successful partial comment", async () => {
+	test("W1 retries a failed STALL comment until it lands, then never repeats it", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
 		const rig = harness();
 		registerWatchers(rig.pi);
@@ -1225,14 +1234,11 @@ describe("registerWatchers", () => {
 		noteProgress({ child: "kid-1", tokens: 0, output: "", terminal: false }, Date.now() - 20 * MINUTE);
 		process.env.ORC_TEST_BD_FAIL = "comment";
 		await rig.sweeps[0]!();
-		expect((await bdCalls()).filter(call => call[0] === "create")).toEqual([]);
-		process.env.ORC_TEST_BD_FAIL = "create";
-		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(1);
 		delete process.env.ORC_TEST_BD_FAIL;
 		await Promise.all([rig.sweeps[0]!(), rig.sweeps[0]!()]);
 		await rig.sweeps[0]!();
 		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(2);
-		expect((await bdCalls()).filter(call => call[0] === "create")).toHaveLength(2);
 	});
 
 	test("W3 warns on a task spawn without ever blocking it", async () => {

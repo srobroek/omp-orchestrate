@@ -80,8 +80,8 @@ At run start, `/orchestrate-run`.
 It creates `.orchestration/.active-run` with `run_id=pending` or preserves the existing
 binding on restart. Gitignore `.orchestration/`.
 Create the run epic with `run_id`, `primary_branch`, `base_sha`, `origin_actor` and an
-absolute `artifacts` directory outside every worktree. Create its related ephemeral
-patrol wisp. Bind with `/orchestrate-bind <epic-id>` and read back the binding before
+absolute `artifacts` directory outside every worktree.
+Bind with `/orchestrate-bind <epic-id>`, which stamps the lead lease, and read back the binding before
 dispatch; pending claims are invalid. Binding requires an active marker, permits the
 same id and refuses a different run.
 
@@ -224,7 +224,7 @@ Anchors are stamped so any later session can find where work physically lives:
 | Task dispatched | architect | nothing to provision: non-isolated children inherit the parent session's `cwd`; isolated children run in runtime-created copies snapshotted from that parent-session `cwd`. Metadata and checkout flags do not relocate either session. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
 | Worker reported | worker | `head_sha=<final commit>` before yield; no claim that parent-side capture exists yet |
 | Successful child result collected | architect | verify the actual architect-repository `omp/task/<id>` branch and reported head before recording the capture anchor or integrating; include accepted dirty delta in the source snapshot |
-| Recovery or branch cleanup | architect | only in an exclusive window with all claim/dispatch/branch writers stopped; reaper appends observations, never rewrites anchors or deletes branches |
+| Recovery or branch cleanup | architect | the reaper releases a dead holder's claim under the lease fence and records `RECOVERED`; only the architect rewrites anchors or deletes branches, after the patch-containment scan |
 | Claim | claim-holder | resolve the authoritative `metadata.worktree`, including inheritance. A persistent architect must establish session `cwd` at its canonical Worktrunk path and verify its binding; an isolated worker/reviewer uses the runtime-assigned isolated root and claimed scope, even when metadata inherits the feature path. A mismatch or unresolved owner stops the claim without writing |
 | Merge | shepherd | `bd update <bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` |
 
@@ -252,7 +252,7 @@ merge anchors survive checkout teardown.
 - Clear the pointer only after the claim is released and the checkout is reclaimed.
 
 On resumed work, preserve dirty trees, captured branches, accepted deltas, and anchors.
-Do not release a claim for runtime re-entry; use the exclusive recovery procedure in
+Do not release a claim for runtime re-entry; dead-claim release is the reaper's, per
 `lifecycle.md` before any replacement.
 Choosing between a label and a metadata key is a cardinality rule plus an authority rule,
 not a style preference. Both filter on `bd ready` and both compose with `--claim`, so
@@ -328,7 +328,7 @@ decomposition time are the real mechanism.
 ## Events: one comment per transition
 
 `REPORTED BLOCKED FAILED REVIEW LANDED BOUNCED ESCALATED ASK NOTE` -- the nine verbs an
-acting agent may write. `src/contracts/grammar.json` leads the set; the other three are the
+acting agent may write. `src/contracts/grammar.json` leads the set; the other four are the
 extension's voice. Each material transition is one write, with identity from
 `BEADS_ACTOR=<actor>`:
 

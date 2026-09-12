@@ -17,6 +17,12 @@ Run the ordinary pull alone in the foreground under the injected dispatch contra
 
 Never add `--parent`: merge beads are unparented. An empty pull means `NO_WORK`; yield.
 
+This ordinary pull claims only the unparented merge bead. Shepherds omit
+`--include-ephemeral` and acquire no wisp or lease, so there is no separate
+ephemeral claim to release. Do not treat an empty ordinary assignee as proof about
+an unrelated wisp; if durable evidence names one, reconcile that wisp through its
+own close/release path; a dead holder's claim on it is the reaper's to release.
+
 ## One duty
 
 1. LOAD `skill://orchestrate/references/review-providers.md`. For every provider in `metadata.bot_review_requests`, require the probe's request marker for that provider, mode and the merge bead's `head_sha`; probe that provider and every configured bot with `orc_bot_review_probe` at that exact head. Never post a provider command.

@@ -11,7 +11,6 @@ import {
 	bdRun,
 	bdShow,
 	bdShowMany,
-	bdWispListChecked,
 	commentVerb,
 	lastBdFailure,
 	metadataString,
@@ -414,8 +413,8 @@ describe("the read cache", () => {
 	});
 
 	test("identical reads around a create are two reads", async () => {
-		// `ensurePatrolWisp` lists dependents, creates the wisp, and lists again to confirm
-		// it; an argv-keyed cache that survived the create would confirm nothing.
+		// A reader that lists, writes, then lists again to confirm the write must see the
+		// write; an argv-keyed cache that survived the create would confirm nothing.
 		const store = await fakeStore();
 		const bd = fakeBd({ beads, linked: { "orc-1": ["orc-w1"] } });
 		try {
@@ -424,6 +423,26 @@ describe("the read cache", () => {
 			await bdRun(["create", "patrol", "--ephemeral"]);
 			expect(await bdLinkedChecked("orc-1", "relates-to")).toEqual(["orc-w1"]);
 			expect(bd.spawned).toEqual(["dep list", "create patrol", "dep list"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
+	test("a fresh read spawns past a hot entry and stores nothing", async () => {
+		// The lease-expiry decision asks for a spawn regardless of the token; the answer
+		// it gets must not be what an ordinary read cached, nor become one.
+		const store = await fakeStore();
+		const bd = fakeBd({ beads });
+		try {
+			resetReadBudget();
+			expect((await bdShow("orc-1"))?.id).toBe("orc-1");
+			expect((await bdShow("orc-1"))?.id).toBe("orc-1");
+			expect(bd.spawned).toEqual(["show orc-1"]);
+			expect((await bdShow("orc-1", undefined, undefined, { fresh: true }))?.id).toBe("orc-1");
+			expect(bd.spawned).toEqual(["show orc-1", "show orc-1"]);
+			expect((await bdShow("orc-1"))?.id).toBe("orc-1");
+			expect(bd.spawned).toEqual(["show orc-1", "show orc-1"]);
 		} finally {
 			bd.restore();
 			await store.restore();
@@ -725,52 +744,6 @@ describe("dispatch read cost", () => {
 			bd.restore();
 		}
 	});
-});
-
-describe("checked wisp listing", () => {
- const spawnResult = (stdout: string, code = 0) => ({
-  stdout: new Response(stdout).body,
-  stderr: new Response("").body,
-  exited: Promise.resolve(code),
-  kill: () => { },
- } as unknown as Bun.Subprocess);
-
- test("normalizes the exact empty wisp envelope", async () => {
-  const spawn = spyOn(Bun, "spawn").mockImplementation(() => spawnResult(
-   JSON.stringify({ count: 0, schema_version: 1, wisps: [] }),
-  ));
-  try {
-   resetReadBudget();
-   expect(await bdWispListChecked()).toEqual([]);
-  } finally {
-   spawn.mockRestore();
-  }
- });
-
- test.each([
-  { count: 1, schema_version: 1, wisps: [] },
-  { count: 0, schema_version: 1, wisps: {} },
-  { count: 1, schema_version: 1, wisps: [{}] },
-  { count: 0, schema_version: 2, wisps: [] },
- ])("keeps malformed wisp envelopes unknown: %j", async payload => {
-  const spawn = spyOn(Bun, "spawn").mockImplementation(() => spawnResult(JSON.stringify(payload)));
-  try {
-   resetReadBudget();
-   expect(await bdWispListChecked()).toBeNull();
-  } finally {
-   spawn.mockRestore();
-  }
- });
-
- test("keeps a failed wisp listing unknown", async () => {
-  const spawn = spyOn(Bun, "spawn").mockImplementation(() => spawnResult("", 1));
-  try {
-   resetReadBudget();
-   expect(await bdWispListChecked()).toBeNull();
-  } finally {
-   spawn.mockRestore();
-  }
- });
 });
 
 describe("checked blocked ids", () => {
