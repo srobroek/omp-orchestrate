@@ -22,7 +22,8 @@ import { gateImplementerIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
-import { isBoundRunActive, registerRunCommands } from "./run-state";
+import { createLeaseRenewer } from "./lease";
+import { isBoundRunActive, registerRunCommands, renewLeadLease } from "./run-state";
 import { bdInvocations } from "./shell";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
@@ -52,6 +53,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claimInFlight = createClaimInFlight();
  const gateExitContract = createExitGuard(claims);
  const leadExitWatch = createLeadExitWatch(claims, process.cwd(), pi.sendMessage.bind(pi));
+ const leases = createLeaseRenewer(pi, claims, renewLeadLease);
  pi.setLabel("Orchestrate");
 
  // Deterministic surfaces the pull loop and the shepherd call by schema, not prose.
@@ -63,8 +65,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerBotReviewProbe(pi);
  registerBotReviewRequest(pi);
  registerReviewRoundPolicy(pi);
- // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus.
- registerSupervision(pi, isBoundRunActive);
+ // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus. The
+ // reaper takes the claim state so a release is attributed to this session's identity.
+ registerSupervision(pi, isBoundRunActive, claims);
  registerWatchers(pi, claims);
 
  // The lead has no `yield` tool, so G4 cannot observe its final turn. Keep this
@@ -152,16 +155,21 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    // command edits the sandbox variable is refused; otherwise the call leaves with the
    // readonly flag added. A missing or invalid marker fails open, while blocking gates
    // above still win.
+   let result: ToolCallEventResult | undefined;
    if (event.toolName === "bash") {
     const sandbox = await gateBeadWriteFree(pi, ctx, input);
     if (sandbox?.block) return sandbox;
     // Marked only now, once every refusal above has had its say: a refused claim runs
     // nothing and would leave a mark no result ever lifts.
     if (claiming) claimInFlight.begin(event.toolCallId);
-    return sandbox ?? (inputRevised ? { input: rebuildBashInput(input) } : undefined);
+    result = sandbox ?? (inputRevised ? { input: rebuildBashInput(input) } : undefined);
    }
 
-   return undefined;
+   // The call is going to run, which is the activity a lease measures: renew what this
+   // session holds, at most once per cadence per lease, without waiting for bd. A refused
+   // tool renews nothing, so a displaced or idle session lets its lease lapse on its own.
+   leases.touch(ctx);
+   return result;
   } catch (error) {
    pi.logger.error("orchestrate gate failed open", {
     tool: event.toolName,

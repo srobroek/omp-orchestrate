@@ -76,8 +76,8 @@ Evidence. Every factual claim carries a file:line, a command result, a bead id, 
 literal word untested. Cite prior facts by reference; never paste them into a message.
 
 Verbs you may write (9): REPORTED BLOCKED FAILED REVIEW LANDED BOUNCED ESCALATED ASK NOTE.
-One verb plus a resource id per message. The full set of 12 lives in
-src/contracts/grammar.json, which leads every copy. The other three are the extension's
+One verb plus a resource id per message. The full set of 13 lives in
+src/contracts/grammar.json, which leads every copy. The other four are the extension's
 voice, never yours. Your role contract narrows this list further. NO_WORK is a yield token,
 not a comment: an empty queue leaves no bead to write on. One carrier per fact: the bead's
 status, assignee and labels hold state, and one comment verb records each transition.
@@ -98,7 +98,7 @@ Completion requires the role's handoff and release. A positively open linked
 escalation pauses a writer without releasing its claim. Unknown evidence allows an
 unevaluated exit; three failed evaluations in this activation allow exit without
 accepting work or changing owner, status or metadata. Recovery requires explicit
-reconciliation under the exclusive-window procedure, never a blind release.
+release by the reaper under the lease fence, never a blind release by an agent.
 
 Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role carries
 it, the architect that decomposed the epic writes it, and no other role may rewrite it.

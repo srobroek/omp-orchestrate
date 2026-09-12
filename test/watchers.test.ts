@@ -1149,7 +1149,7 @@ describe("registerWatchers", () => {
 		expect(rig.failures).toEqual([]);
 	});
 
-	test("W1 comments on the stalled child's bead and raises one error wisp", async () => {
+	test("W1 comments STALL on the stalled child's bead, once, and creates nothing", async () => {
 		await fakeBd();
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
 
@@ -1164,14 +1164,9 @@ describe("registerWatchers", () => {
 		await rig.sweeps[0]!();
 
 		const calls = await bdCalls();
-		const comment = calls.find(argv => argv[0] === "comment");
-		expect(comment).toEqual(["comment", "bd-7", "STALL child kid-1 silent 20m on bd-7"]);
-
-		const create = calls.find(argv => argv[0] === "create");
-		expect(create).toBeDefined();
-		expect(create).toContain("--ephemeral");
-		expect(create?.[create.indexOf("--wisp-type") + 1]).toBe("error");
-		expect(create?.[create.indexOf("--deps") + 1]).toBe("relates-to:bd-7");
+		expect(calls.find(argv => argv[0] === "comment")).toEqual(["comment", "bd-7", "STALL child kid-1 silent 20m on bd-7"]);
+		// The STALL comment is the one carrier: no error wisp beside it.
+		expect(calls.find(argv => argv[0] === "create")).toBeUndefined();
 
 		// No kill, and no second report on the next sweep.
 		await rig.sweeps[0]!();
@@ -1192,7 +1187,7 @@ describe("registerWatchers", () => {
 		expect((await bdCalls()).filter(call => call[0] === "comment").map(call => call[1]).sort()).toEqual(beads.map(bead => bead.id).sort());
 	});
 
-	test("W1 retries failed writes without duplicating a successful partial comment", async () => {
+	test("W1 retries a failed STALL comment until it lands, then never repeats it", async () => {
 		await fakeBd();
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
 		const rig = harness();
@@ -1201,14 +1196,11 @@ describe("registerWatchers", () => {
 		noteProgress({ child: "kid-1", tokens: 0, output: "", terminal: false }, Date.now() - 20 * MINUTE);
 		process.env.ORC_TEST_BD_FAIL = "comment";
 		await rig.sweeps[0]!();
-		expect((await bdCalls()).filter(call => call[0] === "create")).toEqual([]);
-		process.env.ORC_TEST_BD_FAIL = "create";
-		await rig.sweeps[0]!();
+		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(1);
 		delete process.env.ORC_TEST_BD_FAIL;
 		await Promise.all([rig.sweeps[0]!(), rig.sweeps[0]!()]);
 		await rig.sweeps[0]!();
 		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(2);
-		expect((await bdCalls()).filter(call => call[0] === "create")).toHaveLength(2);
 	});
 
 	test("W3 warns on a task spawn without ever blocking it", async () => {

@@ -3,7 +3,7 @@ import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
-import * as supervision from "../src/supervision";
+import type { BdResult } from "../src/bd";
 import * as bd from "../src/bd";
 import type { BdBead } from "../src/bd";
 import { activateRun, bindRun, closeRun, isBoundRunActive, markerPath, readActiveRun, registerRunCommands, runStatusReport } from "../src/run-state";
@@ -22,17 +22,19 @@ const listSpy = spyOn(bd, "bdListChecked").mockImplementation(async args => {
 	listArgs.push(args);
 	return store;
 });
-let patrol: "armed" | "absent" | "unknown" = "armed";
-let arming: Error | undefined;
-const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockImplementation(async () => {
-	if (arming !== undefined) throw arming;
+/** Every lease write the module ran, and whether the next one is refused. Other `bd` calls run for real. */
+let writes: string[][] = [];
+let writeFails: string | undefined;
+const realRun = bd.bdRun;
+const runSpy = spyOn(bd, "bdRun").mockImplementation(async (args, timeoutMs, cwd): Promise<BdResult | null> => {
+	if (args[0] !== "update") return realRun(args, timeoutMs, cwd);
+	writes.push(args);
+	return writeFails === undefined ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: writeFails };
 });
-const patrolStateSpy = spyOn(supervision, "patrolState").mockImplementation(async () => patrol);
 afterAll(() => {
 	showSpy.mockRestore();
 	listSpy.mockRestore();
-	patrolSpy.mockRestore();
-	patrolStateSpy.mockRestore();
+	runSpy.mockRestore();
 });
 
 let cwd: string;
@@ -51,8 +53,8 @@ beforeEach(async () => {
 	for (const id of ["orc-1", "orc-2", "orc-7", "orc-42", "orc-a", "orc-b", "orc-legacy", "orc-new", "orc-other", "orc.run_1:2-3"]) epic(id);
 	store = [];
 	listArgs = [];
-	patrol = "armed";
-	arming = undefined;
+	writes = [];
+	writeFails = undefined;
 	showSpy.mockClear();
 });
 
@@ -236,7 +238,7 @@ describe("isBoundRunActive", () => {
 			epic("orc-7", status);
 			expect(await isBoundRunActive(cwd)).toBe(true);
 		}
-		expect(showSpy).toHaveBeenCalledWith("orc-7", undefined, cwd);
+		expect(showSpy.mock.calls.some(call => call[0] === "orc-7" && call[2] === cwd)).toBe(true);
 		epic("orc-7", "closed");
 		expect(await isBoundRunActive(cwd)).toBe(false);
 	});
@@ -359,28 +361,47 @@ describe("bindRun", () => {
 		epics["orc-typo"] = shown;
 		await expect(bindRun(cwd, "orc-typo")).rejects.toThrow(reason);
 		expect((await readActiveRun(cwd))?.run_id).toBe("pending");
-		expect(patrolSpy).not.toHaveBeenCalledWith("orc-typo", cwd);
+		expect(writes).toEqual([]);
 	});
 
 	test("reads the epic before touching the marker, in the repository cwd", async () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-7");
-		expect(showSpy).toHaveBeenCalledWith("orc-7", undefined, cwd);
+		expect(showSpy.mock.calls.some(call => call[0] === "orc-7" && call[2] === cwd)).toBe(true);
 	});
 
-	test("reports the patrol armed", async () => {
-		await activateRun(cwd);
-		expect(await bindRun(cwd, "orc-7")).toEqual({ patrol: "armed" });
+	test("stamps the binding session's lead lease on the epic", async () => {
+		await activateRun(cwd, "session-t");
+		expect(await bindRun(cwd, "orc-7")).toEqual({ lease: "written" });
+		expect(writes).toHaveLength(1);
+		expect(writes[0]?.slice(0, 5)).toEqual(["update", "orc-7", "--actor", "lead:session-t", "--claim"]);
+		expect(writes[0]?.[6]).toMatch(/^lease_until=\d{4}-\d{2}-\d{2}T/);
 	});
 
-	test("a failed arming binds, is returned, and is not emitted as a process warning", async () => {
-		arming = new Error("Patrol orc-7 lookup unknown; creation refused");
+	test("refuses to take another lead's live lease, binds anyway, and says so", async () => {
+		epics["orc-7"] = { id: "orc-7", status: "in_progress", assignee: "lead:other", updated_at: new Date().toISOString(), metadata: { lease_until: new Date(Date.now() + 600_000).toISOString() } };
+		await activateRun(cwd, "session-t");
+		const bound = await bindRun(cwd, "orc-7");
+		expect(bound.lease).toMatchObject({ failed: expect.stringContaining("leased to lead:other") });
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		expect(writes).toEqual([]);
+	});
+
+	test("takes another lead's lapsed lease: binding is the explicit act", async () => {
+		epics["orc-7"] = { id: "orc-7", status: "in_progress", assignee: "lead:old", updated_at: "2020-01-01T00:00:00Z", metadata: { lease_until: "2020-01-01T00:15:00Z" } };
+		await activateRun(cwd, "session-t");
+		expect(await bindRun(cwd, "orc-7")).toEqual({ lease: "written" });
+		expect(writes.map(argv => argv.slice(2, 5))).toEqual([["--actor", "lead:old", "--claim"], ["--actor", "lead:session-t", "--claim"]]);
+	});
+
+	test("a refused lease write binds, is returned, and is not emitted as a process warning", async () => {
+		writeFails = "store locked";
 		const warnings: string[] = [];
 		const onWarning = (warning: Error) => { warnings.push(warning.message); };
 		process.on("warning", onWarning);
 		try {
 			await activateRun(cwd);
-			expect(await bindRun(cwd, "orc-7")).toEqual({ patrol: { failed: "Patrol orc-7 lookup unknown; creation refused" } });
+			expect(await bindRun(cwd, "orc-7")).toEqual({ lease: { failed: "store locked" } });
 			expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
 			await setImmediate();
 			expect(warnings).toEqual([]);
@@ -502,17 +523,24 @@ describe("runStatusReport", () => {
 		expect(report.lines).toEqual([`run: pending (marker ${markerPath(cwd)}, activated by session session-a); /orchestrate-bind <epic> binds it`]);
 	});
 
-	test("a bound, open, patrolled run is healthy", async () => {
+	test("a bound, open run is healthy and names its lead lease", async () => {
 		await activateRun(cwd);
 		await bindRun(cwd, "orc-7");
-		epic("orc-7", "in_progress");
+		epics["orc-7"] = { id: "orc-7", status: "in_progress", assignee: "lead:s1", metadata: { lease_until: "2999-01-01T00:00:00.000Z" } };
 		const report = await runStatusReport(cwd);
 		expect(report.healthy).toBe(true);
 		expect(report.lines).toEqual([
 			`run: bound to orc-7 (marker ${markerPath(cwd)})`,
 			"epic orc-7: in_progress",
-			"patrol: armed",
+			"lead: lead:s1, lease live until 2999-01-01T00:00:00.000Z",
 		]);
+	});
+
+	test("an epic without a recorded lead says how to stamp one", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		const report = await runStatusReport(cwd);
+		expect(report.lines[2]).toBe("lead: none recorded; /orchestrate-bind orc-7 stamps this session's lease");
 	});
 
 	test.each([
@@ -526,18 +554,6 @@ describe("runStatusReport", () => {
 		const report = await runStatusReport(cwd);
 		expect(report.healthy).toBe(false);
 		expect(report.lines[1]).toBe(line);
-	});
-
-	test.each([
-		["absent", "patrol: absent; /orchestrate-bind orc-7 arms it"],
-		["unknown", "patrol: unknown (the linked-wisp lookup failed)"],
-	] as const)("an %s patrol is not healthy", async (state, line) => {
-		await activateRun(cwd);
-		await bindRun(cwd, "orc-7");
-		patrol = state;
-		const report = await runStatusReport(cwd);
-		expect(report.healthy).toBe(false);
-		expect(report.lines[2]).toBe(line);
 	});
 });
 
@@ -643,24 +659,24 @@ describe("registerRunCommands", () => {
 		expect(calls).toBe(0);
 	});
 
-	test("/orchestrate-bind reports an armed patrol as success", async () => {
+	test("/orchestrate-bind reports the stamped lease as success", async () => {
 		const { run, bind, notices } = rig();
 		await run();
 		await bind("orc-7");
-		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-7; patrol armed"]);
+		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-7; lead lease stamped"]);
+		expect(writes.map(argv => argv.slice(2, 5))).toEqual([["--actor", "lead:session-t", "--claim"]]);
 	});
 
-	test("/orchestrate-bind says so, as a warning, when the patrol did not arm", async () => {
-		// The bind stands and the marker is bound; what the operator was not told before is
-		// that the layer covering process death is missing.
-		arming = new Error("Patrol orc-7 lookup unknown; creation refused");
+	test("/orchestrate-bind says so, as a warning, when the lease was not stamped", async () => {
+		// The bind stands and the marker is bound; what the operator is told is that the
+		// lease a replacement lead adopts against is missing.
+		writeFails = "store locked";
 		const { run, bind, notices } = rig();
 		await run();
 		await bind("orc-7");
-		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
 		expect(notices.at(-1)).toEqual([
 			"warning",
-			"orchestrate run bound to orc-7, but patrol arming needs architect attention: Patrol orc-7 lookup unknown; creation refused",
+			"orchestrate run bound to orc-7, but the lead lease was not stamped: store locked",
 		]);
 	});
 
@@ -679,11 +695,11 @@ describe("registerRunCommands", () => {
 		await run();
 		await bind("orc-7");
 		await status();
-		expect(notices.at(-1)).toEqual(["info", `run: bound to orc-7 (marker ${markerPath(cwd)}, activated by session session-t)\nepic orc-7: open\npatrol: armed`]);
-		patrol = "absent";
+		expect(notices.at(-1)).toEqual(["info", `run: bound to orc-7 (marker ${markerPath(cwd)}, activated by session session-t)\nepic orc-7: open\nlead: none recorded; /orchestrate-bind orc-7 stamps this session's lease`]);
+		epics["orc-7"] = { id: "orc-7", status: "closed" };
 		await status();
 		expect(notices.at(-1)?.[0]).toBe("warning");
-		expect(notices.at(-1)?.[1]).toContain("patrol: absent");
+		expect(notices.at(-1)?.[1]).toContain("epic orc-7: closed");
 	});
 
 	test("/orchestrate-close needs exactly one id and honours --force in either position", async () => {
@@ -713,7 +729,7 @@ describe("registerRunCommands", () => {
 		await close("orc-7");
 		await run();
 		await bind("orc-2");
-		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-2; patrol armed"]);
+		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-2; lead lease stamped"]);
 		expect((await readActiveRun(cwd))?.run_id).toBe("orc-2");
 	});
 });
