@@ -63,7 +63,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus. The
  // reaper takes the claim state so a release is attributed to this session's identity.
  registerSupervision(pi, isBoundRunActive, claims);
- registerWatchers(pi, claims);
+ registerWatchers(pi, claims, leases);
 
  // The lead has no `yield` tool, so G4 cannot observe its final turn. Keep this
  // advisory watch on the same claim state and active run binding as the gates.

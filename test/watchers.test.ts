@@ -11,6 +11,8 @@ import type { BdBead } from "../src/bd";
 import * as bd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
 import { ASSIGNMENT_NOTICE_MESSAGE } from "../src/gates/assignment";
+import type { LeaseRenewer } from "../src/lease";
+import * as runState from "../src/run-state";
 import {
 	appendAudit,
 	auditDir,
@@ -661,7 +663,7 @@ async function fakeBd(): Promise<string> {
 		[
 			`#!${process.execPath}`,
 			'import { appendFileSync } from "node:fs";',
-			'const args = process.argv.slice(2);',
+			'const args = process.argv[2] === "--db" ? process.argv.slice(4) : process.argv.slice(2);',
 			'appendFileSync(process.env.ORC_TEST_BD_LOG, ">>>\\n" + args.join("\\n") + "\\n");',
 			'if (args[0] === process.env.ORC_TEST_BD_FAIL && (!process.env.ORC_TEST_BD_TARGET || args[1] === process.env.ORC_TEST_BD_TARGET)) process.exit(1);',
 			'const beads = JSON.parse(process.env.ORC_TEST_BD_LIST || "[]");',
@@ -696,7 +698,10 @@ async function fakeBd(): Promise<string> {
 	return bin;
 }
 
-/** Every `bd` invocation the fake saw, as argv arrays. */
+/**
+ * Every `bd` invocation the fake saw, as argv arrays, the `--db <store>` a marker-bound
+ * spawn leads with stripped: these tests assert what was written, not where.
+ */
 async function bdCalls(): Promise<string[][]> {
 	let raw: string;
 	try {
@@ -707,7 +712,8 @@ async function bdCalls(): Promise<string[][]> {
 	return raw
 		.split(">>>\n")
 		.filter(record => record.length > 0)
-		.map(record => record.split("\n").filter(line => line.length > 0));
+		.map(record => record.split("\n").filter(line => line.length > 0))
+		.map(argv => (argv[0] === "--db" ? argv.slice(2) : argv));
 }
 
 interface Harness {
@@ -755,12 +761,11 @@ function harness(
 				},
 			}
 			: {}),
-		...(child === undefined
-			? {}
-			: {
-				sessionManager: { getEntries: () => child.entries ?? [] },
-				getSystemPrompt: () => [child.systemPrompt ?? ""],
-			}),
+		sessionManager: {
+			getSessionId: () => "session-w",
+			...(child === undefined ? {} : { getEntries: () => child.entries ?? [] }),
+		},
+		...(child === undefined ? {} : { getSystemPrompt: () => [child.systemPrompt ?? ""] }),
 		setTimeout: (callback: () => unknown) => {
 			timeouts.add(callback);
 			return callback;
@@ -1239,6 +1244,46 @@ describe("registerWatchers", () => {
 		await Promise.all([rig.sweeps[0]!(), rig.sweeps[0]!()]);
 		await rig.sweeps[0]!();
 		expect((await bdCalls()).filter(call => call[0] === "comment")).toHaveLength(2);
+	});
+
+	test("the minute timer renews leases and sweeps lapsed claims only from the seat that leads a bound run", async () => {
+		await fakeBd();
+		await marked(undefined, "pending");
+		const ticks: number[] = [];
+		let leadsRun = false;
+		const leases: LeaseRenewer = {
+			touch: () => {},
+			tick: async () => { ticks.push(Date.now()); return { leadsRun }; },
+		};
+		const sweep = spyOn(runState, "sweepLapsedClaims").mockResolvedValue({ released: [], kept: [], failed: [] });
+		try {
+			const rig = harness();
+			registerWatchers(rig.pi, createClaimState(), leases);
+			await rig.fire("session_start", {});
+
+			// Not yet leading, and the run still pending: renewal runs, the sweep does not.
+			await rig.sweeps[0]!();
+			expect(ticks).toHaveLength(1);
+			leadsRun = true;
+			await rig.sweeps[0]!();
+			expect(ticks).toHaveLength(2);
+			expect(sweep).not.toHaveBeenCalled();
+
+			await marked(undefined, "orc-w5");
+			await rig.sweeps[0]!();
+			expect(sweep.mock.calls.map(call => call.slice(1, 3))).toEqual([["orc-w5", "lead:session-w"]]);
+
+			// A worker's timer renews its own leases and never sweeps.
+			sweep.mockClear();
+			const worker = harness(["bash", "yield"]);
+			registerWatchers(worker.pi, createClaimState(), leases);
+			await worker.fire("session_start", {});
+			await worker.sweeps[0]!();
+			expect(ticks).toHaveLength(4);
+			expect(sweep).not.toHaveBeenCalled();
+		} finally {
+			sweep.mockRestore();
+		}
 	});
 
 	test("W3 warns on a task spawn without ever blocking it", async () => {
