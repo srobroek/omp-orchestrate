@@ -718,6 +718,75 @@ const SEPARATE_OPERAND_FLAGS: Record<string, true> = {
 	"--repo": true,
 };
 
+/** One command `commandInvocations` matched: how the program was addressed, and what the subcommand received. */
+export interface Invocation {
+	/**
+	 * The program's own flags between it and the subcommand, with their operands, in order:
+	 * `git -C /repo push` carries `["-C", "/repo"]`. They select the repository the
+	 * subcommand acts on, so a gate that resolves `HEAD` needs them.
+	 */
+	globals: string[];
+	/** Every word after the matched subcommand: its flags and operands, as it receives them. */
+	args: string[];
+}
+
+/**
+ * Match one segment against `argv` as a leading token sequence, past an `env`/assignment
+ * prefix and the program's global flags, or return undefined when it runs something else.
+ */
+function matchInvocation(segment: readonly string[], argv: readonly string[]): Invocation | undefined {
+	const index = programIndex(segment);
+	const head = segment[index];
+	if (head === undefined || programName(head) !== argv[0]) return undefined;
+
+	// Both git and gh spell a subcommand as the first positionals after their own
+	// global flags -- `git [-c x] <cmd>`, `gh [-R x] <group> <cmd>` -- so the
+	// remaining argv words must be *consecutive positionals*, not merely present in
+	// order. Scanning for them anywhere refused legitimate reads whose operand
+	// happened to be the word: `git log --grep worktree` and `git commit -m worktree`
+	// both matched `git worktree`. Stopping at the first positional that is not the
+	// expected word is git's own grammar, and it keeps `git -C /repo worktree add`
+	// matching because a global flag's operand is skipped with the flag.
+	const globals: string[] = [];
+	let cursor = index + 1;
+	let matched = 1;
+	while (cursor < segment.length && matched < argv.length) {
+		const token = segment[cursor] as string;
+		if (token === argv[matched]) {
+			matched += 1;
+			cursor += 1;
+			continue;
+		}
+		// A positional that is not the expected word names a different subcommand.
+		if (!token.startsWith("-")) break;
+		globals.push(token);
+		cursor += 1;
+		if (SEPARATE_OPERAND_FLAGS[token] === true && cursor < segment.length) {
+			globals.push(segment[cursor] as string);
+			cursor += 1;
+		}
+	}
+	if (matched !== argv.length) return undefined;
+	return { globals, args: segment.slice(cursor) };
+}
+
+/**
+ * Every invocation of `argv` in a command line, in order, including those inside a
+ * wrapper shell's `-c` payload: `git push` matches `git -C /repo push origin HEAD` and
+ * `FOO=1 git push`, not `git log --grep push`. The gates that read a subcommand's
+ * operands -- which branch a push targets -- take these; `invokesCommand` is the
+ * yes-or-no form.
+ */
+export function commandInvocations(command: string, argv: readonly string[]): Invocation[] {
+	if (argv.length === 0) return [];
+	const found: Invocation[] = [];
+	for (const segment of effectiveSegments(command)) {
+		const invocation = matchInvocation(segment, argv);
+		if (invocation !== undefined) found.push(invocation);
+	}
+	return found;
+}
+
 /**
  * True when any segment matches `argv` as a leading token sequence, ignoring an
  * `env`/assignment prefix. Used by the worktree gate for `git worktree` and
@@ -725,35 +794,5 @@ const SEPARATE_OPERAND_FLAGS: Record<string, true> = {
  */
 export function invokesCommand(command: string, argv: readonly string[]): boolean {
 	if (argv.length === 0) return false;
-	for (const segment of effectiveSegments(command)) {
-		const index = programIndex(segment);
-		const head = segment[index];
-		if (head === undefined || programName(head) !== argv[0]) continue;
-		if (argv.length === 1) return true;
-
-		// Both git and gh spell a subcommand as the first positionals after their own
-		// global flags -- `git [-c x] <cmd>`, `gh [-R x] <group> <cmd>` -- so the
-		// remaining argv words must be *consecutive positionals*, not merely present in
-		// order. Scanning for them anywhere refused legitimate reads whose operand
-		// happened to be the word: `git log --grep worktree` and `git commit -m worktree`
-		// both matched `git worktree`. Stopping at the first positional that is not the
-		// expected word is git's own grammar, and it keeps `git -C /repo worktree add`
-		// matching because a global flag's operand is skipped with the flag.
-		let cursor = index + 1;
-		let matched = 1;
-		while (cursor < segment.length && matched < argv.length) {
-			const token = segment[cursor] as string;
-			if (token === argv[matched]) {
-				matched += 1;
-				cursor += 1;
-				continue;
-			}
-			// A positional that is not the expected word names a different subcommand.
-			if (!token.startsWith("-")) break;
-			cursor += 1;
-			if (SEPARATE_OPERAND_FLAGS[token] === true) cursor += 1;
-		}
-		if (matched === argv.length) return true;
-	}
-	return false;
+	return effectiveSegments(command).some(segment => matchInvocation(segment, argv) !== undefined);
 }
