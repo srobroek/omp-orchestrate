@@ -23,6 +23,18 @@ export const CORE_AGENT_CONTRACTS: Record<CoreAgentName, CoreAgentContract> = {
 
 export const ROLE_MARKER = /^ORC-ROLE:[ \t]*([a-z][a-z-]*)[ \t]*$/m;
 
+/**
+ * Spawn-allowlist names that neither a bundled OMP agent nor this package provides,
+ * keyed by the marketplace package that must be installed for the grant to resolve.
+ * `test/declared-surface.json` carries the same table for the agent-definition suite;
+ * the doctor suite asserts the two agree so neither can drift alone.
+ */
+export const PLUGIN_AGENTS_BY_PACKAGE: Readonly<Record<string, readonly string[]>> = {
+ "@srobroek/build": ["operator"],
+ "@srobroek/delivery": ["pr-reviewer"],
+ "@srobroek/quality": ["adversarial-challenger", "docs-guard", "lint-guard"],
+};
+
 export interface AgentDiscoveryFinding {
  agent: string;
  message: string;
