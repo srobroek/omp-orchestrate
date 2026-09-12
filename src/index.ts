@@ -6,7 +6,7 @@
  * agents, the formulas — is data OMP discovers from the package tree.
  */
 
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdListChecked, bdRun, resetReadBudget } from "./bd";
 import { observeClaimResult } from "./claim-observer";
@@ -17,11 +17,11 @@ import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { createLeadExitWatch } from "./gates/lead-exit";
 import { gateOneClaim } from "./gates/one-claim";
-import { beadWriteFreeEnv, pinAddition, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
+import { beadWriteFreeEnv, pinAddition, pinnedRunActive, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
 import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
-import { isBoundRunActive, readActiveRun, registerRunCommands } from "./run-state";
+import { isBoundRunActive, registerRunCommands } from "./run-state";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
@@ -32,6 +32,20 @@ import { preflightSettings, registerWatchers } from "./watchers";
 
 /** Tools any gate inspects. Everything else returns before doing work. */
 const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true };
+
+/**
+ * Whether this session is under orchestration: it declares an `ORC-ROLE`, or an
+ * orchestrate run pins its process and marks its checkout (G1's predicate, shared
+ * through `pinnedRunActive`).
+ *
+ * Every refusing check below hangs off this. Without it the plugin's mere installation
+ * refused `git worktree add`, `printenv BEADS_DIR`, and every edit after a hand-closed
+ * bead, in repositories no run ever touched. The role check comes first because it
+ * costs no read.
+ */
+async function orchestrated(ctx: ExtensionContext): Promise<boolean> {
+ return orcRole(ctx) !== undefined || (await pinnedRunActive(ctx.cwd));
+}
 
 export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claims = createClaimState();
@@ -62,6 +76,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * Blocking gates run before G1's rewrite, because a handler returns a single
   * result: a refusal must win over a revision of an input that will not run.
   *
+  * The runtime database check, G3, G6 and G2 run only under orchestration. G5 and
+  * G7 scope themselves by the session's role, and G1 by its own pinned-run read.
+  *
   * The whole body is wrapped, because a throwing `tool_call` handler blocks the
   * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`). A bug here
   * must degrade to fail-open rather than bricking every tool in the session.
@@ -76,7 +93,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
    if (event.toolName === "yield") return await gateExitContract(ctx, input);
 
-   if (event.toolName === "bash") {
+   const scoped = await orchestrated(ctx);
+
+   if (event.toolName === "bash" && scoped) {
     const runtimeDatabase = await normalizeRuntimeBeadsDir(ctx, input);
     if (!runtimeDatabase.ok) return runtimeDatabase.refusal;
     input = runtimeDatabase.input;
@@ -84,7 +103,6 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
     const ownership = gateWorktrunkOwnership(input);
     if (ownership) return ownership;
-
     // G6 before G5: it is a parse plus one marker read where G5 shells out to
     // `bd show` and `bd list`. It takes `pi` because its findings are notices
     // rather than refusals, and a notice leaves through `sendMessage` rather than
@@ -97,7 +115,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     } else if (discipline) {
      return discipline;
     }
+   }
 
+   if (event.toolName === "bash") {
     // Also before G5: a refused multi-bead claim must not be recorded, or G2
     // would hold the session to two trees it was never allowed to claim.
     const exclusivity = gateOneClaim(ctx, input);
@@ -107,7 +127,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     if (eligibility) return eligibility;
    }
 
-   if (GATED_WRITE_TOOLS[event.toolName] === true) {
+   if (scoped && GATED_WRITE_TOOLS[event.toolName] === true) {
     // G2 needs the input: its containment check is on the path the tool
     // names, not only on the cwd the session sits in.
     const scope = await gateWorktreeScope(claims, ctx, event.toolName, input);
@@ -140,19 +160,19 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * (`session/messages.ts:654`), and the contract must read as authority rather
   * than as something the model said to itself.
   *
-  * The marker is read for one reason only: it is the run gate. Its `repo_root` used to
-  * be substituted into the contract for a `bd -C` pin, and both are gone -- the run pins
-  * BEADS_DIR once at activation and every child inherits it, so a worker needs no path
-  * substituted per call.
+  * The run is read for one reason only: it is the run gate. The marker's `repo_root`
+  * used to be substituted into the contract for a `bd -C` pin, and both are gone -- the
+  * run pins BEADS_DIR once at activation and every child inherits it, so a worker needs
+  * no path substituted per call. The same pin is what locates the marker for an
+  * isolated worker whose own cwd holds none.
   */
  pi.on("session_start", async (_event, ctx) => {
   if (sessionRole(pi) === "lead" || orcRole(ctx) === undefined) return;
-  const marker = await readActiveRun(ctx.cwd).catch(() => null);
   // No run, no contract. Measured without this guard: a plain subagent spawned in
   // this repository received the protocol, obeyed it over its own brief, pulled an
   // empty queue for a role that does not exist, and yielded NO_WORK -- the injected
   // text outranked the task it was actually given.
-  if (marker === null) return;
+  if (!(await pinnedRunActive(ctx.cwd))) return;
   pi.sendMessage(
    {
     customType: "com.srobroek.omp-orchestrate.contract",
@@ -166,10 +186,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
  // A queue claim names no bead, so its id exists only in the result. Without this the
  // exit contract took its no-bead branch for every session that pulled work normally,
- // and every check that hangs off the claimed bead went unevaluated. Awaited: the host
- // holds the result until every handler settles, so a claim resolved from the store is
- // recorded before the next `tool_call` asks about it.
- pi.on("tool_result", async event => {
+ // and every check that hangs off the claimed bead went unevaluated. Armed only under
+ // orchestration: a plain session that claims by hand is not held to G2, G4 or G5.
+ // Awaited: the host holds the result until every handler settles, so a claim resolved
+ // from the store is recorded before the next `tool_call` asks about it.
+ pi.on("tool_result", async (event, ctx) => {
+  if (!(await orchestrated(ctx))) return;
   await observeClaimResult(pi, claims, event);
  });
 

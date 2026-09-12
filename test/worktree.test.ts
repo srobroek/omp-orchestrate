@@ -504,21 +504,71 @@ describe("G2 ownership freshness", () => {
  test("keeps a recognized Beads read control path safe after reassignment", async () => {
   expect(await fromBash(owned, `bd show ${BEAD} --json`)).toBeUndefined();
  });
+
+ test.each([
+  ["a cleared assignee", ""],
+  ["no assignee", undefined],
+ ])("allows the terminal comment on the claimed bead after its release leaves %s", async (_state, assignee) => {
+  // The documented completion writes REPORTED and then releases; a worker that releases
+  // first must still be able to report, or G4 sends it after a comment G2 refuses.
+  beads[BEAD] = { id: BEAD, status: "in_progress", metadata: { worktree: owned, scope: ["src/**"] } };
+  if (assignee !== undefined) beads[BEAD]!.assignee = assignee;
+
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd comment ${BEAD} "REPORTED done"`)).toBeUndefined();
+  expect(await fromBash(owned, `BD_ACTOR=${actor} bd comments add ${BEAD} "REPORTED done"`)).toBeUndefined();
+  // The release admits the comment alone: product work on a released bead is still stale.
+  expect((await fromBash(owned, "git log -1"))?.block).toBe(true);
+  expect((await writing("src/api.ts"))?.block).toBe(true);
+ });
+
+ test("refuses the comment once the bead belongs to a successor, without calling it a product file", async () => {
+  const result = await fromBash(owned, `BEADS_ACTOR=${actor} bd comment ${BEAD} "REPORTED done"`);
+
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain(BEAD);
+  expect(result?.reason).not.toContain("product files");
+ });
+
+ test.each([
+  ["a commit", () => fromBash(owned, "git commit -am done")],
+  ["a write", () => writing("src/api.ts")],
+  ["a comment on it", () => fromBash(owned, `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE closing remark"`)],
+ ])("forgets the claim and admits %s once this actor closed the bead", async (_label, mutate) => {
+  // A finished bead is a release, not a loss of ownership: refusing every later call
+  // locked the session until its next claim command.
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
+
+  expect(await mutate()).toBeUndefined();
+  expect(claims.observedClaim()).toBeUndefined();
+ });
+
+ test.each([
+  ["a successor", { status: "closed", assignee: successor }],
+  ["nobody", { status: "closed" }],
+ ])("keeps refusing after a close that left the bead assigned to %s", async (_label, bead) => {
+  beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned, scope: ["src/**"] } };
+
+  expect((await fromBash(owned, "git commit -am done"))?.block).toBe(true);
+  expect(claims.observedClaim()).toBeDefined();
+ });
+
+ test("keeps the claim through its own recovery commands on the closed bead", async () => {
+  // Reopen and reclaim rely on the retained claim state; a wrapped bd command on the
+  // closed bead is neither recovery nor product work, so it is refused rather than
+  // treated as the end of the claim.
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
+
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`)).toBeUndefined();
+  expect((await fromBash(owned, `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`))?.block).toBe(true);
+  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --status in_progress`))?.block).toBe(true);
+  expect(claims.observedClaim()).toBeDefined();
+ });
 });
 
 describe("G2 runtime database identity", () => {
- // The identity check defends a bound run: these fixtures carry a run marker in
- // both checkouts, and the direct calls pass `bound: true`.
- const markers = (): string[] => [owned, foreign].map(dir => path.join(dir, ".orchestration", ".active-run"));
- beforeAll(async () => {
-  for (const marker of markers()) {
-   await fs.mkdir(path.dirname(marker), { recursive: true });
-   await fs.writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
-  }
- });
- afterAll(async () => {
-  for (const marker of markers()) await fs.rm(path.dirname(marker), { recursive: true, force: true });
- });
+ // The check defends a pinned run's database and is reached only under orchestration
+ // (`test/wiring.test.ts` drives that predicate); these direct calls exercise the
+ // identity comparison itself against the process pin.
 
  test("the documented re-entry command passes through the env field and is refused inline", async () => {
   // Mirrors skills/orchestrate/references/planning.md "re-entry changes the discovery root".
@@ -531,28 +581,6 @@ describe("G2 runtime database identity", () => {
    const inline = await normalizeRuntimeBeadsDir(ctxAt(owned), { command: `BEADS_DIR="${pinned}" ORCHESTRATE_MARKER_FILE=/run/.active-run ${command}` });
    expect(inline.ok).toBe(false);
   });
- });
-
- test("outside a run, an override only has to be an existing directory", async () => {
-  const unbound = await fs.mkdtemp(path.join(os.tmpdir(), "orc-unbound-"));
-  const own = path.join(unbound, ".beads");
-  await fs.mkdir(own);
-  await withPinnedBeadsDir(async () => {
-   // pinned to another database by a concurrent session, yet no run binds this checkout
-   const accepted = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", env: { BEADS_DIR: own } });
-   expect(accepted.ok).toBe(true);
-   const relative = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", env: { BEADS_DIR: ".beads" } });
-   expect(relative.ok && (relative.input.env as Record<string, string>).BEADS_DIR).toBe(await fs.realpath(own));
-   const missing = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", env: { BEADS_DIR: path.join(unbound, "nope") } });
-   expect(missing.ok).toBe(false);
-   const prefixed = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: `BEADS_DIR=${own} bd list` });
-   expect(prefixed.ok).toBe(false); // an inline assignment escapes validation in every state
-   const read = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "printenv BEADS_DIR" });
-   expect(read.ok).toBe(true); // a read is not a database choice
-   const badCwd = await normalizeRuntimeBeadsDir(ctxAt(unbound), { command: "bd list", cwd: "\u0000bad", env: { BEADS_DIR: ".beads" } });
-   expect(badCwd.ok).toBe(false); // an unresolvable cwd refuses rather than escaping to the fail-open wrapper
-  });
-  await fs.rm(unbound, { recursive: true, force: true });
  });
 
  test("accepts the canonical runtime pin without rewriting it", async () => {
@@ -646,16 +674,31 @@ describe("G2 standalone ownership controls", () => {
  });
 
  test("allows the observed actor to recover a closed claim in two steps", async () => {
+  // `bd reopen` sets status open and keeps the assignee; the only reclaim bd has is
+  // `bd update <id> --claim`, with `--json` so the observer re-records it.
   beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/api/**"] } };
 
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`)).toBeUndefined();
   beads[BEAD]!.status = "open";
-  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd claim ${BEAD}`)).toBeUndefined();
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim --json`)).toBeUndefined();
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim`)).toBeUndefined();
   beads[BEAD]!.status = "in_progress";
   listSpy.mockResolvedValueOnce([
    { id: "orc-other", status: "in_progress", assignee: foreignActor, metadata: { scope: ["src/api/**"] } },
   ]);
   expect((await fromBash(owned, "touch src/api.ts"))?.block).toBe(true);
+ });
+
+ test("allows the observed actor to hand a reopened bead back instead of reclaiming it", async () => {
+  beads[BEAD] = { id: BEAD, status: "open", assignee: actor, metadata: { worktree: owned } };
+
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --assignee ""`)).toBeUndefined();
+ });
+
+ test("does not read a reclaim with extra flags as the reclaim control", async () => {
+  beads[BEAD] = { id: BEAD, status: "open", assignee: actor, metadata: { worktree: owned } };
+
+  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim --status in_progress`))?.block).toBe(true);
  });
 
  test("allows matching structured BEADS_DIR for standalone recovery", async () => {
@@ -674,28 +717,29 @@ describe("G2 standalone ownership controls", () => {
  });
 
  test.each([
-  ["reopen missing", "reopen", undefined],
-  ["reopen unassigned", "reopen", { status: "closed" }],
-  ["reopen foreign owner", "reopen", { status: "closed", assignee: foreignActor }],
-  ["reopen wrong status", "reopen", { status: "open", assignee: actor }],
-  ["claim missing", "claim", undefined],
-  ["claim unassigned", "claim", { status: "open" }],
-  ["claim foreign owner", "claim", { status: "open", assignee: foreignActor }],
-  ["claim wrong status", "claim", { status: "in_progress", assignee: actor }],
- ] as const)("refuses %s", async (_label, operation, bead) => {
+  ["reopen missing", `bd reopen ${BEAD}`, undefined],
+  ["reopen unassigned", `bd reopen ${BEAD}`, { status: "closed" }],
+  ["reopen foreign owner", `bd reopen ${BEAD}`, { status: "closed", assignee: foreignActor }],
+  ["reopen wrong status", `bd reopen ${BEAD}`, { status: "open", assignee: actor }],
+  ["reclaim missing", `bd update ${BEAD} --claim`, undefined],
+  ["reclaim unassigned", `bd update ${BEAD} --claim --json`, { status: "open" }],
+  ["reclaim foreign owner", `bd update ${BEAD} --claim`, { status: "open", assignee: foreignActor }],
+  ["reclaim wrong status", `bd update ${BEAD} --claim`, { status: "closed", assignee: actor }],
+ ] as const)("refuses %s", async (_label, command, bead) => {
   if (bead === undefined) delete beads[BEAD];
   else beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned } };
 
-  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd ${operation} ${BEAD}`))?.block).toBe(true);
+  expect((await fromBash(owned, `BEADS_ACTOR=${actor} ${command}`))?.block).toBe(true);
  });
 
  test.each([
   ["a foreign actor", "closed", `BEADS_ACTOR=${foreignActor} bd reopen ${BEAD}`],
   ["a wrapped reopen", "closed", `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`],
   ["a compound reopen", "closed", `BEADS_ACTOR=${actor} bd reopen ${BEAD}; true`],
-  ["a foreign actor reclaim", "open", `BEADS_ACTOR=${foreignActor} bd claim ${BEAD}`],
-  ["a wrapped reclaim", "open", `BEADS_ACTOR=${actor} sh -c 'bd claim ${BEAD}'`],
-  ["a compound reclaim", "open", `BEADS_ACTOR=${actor} bd claim ${BEAD}; true`],
+  ["a foreign actor reclaim", "open", `BEADS_ACTOR=${foreignActor} bd update ${BEAD} --claim`],
+  ["a wrapped reclaim", "open", `BEADS_ACTOR=${actor} sh -c 'bd update ${BEAD} --claim'`],
+  ["a compound reclaim", "open", `BEADS_ACTOR=${actor} bd update ${BEAD} --claim; true`],
+  ["the command bd does not have", "open", `BEADS_ACTOR=${actor} bd claim ${BEAD}`],
   ["a foreign bead", "closed", `BEADS_ACTOR=${actor} bd reopen orc-foreign`],
  ])("refuses recovery through %s", async (_label, status, command) => {
   beads[BEAD] = { id: BEAD, status, assignee: actor, metadata: { worktree: owned } };

@@ -2,10 +2,21 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BdBead } from "../src/bd";
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import * as actualBd from "../src/bd";
 import ompOrchestrate from "../src/index";
+
+// Every case below states its own run scope; the ambient shell's pin must not supply one.
+let previousPin: string | undefined;
+beforeEach(() => {
+	previousPin = process.env.BEADS_DIR;
+	delete process.env.BEADS_DIR;
+});
+afterEach(() => {
+	if (previousPin === undefined) delete process.env.BEADS_DIR;
+	else process.env.BEADS_DIR = previousPin;
+});
 
 type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
 type EventHandler = (event: unknown, ctx?: unknown) => unknown;
@@ -123,7 +134,7 @@ describe("extension factory", () => {
 				content: [{ type: "text", text: JSON.stringify([{ id, status: "in_progress", assignee: actor }]) }],
 			});
 
-			await parentResult(claimReport("orc-parent-1", "parent"));
+			await parentResult(claimReport("orc-parent-1", "parent"), parentCtx);
 			expect(await childToolCall(
 				{ toolName: "bash", input: { command: "bd ready --metadata-field role=implementer --claim --json" } },
 				childCtx,
@@ -133,7 +144,7 @@ describe("extension factory", () => {
 				parentCtx,
 			)).toMatchObject({ block: true, reason: expect.stringContaining("orc-parent-1") });
 
-			await childResult(claimReport("orc-child-1", "child"));
+			await childResult(claimReport("orc-child-1", "child"), childCtx);
 			expect(await childToolCall(
 				{ toolName: "bash", input: { command: "bd update orc-child-1 --status open" } },
 				childCtx,
@@ -256,6 +267,8 @@ describe("actor rewrite keeps claim gates active", () => {
 		await writeFile(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
 		const prior = process.env.ORCHESTRATE_MARKER_FILE;
 		process.env.ORCHESTRATE_MARKER_FILE = join(root, ".orchestration", ".active-run");
+		// G6 fires only under a pinned run; the pin's repository is where the marker lives.
+		process.env.BEADS_DIR = join(root, ".beads");
 		return { root, prior };
 	}
 

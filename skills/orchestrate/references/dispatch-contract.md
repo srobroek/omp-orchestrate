@@ -87,7 +87,8 @@ token is the whole signal, so NO WORK parses as NO and the rulebook flags it. Sp
 multi-word verb with its underscore, then write the prose.
 
 Mirror every material outcome to the affected bead as a comment, under the acting
-identity. Set BEADS_ACTOR and BD_ACTOR to metadata.actor on every mutating bd process.
+identity. Your identity is the assignee your claim report printed; set BEADS_ACTOR and
+BD_ACTOR to it on every mutating bd process. A write attributed to anyone else is refused.
 
 Exit. Follow your role's evidence and disposition contract, not another role's report
 shape. Implementers report head_sha for git before yield; their parent-side branch
