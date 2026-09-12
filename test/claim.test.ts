@@ -85,6 +85,54 @@ describe("G5 acquisition lifecycle", () => {
   expect(claims.observedClaim()?.beadIds).toEqual(["orc-1"]);
  });
 
+ test("names why the previous owner could not be read", async () => {
+  // The old sentence sent the model to "refresh ownership" when the database had
+  // merely not answered; the two need different next steps.
+  claims.recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
+  const failure = spyOn(actualBd, "lastBdFailure").mockReturnValue("timeout");
+  try {
+   const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-2 --claim" });
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("Cannot verify release of 'orc-1'");
+   expect(result?.reason).toContain("did not answer in time");
+  } finally {
+   failure.mockRestore();
+  }
+  beads["orc-1"] = { id: "orc-1" };
+  const malformed = await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-2 --claim" });
+  expect(malformed?.block).toBe(true);
+  expect(malformed?.reason).toContain("status is unreadable");
+ });
+
+ test.each([
+  "bd ready --claim --json",
+  "bd ready --parent orc-epic --claim --json",
+  "bd ready --parent orc-epic --unassigned --claim --json",
+  "bd ready --include-ephemeral --claim --json",
+ ])("a role-marked session must name its queue: %s", async command => {
+  // Beads hands an unfiltered pull the first ready bead of any role, and nothing
+  // downstream compares that bead's routing to the session, so the filter is the only
+  // place cross-role pulls are stopped.
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("queue pull must name your role");
+  expect(result?.reason).toContain("role=implementer");
+  expect(shown).toEqual([]);
+ });
+
+ test.each([
+  ["implementer", "bd ready --parent orc-epic --metadata-field role=implementer --unassigned --claim --json"],
+  ["implementer", "bd ready --metadata-field=role=implementer --claim --json"],
+  ["reviewer", "bd ready --include-ephemeral --parent orc-epic --metadata-field role=reviewer --unassigned --claim --json"],
+  ["shepherd", "bd ready --metadata-field role=shepherd --unassigned --claim --json"],
+  // The legacy label carrier still pins a queue, through the alias table.
+  ["shepherd", "bd ready --label agent:integrator --unassigned --claim --json"],
+  ["implementer", "bd ready --label agent:implementer --claim --json"],
+ ])("%s pulling its own named queue is allowed: %s", async (role, command) => {
+  expect(await gateClaimEligibility(claims, ctxFor(role), { command })).toBeUndefined();
+  expect(shown).toEqual([]);
+ });
+
  test("verified release permits the next claim without mutating Beads", async () => {
   claims.recordClaim({ actor: "impl-1", beadIds: ["orc-1"] });
   beads["orc-1"] = bead("orc-1", { status: "open", assignee: "" });
@@ -216,6 +264,10 @@ describe("G5 fail-open", () => {
   ).toBeUndefined();
  });
 
+ test("a role-less session may pull without naming a queue", async () => {
+  expect(await gateClaimEligibility(claims, ctxFor(), { command: "bd ready --claim --json" })).toBeUndefined();
+ });
+
  test("ignores a command with no bd --claim in it", async () => {
   for (const command of ["bd show orc-7 --json", "git status", "", "bd update orc-7 --status closed"]) {
    expect(await gateClaimEligibility(claims, ctxFor("reviewer"), { command })).toBeUndefined();
@@ -231,8 +283,8 @@ describe("G5 fail-open", () => {
 
 describe("G5 scope conflict", () => {
  /** A candidate scoped to `scope`, routed to the claiming role so routing passes. */
- function candidate(scope: unknown): BdBead {
-  return bead("orc-10", { labels: ["orc-node", "agent:implementer"], metadata: { scope } as Record<string, unknown> });
+ function candidate(scope: unknown, overrides: Partial<BdBead> = {}): BdBead {
+  return bead("orc-10", { labels: ["orc-node", "agent:implementer"], metadata: { scope } as Record<string, unknown>, ...overrides });
  }
 
  const CLAIM = "BEADS_ACTOR=orc-impl-1 bd update orc-10 --claim";
@@ -248,8 +300,9 @@ describe("G5 scope conflict", () => {
   expect(result?.reason).toContain("orc-10");
   expect(result?.reason).toContain("orc-3");
   expect(result?.reason).toContain("src/api/handlers.ts");
-  // Only the in-flight `orc-node` beads are consulted.
-  expect(listed[0]).toEqual(["list", "--label", "orc-node", "--status", "in_progress", "--json"]);
+  // Only the in-flight `orc-node` beads are consulted, and all of them: `bd list`
+  // defaults to 50 rows, past which the tail would never be compared.
+  expect(listed[0]).toEqual(["list", "--label", "orc-node", "--status", "in_progress", "--limit", "0", "--json"]);
  });
 
  test("a literal directory and a wildcard descendant cannot be held by competing writers", async () => {
@@ -330,6 +383,40 @@ describe("G5 scope conflict", () => {
   })];
 
   expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+ });
+
+ test("reads no lineage while no in-flight scope overlaps", async () => {
+  // Lineage is an exemption for an overlap; with nothing to exempt, every ancestor read
+  // would be spent learning nothing. Scope-less architect envelopes are the common case.
+  beads["orc-10"] = candidate(["src/api/**"], { parent: "orc-feature" });
+  inFlight = [
+   bead("orc-feature", { assignee: "architect-1", status: "in_progress", metadata: { role: "architect" } }),
+   bead("orc-epic", { assignee: "architect-1", status: "in_progress", metadata: { role: "architect" } }),
+   bead("orc-3", { parent: "orc-feature", assignee: "writer-3", status: "in_progress", metadata: { scope: ["docs/**"] } }),
+   bead("orc-4", { parent: "orc-feature", assignee: "writer-4", status: "in_progress", metadata: { scope: ["test/**"] } }),
+  ];
+
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  // The one show is G5's own read of the named claim target.
+  expect(shown).toEqual(["orc-10"]);
+ });
+
+ test("an overlap whose lineage cannot be read is unknown, not a conflict", async () => {
+  // `orc-parent` is unreadable here, so the candidate's ancestry is a prefix of the
+  // truth: `orc-feature` may well be its grandparent. A slow database must not turn a
+  // feature and its own task into a conflict; unknown fails open like every gate.
+  beads["orc-10"] = candidate(["src/merge.ts"], { parent: "orc-parent" });
+  inFlight = [bead("orc-feature", {
+   assignee: "architect-1", status: "in_progress", metadata: { role: "architect", scope: ["src/**"] },
+  })];
+
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM })).toBeUndefined();
+  expect(shown).toEqual(["orc-10", "orc-parent"]);
+
+  // The same overlap with a readable, unrelated lineage is the conflict it looks like.
+  beads["orc-parent"] = bead("orc-parent");
+  shown = [];
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: CLAIM }))?.block).toBe(true);
  });
 
  test("skips a three-level ancestor but retains sibling friction", async () => {
