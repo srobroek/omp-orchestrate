@@ -74,13 +74,10 @@ beforeAll(async () => {
  plainRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "orc-g5-plain-")));
  await fs.mkdir(path.dirname(markerPath(runRoot)), { recursive: true });
  await fs.writeFile(markerPath(runRoot), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
- priorPin = process.env.BEADS_DIR;
  priorMarkerOverride = process.env.ORCHESTRATE_MARKER_FILE;
 });
 
 afterAll(async () => {
- if (priorPin === undefined) delete process.env.BEADS_DIR;
- else process.env.BEADS_DIR = priorPin;
  if (priorMarkerOverride === undefined) delete process.env.ORCHESTRATE_MARKER_FILE;
  else process.env.ORCHESTRATE_MARKER_FILE = priorMarkerOverride;
  await fs.rm(runRoot, { recursive: true, force: true });
@@ -104,20 +101,10 @@ beforeEach(() => {
  listed = [];
  warned = [];
  claims = createClaimState();
- // Every case states its own run scope; the ambient shell's pin must not supply one.
- delete process.env.BEADS_DIR;
+ // Every case states its own run scope through its cwd's marker.
  delete process.env.ORCHESTRATE_MARKER_FILE;
 });
 
-/** Run `body` with the process pinned to the run checkout's database, as an active run pins it. */
-async function pinned<T>(body: () => Promise<T>): Promise<T> {
- process.env.BEADS_DIR = path.join(runRoot, ".beads");
- try {
-  return await body();
- } finally {
-  delete process.env.BEADS_DIR;
- }
-}
 
 
 
@@ -899,35 +886,25 @@ describe("G5 claim report on stdout", () => {
  });
 });
 
-/** The lead declares no role. Under a pinned run it dispatches; it never claims. */
+/** The lead declares no role. Under a marked run it dispatches; it never claims. */
 describe("G5 the lead never claims", () => {
  test.each([
   "bd ready --label agent:implementer --claim --json",
   "bd ready --claim --json",
   "BEADS_ACTOR=lead bd update orc-7 --claim",
- ])("refuses a role-less claim under a pinned run: %s", async command => {
-  const result = await pinned(() => gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command }));
+ ])("refuses a role-less claim under a marked run: %s", async command => {
+  const result = await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command });
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("the lead never claims work beads");
   expect(shown).toEqual([]);
  });
 
- test("reads the marker beside the pin when the session checkout has none", async () => {
-  // A linked worktree shares the primary checkout's marker, as `pinnedRunActive` reads it.
-  expect((await pinned(() => gateClaimEligibility(claims, ctxFor(undefined, plainRoot), { command: "bd ready --claim --json" })))?.block).toBe(true);
- });
-
- test("a role-less session with a pin but no marker anywhere is under no run", async () => {
-  process.env.BEADS_DIR = path.join(plainRoot, ".beads");
+ test("a role-less session whose checkout holds no marker is under no run", async () => {
   expect(await gateClaimEligibility(claims, ctxFor(undefined, plainRoot), { command: "bd ready --claim --json" })).toBeUndefined();
  });
 
- test("a role-less session with a marker but no pin is under no run", async () => {
-  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd ready --claim --json" })).toBeUndefined();
- });
-
- test("a role-less read under a pinned run is not a claim", async () => {
-  expect(await pinned(() => gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd show orc-7 --json" }))).toBeUndefined();
+ test("a role-less read under a marked run is not a claim", async () => {
+  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd show orc-7 --json" })).toBeUndefined();
  });
 });
 

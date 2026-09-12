@@ -223,7 +223,7 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    preserves the claim, checkout, capture, terminal result, and evidence for recovery.
    Re-enter only through the rooted `omp --cwd "<canonical-worktree>" --config
    "<run-overlay>"` procedure in `planning.md`, with the same absolute
-   `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`.
+   `ORCHESTRATE_MARKER_FILE`.
 5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
    <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
    whatever the bead says.
@@ -347,6 +347,10 @@ source of truth.
 - **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
   recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
   ephemeral ownership separately and releases each through its own path.
+- **Store sync:** only the lead syncs the beads database during a run, once, at the barrier
+  after every agent has yielded: `bd dolt commit`, then `bd dolt push`. Workers never run
+  `bd dolt push|pull` (G6 refuses it), because the routed sync is a second Dolt engine on the
+  run's journal; `references/beads-store.md` has the discipline and the store probe.
 
 ## Human-in-the-loop and safe autonomy
 

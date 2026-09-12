@@ -107,23 +107,16 @@ async function verdict(
 async function pinnedRun(dir: string, body = JSON.stringify({ schema_version: 1, run_id: "run-wiring" })): Promise<void> {
  await fs.mkdir(path.join(dir, ".orchestration"), { recursive: true });
  await fs.writeFile(path.join(dir, ".orchestration", ".active-run"), body);
- process.env.BEADS_DIR = path.join(dir, ".beads");
 }
 
 describe("gate dispatcher wiring", () => {
  let dir: string;
- let previousPin: string | undefined;
 
  beforeEach(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), "orc-wiring-"));
-  // Every case states its own run scope; the ambient shell's pin must not supply one.
-  previousPin = process.env.BEADS_DIR;
-  delete process.env.BEADS_DIR;
  });
 
  afterEach(async () => {
-  if (previousPin === undefined) delete process.env.BEADS_DIR;
-  else process.env.BEADS_DIR = previousPin;
   await fs.rm(dir, { recursive: true, force: true });
  });
 
@@ -179,25 +172,19 @@ describe("gate dispatcher wiring", () => {
   expect(sent).toHaveLength(0);
  });
 
- test("rewrites a matching runtime database alias to the canonical session pin", async () => {
+ test("a bash call in a run that no gate revises leaves with its input untouched", async () => {
   await pinnedRun(dir);
-  const beadsDir = process.env.BEADS_DIR as string;
-  const alias = path.join(dir, "run-beads-alias");
-  await fs.mkdir(beadsDir);
-  await fs.symlink(beadsDir, alias, "dir");
   const { pi, handlers, errors } = runtimeApi();
   ompOrchestrate(pi);
 
   const results = await dispatchAll(
    handlers,
-   { toolName: "bash", input: { command: "echo ok", env: { BEADS_DIR: alias }, derivedGateOnlyField: "must not survive" } },
+   { toolName: "bash", input: { command: "echo ok", derivedGateOnlyField: "must not survive" } },
    { cwd: dir },
   );
-  const revision = results.find(result => result?.input !== undefined);
 
   expect(errors).toEqual([]);
-  expect(revision?.input).toEqual({ command: "echo ok", env: { BEADS_DIR: await fs.realpath(beadsDir) } });
-  expect(revision?.input).not.toHaveProperty("derivedGateOnlyField");
+  expect(results.every(result => result === undefined)).toBe(true);
  });
 
  test("a tool the gate does not cover reaches no gate at all", async () => {
@@ -231,11 +218,9 @@ describe("gate dispatcher wiring", () => {
   }
  });
 
- test("a contract-bound worker outside a pinned run receives no protocol", async () => {
-  // The marker alone is the old run gate; without the process pin an isolated worker
-  // could not find it, and a worker whose cwd holds a stray marker is not in this run.
+ test("a contract-bound worker whose checkout holds a malformed marker receives no protocol", async () => {
   await fs.mkdir(path.join(dir, ".orchestration"), { recursive: true });
-  await fs.writeFile(path.join(dir, ".orchestration", ".active-run"), "run-wiring-unpinned");
+  await fs.writeFile(path.join(dir, ".orchestration", ".active-run"), "{broken");
   const { pi, starts, sent } = workerApi();
   ompOrchestrate(pi);
   const ctx = {
@@ -248,15 +233,11 @@ describe("gate dispatcher wiring", () => {
  });
 
  /**
-  * The calls the run-scoped checks refuse, each in the shape an ordinary session reaches
-  * for: a read of the pin, a commit message quoting an assignment, OMP's own worktree
-  * command, and a structured override pointing at another database.
+  * The calls the run-scoped checks refuse, in the shape an ordinary session reaches for:
+  * OMP's own worktree command.
   */
  const SCOPED_REFUSALS: [string, Record<string, unknown>][] = [
-  ["a read of the pin variable", { command: "printenv BEADS_DIR" }],
-  ["a quoted mention in a commit message", { command: 'git commit -m "docs: reproduce with BEADS_DIR=/tmp/x bd list"' }],
   ["a worktree command", { command: "git worktree add ../scratch" }],
-  ["a structured override of the database", { command: "bd list --json", env: { BEADS_DIR: "/tmp/another/.beads" } }],
  ];
 
  test.each(SCOPED_REFUSALS)("a role-less session under no pinned run is not refused %s", async (_label, input) => {
@@ -321,11 +302,10 @@ describe("gate dispatcher wiring", () => {
   expect(refusal?.reason).toContain("wt switch");
  });
 
- test("an isolated worker finds the run through the pinned repository", async () => {
-  // The isolated copy's cwd holds no marker; the pin's parent does.
-  await pinnedRun(dir);
+ test("an isolated copy finds the run through the marker it carries", async () => {
   const isolated = await fs.mkdtemp(path.join(os.tmpdir(), "orc-wiring-isolated-"));
   try {
+   await pinnedRun(isolated);
    const { pi, handlers } = runtimeApi();
    ompOrchestrate(pi);
 
@@ -349,22 +329,17 @@ describe("gate dispatcher wiring", () => {
  */
 describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
  let dir: string;
- let previousPin: string | undefined;
  let previousWorktreeDir: string | undefined;
 
  beforeEach(async () => {
   // realpath: macOS reaches `/var` through a link and G2 compares resolved paths.
   dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "orc-wiring-worker-")));
-  previousPin = process.env.BEADS_DIR;
-  delete process.env.BEADS_DIR;
   // A base that does not exist, so OMP's isolation exemption cannot fire by accident.
   previousWorktreeDir = process.env.OMP_WORKTREE_DIR;
   process.env.OMP_WORKTREE_DIR = path.join(dir, "no-such-isolation-base");
  });
 
  afterEach(async () => {
-  if (previousPin === undefined) delete process.env.BEADS_DIR;
-  else process.env.BEADS_DIR = previousPin;
   if (previousWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
   else process.env.OMP_WORKTREE_DIR = previousWorktreeDir;
   await fs.rm(dir, { recursive: true, force: true });
@@ -426,19 +401,50 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
   }
  });
 
- test("a generic helper in an isolated copy is sandboxed by G1 through the pinned repository", async () => {
-  // The helper's cwd holds no marker and it declares no role; the pin's parent has the
-  // marker, which is the second root G1 documents and the one an isolated helper needs.
-  await pinnedRun(dir);
+ test("a generic helper in an isolated copy is sandboxed by G1 through the copied marker", async () => {
   const isolated = path.join(dir, "isolated-copy");
-  await fs.mkdir(isolated);
+  await pinnedRun(isolated);
   const { pi, handlers, errors } = workerApi();
   ompOrchestrate(pi);
 
   const result = await verdict(handlers, call("helper-echo", "echo ok"), { cwd: isolated });
 
   expect(errors).toEqual([]);
-  expect(result?.input).toEqual({ command: "echo ok", env: { BEADS_DIR: path.join(dir, ".beads"), BD_READONLY: "1" } });
+  expect(result?.input).toEqual({ command: "echo ok", env: { BD_READONLY: "1" } });
+ });
+
+ describe("a copy that keeps a private store", () => {
+  test.each([
+   ["the run's store is missing", false],
+   ["the redirect cannot be written", true],
+  ])("refuses bd commands but not other commands while %s", async (_label, unwritable) => {
+   // An isolated copy under OMP's base holding a store. Its marker names a run database
+   // that either does not exist or exists while the copy's `.beads` refuses the redirect.
+   const base = path.join(dir, "isolation-base");
+   process.env.OMP_WORKTREE_DIR = base;
+   const copy = path.join(base, "copy");
+   await fs.mkdir(path.join(copy, ".beads", "embeddeddolt"), { recursive: true });
+   await fs.writeFile(path.join(copy, ".beads", "embeddeddolt", "data"), "copied store");
+   const primary = path.join(dir, "primary", ".beads");
+   if (unwritable) await fs.mkdir(path.join(primary, "embeddeddolt"), { recursive: true });
+   await pinnedRun(copy, JSON.stringify({ schema_version: 1, run_id: "run-wiring", beads_dir: primary }));
+   if (unwritable) await fs.chmod(path.join(copy, ".beads"), 0o555);
+   const { pi, handlers, errors } = workerApi();
+   ompOrchestrate(pi);
+   try {
+    const refused = await verdict(handlers, call("bd-list", "bd list --json"), { cwd: copy, role: "implementer" });
+    const allowed = await verdict(handlers, call("echo", "echo ok"), { cwd: copy, role: "implementer" });
+
+    expect(errors).toEqual([]);
+    expect(refused?.block).toBe(true);
+    expect(refused?.reason).toContain("private copy of the beads store");
+    expect(allowed?.block).not.toBe(true);
+    expect(await fs.readFile(path.join(copy, ".beads", "embeddeddolt", "data"), "utf8")).toBe("copied store");
+    expect(await fs.stat(path.join(copy, ".beads", "redirect")).catch(() => null)).toBeNull();
+   } finally {
+    await fs.chmod(path.join(copy, ".beads"), 0o755);
+   }
+  });
  });
 
  test("a generic helper that sets the sandbox variable inline is refused by G1", async () => {
@@ -599,6 +605,32 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    );
 
    expect(result).toBeUndefined();
+  });
+ });
+
+ describe("G6 refusals reach the verdict", () => {
+  test("a worker's routed sync under an active marker is blocked, not merely noticed", async () => {
+   await pinnedRun(dir);
+   const { pi, handlers, sent, errors } = workerApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(handlers, call("worker-sync", "bd dolt pull"), { cwd: dir, role: "implementer" });
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("sync is the lead's barrier step");
+   expect(sent).toEqual([]);
+  });
+
+  test("the lead's own sync under the same marker passes G6", async () => {
+   await pinnedRun(dir);
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(handlers, call("lead-sync", "bd dolt push"), { cwd: dir });
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBeUndefined();
   });
  });
 });

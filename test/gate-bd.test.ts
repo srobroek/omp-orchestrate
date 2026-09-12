@@ -421,11 +421,17 @@ interface Outcome {
 
 let sent: { message: Record<string, unknown>; options: Record<string, unknown> }[] = [];
 
-/** `ExtensionAPI` as this gate consumes it: one channel, recorded rather than delivered. */
+/** The lead's seat has no `yield`; a spawned session's does. */
+const LEAD_TOOLS: { name: string }[] = [];
+const WORKER_TOOLS: { name: string }[] = [{ name: "yield" }];
+let tools = LEAD_TOOLS;
+
+/** `ExtensionAPI` as this gate consumes it: one channel, recorded rather than delivered, and the seat. */
 const pi = {
 	sendMessage: (message: Record<string, unknown>, options: Record<string, unknown>) => {
 		sent.push({ message, options });
 	},
+	getAllTools: () => tools,
 } as unknown as ExtensionAPI;
 
 /** The temporary tree holding all three. */
@@ -459,24 +465,20 @@ beforeAll(async () => {
 	outsideRun = path.join(root, "outside-run");
 	await fs.mkdir(outsideRun, { recursive: true });
 	// The override wins outright over the default path, so an exported value in the
-	// ambient environment would point every case at one file.
+	// ambient environment would point every case at one file. G6 fires only under a
+	// marked run, so each case's cwd alone decides whether it is in a run.
 	priorMarkerFile = process.env.ORCHESTRATE_MARKER_FILE;
 	delete process.env.ORCHESTRATE_MARKER_FILE;
-	// G6 fires only under a pinned run. The pin sits beside no marker, so each case's cwd
-	// alone decides whether it is in a run; the ambient shell's pin must not.
-	priorPin = process.env.BEADS_DIR;
-	process.env.BEADS_DIR = path.join(root, ".beads");
 });
 
 afterAll(async () => {
 	if (priorMarkerFile !== undefined) process.env.ORCHESTRATE_MARKER_FILE = priorMarkerFile;
-	if (priorPin === undefined) delete process.env.BEADS_DIR;
-	else process.env.BEADS_DIR = priorPin;
 	await fs.rm(root, { recursive: true, force: true });
 });
 
 afterEach(() => {
 	Reflect.deleteProperty(globalThis, ACTOR_NOTICE_ARBITER);
+	tools = LEAD_TOOLS;
 });
 
 async function rawGateInput(
@@ -546,32 +548,6 @@ describe("G6 outside a run", () => {
 		// `.catch(() => null)`: an unreadable marker is not a run. A cwd that does not
 		// exist is the cheapest shape of that, and an isolated worker's cwd can vanish.
 		expect(await gate("bd update orc-1 --claim", path.join(outsideRun, "no-such-dir"))).toEqual(SILENT);
-	});
-
-	test("is silent with a marker but no process pin", async () => {
-		// A marker without the run's pin is a stray or another process's run: the pin is
-		// what `/orchestrate-run` leaves on the process, and what every child inherits.
-		const pin = process.env.BEADS_DIR;
-		delete process.env.BEADS_DIR;
-		try {
-			expect(await gate("bd update orc-1 --claim", inRun)).toEqual(SILENT);
-		} finally {
-			process.env.BEADS_DIR = pin;
-		}
-	});
-
-	test("notifies from an isolated cwd when the pinned repository holds the marker", async () => {
-		// An isolated worker's copy carries no `.orchestration/`; the run is found beside
-		// the pin, as G1 finds it.
-		const pin = process.env.BEADS_DIR;
-		process.env.BEADS_DIR = path.join(inRun, ".beads");
-		try {
-			const outcome = await gate("bd update orc-1 --claim", outsideRun);
-			expect(outcome.block).toBeUndefined();
-			expect(outcome.notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
-		} finally {
-			process.env.BEADS_DIR = pin;
-		}
 	});
 });
 
@@ -762,5 +738,96 @@ describe("G6 on input it cannot read", () => {
 		["a lone program with flags", "bd --json"],
 	])("stays silent on %s", async (_label, command) => {
 		expect(await gate(command)).toEqual(SILENT);
+	});
+});
+
+/**
+ * The two refusals: a routed sync from a spawned seat, and a named database from any
+ * seat. Both only inside a run, both silent (no notice rides along with a block).
+ */
+describe("G6 refusals", () => {
+	const SYNC_REASON = "sync is the lead's barrier step";
+	const DATABASE_REASON = "the run's database is resolved by bd";
+
+	describe("a routed sync", () => {
+		test.each([
+			["pull", "bd dolt pull"],
+			["push", "bd dolt push"],
+			["fetch", "bd dolt fetch"],
+			["clone", "bd dolt clone git+https://example.invalid/r.git"],
+			["sync", "bd dolt sync"],
+			["pull after other work", "git pull --ff-only && bd dolt pull"],
+			["pull inside a wrapper shell", "sh -c 'bd dolt pull || true'"],
+			["push with a global flag", "bd --json dolt push"],
+		])("from a worker is refused: %s", async (_label, command) => {
+			tools = WORKER_TOOLS;
+			const outcome = await gate(command);
+			expect(outcome.block).toContain(SYNC_REASON);
+			expect(outcome.block).toContain("bd dolt commit");
+			expect(outcome.notices).toEqual([]);
+		});
+
+		test("names the action it refused", async () => {
+			tools = WORKER_TOOLS;
+			expect((await gate("bd dolt pull")).block).toContain("'bd dolt pull'");
+		});
+
+		test.each([
+			["the lead's barrier push", LEAD_TOOLS, "bd dolt push"],
+			["the lead's pull", LEAD_TOOLS, "bd dolt pull"],
+			["a worker's dolt status", WORKER_TOOLS, "bd dolt status"],
+			["a worker's dolt commit", WORKER_TOOLS, "bd dolt commit -m 'checkpoint'"],
+			["a worker's dolt show", WORKER_TOOLS, "bd dolt show"],
+			["a worker asking for help", WORKER_TOOLS, "bd dolt pull --help"],
+			["a worker's git pull", WORKER_TOOLS, "git pull"],
+		])("lets %s run", async (_label, seat, command) => {
+			tools = seat;
+			expect((await gate(command)).block).toBeUndefined();
+		});
+
+		test("outside a run a worker's sync is not this gate's business", async () => {
+			tools = WORKER_TOOLS;
+			expect(await gate("bd dolt pull", outsideRun)).toEqual(SILENT);
+		});
+	});
+
+	describe("a named database", () => {
+		test.each([
+			["--db as its own token", { command: "bd --db /elsewhere/.beads count" }, "'--db'"],
+			["--db= inline", { command: "bd --db=/elsewhere/.beads count" }, "'--db'"],
+			["--db after the subcommand", { command: "bd count --db /elsewhere/.beads" }, "'--db'"],
+			["an inline assignment", { command: "BEADS_DB=/elsewhere/.beads bd count" }, "'BEADS_DB='"],
+			["an env prefix", { command: "env BEADS_DB=/elsewhere/.beads bd count" }, "'BEADS_DB='"],
+			["the bash call's own env", { command: "bd count", env: { BEADS_DB: "/elsewhere/.beads" } }, "'env.BEADS_DB'"],
+			["a database on a claim", { command: "BEADS_ACTOR=impl bd --db /elsewhere/.beads update orc-1 --claim" }, "'--db'"],
+		])("is refused from any seat: %s", async (_label, input, carrier) => {
+			for (const seat of [LEAD_TOOLS, WORKER_TOOLS]) {
+				tools = seat;
+				const outcome = await gateInput(input);
+				expect(outcome.block).toContain(DATABASE_REASON);
+				expect(outcome.block).toContain(carrier);
+				expect(outcome.notices).toEqual([]);
+			}
+		});
+
+		test.each([
+			["-C into the clone", "bd -C /run/repo show orc-1"],
+			["a --db on another program", "sqlite3 --db /x.db 'select 1' && bd count"],
+			["a variable that merely shares the prefix", "BEADS_DBX=1 bd count"],
+		])("lets %s run", async (_label, command) => {
+			tools = WORKER_TOOLS;
+			expect((await gate(command)).block).toBeUndefined();
+		});
+
+		test("outside a run a named database is not this gate's business", async () => {
+			expect(await gate("bd --db /elsewhere/.beads count", outsideRun)).toEqual(SILENT);
+		});
+
+		test("a refusal wins over the actor rewrite", async () => {
+			const claims = createClaimState();
+			claims.recordClaim({ actor: "worker-1", beadIds: ["orc-1"] });
+			const result = await rawGateInput({ command: "bd --db /elsewhere/.beads comment orc-1 'REPORTED done'" }, inRun, "refused", claims);
+			expect(result).toEqual({ block: true, reason: expect.stringContaining(DATABASE_REASON) });
+		});
 	});
 });

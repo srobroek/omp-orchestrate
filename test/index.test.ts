@@ -7,16 +7,6 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import * as actualBd from "../src/bd";
 import ompOrchestrate from "../src/index";
 
-// Every case below states its own run scope; the ambient shell's pin must not supply one.
-let previousPin: string | undefined;
-beforeEach(() => {
-	previousPin = process.env.BEADS_DIR;
-	delete process.env.BEADS_DIR;
-});
-afterEach(() => {
-	if (previousPin === undefined) delete process.env.BEADS_DIR;
-	else process.env.BEADS_DIR = previousPin;
-});
 
 type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
 type EventHandler = (event: unknown, ctx?: unknown) => unknown;
@@ -273,8 +263,7 @@ describe("actor rewrite keeps claim gates active", () => {
 		await writeFile(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
 		const prior = process.env.ORCHESTRATE_MARKER_FILE;
 		process.env.ORCHESTRATE_MARKER_FILE = join(root, ".orchestration", ".active-run");
-		// G6 fires only under a pinned run; the pin's repository is where the marker lives.
-		process.env.BEADS_DIR = join(root, ".beads");
+		// G6 fires only under a marked run; the override points every cwd at this marker.
 		return { root, prior };
 	}
 

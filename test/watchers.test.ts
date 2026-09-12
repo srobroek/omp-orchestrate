@@ -35,7 +35,7 @@ const MINUTE = 60_000;
 
 let cwd: string;
 
-const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET", "ORC_TEST_BD_WHERE", "ORC_TEST_BD_SHOW", "ORC_TEST_BD_COMMENTS", "BEADS_DIR"] as const;
+const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET", "ORC_TEST_BD_WHERE", "ORC_TEST_BD_SHOW", "ORC_TEST_BD_COMMENTS"] as const;
 
 beforeEach(async () => {
 	cwd = join(tmpdir(), `orc-watchers-${Math.random().toString(36).slice(2)}`);
@@ -154,9 +154,9 @@ describe("bdMutation", () => {
 	});
 });
 
-/** The event `bdMutationEvent` reports for a clean write against the session's own store. */
+/** The event `bdMutationEvent` reports for a clean write against the run's own store. */
 function ownWrite(child: string, command: string) {
-	return { child, command, exitCode: 0, store: process.env.BEADS_DIR, foreignStore: false };
+	return { child, command, exitCode: 0, store: undefined };
 }
 
 describe("bdMutationEvent", () => {
@@ -168,72 +168,26 @@ describe("bdMutationEvent", () => {
 		expect(bdMutationEvent(bashEnd("kid-1"))).toEqual(ownWrite("kid-1", "bd update bd-7 --claim"));
 	});
 
-	test("attributes the write to the store it targeted", () => {
-		// A researcher's sandbox writes were counted as run mutations because the
-		// ledger classified by command text alone. The pin is the run's store; a
-		// call that names another one is provenance, not a run mutation.
-		process.env.BEADS_DIR = "/run/.beads";
-		bdMutationEvent(bashStart("kid-1", "bd update bd-7 --claim"));
-		expect(bdMutationEvent(bashEnd("kid-1"))).toMatchObject({ store: "/run/.beads", foreignStore: false });
-
+	test.each([
+		["a --db path", "bd create 'sandbox' --type task --db /tmp/sandbox/.beads/embeddeddolt", undefined, "/tmp/sandbox/.beads/embeddeddolt"],
+		["a --db= path", "bd close bd-7 --db=/tmp/sandbox/.beads", undefined, "/tmp/sandbox/.beads"],
+		["a -C directory", "bd -C /tmp/sandbox close bd-7", undefined, "/tmp/sandbox"],
+		["an inline BEADS_DB assignment", "BEADS_DB=/tmp/inline/.beads bd close bd-7", { BEADS_DB: "/tmp/env/.beads" }, "/tmp/inline/.beads"],
+		["a structured BEADS_DB env", "bd close bd-7", { BEADS_DB: "/tmp/env/.beads" }, "/tmp/env/.beads"],
+	])("attributes a write naming %s to that store, as provenance rather than a run mutation", (_label, command, env, store) => {
+		// A researcher's sandbox writes were counted as run mutations because the ledger
+		// classified by command text alone. Inside a run bd resolves the run's store from the
+		// working directory; a call that names one points elsewhere.
 		bdMutationEvent({
 			id: "kid-1",
-			event: {
-				type: "tool_execution_start",
-				toolCallId: "call-2",
-				toolName: "bash",
-				args: { command: "bd create 'sandbox' --type task", env: { BEADS_DIR: "/tmp/sandbox/.beads" } },
-			},
+			event: { type: "tool_execution_start", toolCallId: "call-2", toolName: "bash", args: { command, ...(env === undefined ? {} : { env }) } },
 		});
-		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-2"))).toMatchObject({
-			store: "/tmp/sandbox/.beads",
-			foreignStore: true,
-		});
-
-		// An inline assignment is what the shell applies last, so it outranks the call's env.
-		bdMutationEvent({
-			id: "kid-1",
-			event: {
-				type: "tool_execution_start",
-				toolCallId: "call-3",
-				toolName: "bash",
-				args: { command: "BEADS_DIR=/tmp/inline/.beads bd close bd-7", env: { BEADS_DIR: "/run/.beads" } },
-			},
-		});
-		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-3"))).toMatchObject({
-			store: "/tmp/inline/.beads",
-			foreignStore: true,
-		});
-
-		// A structured env naming the pin itself is the run's store.
-		bdMutationEvent({
-			id: "kid-1",
-			event: {
-				type: "tool_execution_start",
-				toolCallId: "call-4",
-				toolName: "bash",
-				args: { command: "bd close bd-7", env: { BEADS_DIR: "/run/.beads" } },
-			},
-		});
-		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-4"))).toMatchObject({
-			store: "/run/.beads",
-			foreignStore: false,
-		});
+		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-2"))).toMatchObject({ store });
 	});
 
-	test("an unpinned session records the named store and calls nothing foreign", () => {
-		bdMutationEvent({
-			id: "kid-1",
-			event: {
-				type: "tool_execution_start",
-				toolCallId: "call-1",
-				toolName: "bash",
-				args: { command: "bd close bd-7", env: { BEADS_DIR: "/tmp/sandbox/.beads" } },
-			},
-		});
-		expect(bdMutationEvent(bashEnd("kid-1"))).toMatchObject({ store: "/tmp/sandbox/.beads", foreignStore: false });
+	test("a write naming no store is the run's", () => {
 		bdMutationEvent(bashStart("kid-1", "bd close bd-8"));
-		expect(bdMutationEvent(bashEnd("kid-1"))).toMatchObject({ store: undefined, foreignStore: false });
+		expect(bdMutationEvent(bashEnd("kid-1"))).toEqual(ownWrite("kid-1", "bd close bd-8"));
 	});
 
 	test("carries the reported exit code through", () => {
@@ -348,14 +302,10 @@ function settingsReads(): number {
 	return settingsSpy.mock.calls.length;
 }
 
-/**
- * Pin the run's database up front, for tests whose subject is not the pin. The
- * preflight pins unconditionally, and an unpinned session would otherwise reach for
- * the real `bd`.
- */
-async function pinned(): Promise<void> {
-	await mkdir(join(cwd, ".beads"), { recursive: true });
-	process.env.BEADS_DIR = join(cwd, ".beads");
+/** A run marker at `cwd`, recording the run's database unless `beadsDir` is `null`. */
+async function marked(beadsDir: string | null = join(cwd, ".beads")): Promise<void> {
+	await mkdir(join(cwd, ".orchestration"), { recursive: true });
+	await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-w5", ...(beadsDir === null ? {} : { beads_dir: beadsDir }) }));
 }
 
 describe("W5 shared-database precondition", () => {
@@ -369,91 +319,37 @@ describe("W5 shared-database precondition", () => {
 		await stubSettings({ ...COMPLIANT_SETTINGS, "task.isolation.enabled": enabled });
 	}
 
-	afterEach(() => {
-		delete process.env.BEADS_DIR;
-	});
-
-	test("isolation with no pinned path pins the database bd resolves", async () => {
-		// The preflight asks bd for the active database and pins that canonical path so every
-		// child inherits it. Linked worktrees may resolve the primary checkout's database;
-		// copied checkouts must not inherit an unrelated ancestor database.
+	test("a marker without the run's database asks for a re-activation", async () => {
+		// A marker written before the field existed leaves every isolated copy on its private
+		// store; re-activation records the database, so that is the repair the line names.
 		await stubOmp(true);
-		await fakeBd();
-		await mkdir(join(cwd, ".beads"), { recursive: true });
+		await marked(null);
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
-		expect(process.env.BEADS_DIR).toBe(await realpath(join(cwd, ".beads")));
-		expect((await bdCalls()).map(call => call[0])).toContain("where");
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
-	});
-
-	test("isolation in a linked worktree pins the primary checkout database", async () => {
-		await stubOmp(true);
-		await fakeBd();
-		const primary = join(cwd, "primary");
-		const linked = join(cwd, "linked");
-		await mkdir(primary);
-		const runGit = async (args: string[]) => {
-			const proc = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "pipe" });
-			const code = await proc.exited;
-			if (code !== 0) throw new Error(await new Response(proc.stderr).text());
-		};
-		await runGit(["init", primary]);
-		await runGit(["-C", primary, "config", "user.email", "test@example.com"]);
-		await runGit(["-C", primary, "config", "user.name", "Test"]);
-		await runGit(["-C", primary, "commit", "--allow-empty", "-m", "init"]);
-		await runGit(["-C", primary, "worktree", "add", "-b", "linked", linked]);
-		const primaryBeads = join(primary, ".beads");
-		await mkdir(primaryBeads);
-		process.env.ORC_TEST_BD_WHERE = primaryBeads;
-		const rig = harness();
-		resetWatchers();
-
-		await preflightSettings(rig.pi, linked);
-
-		expect(process.env.BEADS_DIR).toBe(await realpath(primaryBeads));
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR");
-	});
-
-	test("a pin bd refuses is reported with bd's reason", async () => {
-		await stubOmp(true);
-		await fakeBd();
-		process.env.ORC_TEST_BD_FAIL = "where";
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(process.env.BEADS_DIR).toBeUndefined();
 		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("BEADS_DIR could not be pinned");
-		expect(notice).toContain("bd could not locate a beads database");
-		// The old remedies are gone with the server they served.
-		expect(notice).not.toContain("bd init --server");
-		expect(notice).not.toContain("per-project Dolt server");
+		expect(notice).toContain("the run marker names no beads database");
+		expect(notice).toContain("/orchestrate-run");
+		expect((await bdCalls()).map(call => call[0])).not.toContain("where");
 	});
 
-	test("a pinned path silences it", async () => {
-		// `/orchestrate-run` sets this, and every child inherits it, so the run's database is
-		// the one an isolated worker reaches.
+	test("a marker recording the database is silent, and no bd is spawned for it", async () => {
 		await stubOmp(true);
-		await mkdir(join(cwd, ".beads"), { recursive: true });
-		process.env.BEADS_DIR = join(cwd, ".beads");
+		await fakeBd();
+		await marked();
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR is unset");
+		expect(rig.messages).toEqual([]);
+		expect(await bdCalls()).toEqual([]);
 	});
 
-	test("a repository with no beads database says nothing", async () => {
-		// Observed in the field: this warning fired in a repository that had never run
-		// `bd init`, where there are no claims to split and the advice was
-		// unactionable. The precondition applies to runs that track work in beads.
+	test("a repository with no run says nothing about the database", async () => {
 		await stubOmp(true);
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages.map(message => String(message.content)).join("\n")).not.toContain("BEADS_DIR is unset");
+		expect(rig.messages).toEqual([]);
 	});
 
 	/**
@@ -467,7 +363,7 @@ describe("W5 shared-database precondition", () => {
 		["roles that configure it", { reviewer: "mantle/openai.gpt-5.6-sol:medium" }, false],
 	])("a declared model role missing from %s warns=%p", async (_label, modelRoles, wantWarning) => {
 		await stubSettings({ ...COMPLIANT_SETTINGS, modelRoles });
-		await pinned();
+		await marked();
 		const rig = harness();
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
@@ -479,7 +375,7 @@ describe("W5 shared-database precondition", () => {
 		// Nothing is known about the settings, so no setting is named -- reading a missing
 		// value as "isolating" would warn about a split database on a run with no
 		// isolation. What the operator is told is that the check did not run.
-		await pinned();
+		await marked();
 		const rig = harness();
 		resetWatchers();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
@@ -487,42 +383,23 @@ describe("W5 shared-database precondition", () => {
 		const notice = String(rig.messages[0]?.content);
 		expect(notice).toContain("could not be read");
 		expect(notice).not.toContain("task.isolation");
-		expect(notice).not.toContain("BEADS_DIR");
+		expect(notice).not.toContain("beads database");
 	});
 
-	test("isolation explicitly off warns about shared trees and still pins the database", async () => {
+	test("isolation explicitly off warns about shared trees only", async () => {
 		await stubOmp(false);
-		await fakeBd();
-		await mkdir(join(cwd, ".beads"));
+		await marked();
 
 		const rig = harness();
 		resetWatchers();
 		const deviations = await preflightSettings(rig.pi, cwd);
 		expect(deviations.map(item => item.key)).toEqual(["task.isolation.enabled"]);
-		// G1 needs the pin whether or not workers are isolated; a lead that restarted mid-run
-		// had it inert until something re-pinned.
-		expect(process.env.BEADS_DIR).toBe(await realpath(join(cwd, ".beads")));
-		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("BEADS_DIR");
-	});
-
-	test("a pin the gates would reject is reported when a lead comes back to a marked repository", async () => {
-		// The pin lives in the process environment and does not survive a restart; an
-		// operator shell exporting a relative value used to leave the run reporting active
-		// with G1 disarmed and nothing said.
-		await stubOmp(true);
-		process.env.BEADS_DIR = "relative/.beads";
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		const notice = String(rig.messages.at(-1)?.content ?? "");
-		expect(notice).toContain("BEADS_DIR could not be pinned");
-		expect(notice).toContain("not an absolute path");
+		expect(String(rig.messages.at(-1)?.content ?? "")).not.toContain("beads database");
 	});
 });
 
 describe("the settings preflight preserves user configuration", () => {
 	async function deviantSettings(): Promise<void> {
-		await pinned();
 		await stubSettings({
 			...COMPLIANT_SETTINGS,
 			"task.isolation.merge": "patch",
@@ -1147,7 +1024,7 @@ describe("registerWatchers", () => {
 		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([]);
 
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		const comments = (await bdCalls()).filter(call => call[0] === "comment");
@@ -1176,9 +1053,8 @@ describe("registerWatchers", () => {
 		// `task` dispatch used to pay it to read a session-constant value.
 		await fakeBd();
 		await stubSettings({ ...COMPLIANT_SETTINGS, "task.agentModelOverrides": {} });
-		await pinned();
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		const rig = harness(undefined, true);
 		const spawn = spyOn(Bun, "spawn");
 		try {
@@ -1231,7 +1107,6 @@ describe("registerWatchers", () => {
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {
-		process.env.BEADS_DIR = join(cwd, ".beads");
 		const rig = harness();
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
@@ -1250,7 +1125,7 @@ describe("registerWatchers", () => {
 				type: "tool_execution_start",
 				toolCallId: "call-1",
 				toolName: "bash",
-				args: { command: "bd create 'scratch' --type task", env: { BEADS_DIR: join(cwd, "sandbox", ".beads") } },
+				args: { command: `bd -C ${join(cwd, "sandbox")} create 'scratch' --type task` },
 			},
 		});
 		await rig.emit("task:subagent:event", bashEnd("kid-3"));
@@ -1262,7 +1137,6 @@ describe("registerWatchers", () => {
 			child: "kid-1",
 			argv: "bd update bd-7 --status open",
 			exitCode: 0,
-			store: join(cwd, ".beads"),
 		});
 
 		const kid2 = JSON.parse((await readFile(join(cwd, ".orchestration", "audit", "kid-2.bdlog"), "utf8")).trim());
@@ -1271,7 +1145,7 @@ describe("registerWatchers", () => {
 		// The sandbox write is kept as provenance and tagged, so a reader counting the
 		// run's mutations can skip it.
 		const kid3 = JSON.parse((await readFile(join(cwd, ".orchestration", "audit", "kid-3.bdlog"), "utf8")).trim());
-		expect(kid3).toMatchObject({ child: "kid-3", store: join(cwd, "sandbox", ".beads"), foreign_store: true });
+		expect(kid3).toMatchObject({ child: "kid-3", store: join(cwd, "sandbox"), foreign_store: true });
 		expect(rig.failures).toEqual([]);
 	});
 
@@ -1340,7 +1214,7 @@ describe("registerWatchers", () => {
 	test("W3 warns on a task spawn without ever blocking it", async () => {
 		await fakeBd();
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 
 		const rig = harness();
 		registerWatchers(rig.pi);
@@ -1348,19 +1222,19 @@ describe("registerWatchers", () => {
 		await rig.emit("mcp:connection-status", { type: "failed", serverName: "context7", error: "x" });
 
 		expect(await rig.fire("tool_call", { toolName: "task", input: {} })).toEqual([undefined]);
-		const warn = (await bdCalls()).find(argv => argv[0] === "comment");
+		const warn = (await bdCalls()).find(argv => argv[0] === "comment" && String(argv[2]).startsWith("WARN preflight"));
 		expect(warn).toEqual(["comment", "bd-1", "WARN preflight: mcp:context7 degraded"]);
 
 		// Once per interval, and never for a tool it does not observe.
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		expect(await rig.fire("tool_call", { toolName: "bash", input: { command: "ls" } })).toEqual([undefined]);
-		expect((await bdCalls()).filter(argv => argv[0] === "comment")).toHaveLength(1);
+		expect((await bdCalls()).filter(argv => argv[0] === "comment" && String(argv[2]).startsWith("WARN preflight"))).toHaveLength(1);
 	});
 
 	test("W3 stays quiet when nothing is degraded", async () => {
 		await fakeBd();
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 
 		const rig = harness();
 		registerWatchers(rig.pi);
@@ -1377,7 +1251,7 @@ describe("registerWatchers", () => {
 			{ id: "bd-50", parent: "bd-49" },
 		]);
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 
 		const rig = harness(["bash", "read"]);
 		registerWatchers(rig.pi);
@@ -1443,7 +1317,7 @@ describe("registerWatchers", () => {
 		await fakeBd();
 		await mkdir(join(cwd, ".orchestration"));
 		const marker = join(cwd, ".orchestration", ".active-run");
-		await writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }, { id: "bd-2", parent: "bd-1" }]);
 		const rig = harness(["bash"]);
 		registerWatchers(rig.pi);
@@ -1469,7 +1343,7 @@ describe("registerWatchers", () => {
 	test("W4 discards an older goal whose lookup finishes after a newer event", async () => {
 		await fakeBd();
 		await mkdir(join(cwd, ".orchestration"));
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<BdBead[]>();
 		const lookup = spyOn(bd, "bdList")
@@ -1504,7 +1378,7 @@ describe("registerWatchers", () => {
 		await rig.fire("goal_updated", { goal: { id: "g-1", objective: "latest", status: "active" } });
 		expect(await bdCalls()).toEqual([]);
 		await mkdir(join(cwd, ".orchestration"));
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_FAIL = "comment";
 		await rig.sweeps[0]!();
 		expect(rig.messages).toEqual([]);
@@ -1521,7 +1395,7 @@ describe("registerWatchers", () => {
 	test("W4 relays A, B, then A again as three consecutive goal versions", async () => {
 		await fakeBd();
 		await mkdir(join(cwd, ".orchestration"));
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
 		const rig = harness(["bash"]);
 		registerWatchers(rig.pi);
@@ -1540,9 +1414,8 @@ describe("registerWatchers", () => {
 		// The session starts under a marker, so W5 runs too; keep it satisfied so the
 		// comments below are W4's alone.
 		await stubSettings(COMPLIANT_SETTINGS);
-		await pinned();
 		await mkdir(join(cwd, ".orchestration"));
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
 		const rig = harness(["bash"]);
 		registerWatchers(rig.pi);
@@ -1565,7 +1438,7 @@ describe("registerWatchers", () => {
 		// and the message assertion below would not be W4's alone.
 		await stubSettings(COMPLIANT_SETTINGS);
 		await mkdir(join(cwd, ".orchestration"));
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
 		const rig = harness(["bash"]);
 		registerWatchers(rig.pi);
@@ -1601,7 +1474,7 @@ describe("registerWatchers", () => {
 		// `tool_call` handler, which would block the tool it was inspecting.
 		process.env.BD_BIN = "definitely-not-a-real-binary-xyz";
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 
 		const rig = harness();
 		registerWatchers(rig.pi);
@@ -1650,7 +1523,6 @@ describe("W5 settings preflight", () => {
 
 	test.each([true, "false"])("an unsafe automatic background snapshot (%p) warns without changing config", async enabled => {
 		await stubSettings({ ...COMPLIANT_SETTINGS, "bash.autoBackground.enabled": enabled });
-		await pinned();
 		await mkdir(join(cwd, ".omp"));
 		const file = join(cwd, ".omp", "config.yml");
 		const config = "# operator owned\nbash:\n  autoBackground:\n    enabled: true\n";
@@ -1668,7 +1540,6 @@ describe("W5 settings preflight", () => {
 
 	test("a disabled automatic background snapshot satisfies claim observation", async () => {
 		await stubSettings({ ...COMPLIANT_SETTINGS, "bash.autoBackground.enabled": false });
-		await pinned();
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		expect(rig.messages).toEqual([]);
@@ -1687,7 +1558,6 @@ describe("W5 settings preflight", () => {
 	});
 
 	test("no live settings instance finds nothing, does not throw, and says the check did not run", async () => {
-		await pinned();
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		expect(String(rig.messages[0]?.content)).toContain("could not be read");
@@ -1695,7 +1565,6 @@ describe("W5 settings preflight", () => {
 
 	test("the check runs once per session, once it has run", async () => {
 		await stubSettings(COMPLIANT_SETTINGS);
-		await pinned();
 		const rig = harness();
 		await preflightSettings(rig.pi, cwd);
 		expect(settingsReads()).toBe(1);
@@ -1710,7 +1579,6 @@ describe("W5 settings preflight", () => {
 	test("an unreadable host leaves the check pending for the next activation", async () => {
 		// Marking the check done on a host where the settings could not be read meant the
 		// `/orchestrate-run` hook returned [] forever with no notice.
-		await pinned();
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		await stubSettings({ ...COMPLIANT_SETTINGS, "task.isolation.merge": "patch" });

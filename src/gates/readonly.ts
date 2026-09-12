@@ -2,9 +2,8 @@
  * G1 — bead-write-free sessions.
  *
  * A generic helper (a spawned worker with no `ORC-ROLE`) has no bead contract of
- * its own. During an active orchestrate run, the pinned `BEADS_DIR` identifies
- * the run database and the repository beside it owns a valid active-run marker;
- * only then does G1 impose `BD_READONLY=1` on the helper's shell calls.
+ * its own. During an active orchestrate run, its checkout carries a valid active-run
+ * marker; only then does G1 impose `BD_READONLY=1` on the helper's shell calls.
  *
  * The variable rides on the tool's `env`, which is a default the command text can
  * override: `BD_READONLY=0 bd ...`, `env -u BD_READONLY bd ...`, `unset BD_READONLY;
@@ -13,10 +12,9 @@
  * is a revision. bd's own error (`operation 'update' is not allowed in read-only mode`)
  * names the variable, so editing it is the plausible next slip, not only an evasion.
  *
- * The run and pin checks are deliberate. A helper in an unrelated OMP process,
- * or a process sharing the same cwd without the process-local pin, remains
- * writable. Contract-bound `orc-*` roles remain writable because their exit
- * contracts require bead comments and state transitions.
+ * The run check is deliberate. A helper in an unrelated OMP process, or in a checkout
+ * no run has marked, remains writable. Contract-bound `orc-*` roles remain writable
+ * because their exit contracts require bead comments and state transitions.
  *
  * Verified against a scratch database: under `BD_READONLY=1`, `bd show`,
  * `bd ready`, and `bd list` all exit 0, while `bd update`, `bd comment`,
@@ -26,7 +24,6 @@
  * `BD_READ_ONLY` do nothing, and there is no config key.
  */
 
-import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { isBeadWriteFree } from "../identity";
@@ -48,33 +45,22 @@ const SANDBOX_VARIABLE = "BD_READONLY";
 const BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"] as const;
 
 /**
- * Whether an orchestrate run pins this session: an absolute process-local `BEADS_DIR`
- * from `ensureBeadsPath`, and a valid active-run marker in the session checkout or in
- * the repository beside that pin.
- *
- * Two roots, because the marker normally belongs to the session checkout while a
- * linked worktree or an isolated copy shares the primary checkout's `.beads`; neither
- * root is treated as mutation authority. `readActiveRunStrict` rejects malformed
- * authority, so every uncertain candidate reads as no run.
+ * Whether an orchestrate run marks this session: a valid active-run marker in the
+ * session checkout. An isolated copy carries the primary's marker with it, so the one
+ * root is enough; a linked worktree holds none and is under no run unless it declares a
+ * role. `readActiveRunStrict` rejects malformed authority, so an uncertain marker reads
+ * as no run.
  *
  * This is the run predicate every run-scoped check shares: G1 here, and in
- * `src/index.ts` the runtime database check, G3, G6, the claim observer and G2. A
- * helper in an unrelated OMP process, or one sharing the cwd without the process-local
- * pin, is under no run.
+ * `src/index.ts` G3, G6, the claim observer and G2.
  */
 export async function pinnedRunActive(cwd: string): Promise<boolean> {
-	const beadsDir = process.env.BEADS_DIR;
-	if (beadsDir === undefined || beadsDir.length === 0 || !path.isAbsolute(beadsDir)) return false;
-
-	const pinnedRoot = path.dirname(beadsDir);
-	for (const root of pinnedRoot === cwd ? [cwd] : [cwd, pinnedRoot]) {
-		try {
-			if ((await readActiveRunStrict(root)) !== null) return true;
-		} catch {
-			// An unreadable or malformed candidate is not positive run authority.
-		}
+	try {
+		return (await readActiveRunStrict(cwd)) !== null;
+	} catch {
+		// An unreadable or malformed marker is not positive run authority.
+		return false;
 	}
-	return false;
 }
 
 /** Return the G1 environment addition for a generic helper in an active run. */
@@ -86,24 +72,7 @@ export async function beadWriteFreeEnv(
 	return (await pinnedRunActive(ctx.cwd)) ? { BD_READONLY: "1" } : undefined;
 }
 
-/**
- * The process pin, as an addition for a Bash call that carries no `BEADS_DIR`.
- *
- * The persistent shell of an interactive session predates the pin the run (or the
- * beads plugin) placed on `process.env`, so the pin has to travel on the call. The
- * beads plugin injects it too; a `tool_call` handler's revision replaces any other
- * extension's, so whichever revision wins must carry the pin itself.
- */
-export function pinAddition(input: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-	const pin = env.BEADS_DIR;
-	if (pin === undefined || pin.length === 0 || !path.isAbsolute(pin)) return {};
-	const existing = input.env;
-	const current = existing !== null && typeof existing === "object" ? (existing as Record<string, unknown>).BEADS_DIR : undefined;
-	if (typeof current === "string" && current.length > 0) return {};
-	return { BEADS_DIR: pin };
-}
-
-/** Rebuild raw Bash input from the allowlist, preserving a rewritten BEADS_DIR. */
+/** Rebuild raw Bash input from the allowlist, dropping derived gate-only fields. */
 export function rebuildBashInput(input: Record<string, unknown>): Record<string, unknown> {
 	const existing = input.env;
 	const env: Record<string, unknown> =
@@ -166,8 +135,8 @@ function escapesSandbox(command: unknown): boolean {
  * G1 for one `bash` call: the sandbox refusal, or the environment revision.
  *
  * Returns a block when the helper is sandboxed and its command edits the sandbox
- * variable; otherwise the single revision carrying the pin mirror and the readonly flag,
- * or `undefined` when the call already has both.
+ * variable; otherwise the revision adding the readonly flag, or `undefined` when the
+ * call is not sandboxed or already carries it.
  */
 export async function gateBeadWriteFree(
 	pi: ExtensionAPI,
@@ -175,7 +144,8 @@ export async function gateBeadWriteFree(
 	input: Record<string, unknown>,
 ): Promise<ToolCallEventResult | undefined> {
 	const sandbox = await beadWriteFreeEnv(pi, ctx);
-	if (sandbox !== undefined && escapesSandbox(input.command)) {
+	if (sandbox === undefined) return undefined;
+	if (escapesSandbox(input.command)) {
 		return {
 			block: true,
 			reason:
@@ -184,6 +154,6 @@ export async function gateBeadWriteFree(
 				`${SANDBOX_VARIABLE}; leave the variable alone, and hand any bead write to the contract-bound role that owns it.`,
 		};
 	}
-	return reviseBashEnv(input, { ...pinAddition(input), ...sandbox });
+	return reviseBashEnv(input, sandbox);
 }
 
