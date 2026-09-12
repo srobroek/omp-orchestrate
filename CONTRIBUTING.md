@@ -157,7 +157,7 @@ turning an actionable review-bot round into a fix bead under `orc_review_round_p
 
 ## Gates
 
-The extension registers a single `tool_call` handler with six numbered checks, one runtime
+The extension registers a single `tool_call` handler with seven numbered checks, one runtime
 database check, and one assignment notice. They catch protocol mistakes. They cannot
 enforce transactional isolation.
 
@@ -196,6 +196,14 @@ cause and lets the call run. A check refuses only what it read and can prove:
   - comments without protocol verbs
   - bug beads unreachable from queues
   - a role started as a nested `omp` process: `omp -p`, `--print`, `--prompt`, `--cwd`, `--agent` or `--session-dir` from a shell. `--config` on the same command exempts it
+- **G7 (`bash`):** within a marked run, from every session but the lead (the one the marker's `session_id` names), it refuses:
+  - `git push` to the run's primary branch (`metadata.primary_branch` on the run epic, `main` when unset): named as a destination, deleted, or pushed bare from a checkout on that branch. G7 reads that checkout's branch with `git symbolic-ref`, at the directory a `-C` names
+  - a bare push, a `HEAD` destination, or a `<src>:` with no destination, once the line runs `cd` or `pushd` or the push carries `--git-dir` or `--work-tree`. G7 cannot read the branch git pushes from there. The refusal names the explicit form, `git -C <dir> push origin <src>:<dst>`
+  - `git push --force`, `-f`, `--force-with-lease`, or a `+refspec`, to any branch
+  - `git push --all`, `--branches`, or `--mirror`
+  - `wt switch --create` from a generic helper: a role-less session that does not lead the run works in the tree the lead gave it
+
+  A push to `omp/task/<id>`, to a branch the session made, or to any other branch by name passes. A detached or unreadable `HEAD` refuses nothing. An unreadable run epic means `main`.
 - **G8 (every tool, notice):** in a worker session, compares the agent's `ORC-ROLE` and live model against the core contract once. On a mismatch it sends one notice naming the expected model, the live model, and the parking commands. G8 accepts a model that OMP moved the session onto through retry fallback. When G8 cannot read the model, it logs the cause and stays silent.
 
 ### Spelling and scan bounds

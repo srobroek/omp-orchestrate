@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bdInvocations, editsVariable, effectiveSegments, invokesCommand, parseBdInvocation, splitSegments } from "../src/shell";
+import { bdInvocations, commandInvocations, editsVariable, effectiveSegments, invokesCommand, parseBdInvocation, splitSegments } from "../src/shell";
 
 describe("splitSegments", () => {
 	test("splits on every shell operator", () => {
@@ -471,6 +471,32 @@ describe("invokesCommand", () => {
 
 	test("does not match the words inside a quoted payload", () => {
 		expect(invokesCommand(`bd comment x "do not run git worktree add"`, ["git", "worktree"])).toBe(false);
+	});
+});
+
+describe("commandInvocations", () => {
+	test("hands back the subcommand's words, with the program's global flags kept apart", () => {
+		expect(commandInvocations("git -C /repo push -u origin HEAD:main", ["git", "push"])).toEqual([
+			{ globals: ["-C", "/repo"], args: ["-u", "origin", "HEAD:main"] },
+		]);
+		expect(commandInvocations("gh pr checkout 12 --force", ["gh", "pr", "checkout"])).toEqual([{ globals: [], args: ["12", "--force"] }]);
+	});
+
+	test("one entry per segment that invokes the command, in order, through prefixes and wrappers", () => {
+		expect(commandInvocations("FOO=1 git push origin a; git status; sh -c 'git push origin b'", ["git", "push"])).toEqual([
+			{ globals: [], args: ["origin", "a"] },
+			{ globals: [], args: ["origin", "b"] },
+		]);
+	});
+
+	test("a one-word command receives everything after the program", () => {
+		expect(commandInvocations("timeout 5 wt switch --create x", ["wt"])).toEqual([{ globals: [], args: ["switch", "--create", "x"] }]);
+	});
+
+	test("empty for a different subcommand, a quoted mention, or an empty pattern", () => {
+		expect(commandInvocations("git log --grep push", ["git", "push"])).toEqual([]);
+		expect(commandInvocations(`echo "git push origin main"`, ["git", "push"])).toEqual([]);
+		expect(commandInvocations("git push", [])).toEqual([]);
 	});
 });
 

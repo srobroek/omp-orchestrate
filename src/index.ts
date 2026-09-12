@@ -22,6 +22,7 @@ import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { gateLeadContract } from "./gates/lead";
 import { createLeadExitWatch } from "./gates/lead-exit";
+import { gatePush } from "./gates/push";
 import { gateBeadWriteFree, rebuildBashInput } from "./gates/readonly";
 import { gateImplementerIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
@@ -117,6 +118,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
     const ownership = gateWorktrunkOwnership(input);
     if (ownership) return ownership;
+    // G7 after G3: a push or a Worktrunk checkout from the wrong seat is refused here. It
+    // parses first and reads the marker, then the epic, only once a command is known to push.
+    const push = await gatePush(ctx, input);
+    if (push) return push;
     // G6 before G5: it is a parse plus one marker read where G5 shells out to
     // `bd show` and `bd list`. It takes `pi` because most of its findings are
     // notices, which leave through `sendMessage`; a refusal (a routed sync from a

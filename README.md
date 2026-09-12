@@ -17,7 +17,7 @@ answers the questions it raises, and stops it. Agents claim their own work from 
 3. Workers edit in isolated copies of the checkout. The architect integrates their captured
    branches into one feature branch and opens one PR per feature.
 4. The plugin merges each approved PR at its reviewed head. No agent merges.
-5. Six tool-call gates and three rules hold every agent to its claim. The operator's writes
+5. Eight tool-call gates and three rules hold every agent to its claim. The operator's writes
    are `start`, `answer`, and `stop`.
 
 ## Prerequisites
