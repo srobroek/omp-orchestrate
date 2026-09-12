@@ -132,7 +132,7 @@ hand is never observed. G6 and the contract injection require the pinned run its
 
 ## Rules
 
-Five TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
+Four TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
 reminder on a protocol slip. None is a security boundary.
 
 The host matches the raw tool-argument JSON as the model streams it (`session/ttsr-coordinator.ts`,

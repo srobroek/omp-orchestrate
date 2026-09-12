@@ -369,18 +369,46 @@ function skipTransparentPrefix(segment: readonly string[], from: number): number
 }
 
 /**
- * Advance past `KEY=VALUE` assignments and an `env [-flags] KEY=VALUE...` prefix,
- * recording each assignment when a map is given.
+ * `env` options whose operand is the next word, so that word is not the program:
+ * `env -u NAME bd ...` and `env -C DIR bd ...` run bd. Long options also take the
+ * operand inline (`--unset=NAME`), short ones glued (`-uNAME`), as getopt reads them.
+ * `-S` splits its string into further `env` words and `leafSegments` splices them in;
+ * `-P` is BSD env's alternate `PATH`. Every other option is a switch (`-i`, `-0`, `-v`).
  */
-function skipEnvPrefix(segment: readonly string[], from: number, assignments?: Map<string, string>): number {
-	const record = (token: string): void => {
-		if (assignments === undefined) return;
+const ENV_OPERAND_FLAGS: Record<string, true> = {
+	"-u": true, "--unset": true,
+	"-C": true, "--chdir": true,
+	"-S": true, "--split-string": true,
+	"-P": true,
+};
+
+/** What a segment's assignment and `env` prefix does to the environment before its program runs. */
+interface EnvEdits {
+	/** `KEY=VALUE` words, inline or as `env` operands. */
+	assignments: Map<string, string>;
+	/** Names removed by `env -u NAME`, `--unset NAME` or `--unset=NAME`, in order. */
+	unsets: string[];
+	/** The first `env -S STR` on the walk, for the caller that splices its words in. */
+	split?: { at: number; consumed: number; text: string };
+}
+
+function noEnvEdits(): EnvEdits {
+	return { assignments: new Map<string, string>(), unsets: [] };
+}
+
+/**
+ * Advance past `KEY=VALUE` assignments and an `env [-flags] KEY=VALUE...` prefix,
+ * recording what they do to the environment when a collector is given.
+ */
+function skipEnvPrefix(segment: readonly string[], from: number, edits?: EnvEdits): number {
+	const assign = (token: string): void => {
+		if (edits === undefined) return;
 		const cut = token.indexOf("=");
-		assignments.set(token.slice(0, cut), token.slice(cut + 1));
+		edits.assignments.set(token.slice(0, cut), token.slice(cut + 1));
 	};
 	let index = from;
 	while (index < segment.length && ASSIGNMENT.test(segment[index] as string)) {
-		record(segment[index] as string);
+		assign(segment[index] as string);
 		index += 1;
 	}
 	const env = segment[index];
@@ -388,9 +416,31 @@ function skipEnvPrefix(segment: readonly string[], from: number, assignments?: M
 	index += 1;
 	while (index < segment.length) {
 		const token = segment[index] as string;
-		if (ASSIGNMENT.test(token)) record(token);
-		else if (!token.startsWith("-")) break;
-		index += 1;
+		if (ASSIGNMENT.test(token)) {
+			assign(token);
+			index += 1;
+			continue;
+		}
+		if (!token.startsWith("-")) break;
+		let { flag, inline } = splitFlag(token);
+		if (ENV_OPERAND_FLAGS[flag] !== true && !token.startsWith("--") && token.length > 2 && ENV_OPERAND_FLAGS[token.slice(0, 2)] === true) {
+			flag = token.slice(0, 2);
+			inline = token.slice(2);
+		}
+		if (ENV_OPERAND_FLAGS[flag] !== true) {
+			// A switch, or the `--` that ends the options.
+			index += 1;
+			continue;
+		}
+		const operand = inline ?? segment[index + 1];
+		const consumed = inline === undefined ? 2 : 1;
+		if (edits !== undefined && operand !== undefined) {
+			if (flag === "-u" || flag === "--unset") edits.unsets.push(operand);
+			else if ((flag === "-S" || flag === "--split-string") && edits.split === undefined) {
+				edits.split = { at: index, consumed, text: operand };
+			}
+		}
+		index += consumed;
 	}
 	return index;
 }
@@ -400,11 +450,32 @@ function skipEnvPrefix(segment: readonly string[], from: number, assignments?: M
  * assignments, an `env` prefix and transparent runners, in the order a shell reads
  * them (`then BEADS_ACTOR=w timeout 5 bd ...`).
  */
-function programIndex(segment: readonly string[], assignments?: Map<string, string>): number {
+function programIndex(segment: readonly string[], edits?: EnvEdits): number {
 	let index = 0;
 	while (index < segment.length && RESERVED_WORDS[segment[index] as string] === true) index += 1;
-	index = skipEnvPrefix(segment, index, assignments);
+	index = skipEnvPrefix(segment, index, edits);
 	return skipTransparentPrefix(segment, index);
+}
+
+/** Builtins whose `NAME=VALUE` operands set variables the way an assignment prefix does. */
+const ASSIGNING_BUILTINS: Record<string, true> = { export: true, declare: true, typeset: true, readonly: true, local: true };
+
+/**
+ * Whether one segment sets or unsets the variable `name`: as an assignment prefix
+ * (`NAME=v bd ...`, `env NAME=v bd ...`), an `env -u NAME` removal, or through a variable
+ * builtin (`export NAME=v`, `unset NAME`). A tool's `env` parameter sets a default the
+ * command text can override, so a gate that relies on a variable has to read the text.
+ */
+export function editsVariable(segment: readonly string[], name: string): boolean {
+	const edits = noEnvEdits();
+	const index = programIndex(segment, edits);
+	if (edits.assignments.has(name) || edits.unsets.includes(name)) return true;
+	const program = segment[index];
+	if (program === undefined) return false;
+	const operands = segment.slice(index + 1);
+	if (program === "unset") return operands.includes(name);
+	if (ASSIGNING_BUILTINS[program] === true) return operands.some(word => word.startsWith(`${name}=`));
+	return false;
 }
 
 /** Bound on wrapper-shell recursion, so a self-nesting payload cannot spin. */
@@ -435,7 +506,8 @@ function wrapperPayload(words: readonly string[], head: number): string | undefi
 /**
  * Executable leaf segments, expanding static shell wrappers and eval payloads. A
  * wrapper's own redirections apply to everything its payload runs, so they are carried
- * onto each leaf.
+ * onto each leaf. `env -S STR` is expanded in place: env splits the string into further
+ * words of its own, so `env -S 'FOO=1 bd' update x` runs `bd update x` under `FOO=1`.
  */
 function leafSegments(command: string, depth: number): Segment[] {
 	const expanded: Segment[] = [];
@@ -445,8 +517,14 @@ function leafSegments(command: string, depth: number): Segment[] {
 			continue;
 		}
 
+		const edits = noEnvEdits();
+		let head = programIndex(segment.words, edits);
+		if (edits.split !== undefined) {
+			const { at, consumed, text } = edits.split;
+			segment.words = [...segment.words.slice(0, at), ...splitSegments(text).flat(), ...segment.words.slice(at + consumed)];
+			head = programIndex(segment.words);
+		}
 		const words = segment.words;
-		const head = programIndex(words);
 		const program = words[head];
 		if (program === undefined) {
 			expanded.push(segment);
@@ -503,6 +581,8 @@ const PFLAG_TRUE: Record<string, true> = { "1": true, t: true, T: true, TRUE: tr
 export interface BdInvocation {
 	/** Environment assignments carried on the segment, inline or via `env`. */
 	assignments: Map<string, string>;
+	/** Variables the segment removes with `env -u NAME` before bd runs, in order. */
+	unsets: string[];
 	/** The `bd` subcommand, e.g. `update`, `ready`, `comment`. Empty when absent. */
 	subcommand: string;
 	/** Positionals after the subcommand — bead ids for most subcommands. */
@@ -525,9 +605,10 @@ export interface BdInvocation {
  *
  * Wider than the pattern `src/bd.ts` uses to sieve ids out of a dependency record, which
  * forbids a hyphen in the suffix and so rejects `orc-chaos-c3-05k` -- a real id, since a
- * configured issue prefix may itself contain one. Exported because two gates need the
- * same answer: G6 reads the token after an id as a comment body, G7 counts the ids one
- * claim names, and a second copy of this would let them disagree about what an id is.
+ * configured issue prefix may itself contain one. Exported because G6 needs the same
+ * answer twice: the token after an id is a comment body, and a claim's first positional
+ * is the bead whose `metadata.actor` seeds attribution. A second copy would let the two
+ * disagree about what an id is.
  *
  * Matched against a single token the tokeniser produced, never against command text.
  */
@@ -537,14 +618,15 @@ export const BEAD_ID = /^[a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+$/;
  * Parse one segment as a `bd` invocation, or return null when it is not one.
  *
  * Consumes leading reserved words, `KEY=VALUE` assignments, an optional
- * `env [-flags] KEY=VALUE...` prefix and transparent runners, then requires the next
- * token to basename as `bd`. Mirrors `claim_envelope` in the Python, except that
- * `--claim` is reported rather than required, so callers can gate on any `bd`
- * invocation. `redirections` are the segment's, as `bdInvocations` supplies them.
+ * `env [-flags] KEY=VALUE...` prefix (its operand-taking flags modelled, so `env -u X bd`
+ * runs bd) and transparent runners, then requires the next token to basename as `bd`.
+ * Mirrors `claim_envelope` in the Python, except that `--claim` is reported rather than
+ * required, so callers can gate on any `bd` invocation. `redirections` are the
+ * segment's, as `bdInvocations` supplies them.
  */
 export function parseBdInvocation(segment: readonly string[], redirections: readonly string[] = []): BdInvocation | null {
-	const assignments = new Map<string, string>();
-	const index = programIndex(segment, assignments);
+	const edits = noEnvEdits();
+	const index = programIndex(segment, edits);
 	const head = segment[index];
 	if (head === undefined || basename(head) !== "bd") return null;
 
@@ -579,7 +661,8 @@ export function parseBdInvocation(segment: readonly string[], redirections: read
 	}
 
 	return {
-		assignments,
+		assignments: edits.assignments,
+		unsets: edits.unsets,
 		subcommand: positionals[0] ?? "",
 		positionals: positionals.slice(1),
 		rest,
