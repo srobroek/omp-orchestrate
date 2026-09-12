@@ -1,0 +1,8 @@
+# Test runner configuration. `test/preload.ts` moves the process into an empty directory,
+# so a suite run inside a checkout with an active run never resolves that run's marker or
+# store through the process cwd (bead omp-orchestrate-dg8). The timeout covers the
+# git-backed fixtures, whose `git commit` alone costs 3-4 s on a host with SSH commit
+# signing (audit F-TEST-04).
+[test]
+preload = ["./test/preload.ts"]
+timeout = 20000
