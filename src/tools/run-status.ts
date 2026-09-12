@@ -1,10 +1,10 @@
 /**
  * `orc_run_status` — the standardised run status report.
  *
- * A TypeScript port of the reporting core of `scripts/run-status.py`. Every status
- * answer takes the same shape, so a reader compares runs instead of re-learning a
- * format: an epic rolls up through its features to their tasks, and the report
- * names what is claimable now, what is active, and what is blocked.
+ * Originally a Python reporting script in the orchestrate skill; the shape is kept so a
+ * reader compares runs instead of re-learning a format. A run epic rolls up through its
+ * architect-domain epics and their features to the tasks, and the report names what is
+ * claimable now, what is active, and what is blocked.
  *
  * `bd blocked` supplies the blocked set directly rather than walking the dependency
  * graph, because it already resolves which of a bead's dependencies are still open.
@@ -37,6 +37,8 @@ export interface StatusNode {
  type: string;
  state: BeadState;
  assignee?: string;
+ /** `metadata.actor`: the acting identity dispatch stamped on this bead; holds it even when the claim set no assignee. */
+ actor?: string;
  /** `metadata.role`: who this routes to while it is still unclaimed. */
  role?: string;
  /** `metadata.run_epic`: the run epic this bead was poured under. */
@@ -56,16 +58,22 @@ export interface StatusNode {
  blocked: boolean;
 }
 
-/** A feature (one architect domain) and every bead beneath it, at any depth. */
+/** A feature and every bead beneath it, at any depth. */
 export interface StatusFeature extends StatusNode {
  tasks: StatusNode[];
  counts: Counts;
 }
 
+/**
+ * An epic as a rollup. A run epic holds one epic per architect domain, each holding
+ * its features, so an epic child of an epic is a nested rollup, never a task.
+ */
 export interface StatusEpic extends StatusNode {
+ epics: StatusEpic[];
  features: StatusFeature[];
- /** Direct children that are not features, plus their descendants. */
+ /** Direct children that are neither epics nor features, plus their descendants. */
  tasks: StatusNode[];
+ /** Every node beneath this epic at any depth, including nested epics and features. */
  counts: Counts;
 }
 
@@ -151,6 +159,8 @@ function toNode(bead: BdBead, blocked: ReadonlySet<string>): StatusNode {
  };
  const assignee = bead.assignee;
  if (typeof assignee === "string" && assignee.length > 0) node.assignee = assignee;
+ const actor = metadataString(bead, "actor");
+ if (actor !== undefined) node.actor = actor;
  const role = metadataString(bead, "role");
  if (role !== undefined) node.role = role;
  const runEpic = metadataString(bead, "run_epic");
@@ -172,12 +182,11 @@ function tally(nodes: readonly StatusNode[]): Counts {
  return counts;
 }
 
-/** Every node an epic covers: its features, their tasks, and its direct tasks. */
+/** Every node an epic covers, at any depth: nested epics, features, and tasks. */
 function epicNodes(epic: StatusEpic): StatusNode[] {
  const nodes: StatusNode[] = [];
- for (const feature of epic.features) {
-  nodes.push(feature, ...feature.tasks);
- }
+ for (const child of epic.epics) nodes.push(child, ...epicNodes(child));
+ for (const feature of epic.features) nodes.push(feature, ...feature.tasks);
  nodes.push(...epic.tasks);
  return nodes;
 }
@@ -191,15 +200,21 @@ function progress(counts: Counts): string {
 }
 
 /**
- * Group beads into epic → feature → task, deriving each bead's state.
+ * Group beads into epic → epic → feature → task, deriving each bead's state.
  *
  * A root epic is an `epic` whose parent is not itself a known bead: a parent id
- * pointing at nothing is a dangling link, not a reason to hide the epic. Beneath a
+ * pointing at nothing is a dangling link, not a reason to hide the epic. An epic
+ * beneath an epic is a nested rollup (the architect domain under the run). Beneath a
  * feature, tasks are flattened to every descendant at any depth, so a subtask never
  * escapes its feature's counts.
+ *
+ * `event` beads are dropped before grouping. `bd set-state` writes one closed event
+ * child per transition, so a task in review already has several "closed" children;
+ * counting them reports a run half done when nothing has closed.
  */
-export function buildStatusTree(beads: readonly BdBead[], blockedIds: readonly string[]): StatusTree {
+export function buildStatusTree(allBeads: readonly BdBead[], blockedIds: readonly string[]): StatusTree {
  const blocked = new Set(blockedIds);
+ const beads = allBeads.filter(bead => field(bead, "issue_type") !== "event");
  const known = new Set(beads.map(bead => bead.id));
 
  const childrenOf = new Map<string, BdBead[]>();
@@ -231,6 +246,28 @@ export function buildStatusTree(beads: readonly BdBead[], blockedIds: readonly s
   return out;
  };
 
+ /** The rollup for one epic whose id is already placed. */
+ const rollup = (root: BdBead): StatusEpic => {
+  const epics: StatusEpic[] = [];
+  const features: StatusFeature[] = [];
+  const tasks: StatusNode[] = [];
+  for (const child of childrenOf.get(root.id) ?? []) {
+   if (placed.has(child.id)) continue;
+   placed.add(child.id);
+   const type = field(child, "issue_type");
+   if (type === "epic") {
+    epics.push(rollup(child));
+    continue;
+   }
+   const kin = descendants(child.id).map(bead => toNode(bead, blocked));
+   if (type === "feature") features.push({ ...toNode(child, blocked), tasks: kin, counts: tally(kin) });
+   else tasks.push(toNode(child, blocked), ...kin);
+  }
+  const epic: StatusEpic = { ...toNode(root, blocked), epics, features, tasks, counts: {} };
+  epic.counts = tally(epicNodes(epic));
+  return epic;
+ };
+
  const roots = beads
   .filter(bead => {
    if (field(bead, "issue_type") !== "epic") return false;
@@ -242,21 +279,7 @@ export function buildStatusTree(beads: readonly BdBead[], blockedIds: readonly s
  const epics: StatusEpic[] = [];
  for (const root of roots) {
   placed.add(root.id);
-  const features: StatusFeature[] = [];
-  const tasks: StatusNode[] = [];
-  for (const child of childrenOf.get(root.id) ?? []) {
-   if (placed.has(child.id)) continue;
-   placed.add(child.id);
-   const kin = descendants(child.id).map(bead => toNode(bead, blocked));
-   if (field(child, "issue_type") === "feature") {
-    features.push({ ...toNode(child, blocked), tasks: kin, counts: tally(kin) });
-   } else {
-    tasks.push(toNode(child, blocked), ...kin);
-   }
-  }
-  const epic: StatusEpic = { ...toNode(root, blocked), features, tasks, counts: {} };
-  epic.counts = tally(epicNodes(epic));
-  epics.push(epic);
+  epics.push(rollup(root));
  }
 
  const orphans = beads
@@ -283,43 +306,83 @@ function retainedBlocked(tree: StatusTree): string[] {
 
 function heldBy(node: StatusNode, actor: string): boolean {
  // assignee is the claim of record, but `bd update --status` does not set it (only
- // `--claim` does), so `metadata.actor` is a second and often more truthful signal.
- return node.assignee === actor || node.role === actor;
+ // `--claim` does), so `metadata.actor` -- the identity dispatch stamps on the bead --
+ // is a second and often more truthful signal. `metadata.role` is routing, not holding:
+ // matching it would return every unclaimed bead queued for that role.
+ return node.assignee === actor || node.actor === actor;
+}
+
+/** The epic with this id at any depth, or `undefined`. */
+function findEpic(epics: readonly StatusEpic[], id: string): StatusEpic | undefined {
+ for (const epic of epics) {
+  if (epic.id === id) return epic;
+  const nested = findEpic(epic.epics, id);
+  if (nested) return nested;
+ }
+ return undefined;
+}
+
+/** The epic directly holding the feature with this id, narrowed to that feature alone. */
+function findFeatureHolder(epics: readonly StatusEpic[], id: string): StatusEpic | undefined {
+ for (const epic of epics) {
+  const feature = epic.features.find(f => f.id === id);
+  if (feature) {
+   const holder: StatusEpic = { ...epic, epics: [], features: [feature], tasks: [], counts: {} };
+   holder.counts = tally(epicNodes(holder));
+   return holder;
+  }
+  const nested = findFeatureHolder(epic.epics, id);
+  if (nested) return nested;
+ }
+ return undefined;
+}
+
+/** The epic pruned to what `actor` holds, or `undefined` when that is nothing. */
+function heldSubtree(epic: StatusEpic, actor: string): StatusEpic | undefined {
+ const epics: StatusEpic[] = [];
+ for (const child of epic.epics) {
+  const kept = heldSubtree(child, actor);
+  if (kept) epics.push(kept);
+ }
+ const features: StatusFeature[] = [];
+ for (const feature of epic.features) {
+  const kept = feature.tasks.filter(task => heldBy(task, actor));
+  if (kept.length > 0 || heldBy(feature, actor)) features.push({ ...feature, tasks: kept, counts: tally(kept) });
+ }
+ const tasks = epic.tasks.filter(task => heldBy(task, actor));
+ if (epics.length === 0 && features.length === 0 && tasks.length === 0 && !heldBy(epic, actor)) return undefined;
+ const held: StatusEpic = { ...epic, epics, features, tasks, counts: {} };
+ held.counts = tally(epicNodes(held));
+ return held;
 }
 
 /**
  * Narrow a tree to one epic, one feature, or one actor's holdings.
  *
- * Counts are recomputed from what survives, so a filtered report never quotes
- * totals for work it does not show.
+ * The named epic — a run or an architect domain — becomes the report's root; a named
+ * feature is reported under the epic that holds it. Counts are recomputed from what
+ * survives, so a filtered report never quotes totals for work it does not show.
  */
 export function filterTree(tree: StatusTree, filter: StatusFilter): StatusTree {
  const { epic: wantEpic, feature: wantFeature, actor } = filter;
  if (wantEpic === undefined && wantFeature === undefined && actor === undefined) return tree;
 
- const epics: StatusEpic[] = [];
- for (const epic of tree.epics) {
-  if (wantEpic !== undefined && epic.id !== wantEpic) continue;
-
-  let features = wantFeature === undefined ? epic.features : epic.features.filter(f => f.id === wantFeature);
-  let tasks = wantFeature === undefined ? epic.tasks : [];
-
-  if (actor !== undefined) {
-   features = features
-    .map(feature => {
-     const kept = feature.tasks.filter(task => heldBy(task, actor));
-     return { ...feature, tasks: kept, counts: tally(kept) };
-    })
-    .filter(feature => feature.tasks.length > 0 || heldBy(feature, actor));
-   tasks = tasks.filter(task => heldBy(task, actor));
+ let epics = tree.epics;
+ if (wantEpic !== undefined) {
+  const found = findEpic(epics, wantEpic);
+  epics = found ? [found] : [];
+ }
+ if (wantFeature !== undefined) {
+  const holder = findFeatureHolder(epics, wantFeature);
+  epics = holder ? [holder] : [];
+ }
+ if (actor !== undefined) {
+  const held: StatusEpic[] = [];
+  for (const epic of epics) {
+   const kept = heldSubtree(epic, actor);
+   if (kept) held.push(kept);
   }
-
-  if (wantFeature !== undefined && features.length === 0) continue;
-  if (actor !== undefined && features.length === 0 && tasks.length === 0 && !heldBy(epic, actor)) continue;
-
-  const next: StatusEpic = { ...epic, features, tasks, counts: {} };
-  next.counts = tally(epicNodes(next));
-  epics.push(next);
+  epics = held;
  }
 
  let orphans = wantEpic === undefined && wantFeature === undefined ? tree.orphans : [];
@@ -330,19 +393,20 @@ export function filterTree(tree: StatusTree, filter: StatusFilter): StatusTree {
  return filtered;
 }
 
-/** One line naming the shape of a run: what a slash command shows without the rollup. */
+/** The report's first line: how many epics, features, tasks and blockers it covers, at every depth. */
 export function statusSummaryLine(tree: StatusTree): string {
- const features = tree.epics.reduce((sum, epic) => sum + epic.features.length, 0);
- const tasks = tree.epics.reduce(
-  (sum, epic) => sum + epic.tasks.length + epic.features.reduce((n, f) => n + f.tasks.length, 0),
-  0,
- );
- const bits = [
-  `${tree.epics.length} epics`,
-  `${features} features`,
-  `${tasks} tasks`,
-  `${tree.blocked.length} blocked`,
- ];
+ let epics = 0;
+ let features = 0;
+ let tasks = 0;
+ const count = (epic: StatusEpic): void => {
+  epics += 1;
+  features += epic.features.length;
+  tasks += epic.tasks.length;
+  for (const feature of epic.features) tasks += feature.tasks.length;
+  for (const child of epic.epics) count(child);
+ };
+ for (const epic of tree.epics) count(epic);
+ const bits = [`${epics} epics`, `${features} features`, `${tasks} tasks`, `${tree.blocked.length} blocked`];
  if (tree.orphans.length > 0) bits.push(`${tree.orphans.length} unparented`);
  return bits.join(" · ");
 }
@@ -350,6 +414,7 @@ export function statusSummaryLine(tree: StatusTree): string {
 function nodeLine(node: StatusNode, indent: string): string {
  const bits: string[] = [];
  if (node.assignee) bits.push(`@${node.assignee}`);
+ else if (node.actor) bits.push(`actor=${node.actor}`);
  else if (node.role) bits.push(`role=${node.role}`);
  if (node.blocked) bits.push("blocked");
  // Each bit names the key it came from: an actor handle, a bead id and a run epic id
@@ -370,6 +435,26 @@ function countsLine(counts: Counts): string {
  return parts.length > 0 ? parts.join("  ") : "no children";
 }
 
+/** One epic's rollup, nested epics indented beneath it. */
+function renderEpic(epic: StatusEpic, indent: string, opts: RenderOptions, lines: string[]): void {
+ lines.push(`${indent}EPIC  ${epic.id}  ${epic.title}  [${epic.state}]`);
+ lines.push(`${indent}  ${progress(epic.counts)}   ${countsLine(epic.counts)}`);
+ for (const child of epic.epics) renderEpic(child, `${indent}  `, opts, lines);
+ for (const feature of epic.features) {
+  lines.push(nodeLine(feature, `${indent}  `));
+  lines.push(`${indent}      ${progress(feature.counts)}`);
+  if (opts.full) {
+   for (const task of feature.tasks) lines.push(nodeLine(task, `${indent}      `));
+  }
+ }
+ if (epic.tasks.length > 0) {
+  lines.push(`${indent}  direct tasks (${epic.tasks.length}): ${countsLine(tally(epic.tasks))}`);
+  if (opts.full) {
+   for (const task of epic.tasks) lines.push(nodeLine(task, `${indent}  `));
+  }
+ }
+}
+
 /** The report a reader (or the model) sees. */
 export function renderStatus(tree: StatusTree, opts: RenderOptions = {}): string {
  const lines: string[] = [statusSummaryLine(tree)];
@@ -387,21 +472,10 @@ export function renderStatus(tree: StatusTree, opts: RenderOptions = {}): string
  }
 
  for (const epic of tree.epics) {
-  lines.push("", `EPIC  ${epic.id}  ${epic.title}  [${epic.state}]`);
-  lines.push(`  ${progress(epic.counts)}   ${countsLine(epic.counts)}`);
-  for (const feature of epic.features) {
-   lines.push(nodeLine(feature, "  "));
-   lines.push(`      ${progress(feature.counts)}`);
-   if (opts.full) {
-    for (const task of feature.tasks) lines.push(nodeLine(task, "      "));
-   }
-  }
-  if (epic.tasks.length > 0) {
-   lines.push(`  direct tasks (${epic.tasks.length}): ${countsLine(tally(epic.tasks))}`);
-   if (opts.full) {
-    for (const task of epic.tasks) lines.push(nodeLine(task, "  "));
-   }
-  }
+  lines.push("");
+  renderEpic(epic, "", opts, lines);
+  // Blockers once per root, covering every nested epic, so a domain's blockers are not
+  // printed again under the run.
   const blocked = epicNodes(epic).filter(node => node.blocked);
   if (blocked.length > 0) lines.push(`  BLOCKED (${blocked.length}): ${blocked.map(n => n.id).join(", ")}`);
  }
@@ -449,11 +523,12 @@ export function parseBlockedIds(stdout: string): string[] | null {
 }
 
 const DESCRIPTION = [
- "Standardised beads run status: rolls each epic up through its features to their tasks,",
- "deriving per-bead state from status, `state:` labels, and assignee, and marking what",
- "`bd blocked` reports as blocked. Reads only; never mutates a bead.",
+ "Standardised beads run status: rolls a run epic up through its architect-domain epics and",
+ "their features to the tasks, deriving per-bead state from status, `state:` labels, and",
+ "assignee, and marking what `bd blocked` reports as blocked. `bd set-state` event beads are",
+ "not counted. Reads only; never mutates a bead.",
  "Use this instead of hand-assembling a summary from `bd list`, which loses blockers and",
- "the feature rollup.",
+ "the rollup.",
 ].join(" ");
 
 /** Register `orc_run_status`. The orchestrator wires this from `src/index.ts`. */
@@ -465,16 +540,18 @@ export function registerRunStatus(pi: ExtensionAPI): void {
   description: DESCRIPTION,
   approval: "read",
   parameters: z.object({
-   epic: z.string().optional().describe("Report only this epic, by bead id."),
-   feature: z.string().optional().describe("Report only this feature (one architect domain), by bead id."),
-   actor: z.string().optional().describe("Report only what this actor holds, by assignee or metadata.role."),
+   epic: z.string().optional().describe("Report only this epic — the run or one architect domain — by bead id."),
+   feature: z.string().optional().describe("Report only this feature, by bead id."),
+   actor: z.string().optional().describe("Report only what this actor holds, by assignee or metadata.actor."),
    full: z.boolean().optional().describe("Include one line per bead. Off, only rollups and counts."),
   }),
   async execute(_toolCallId, params: StatusFilter & { full?: boolean }): Promise<AgentToolResult<RunStatusDetails>> {
    try {
     resetReadBudget();
     const [beads, blockedResult] = await Promise.all([
-     bdListChecked(["list", "--status", "all", "--limit", "0", "--json"]),
+     // Events are `bd set-state`'s audit trail, one closed child per transition; the
+     // tree drops them too, so `bd blocked` ids keep lining up with what is shown.
+     bdListChecked(["list", "--status", "all", "--exclude-type", "event", "--limit", "0", "--json"]),
      bdRun(["blocked", "--json"]),
     ]);
 

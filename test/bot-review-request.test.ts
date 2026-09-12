@@ -1,6 +1,6 @@
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { zod } from "@oh-my-pi/pi-coding-agent";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { Exec, ExecResult } from "../src/tools/bot-review-probe";
 import {
  registerBotReviewRequest,
@@ -211,6 +211,44 @@ describe("Copilot review requests", () => {
    [post]: { code: 1, stdout: "", stderr: "HTTP 422: Reviews may only be requested from collaborators" },
   });
   expect((await requestBotReview(REPO, PR, "copilot", HEAD, undefined, { exec })).state).toBe("unavailable");
+ });
+
+ test("seven gh calls that each nearly exhaust their bound still complete the request", async () => {
+  // Every call answers just inside the per-call bound, so only the operation deadline can
+  // refuse one. With the deadline sized for six reads the reviewer POST was sent and the
+  // marker POST refused, and the tool reported `unknown` for a request it had made. The
+  // clock is moved instead of waited on, and the exec honours the deadline exactly as
+  // `spawnExec` does: a call whose remaining budget is under its duration never answers.
+  const post = `gh api repos/${REPO}/pulls/${PR}/requested_reviewers --method POST -f reviewers[]=copilot-pull-request-reviewer[bot]`;
+  const marker = reviewRequestMarker("copilot", "review", HEAD);
+  const markerPost = `gh api repos/${REPO}/issues/${PR}/comments --method POST -f body=Requested Copilot code review for ${HEAD.slice(0, 12)}.\n\n${marker}`;
+  const answers: Record<string, ExecResult> = {
+   [VIEW]: ok({ headRefOid: HEAD }),
+   [REVIEWERS]: ok({ users: [] }),
+   [REVIEWS]: ok([[]]),
+   [post]: ok({ users: [{ login: "copilot-pull-request-reviewer[bot]" }] }),
+   [ACTOR]: ok({ login: "orchestrator" }),
+   [COMMENTS]: ok([[]]),
+   [markerPost]: ok({ html_url: "marker-url", created_at: "2026-09-10T12:05:00Z" }),
+  };
+  const TIMEOUT_MS = 100;
+  const CALL_MS = 95;
+  const calls: string[] = [];
+  const exec: Exec = async (argv, opts) => {
+   calls.push(argv.join(" "));
+   const budget = Math.min(opts.timeoutMs ?? Infinity, (opts.deadline ?? Infinity) - Date.now());
+   if (budget < CALL_MS) return null;
+   setSystemTime(new Date(Date.now() + CALL_MS));
+   return answers[argv.join(" ")] ?? null;
+  };
+  setSystemTime(new Date("2026-09-10T12:00:00Z"));
+  try {
+   const result = await requestBotReview(REPO, PR, "copilot", HEAD, undefined, { exec, timeoutMs: TIMEOUT_MS });
+   expect(calls).toEqual([VIEW, REVIEWERS, REVIEWS, post, ACTOR, COMMENTS, markerPost]);
+   expect(result).toMatchObject({ state: "requested", evidence: "marker-url" });
+  } finally {
+   setSystemTime();
+  }
  });
 });
 
