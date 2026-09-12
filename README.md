@@ -17,7 +17,7 @@ answers the questions it raises, and stops it. Agents claim their own work from 
 3. Workers edit in isolated copies of the checkout. The architect integrates their captured
    branches into one feature branch and opens one PR per feature.
 4. The plugin merges each approved PR at its reviewed head. No agent merges.
-5. Seven tool-call gates and three rules hold every agent to its claim. The operator's writes
+5. Eight tool-call gates and three rules hold every agent to its claim. The operator's writes
    are `start`, `answer`, and `stop`.
 
 ## Prerequisites
@@ -86,11 +86,20 @@ error.
 | `task.maxRecursionDepth` | `3` | a worker's helper sits at depth 3, so at the default `2` no worker can spawn one |
 | `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
 
-A seventh setting, `modelRoles.reviewer`, is optional. The overlay carries it as a
-commented line; uncomment it and name the model you want independent review to use.
-Left unset, `/orchestrate-doctor` reports a `warn` row and the preflight a `WARN`; the run
-still starts, and `orc-reviewer` falls back to the session model. The five agents select
-their models through `modelRoles` and inherit the role's thinking level:
+The five agents select their models through four `modelRoles` entries and inherit each
+role's thinking level. OMP ships the names `plan`, `task` and `smol` without a default
+model, so each one must resolve in your configuration before a run starts; `reviewer` is
+optional. `/orchestrate-doctor` prints one row per role:
+
+| Role | Agents | Unresolved |
+| --- | --- | --- |
+| `modelRoles.plan` | `orc-architect` | `fail`: the architect cannot be spawned |
+| `modelRoles.task` | `orc-implementer`, `orc-shepherd` | `fail`: neither agent can be spawned |
+| `modelRoles.smol` | `orc-researcher` | `fail`: the researcher cannot be spawned |
+| `modelRoles.reviewer` | `orc-reviewer` | `warn`: the reviewer falls back to the session model, and the preflight writes one `WARN` |
+
+The overlay carries `modelRoles.reviewer` as a commented line; uncomment it and name the
+model you want independent review to use.
 
 | Agent | Model role | Edits code |
 | --- | --- | --- |
@@ -119,31 +128,40 @@ Then, in the lead session started with the overlay:
 ```
 
 Pass an epic id instead of `--new` to run an existing epic: `/orchestrate-start <epic-id>`.
+Add `--store <path>` to bind a `.beads` directory that is not the checkout's own.
 The command:
 
 - creates the run epic, or reads the epic you named and leaves its metadata as written.
   A new epic gets `run_id`, `primary_branch`, `base_sha`, `origin_actor`, and an
   `artifacts` directory under `.orchestration/<epic-id>/`
-- probes the run's store and refuses a `locked` or `corrupted` one
-- writes the marker `.orchestration/.active-run` naming the epic and the run's `.beads`
+- resolves the run's store and refuses one that a store selector in the process
+  environment named, unless `--store` names the same path
+- probes the store and refuses a `locked` or `corrupted` one
+- writes the marker `.orchestration/.active-run` naming the epic, the run's `.beads`, and
+  how that store was found (`checkout`, `common-dir`, `redirect`, or `explicit`)
 - stamps this session's lead lease on the epic
 - records the repository's landing capabilities on the epic as `metadata.landing`
 - arms the watchers
+- prints the lead's three obligations and sends the lead contract to the model
 
 When another session's run is active in the checkout, it refuses. One checkout hosts one
 run, and one session leads it. A second person joins by opening a session in the same
-checkout without starting a run.
+checkout without starting a run. Every slash command finds the run through the marker at
+the checkout, or at the primary checkout of a linked worktree.
 
-Once the command reports the run, describe the goal to the lead. The lead follows the
-`orchestrate` skill: it plans the graph and spawns architects, and it never claims a bead.
+Once the command reports the run, describe the goal to the lead. The lead plans the
+graph and spawns `orc-architect` with the run id; it never claims a work bead. While the
+run is active, the plugin refuses the lead's `git commit`, `git push`, `gh pr merge`,
+`gh pr ready`, and every `edit` or `write` of a file inside a git working tree outside
+`.orchestration/`. Each refusal names the recovery: spawn `orc-architect`.
 
 ## Watch
 
 | Command | Shows |
 | --- | --- |
-| `/orchestrate-status` | the run epic the marker names, its status or why its liveness check failed, the lead lease with its holder, then **Attention** |
+| `/orchestrate-status` | the run epic the marker names, its status or why its liveness check failed, the lead lease with its holder, the store the marker names (or a warning that it names none), then **Attention** |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
-| `/orchestrate-doctor` | every prerequisite, the six required settings and the optional reviewer role, the landing capabilities, and the store probe |
+| `/orchestrate-doctor` | every prerequisite, the six required settings, one row per model role, the landing capabilities, and the store probe |
 
 **Attention** lists what needs you:
 
@@ -165,7 +183,9 @@ is one comment whose first word is a verb: `REPORTED`, `BLOCKED`, `ASK`, `LANDED
 /orchestrate-answer <bead> <text>
 ```
 
-The command writes a `NOTE` comment prefixed `ANSWER` on the bead. Then it acts on the
+The bead must sit beneath the run epic, at any depth. A bead outside the run, or one
+whose parent chain cannot be read, is refused and nothing is written. Otherwise the
+command writes a `NOTE` comment prefixed `ANSWER` on the bead. Then it acts on the
 bead's state:
 
 - last verbs `FAILED` and `ASK` from an implementer: it requeues the bead as `open` and
@@ -225,6 +245,9 @@ atomically, and a parked architect gets a wake.
   that session. Once its lead lease lapses, `/orchestrate-resume` adopts it.
 - `no active Beads workspace was found`: run `bd init --stealth --prefix orc` in the
   checkout.
+- `bd resolved its database to <dir> through a store selector in this process's
+  environment`: the session inherited a variable that points bd at another store. Unset
+  it, or pass `--store <dir>` to bind that store on purpose.
 - `run not started: the store at <dir> is locked by <holder>` or `is corrupted`: read
   [Store probe states](#store-probe-states).
 

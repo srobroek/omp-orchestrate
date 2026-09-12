@@ -104,6 +104,16 @@ describe("probeStore on a laid-out store", () => {
 		expect(result.state === "corrupted" && result.detail).toContain("journal.idx at offset 599185: corrupted journal");
 	});
 
+	test("corrupted: a malformed journal index is the same verdict, quoting bd's line", async () => {
+		const { beadsDir } = await layout(dir);
+		await stubBd(`echo "Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: error bootstrapping chunk journal: journal index is malformed" >&2; exit 1`);
+
+		const result = await probeStore(beadsDir);
+
+		expect(result.state).toBe("corrupted");
+		expect(result.state === "corrupted" && result.detail).toContain("journal index is malformed");
+	});
+
 	test("corrupted: a store whose LOCK is gone is refused without running bd", async () => {
 		const { beadsDir, lock } = await layout(dir);
 		await stubBd(`echo "read ran" > "${path.join(dir, "read-ran")}"; echo '{"count":1}'`);
@@ -220,5 +230,19 @@ describe.skipIf(!BD_AVAILABLE)("probeStore on a store bd built", () => {
 
 		expect(result.state).toBe("corrupted");
 		expect(result.state === "corrupted" && result.detail).toMatch(/corrupted journal|invalid journal record/);
+	});
+
+	test("a damaged journal index is corrupted, not an unreadable store", async () => {
+		const copy = path.join(root, "bad-index", ".beads");
+		await fs.cp(beadsDir, copy, { recursive: true });
+		const index = path.join(copy, "embeddeddolt", "probe", ".dolt", "noms", "journal.idx");
+		const bytes = Buffer.from(await fs.readFile(index));
+		bytes.write("garbage-garbage-garbage", 8);
+		await fs.writeFile(index, bytes);
+
+		const result = await probeStore(copy);
+
+		expect(result.state).toBe("corrupted");
+		expect(result.state === "corrupted" && result.detail).toContain("journal index is malformed");
 	});
 });

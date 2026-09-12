@@ -1,11 +1,21 @@
 {
   "agent": "implementer",
   "tier": "T1",
-  "_comment": "Pre-yield git evidence is the local final head_sha; host branch capture follows a successful child result. All completion modes require REPORTED, reviewer handoff, and release. An open linked escalation pauses completion without changing ownership; the architect reconciles durable work after the escalation closes. Routing is enforced at the write seam, while handoff uses the agent:reviewer label.",
+  "_comment": "Pre-yield git evidence is the local final head_sha; host branch capture follows a successful child result. All completion modes require REPORTED, reviewer handoff, and release. An open linked escalation pauses completion without changing ownership; the architect reconciles durable work after the escalation closes. Routing is enforced at the write seam, while handoff uses the agent:reviewer label. Git work is judged as work, not as presence: the head must have moved off the bead's base (metadata.base_sha, else the run epic's) and REPORTED must name a changed path, unless the worker wrote NOTE no-change: <reason> to say the task needed no edit. A base nobody recorded leaves the head comparison unknown, which fails open.",
   "completion": [
     {
       "check": "delivery",
       "require": "metadata.head_sha",
+      "when": "git"
+    },
+    {
+      "check": "work",
+      "require": "metadata.head_sha != base_sha or comment.NOTE no-change",
+      "when": "git"
+    },
+    {
+      "check": "changed_paths",
+      "require": "comment.REPORTED names a path or comment.NOTE no-change",
       "when": "git"
     },
     {

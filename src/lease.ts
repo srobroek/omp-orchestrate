@@ -34,8 +34,10 @@
  * harmless re-release when the bead is already free.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdRun, metadataString } from "./bd";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { type BdBead, bdListChecked, bdRun, metadataString } from "./bd";
 import type { ClaimState } from "./claim-state";
 import { sessionRole } from "./identity";
 
@@ -135,11 +137,40 @@ export interface ReleaseEvidence {
  recoveredBy: string;
  /** The holder's captured branch, when the repository showed one; stamped as `recovered_branch`. */
  branch?: string;
- /** Observations appended to the comment after the cause. */
+ /**
+  * Observations appended to the comment after the cause. A caller that made none (the
+  * lease sweep, which has no child frame to judge) leaves this out, and the release looks
+  * up the holder's `omp/task/<holder>` capture in `cwd` itself, so every `RECOVERED` names
+  * the branch a replacement should look at, whichever path released the claim.
+  */
  observations?: readonly string[];
 }
 
 export type ReleaseOutcome = "released" | "held-by-other" | "failed" | "comment-failed";
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * What the repository at `cwd` shows for the holder's capture: the branch name when
+ * `refs/heads/omp/task/<holder>` exists, with its tip's committer date so a reader can
+ * tell a leftover from an earlier run apart from this claim's work, and a hedged
+ * observation either way. The reaper (`src/supervision.ts`) makes the same observation
+ * with the child's start time in hand; this is the sweep's version, without one.
+ */
+export async function capturedBranchEvidence(holder: string, cwd: string): Promise<{ branch?: string; observation: string }> {
+ const name = `omp/task/${holder}`;
+ try {
+  const { stdout } = await execFileAsync(
+   "git", ["-C", cwd, "for-each-ref", "--format=%(committerdate:iso-strict)", `refs/heads/${name}`],
+   { timeout: 5_000, maxBuffer: 4096 },
+  );
+  const tip = stdout.trim();
+  if (tip.length === 0) return { observation: "no captured branch observed (not proof of no work)" };
+  return { branch: name, observation: `captured branch observed: ${name} (tip committed ${tip}; verify it postdates this claim)` };
+ } catch {
+  return { observation: "captured branch unknown" };
+ }
+}
 
 /**
  * Release a dead holder's claim: the fenced transition to `open` and unassigned, then one
@@ -152,11 +183,17 @@ export type ReleaseOutcome = "released" | "held-by-other" | "failed" | "comment-
  * Nothing here touches `metadata.worktree`, branches, or captured refs.
  */
 export async function releaseDeadClaim(bead: string, holder: string, evidence: ReleaseEvidence, cwd?: string): Promise<ReleaseOutcome> {
+ let { branch, observations } = evidence;
+ if (observations === undefined) {
+  const capture = await capturedBranchEvidence(holder, cwd ?? process.cwd());
+  branch ??= capture.branch;
+  observations = [capture.observation];
+ }
  const args = [
   "update", bead, "--actor", holder, "--claim", "--assignee", "", "--status", "open",
   "--set-metadata", `recovered_by=${evidence.recoveredBy}`,
  ];
- if (evidence.branch !== undefined) args.push("--set-metadata", `recovered_branch=${evidence.branch}`);
+ if (branch !== undefined) args.push("--set-metadata", `recovered_branch=${branch}`);
  args.push("--dolt-auto-commit", "off");
  const released = await bdRun(args, WRITE_TIMEOUT_MS, cwd);
  if (released === null) return "failed";
@@ -164,19 +201,37 @@ export async function releaseDeadClaim(bead: string, holder: string, evidence: R
   return fenceRefused(released) ? "held-by-other" : "failed";
  }
 
- const text = [`RECOVERED ${holder} ${evidence.cause}`, ...(evidence.observations ?? [])].join("; ");
+ const text = [`RECOVERED ${holder} ${evidence.cause}`, ...observations].join("; ");
  const commented = await bdRun(["comment", bead, text, "--actor", evidence.recoveredBy], WRITE_TIMEOUT_MS, cwd);
  return commented?.code === 0 ? "released" : "comment-failed";
 }
 
 // ============================================================================
-// Renewal on activity
+// Renewal on activity and on the clock
 // ============================================================================
 
-/** Renews what this session holds, on activity, at most once per cadence per lease. */
+/**
+ * Renews what this session holds, at most once per cadence per lease, from two sources:
+ * activity (`touch`, after a gated tool call passes) and the minute timer (`tick`, from
+ * `src/watchers.ts`). Both share one cadence, so a lease is written once per
+ * `ORC_LEASE_RENEW_MS` however it was reached.
+ *
+ * The timer is what makes a lease mean liveness. Renewal on activity alone let a lead in
+ * one long tool call, or a lead idle between prompts, lapse while its process lived, and
+ * `/orchestrate-status` advised adopting a run whose lead was alive (E2E D-normal-ts-06,
+ * D-crash-recovery-02). With the timer, a lapsed lease says no live session renews it.
+ */
 export interface LeaseRenewer {
  /** Called after a gated tool call passes. Never awaits bd; the tool runs regardless. */
  touch(ctx: ExtensionContext, now?: number): void;
+ /**
+  * Called from the sweep timer while the session lives. Awaits its writes. Renews this
+  * session's own leases and, from the lead's seat, the claims of children the registry
+  * reports parked: a parked child's session is disposed, so no timer of its own runs,
+  * yet it is revivable and keeps its claim by the reaper's contract. Reports whether this
+  * session holds the lead lease, which is what licenses the lapsed-claim sweep.
+  */
+ tick(ctx: ExtensionContext, now?: number): Promise<{ leadsRun: boolean }>;
 }
 
 /** What one lead-lease renewal did. `run` names the epic when the marker bound one. */
@@ -188,6 +243,11 @@ export interface LeadLeaseRenewal {
 
 /** The lead's renewal: `run-state.ts` owns the marker and the epic, this module the cadence. */
 export type LeadLeaseRenew = (cwd: string, sessionId: string, now: number) => Promise<LeadLeaseRenewal>;
+
+/** The registry rows the timer reads: which spawned agents are parked. `AgentRegistry.global()` answers it. */
+export interface ParkedRegistry {
+ list(): ReadonlyArray<{ id: string; kind: string; status: string }>;
+}
 
 /** The lead lease is one per session, keyed apart from any bead id. */
 const LEAD_KEY = "\u0000lead";
@@ -202,8 +262,14 @@ const LEAD_KEY = "\u0000lead";
  * check refuses its next write on the bead; a displaced lead is told another session
  * holds the run.
  */
-export function createLeaseRenewer(pi: ExtensionAPI, claims: ClaimState, renewLead: LeadLeaseRenew): LeaseRenewer {
+export function createLeaseRenewer(
+ pi: ExtensionAPI,
+ claims: ClaimState,
+ renewLead: LeadLeaseRenew,
+ registry: ParkedRegistry = AgentRegistry.global(),
+): LeaseRenewer {
  const last = new Map<string, number>();
+ let leadsRun = false;
 
  const due = (key: string, now: number): boolean => {
   const previous = last.get(key);
@@ -213,6 +279,7 @@ export function createLeaseRenewer(pi: ExtensionAPI, claims: ClaimState, renewLe
  };
 
  const report = (kind: "claim" | "lead", subject: string, holder: string, outcome: RenewOutcome | "no-run"): void => {
+  if (kind === "lead") leadsRun = outcome === "renewed";
   if (outcome === "renewed" || outcome === "no-run") return;
   if (outcome === "held-by-other") {
    pi.logger.warn(`orchestrate ${kind} lease renewal refused: held by another actor`, { subject, holder });
@@ -228,28 +295,57 @@ export function createLeaseRenewer(pi: ExtensionAPI, claims: ClaimState, renewLe
   pi.logger.info(`orchestrate ${kind} lease not renewed`, { subject, holder, outcome });
  };
 
+ /** Every renewal this session owes at `now`, started; the lead's is last so its standing is current. */
+ const renewals = (ctx: ExtensionContext, now: number): Promise<void>[] => {
+  const pending: Promise<void>[] = [];
+  const claim = claims.observedClaim();
+  if (claim !== undefined) {
+   for (const bead of claim.beadIds) {
+    if (!due(bead, now)) continue;
+    pending.push(renewLease(bead, claim.actor, now, ctx.cwd)
+     .then(outcome => report("claim", bead, claim.actor, outcome))
+     .catch((error: unknown) => pi.logger.error("orchestrate lease renewal threw", { bead, error: String(error) })));
+   }
+  }
+  if (sessionRole(pi) === "lead" && due(LEAD_KEY, now)) {
+   pending.push(renewLead(ctx.cwd, ctx.sessionManager.getSessionId(), now)
+    .then(renewed => report("lead", renewed.run ?? "run", renewed.actor, renewed.outcome))
+    .catch((error: unknown) => pi.logger.error("orchestrate lead lease renewal threw", { error: String(error) })));
+  }
+  return pending;
+ };
+
+ /** The claims of every parked child, renewed under each child's own actor, once per cadence per child. */
+ const renewParked = async (ctx: ExtensionContext, now: number): Promise<void> => {
+  for (const ref of registry.list()) {
+   if (ref.kind !== "sub" || ref.status !== "parked" || !due(`\u0000parked:${ref.id}`, now)) continue;
+   const held = await bdListChecked(["list", "--include-infra", "--assignee", ref.id, "--status", "in_progress", "--limit", "0", "--json"], undefined, ctx.cwd);
+   if (held === null) {
+    pi.logger.info("orchestrate parked child's claims unread; leases not renewed", { child: ref.id });
+    continue;
+   }
+   for (const bead of held) report("claim", bead.id, ref.id, await renewLease(bead.id, ref.id, now, ctx.cwd));
+  }
+ };
+
  // Nothing in here may reach the tool_call handler: a thrown renewal would fail the gate
  // open and log a gate failure for what is bookkeeping. Every path swallows and logs.
  return {
   touch(ctx, now = Date.now()): void {
    try {
-    const claim = claims.observedClaim();
-    if (claim !== undefined) {
-     for (const bead of claim.beadIds) {
-      if (!due(bead, now)) continue;
-      renewLease(bead, claim.actor, now, ctx.cwd)
-       .then(outcome => report("claim", bead, claim.actor, outcome))
-       .catch((error: unknown) => pi.logger.error("orchestrate lease renewal threw", { bead, error: String(error) }));
-     }
-    }
-    if (sessionRole(pi) === "lead" && due(LEAD_KEY, now)) {
-     renewLead(ctx.cwd, ctx.sessionManager.getSessionId(), now)
-      .then(renewed => report("lead", renewed.run ?? "run", renewed.actor, renewed.outcome))
-      .catch((error: unknown) => pi.logger.error("orchestrate lead lease renewal threw", { error: String(error) }));
-    }
+    renewals(ctx, now);
    } catch (error) {
     pi.logger.error("orchestrate lease renewal threw", { error: String(error) });
    }
+  },
+  async tick(ctx, now = Date.now()): Promise<{ leadsRun: boolean }> {
+   try {
+    await Promise.all(renewals(ctx, now));
+    if (sessionRole(pi) === "lead") await renewParked(ctx, now);
+   } catch (error) {
+    pi.logger.error("orchestrate lease renewal threw", { error: String(error) });
+   }
+   return { leadsRun };
   },
  };
 }

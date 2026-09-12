@@ -363,8 +363,8 @@ const IMPLEMENTER = roleCtx("implementer");
 
 /**
  * An implementer node satisfying its git contract outright: captured branch, final sha,
- * reviewer handoff, assignee cleared, and a REPORTED comment. The control every authority
- * case below is one field away from.
+ * reviewer handoff, assignee cleared, and a REPORTED comment naming a changed path. The
+ * control every authority case below is one field away from.
  */
 function delivered(metadata: Record<string, unknown> = {}, overrides: Partial<BdBead> = {}): BdBead {
  return {
@@ -389,7 +389,7 @@ function checks(result: ToolCallEventResult | undefined): string[] {
 
 beforeEach(() => {
  issued = [];
- reads = { bead: delivered(), comments: { [NODE]: [{ text: "REPORTED: 3 files, tests green" }] }, linked: [] };
+ reads = { bead: delivered(), comments: { [NODE]: [{ text: "REPORTED: 3 files (src/api.ts), tests green" }] }, linked: [] };
  freshSession();
  gateExitContract = createExitGuard(claims);
  claims.recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });

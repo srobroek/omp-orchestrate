@@ -11,13 +11,13 @@
  * asserts the same paths fire, so a guard that goes dormant for good fails here too.
  */
 
-import { afterEach, beforeEach, describe, expect, type Mock, setSystemTime, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, type Mock, setSystemTime, spyOn, test } from "bun:test";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import { AgentRegistry, type AgentSession, type ExtensionAPI, type ExtensionContext, type ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { BD_NOTICE_MESSAGE } from "../src/gates/bd";
 import ompOrchestrate from "../src/index";
@@ -100,12 +100,19 @@ function rig(tools: string[]): Rig {
 	};
 }
 
-/** A session context at `cwd`, declaring `role` when one is given, with the timer seam the watchers need. */
-function ctxAt(cwd: string, sweeps: Array<() => unknown>, role?: string): ExtensionContext {
+/** The lead's session id: registered as the main agent, the way OMP registers the session that spawns. */
+const LEAD_SESSION = "matrix-lead";
+
+/**
+ * A session context at `cwd`, declaring `role` when one is given, with the timer seam the
+ * watchers need. The lead's carries {@link LEAD_SESSION}; a worker's is a session the
+ * registry does not know.
+ */
+function ctxAt(cwd: string, sweeps: Array<() => unknown>, role?: string, sessionId = "matrix-session"): ExtensionContext {
 	return {
 		cwd,
 		getSystemPrompt: () => [role === undefined ? "a plain brief" : `ORC-ROLE: ${role}`],
-		sessionManager: { getSessionId: () => "matrix-session", getEntries: () => [] },
+		sessionManager: { getSessionId: () => sessionId, getEntries: () => [] },
 		hasTool: () => false,
 		setInterval: (callback: () => unknown) => {
 			sweeps.push(callback);
@@ -115,6 +122,14 @@ function ctxAt(cwd: string, sweeps: Array<() => unknown>, role?: string): Extens
 		clearTimer: () => {},
 	} as unknown as ExtensionContext;
 }
+
+beforeAll(() => {
+	AgentRegistry.global().register({
+		id: "Main", displayName: "Main", kind: "main",
+		session: { sessionManager: { getSessionId: () => LEAD_SESSION } } as unknown as AgentSession,
+	});
+});
+afterAll(() => AgentRegistry.global().unregister("Main"));
 
 /** Every path beneath `root`, sorted, so "no file was created" is one comparison. */
 async function listing(root: string): Promise<string[]> {
@@ -205,7 +220,7 @@ async function mark(cwd: string, body: Record<string, unknown> = { schema_versio
  * so the caller can assert silence or refusals.
  */
 async function driveMatrix(lead: Rig, worker: Rig, role: Rig): Promise<Record<string, unknown[]>> {
-	const leadCtx = ctxAt(repo, lead.sweeps);
+	const leadCtx = ctxAt(repo, lead.sweeps, undefined, LEAD_SESSION);
 	const workerCtx = ctxAt(repo, worker.sweeps);
 	const roleCtx = ctxAt(repo, role.sweeps, "implementer");
 	const results: Record<string, unknown[]> = {};
@@ -317,7 +332,7 @@ describe("inside a run scope the same paths arm", () => {
 		// W2's ledger and W1's sweep, the two watchers that used to run in every repository.
 		const ledger = await fs.readFile(path.join(repo, ".orchestration", "audit", "kid-1.bdlog"), "utf8");
 		expect(JSON.parse(ledger.trim()).argv).toBe("bd update orc-7 --status open");
-		expect(spawn.mock.calls.map(call => (call[0] as string[]).slice(1, 2)[0])).toContain("list");
+		expect(spawned().some(line => line.split(" ")[1] === "list")).toBe(true);
 		expect([...lead.errors, ...worker.errors, ...role.errors]).toEqual([]);
 	});
 

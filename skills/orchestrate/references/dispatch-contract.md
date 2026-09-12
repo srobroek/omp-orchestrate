@@ -88,8 +88,14 @@ token is the whole signal, so a verb later in the sentence is prose, and the yie
 NO WORK reads as NO. Lead with the verb, then write the prose.
 
 Mirror every material outcome to the affected bead as a comment, under the acting
-identity. Your identity is the assignee your claim report printed; set BEADS_ACTOR and
-BD_ACTOR to it on every mutating bd process. A write attributed to anyone else is refused.
+identity. Identity has one format: a spawned role is its OMP agent id, the name the task
+tool registered it under; the lead is lead:<session id>. Your claim report prints that
+name as assignee.
+
+Under a run the plugin sets BEADS_ACTOR and BD_ACTOR to your identity in the environment
+of every bash call; never set them yourself. A claim under no identity is refused. So is a
+claim as the git user.name that unattributed writes fall back to, and so is a write
+attributed to anyone but you.
 
 Exit. Follow your role's evidence and disposition contract, not another role's report
 shape. Implementers report head_sha for git before yield; their parent-side branch

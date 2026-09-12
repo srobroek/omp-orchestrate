@@ -73,10 +73,10 @@
     },
     {
       "verb": "NOTE",
-      "meaning": "A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's record of a claim it preserved and why.",
+      "meaning": "A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's record of a claim it preserved and why, an implementer's `NOTE no-change: <reason>` when a git task turned out to need no edit.",
       "writers": ["*"],
       "terminal": false,
-      "source": { "kind": "contract", "where": "researcher.json: completion.answer on the linked node. Every other writer is prose: references/lifecycle.md incidental bug beads, references/beads-store.md bead-local defaults, src/supervision.ts reapBead (NOTE claim preserved)" }
+      "source": { "kind": "contract", "where": "researcher.json: completion.answer on the linked node; implementer.json: completion.work and completion.changed_paths accept `NOTE no-change: <reason>` in place of a moved head and a named path. Every other writer is prose: references/lifecycle.md incidental bug beads, references/beads-store.md bead-local defaults, src/supervision.ts reapBead (NOTE claim preserved)" }
     },
     {
       "verb": "RECOVERED",

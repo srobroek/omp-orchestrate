@@ -39,9 +39,11 @@ import {
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { runScope } from "./run-scope";
+import { leadActor, sweepLapsedClaims } from "./run-state";
 import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
+import type { LeaseRenewer } from "./lease";
 import { type BdInvocation, bdInvocations } from "./shell";
 import { landingSweep } from "./landing";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
@@ -1032,8 +1034,12 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  * Registration only: every bus subscription happens inside `session_start`, and
  * the two extension-event handlers are `pi.on` registrations, so importing this
  * module has no observable effect.
+ *
+ * `leases` is the session's one renewer (`src/lease.ts`), shared with the `tool_call`
+ * handler so the minute timer and the activity path renew on one cadence. Without it the
+ * timer renews nothing, which is the shape the unit tests of the other watchers use.
  */
-export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createClaimState()): void {
+export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createClaimState(), leases?: LeaseRenewer): void {
  // Lifecycle handlers can run after construction's async scope has ended.
  const runInDiscoveryScope = AsyncLocalStorage.snapshot();
  let reportedAgentFindings = new Set<string>();
@@ -1058,11 +1064,25 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   // rejection only when it can see one (`managed-timers.ts:66-75`). Nothing runs
   // outside a run scope: a silent child in a plain session is not this plugin's
   // business, and the sweep would otherwise spawn `bd list` for it every minute.
+  //
+  // The same tick renews this session's leases (`lease.ts`), so a lead in one long tool
+  // call, or idle between prompts, keeps its lease while its process lives; and from the
+  // seat that holds the lead lease it releases the run's claims whose lease has lapsed.
+  // That sweep once ran only inside `/orchestrate-resume`, so an orphan whose lease lapsed
+  // a minute after adoption waited for the operator's next resume (E2E D-crash-recovery-03).
+  // With every live holder renewing on the clock, a lapsed lease means no live session
+  // stands behind the claim, and the fenced release loses to any holder that is.
   const timer = ctx.setInterval(async () => {
-   if ((await runScope({ cwd })) === null) return;
+   const scope = await runScope({ cwd });
+   if (scope === null) return;
    await sweep(pi);
+   const standing = await leases?.tick(ctx);
    if (sessionRole(pi) === "lead") {
     await retryGoal(pi, cwd, true).catch(error => logFailure(pi, "goal retry", error));
+    if (standing?.leadsRun === true && scope.runId !== PENDING_RUN) {
+     await sweepLapsedClaims(scope.root, scope.runId, leadActor(ctx.sessionManager.getSessionId()), Date.now())
+      .catch(error => logFailure(pi, "lease sweep", error));
+    }
    }
   }, SWEEP_MS);
   unsubscribers.push(() => ctx.clearTimer(timer));

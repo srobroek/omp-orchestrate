@@ -102,8 +102,14 @@ token is the whole signal, so a verb later in the sentence is prose, and the yie
 NO WORK reads as NO. Lead with the verb, then write the prose.
 
 Mirror every material outcome to the affected bead as a comment, under the acting
-identity. Your identity is the assignee your claim report printed; set BEADS_ACTOR and
-BD_ACTOR to it on every mutating bd process. A write attributed to anyone else is refused.
+identity. Identity has one format: a spawned role is its OMP agent id, the name the task
+tool registered it under; the lead is lead:<session id>. Your claim report prints that
+name as assignee.
+
+Under a run the plugin sets BEADS_ACTOR and BD_ACTOR to your identity in the environment
+of every bash call; never set them yourself. A claim under no identity is refused. So is a
+claim as the git user.name that unattributed writes fall back to, and so is a write
+attributed to anyone but you.
 
 Exit. Follow your role's evidence and disposition contract, not another role's report
 shape. Implementers report head_sha for git before yield; their parent-side branch
@@ -142,3 +148,48 @@ Worker helpers require task.maxRecursionDepth 3 as well as the explicit allowlis
 An agent with no tools: list inherits tools; that alone never grants a spawn name.
 `;
 
+/**
+ * The lead's obligations in three sentences. `/orchestrate-start` prints them where the
+ * operator reads, and the lead contract below opens with them, so the human and the model
+ * hear the same thing.
+ */
+export function leadSummary(runId: string): string[] {
+	return [
+		`You lead run ${runId}: plan the graph, then spawn orc-architect with the run id for each architect epic; the architect decomposes and dispatches.`,
+		"The lead never claims a work bead, never edits or writes a product file, and never commits, pushes, or merges; those calls are refused while the run is active.",
+		"Watch the run with /orchestrate-status, answer an ASK with /orchestrate-answer <bead> <text>, end it with /orchestrate-stop.",
+	];
+}
+
+/**
+ * What the lead session hears once a run is active: at `session_start` when the marker
+ * names it, and from `/orchestrate-start` and `/orchestrate-resume` when they succeed.
+ *
+ * Measured without it (`scratch/audit/e2e/normal-ts.ledger.md`, D-03): the start command
+ * runs locally and tells the model nothing, so the lead read the skill and implemented the
+ * goal itself for thirteen minutes before an operator steered it. The worker protocol
+ * above never reaches the lead, which declares no role; this is its counterpart, short
+ * because the skill and its references carry the procedure.
+ */
+export function leadContract(runId: string): string {
+	return `ORCHESTRATION LEAD — run ${runId} is active in this checkout. Follow exactly.
+
+${leadSummary(runId).join("\n")}
+
+Planning is yours: read skill://orchestrate and its planning reference, decide which
+architect epics exist beneath ${runId} and what done means for each, and create each one
+unassigned with the orc-node label and metadata role=architect and scope. Decomposition
+into features and tasks is the architect's, never yours. Spawn orc-architect through the
+task tool, not isolated, with a brief that names run ${runId}, the epic id, and the goal.
+
+Doing is refused: an edit or write outside .orchestration/, git commit, git push, gh pr
+merge and gh pr ready are blocked for the lead while the run is active, and each refusal
+names this contract. Reading, bd, task, and writes under .orchestration/ pass. Never claim
+a bead; never pass --db or point bd at another store. Never spawn a bare task agent to do a
+role's work: helpers do not claim beads, and work outside a claim is invisible to the run.
+
+Recovery: an architect that stops with its epic open is rolled over, not replaced by you.
+Read its epic and worktree state, then spawn one replacement orc-architect for the same
+epic with a handover; roles.md describes it.
+`;
+}
