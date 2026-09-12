@@ -3,15 +3,24 @@
  *
  * Checks containment in the claimed checkout (or the current isolated Git root),
  * then the union of claimed repo-relative scopes. Shell commands are checked at
- * their effective cwd; their arbitrary redirections are not parsed.
- * Product mutations require every observed bead to remain in_progress and assigned
- * to this session's actor. Missing, unreadable, or stale beads fail closed for those
- * mutations; narrowly recognized Beads controls retain their safe behavior. A comment
- * on the claimed bead is also admitted once this session has released it, so the
- * terminal report may follow the release. A bead this actor closed ends the claim:
- * product work or a comment on it forgets the claim rather than being refused, while
- * other `bd` commands on it stay under the reopen-then-reclaim grammar.
- * Uninspectable edit payloads are refused rather than silently reduced to a cwd-only check.
+ * their effective cwd; the tokeniser parses their redirections, but a redirection
+ * target is not a declared path here, so `bash` is contained by its cwd alone.
+ *
+ * A gate that catches slips refuses on evidence, never on its absence. A product
+ * mutation is refused when the claimed bead is readable and proves the loss: assigned
+ * to another actor, or closed. A bead the store cannot read -- `bd` missing, slow,
+ * over budget, or answering nothing -- proves nothing, so the call proceeds and the
+ * cause is logged. Narrowly recognized Beads controls keep their grammar on a readable
+ * bead: reopen needs the closed bead this actor still holds, reclaim the reopened one,
+ * release current ownership. A comment on the claimed bead is admitted once this
+ * session has released it, so the terminal report may follow the release. A bead this
+ * actor closed ends the claim: product work or a comment on it forgets the claim rather
+ * than being refused, while other `bd` commands on it stay under the reopen-then-reclaim
+ * grammar. Uninspectable edit payloads are refused rather than silently reduced to a
+ * cwd-only check.
+ *
+ * Scope disjointness between claims is judged once, at claim, by G5. This gate reads
+ * only the claimed beads and compares each write against the territory they name.
  *
  * The dispatcher (`src/index.ts`) runs this gate and the runtime database check only
  * under orchestration: a declared `ORC-ROLE`, or the pinned run `pinnedRunActive`
@@ -26,12 +35,11 @@ import { resolveToCwd } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { editInspect } from "@oh-my-pi/pi-natives";
-import { getWorktreesDir } from "@oh-my-pi/pi-utils";
-import { bdShow, metadataRecord, metadataString } from "../bd";
-import type { BdBead } from "../bd";
+import { getWorktreesDir, logger } from "@oh-my-pi/pi-utils";
+import { bdFailureText, bdShow, lastBdFailure, metadataRecord, metadataString } from "../bd";
+import type { BdBead, BdFailure } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
-import { scopeConflict } from "./claim";
 import { splitSegments } from "../shell";
 
 /** Tools that mutate the working tree and therefore need a scope check. */
@@ -446,11 +454,39 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  * open after its own reopen — or it is closed and either already unassigned or still
  * assigned to this actor, so a release retried after a close stays idempotent.
  */
-function releasable(bead: BdBead | null, actor: string): boolean {
- if (bead === null) return false;
+function releasable(bead: BdBead, actor: string): boolean {
  if (bead.status === "in_progress" || bead.status === "open") return bead.assignee === actor;
  if (bead.status === "closed") return bead.assignee === undefined || bead.assignee === "" || bead.assignee === actor;
  return false;
+}
+
+/**
+ * The refusal a readable bead proves, or `undefined` while it proves no loss.
+ *
+ * Loss is another actor's name on the bead, or a close. A released bead -- assignee
+ * cleared, still open -- is held by nobody and taken from nobody, so `next` proceeds:
+ * a worker bounced by G4 after its release must be able to repair its evidence. A bead
+ * this actor closed is a slip of grammar rather than of ownership, and the refusal
+ * names the recovery instead of an owner.
+ */
+function ownershipRefusal(bead: BdBead, actor: string, next: string): string | undefined {
+ const assignee = typeof bead.assignee === "string" && bead.assignee.length > 0 ? bead.assignee : undefined;
+ if (assignee !== undefined && assignee !== actor) {
+  return `claimed bead '${bead.id}' is now assigned to '${assignee}', not '${actor}'; another actor owns it, so ${next} is refused`;
+ }
+ if (bead.status !== "closed") return undefined;
+ if (assignee === actor) {
+  return `claimed bead '${bead.id}' is closed; run 'bd reopen ${bead.id}' and 'bd update ${bead.id} --claim --json' before ${next}`;
+ }
+ return `claimed bead '${bead.id}' was closed by another actor, so ${next} is refused`;
+}
+
+/** One claimed bead as this call read it. `failure` is why the read answered nothing. */
+interface BeadView {
+ beadId: string;
+ bead: BdBead | null;
+ failure: BdFailure | undefined;
+ control: ConflictControl | undefined;
 }
 
 /** Refuse a mutation outside the tree, or the territory, the claimed bead names. */
@@ -471,9 +507,11 @@ export async function gateWorktreeScope(
  if (!claim || claim.beadIds.length === 0) return undefined;
  const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(normalizedInput, claim.actor, beadId) : undefined);
  const hasControl = controls.some(control => control !== undefined);
- const beadViews: { beadId: string; bead: BdBead | null; control: ConflictControl | undefined }[] = [];
+ const beadViews: BeadView[] = [];
  for (const [index, beadId] of claim.beadIds.entries()) {
-  beadViews.push({ beadId, bead: await bdShow(beadId), control: controls[index] });
+  const bead = await bdShow(beadId);
+  // Read beside the show: the recorded kind describes the most recent bd call only.
+  beadViews.push({ beadId, bead, failure: bead === null ? lastBdFailure() : undefined, control: controls[index] });
  }
 
  // A bead this actor closed is finished, not lost. Refusing every later edit would hold
@@ -481,7 +519,7 @@ export async function gateWorktreeScope(
  // the finished bead — forgets the claim instead and falls open as it does for a session
  // that never claimed. Any other command naming `bd`, wrapped or literal, stays under
  // the recovery grammar: reopen and reclaim keep the claim so the recovery stays
- // observed, and a mention that is not one fails closed as before.
+ // observed, and a mention that is not one is refused with the grammar named.
  if (beadViews.every(({ bead }) => bead?.status === "closed" && bead.assignee === claim.actor)) {
   const command = toolName === "bash" ? normalizedInput.command : undefined;
   const namesBd = typeof command === "string" &&
@@ -492,25 +530,30 @@ export async function gateWorktreeScope(
   }
  }
 
- for (const { beadId, bead, control } of beadViews) {
+ for (const { beadId, bead, failure, control } of beadViews) {
   if (control === "deny") {
    return { block: true, reason: `control command is not authorized for claimed bead '${beadId}'` };
   }
-  if (!hasControl || control === "write" || control === "comment") {
-   const released = bead?.assignee === undefined || bead.assignee === "";
-   const fresh = bead?.status === "in_progress" && (bead.assignee === claim.actor || (control === "comment" && released));
-   if (!fresh) {
-    const next = control === undefined ? "mutating product files" : "writing to it";
-    return {
-     block: true,
-     reason: `claimed bead '${beadId}' is no longer in_progress and assigned to '${claim.actor}'; refresh ownership before ${next}`,
-    };
-   }
+  if (bead === null) {
+   // Nothing was read, so nothing is proven: the call proceeds, and the cause lands
+   // where an operator watching a store under load can see it. `bd` itself still
+   // refuses a write that the bead's real owner would contest.
+   logger.warn("orchestrate G2: claimed bead could not be read; allowing", {
+    bead: beadId,
+    actor: claim.actor,
+    tool: toolName,
+    cause: bdFailureText(failure),
+   });
+   continue;
   }
-  if (control === "reopen" && (bead?.status !== "closed" || bead.assignee !== claim.actor)) {
+  if (!hasControl || control === "write" || control === "comment") {
+   const refusal = ownershipRefusal(bead, claim.actor, control === undefined ? "mutating product files" : "writing to it");
+   if (refusal !== undefined) return { block: true, reason: refusal };
+  }
+  if (control === "reopen" && (bead.status !== "closed" || bead.assignee !== claim.actor)) {
    return { block: true, reason: `cannot reopen claimed bead '${beadId}' unless it is closed and assigned to '${claim.actor}'` };
   }
-  if (control === "claim" && (bead?.status !== "open" || bead.assignee !== claim.actor)) {
+  if (control === "claim" && (bead.status !== "open" || bead.assignee !== claim.actor)) {
    return { block: true, reason: `cannot reclaim claimed bead '${beadId}' unless it is open and assigned to '${claim.actor}'` };
   }
   if (control === "release" && !releasable(bead, claim.actor)) {
@@ -550,14 +593,10 @@ export async function gateWorktreeScope(
  // globs disjoint, so intersecting them would refuse every write a worker holding two
  // beads could possibly make.
  const scoped: { beadId: string; worktree: string; globs: string[] }[] = [];
- for (const { beadId, bead, control } of beadViews) {
-  if (control === undefined) {
-   const conflict = await scopeConflict(bead);
-   if (conflict) return conflict;
-  }
-  // For a permitted control, an unreadable bead names no tree, and a bead that
-  // declares none leaves nothing to compare. `metadata.scope` is repo-relative and
-  // needs that tree as its base, so both comparisons stop here.
+ for (const { beadId, bead } of beadViews) {
+  // An unreadable bead names no tree, and a bead that declares none leaves nothing to
+  // compare. `metadata.scope` is repo-relative and needs that tree as its base, so
+  // both comparisons stop here.
   const declaredTree = metadataString(bead, "worktree");
   if (declaredTree === undefined) continue;
 
