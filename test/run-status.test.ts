@@ -2,7 +2,9 @@ import { describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import {
+	buildCloseOut,
 	buildStatusTree,
+	type CloseOutReads,
 	deriveState,
 	filterTree,
 	registerRunStatus,
@@ -46,6 +48,20 @@ const DOMAINS: BdBead[] = [
 function event(id: string, parent: string, phase: string): BdBead {
 	return bead(id, { issue_type: "event", title: `State change: state → ${phase}`, parent, status: "closed" });
 }
+
+/** A merge bead as the architect creates it and the sweep stamps it. */
+function merge(id: string, fields: Partial<BdBead> & Record<string, unknown> = {}): BdBead {
+	const { metadata, ...rest } = fields;
+	return bead(id, {
+		title: `land ${id}`,
+		labels: ["pr:merge"],
+		metadata: { role: "shepherd", repo: "o/r", origin_bead: "feat-1", branch: `omp/task/${id}`, pr: 7, head_sha: "a".repeat(40), ...metadata },
+		...rest,
+	});
+}
+
+/** Every read answered and nothing outstanding: what a finished run reports. */
+const ALL_READY: CloseOutReads = { blocked: [], ready: [], cycles: [] };
 
 describe("buildStatusTree", () => {
 	test("groups epic -> feature -> task through parent links, flattening depth", () => {
@@ -378,6 +394,102 @@ describe("empty bd", () => {
 	});
 });
 
+describe("buildCloseOut", () => {
+	const finished = DOMAINS.map(item => ({ ...item, status: "closed", assignee: undefined }));
+
+	test("a finished run with every read answered is clean and renders as one line", () => {
+		const tree = buildStatusTree(finished, []);
+		const gate = buildCloseOut(finished, tree, ALL_READY);
+		expect(gate).toEqual({ cycles: [], in_progress: [], blocked: [], stranded: [], undrainable: [], unlanded: [], clean: true });
+		const text = renderStatus(tree, { closeOut: gate });
+		expect(text).toEndWith("CLOSE-OUT: clean");
+	});
+
+	test("stored status in_progress counts at any depth, whatever state: label the bead carries", () => {
+		const beads = [...DOMAINS, bead("t2.1", { parent: "t2", status: "in_progress", labels: ["state:in_review"] })];
+		const gate = buildCloseOut(beads, buildStatusTree(beads, []), { ...ALL_READY, ready: ["t3"] });
+		expect(gate.in_progress).toEqual(["run", "dom-a", "feat-1", "t2.1"]);
+		expect(gate.clean).toBe(false);
+	});
+
+	test("blocked unions bd blocked with stored status, and skips finished beads", () => {
+		const beads = [...DOMAINS, bead("t4", { parent: "feat-2", status: "blocked" }), bead("t5", { parent: "feat-2", status: "closed" })];
+		const gate = buildCloseOut(beads, buildStatusTree(beads, ["t2", "t5"]), { ...ALL_READY, blocked: ["t2", "t5"] });
+		expect(gate.blocked).toEqual(["t2", "t4"]);
+	});
+
+	test("stranded is open, unassigned, not ready, and not blocked", () => {
+		// t2 is open and unassigned yet absent from ready: stranded. dom-b, feat-2 are ready.
+		// t3 is claimed. t6 is open and unassigned but blocked, so it is reported once, as blocked.
+		const beads = [...DOMAINS, bead("t6", { parent: "feat-2" })];
+		const gate = buildCloseOut(beads, buildStatusTree(beads, ["t6"]), { ...ALL_READY, blocked: ["t6"], ready: ["dom-b", "feat-2"] });
+		expect(gate.stranded).toEqual(["t2"]);
+		expect(gate.blocked).toEqual(["t6"]);
+	});
+
+	test("an unanswered ready or cycles read leaves its row unknown and the gate not clean", () => {
+		const tree = buildStatusTree(finished, []);
+		const noReady = buildCloseOut(finished, tree, { ...ALL_READY, ready: null });
+		expect(noReady.stranded).toBeNull();
+		expect(noReady.clean).toBe(false);
+		expect(renderStatus(tree, { closeOut: noReady })).toContain("stranded: unknown (bd ready did not answer)");
+
+		const noCycles = buildCloseOut(finished, tree, { ...ALL_READY, cycles: null });
+		expect(noCycles.clean).toBe(false);
+		expect(renderStatus(tree, { closeOut: noCycles })).toContain("cycles: unknown (bd dep cycles did not answer)");
+	});
+
+	test("a cycle renders as its path closed on the first member", () => {
+		const tree = buildStatusTree(finished, []);
+		const gate = buildCloseOut(finished, tree, { ...ALL_READY, cycles: [["t1", "t2"]] });
+		expect(gate.clean).toBe(false);
+		expect(renderStatus(tree, { closeOut: gate })).toContain("    t1 → t2 → t1");
+	});
+
+	test("undrainable names the anchors an open merge bead lacks, store-wide", () => {
+		const beads = [
+			...finished,
+			merge("m-ok"),
+			merge("m-bare", { metadata: { branch: undefined, repo: undefined } }),
+			merge("m-legacy", { metadata: { origin_bead: undefined, origin: "feat-1" } }),
+			merge("m-unlabelled", { labels: [] }),
+			bead("m-mislabelled", { labels: ["pr:merge"], metadata: { role: "implementer", repo: "o/r", origin_bead: "feat-1", branch: "b" } }),
+			merge("m-closed", { status: "closed", metadata: { branch: undefined } }),
+		];
+		// The filter drops every merge bead from the tree; the row still reads the store.
+		const tree = filterTree(buildStatusTree(beads, []), { epic: "dom-a" });
+		const gate = buildCloseOut(beads, tree, ALL_READY);
+		expect(gate.undrainable).toEqual([
+			{ id: "m-bare", missing: ["repo", "branch"] },
+			{ id: "m-unlabelled", missing: ["label pr:merge"] },
+			{ id: "m-mislabelled", missing: ["role=shepherd"] },
+		]);
+		expect(renderStatus(tree, { closeOut: gate })).toContain("undrainable merge beads (3): m-bare (missing repo, branch); ");
+	});
+
+	test("unlanded follows the report: a merge bead counts through the feature it captured", () => {
+		const beads = [
+			...finished,
+			merge("m-open", { status: "in_progress" }),
+			merge("m-landed", { metadata: { merge_sha: "b".repeat(40) } }),
+			merge("m-swept", { metadata: { landing_state: "landed" } }),
+			merge("m-closed", { status: "closed" }),
+			merge("m-other", { metadata: { origin_bead: "elsewhere" } }),
+			merge("m-legacy", { metadata: { origin_bead: undefined, origin: "feat-1", branch: undefined } }),
+		];
+		const whole = buildCloseOut(beads, buildStatusTree(beads, []), ALL_READY);
+		expect(whole.unlanded.map(m => m.id)).toEqual(["m-open", "m-other", "m-legacy"]);
+
+		const domain = filterTree(buildStatusTree(beads, []), { epic: "dom-a" });
+		const gate = buildCloseOut(beads, domain, ALL_READY);
+		expect(gate.unlanded).toEqual([
+			{ id: "m-open", state: "active", branch: "omp/task/m-open" },
+			{ id: "m-legacy", state: "ready" },
+		]);
+		expect(renderStatus(domain, { closeOut: gate })).toContain("unlanded (2): m-open (omp/task/m-open, active); m-legacy (ready)");
+	});
+});
+
 describe("registered run status", () => {
 	function registered() {
 		let tool: unknown;
@@ -390,7 +502,7 @@ describe("registered run status", () => {
 			execute(id: string, params: { epic?: string; full?: boolean }): Promise<{
 				isError?: boolean;
 				content: { text: string }[];
-				details: { incomplete?: boolean; blocked: string[] | null };
+				details: { incomplete?: boolean; blocked: string[] | null; closeOut?: { stranded: string[] | null; cycles: string[][] | null; clean: boolean } };
 			}>;
 		};
 	}
@@ -420,6 +532,36 @@ describe("registered run status", () => {
 			expect(result.content[0]?.text).toContain("late-task");
 			expect(result.content[0]?.text).toContain("ready 1");
 			expect(result.content[0]?.text).not.toContain("unrelated-");
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
+	test("the close-out gate reads bd ready with wisps and bd dep cycles, and lands in the details", async () => {
+		const beads = [bead("run", { issue_type: "epic" }), bead("pulled", { parent: "run" }), bead("stuck", { parent: "run" })];
+		const argvs: string[][] = [];
+		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
+			const argv = args[0] as string[];
+			argvs.push(argv);
+			let payload: unknown = beads;
+			if (argv.includes("blocked")) payload = [];
+			else if (argv.includes("ready")) payload = beads.filter(item => item.id !== "stuck");
+			else if (argv.includes("cycles")) payload = [[{ id: "pulled" }, { id: "stuck" }]];
+			return {
+				stdout: new Response(JSON.stringify(payload)).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => { },
+			} as unknown as Bun.Subprocess;
+		});
+		try {
+			const result = await registered().execute("gate", {});
+			expect(result.isError).not.toBe(true);
+			expect(argvs.find(argv => argv.includes("ready"))).toEqual(["bd", "ready", "--include-ephemeral", "--limit", "0", "--json"]);
+			expect(argvs.find(argv => argv.includes("cycles"))).toEqual(["bd", "dep", "cycles", "--json"]);
+			expect(result.details.closeOut).toMatchObject({ stranded: ["stuck"], cycles: [["pulled", "stuck"]], clean: false });
+			expect(result.content[0]?.text).toContain("CLOSE-OUT: not clean");
+			expect(result.content[0]?.text).toContain("stranded (1): stuck");
 		} finally {
 			spawn.mockRestore();
 		}

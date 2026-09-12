@@ -55,8 +55,7 @@ function healthy(): Record<string, ExecResult | null> {
 		"git --version": out("git version 2.55.0"),
 		"gh --version": out("gh version 2.100.0 (2026-09-03)\nhttps://github.com/cli/cli/releases/tag/v2.100.0"),
 		"gh auth status": out("github.com\n  Logged in to github.com account someone"),
-		"python3 --version": out("Python 3.14.0"),
-		"jq --version": out("jq-1.7.1"),
+		"bun --version": out("1.4.2"),
 		"gh repo view --json nameWithOwner,defaultBranchRef": out(JSON.stringify({ nameWithOwner: "o/r", defaultBranchRef: { name: "main" } })),
 		"gh api graphql": out(capabilityPayload()),
 	};
@@ -189,16 +188,15 @@ describe("runDoctor", () => {
 		expectRow(report, "bd", "fail", "/opt/nowhere/bd not found");
 	});
 
-	test("missing required binaries fail; missing optional ones warn and leave ok standing", async () => {
-		const report = await doctor({ ...healthy(), "wt --version": null, "python3 --version": null, "jq --version": null });
+	test("missing required binaries fail; a missing bun warns and leaves ok standing", async () => {
+		const report = await doctor({ ...healthy(), "wt --version": null, "bun --version": null });
 		expect(row(report, "wt").status).toBe("fail");
-		expectRow(report, "python3", "warn", "worktree-sweep.sh");
-		expectRow(report, "jq", "warn", "beads-store.md");
+		expectRow(report, "bun", "warn", "worktree-sweep.ts");
 		expect(report.ok).toBe(false);
 
-		const optionalOnly = await doctor({ ...healthy(), "python3 --version": null, "jq --version": null });
+		const optionalOnly = await doctor({ ...healthy(), "bun --version": null });
 		expect(optionalOnly.ok).toBe(true);
-		expect(renderDoctor(optionalOnly).split("\n")[0]).toBe("doctor: ok (2 warnings)");
+		expect(renderDoctor(optionalOnly).split("\n")[0]).toBe("doctor: ok (1 warning)");
 	});
 
 	test("gh present but unauthenticated fails with the login repair", async () => {

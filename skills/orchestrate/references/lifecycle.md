@@ -551,7 +551,7 @@ could hold that marker:
 | Carrier | Verdict |
 |---|---|
 | label `kind:incidental` | chosen. `kind:` is an established namespace, the marker is a classification nothing claims on, and it reads back with `bd list --parent <epic> --label kind:incidental` |
-| `metadata.incidental` | rejected. Single-value, one more key to register in the metadata contract, and read with jq instead of a label filter |
+| `metadata.incidental` | rejected. Single-value, one more key to register in the metadata contract, and read with `--metadata-field` instead of a label filter |
 
 The bead carries no `orc-node` label either. It is nobody's DAG node until an architect adopts
 it and adds one.
@@ -621,14 +621,17 @@ Three kinds of tree exist, and only one of them is swept:
 - **Captured branches** (`omp/task/*`) are explicit cleanup candidates only after patch
   containment and terminal state are established by the architect's scan above.
 - **Worktrunk feature worktrees** are inspected with `wt list` and removed with `wt remove`,
-  through `scripts/worktree-sweep.sh`. Raw `git worktree` lifecycle commands are denied.
+  through `bun skill://orchestrate/scripts/worktree-sweep.ts <worktree-path>`
+  (`--discard-branch` deletes a disposable role branch with it). Raw `git worktree`
+  lifecycle commands are denied.
 
 On an architect's death, its feature worktree is triaged through a `recovery` wisp rather
 than deleted: the tree may hold uncommitted work worth rescuing. On epic teardown, verify the
 Worktrunk state vars are cleared and the worktree is released.
 
-At run end, after every feature tree is reclaimed, run `scripts/worktree-sweep.sh --prune
-<primary-repo-path>`. Exit 1 means at least one dirty, valid-but-unregistered, unknown, or
+At run end, after every feature tree is reclaimed, run
+`bun skill://orchestrate/scripts/worktree-sweep.ts --prune <primary-repo-path>`. Exit 1
+means at least one dirty, valid-but-unregistered, unknown, or
 symlink path was refused: inspect those paths and keep the run open instead of forcing
 deletion. The dirty primary checkout, the artifacts directory, the beads database, and the
 shared build target are never swept.

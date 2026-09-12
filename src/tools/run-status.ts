@@ -14,7 +14,7 @@
  */
 
 import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdBlockedChecked, bdListChecked, metadataString, resetReadBudget } from "../bd";
+import { type BdBead, bdBlockedChecked, bdCyclesChecked, bdListChecked, metadataString, resetReadBudget } from "../bd";
 
 /**
  * A bead's derived lifecycle state.
@@ -85,7 +85,46 @@ export interface StatusTree {
  blocked: string[];
 }
 
-export type RunStatusDetails = StatusTree | {
+/** A merge bead the shepherd queue cannot match, and the anchors it lacks. */
+export interface UndrainableMerge {
+ id: string;
+ missing: string[];
+}
+
+/** A merge bead whose captured branch carries no landing proof. */
+export interface UnlandedMerge {
+ id: string;
+ state: BeadState;
+ branch?: string;
+}
+
+/**
+ * The close-out gate as data: what still stands between a run and `/orchestrate-stop`.
+ *
+ * A row is a list, or `null` when the read behind it did not answer, and `clean` holds
+ * only when every row is known and empty. `in_progress`, `blocked` and `stranded` cover
+ * the beads the report shows, at any depth. `undrainable` reads the whole store: a merge
+ * bead carries no parent and the shepherd queue is repository-global, so one that no
+ * queue can match belongs to no run. `unlanded` follows the report: a merge bead counts
+ * when it, or the feature it captured, is in the tree.
+ */
+export interface CloseOut {
+ /** `bd dep cycles`: each cycle as the ids it visits, in edge order. */
+ cycles: string[][] | null;
+ /** Stored status `in_progress`, whatever `state:` label the bead also carries. */
+ in_progress: string[];
+ /** In `bd blocked`, or stored status `blocked`; closed and deferred beads excluded. */
+ blocked: string[];
+ /** Open and unassigned, yet absent from `bd ready` and not blocked: no worker can ever pull it. */
+ stranded: string[] | null;
+ /** Open merge beads missing the `pr:merge` label, `role=shepherd`, `repo`, `origin_bead`, or `branch`. */
+ undrainable: UndrainableMerge[];
+ /** Merge beads not closed, with neither `merge_sha` nor `landing_state=landed`. */
+ unlanded: UnlandedMerge[];
+ clean: boolean;
+}
+
+export type RunStatusDetails = (StatusTree & { closeOut: CloseOut }) | {
  incomplete: true;
  beads: BdBead[] | null;
  blocked: string[] | null;
@@ -101,6 +140,8 @@ export interface RenderOptions {
  /** Include one line per bead. Off, only rollups and counts are printed. */
  full?: boolean;
  filter?: StatusFilter;
+ /** Append the close-out gate. */
+ closeOut?: CloseOut;
 }
 
 /** Sibling ordering: the rollup reads top-down, so structure precedes work. */
@@ -304,6 +345,114 @@ function retainedBlocked(tree: StatusTree): string[] {
  return ids;
 }
 
+/** Every id a tree shows: roots, everything beneath them, and the unparented. */
+function treeIds(tree: StatusTree): Set<string> {
+ const ids = new Set<string>();
+ for (const epic of tree.epics) {
+  ids.add(epic.id);
+  for (const node of epicNodes(epic)) ids.add(node.id);
+ }
+ for (const node of tree.orphans) ids.add(node.id);
+ return ids;
+}
+
+/** The reads the close-out gate is derived from, each `null` when it did not answer. */
+export interface CloseOutReads {
+ blocked: readonly string[];
+ /** `bd ready --include-ephemeral`: what a worker could pull now. */
+ ready: readonly string[] | null;
+ /** `bd dep cycles`. */
+ cycles: string[][] | null;
+}
+
+/**
+ * The close-out gate over the beads a tree shows.
+ *
+ * `beads` is the whole store as `bd list --status all` returned it; the tree decides
+ * which of them are in scope. The merge rows are the two the shepherd queue cannot
+ * answer itself: a merge bead missing an anchor is never matched by the cross-run
+ * `bd ready` net, and a merge bead without `merge_sha` holds captured code the run has
+ * not proven landed.
+ */
+export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads: CloseOutReads): CloseOut {
+ const scope = treeIds(tree);
+ const blockedSet = new Set(reads.blocked);
+ const ready = reads.ready === null ? null : new Set(reads.ready);
+
+ const inProgress: string[] = [];
+ const blocked: string[] = [];
+ const stranded: string[] = [];
+ const undrainable: UndrainableMerge[] = [];
+ const unlanded: UnlandedMerge[] = [];
+ for (const bead of beads) {
+  const status = bead.status ?? "";
+  const labels = bead.labels ?? [];
+  const isMergeBead = labels.includes("pr:merge");
+  const origin = metadataString(bead, "origin_bead") ?? metadataString(bead, "origin");
+
+  if (scope.has(bead.id)) {
+   const isBlocked = status === "blocked" || blockedSet.has(bead.id);
+   if (status === "in_progress") inProgress.push(bead.id);
+   if (isBlocked && status !== "closed" && status !== "deferred") blocked.push(bead.id);
+   if (status === "open" && !bead.assignee && !isBlocked && ready !== null && !ready.has(bead.id)) stranded.push(bead.id);
+  }
+
+  if (status === "open" && (isMergeBead || metadataString(bead, "role") === "shepherd")) {
+   const missing: string[] = [];
+   if (!isMergeBead) missing.push("label pr:merge");
+   if (metadataString(bead, "role") !== "shepherd") missing.push("role=shepherd");
+   if (metadataString(bead, "repo") === undefined) missing.push("repo");
+   if (origin === undefined) missing.push("origin_bead");
+   if (metadataString(bead, "branch") === undefined) missing.push("branch");
+   if (missing.length > 0) undrainable.push({ id: bead.id, missing });
+  }
+
+  if (isMergeBead && status !== "closed" && (scope.has(bead.id) || (origin !== undefined && scope.has(origin)))) {
+   const landed = metadataString(bead, "merge_sha") !== undefined || metadataString(bead, "landing_state") === "landed";
+   if (!landed) {
+    const entry: UnlandedMerge = { id: bead.id, state: deriveState(bead, blockedSet) };
+    const branch = metadataString(bead, "branch");
+    if (branch !== undefined) entry.branch = branch;
+    unlanded.push(entry);
+   }
+  }
+ }
+
+ const cycles = reads.cycles;
+ return {
+  cycles,
+  in_progress: inProgress,
+  blocked,
+  stranded: ready === null ? null : stranded,
+  undrainable,
+  unlanded,
+  clean:
+   cycles !== null && cycles.length === 0 && inProgress.length === 0 && blocked.length === 0 && ready !== null && stranded.length === 0
+   && undrainable.length === 0 && unlanded.length === 0,
+ };
+}
+
+/** The close-out section: one line when clean, otherwise one line per row that is not. */
+function renderCloseOut(gate: CloseOut, lines: string[]): void {
+ lines.push("", `CLOSE-OUT: ${gate.clean ? "clean" : "not clean"}`);
+ if (gate.clean) return;
+ if (gate.cycles === null) lines.push("  cycles: unknown (bd dep cycles did not answer)");
+ else if (gate.cycles.length > 0) {
+  lines.push(`  cycles (${gate.cycles.length}):`);
+  for (const cycle of gate.cycles) lines.push(`    ${[...cycle, cycle[0]].join(" → ")}`);
+ }
+ if (gate.in_progress.length > 0) lines.push(`  in_progress (${gate.in_progress.length}): ${gate.in_progress.join(", ")}`);
+ if (gate.blocked.length > 0) lines.push(`  blocked (${gate.blocked.length}): ${gate.blocked.join(", ")}`);
+ if (gate.stranded === null) lines.push("  stranded: unknown (bd ready did not answer)");
+ else if (gate.stranded.length > 0) lines.push(`  stranded (${gate.stranded.length}): ${gate.stranded.join(", ")}`);
+ if (gate.undrainable.length > 0) {
+  lines.push(`  undrainable merge beads (${gate.undrainable.length}): ${gate.undrainable.map(m => `${m.id} (missing ${m.missing.join(", ")})`).join("; ")}`);
+ }
+ if (gate.unlanded.length > 0) {
+  lines.push(`  unlanded (${gate.unlanded.length}): ${gate.unlanded.map(m => `${m.id} (${m.branch === undefined ? m.state : `${m.branch}, ${m.state}`})`).join("; ")}`);
+ }
+}
+
 function heldBy(node: StatusNode, actor: string): boolean {
  // assignee is the claim of record, but `bd update --status` does not set it (only
  // `--claim` does), so `metadata.actor` -- the identity dispatch stamps on the bead --
@@ -487,6 +636,8 @@ export function renderStatus(tree: StatusTree, opts: RenderOptions = {}): string
   }
  }
 
+ if (opts.closeOut !== undefined) renderCloseOut(opts.closeOut, lines);
+
  return lines.join("\n");
 }
 
@@ -494,7 +645,9 @@ const DESCRIPTION = [
  "Standardised beads run status: rolls a run epic up through its architect-domain epics and",
  "their features to the tasks, deriving per-bead state from status, `state:` labels, and",
  "assignee, and marking what `bd blocked` reports as blocked. `bd set-state` event beads are",
- "not counted. Reads only; never mutates a bead.",
+ "not counted. Ends with the close-out gate: dependency cycles, in-progress and blocked beads",
+ "at any depth, stranded beads no worker can pull, undrainable merge beads, and captured",
+ "branches without landing proof. Reads only; never mutates a bead.",
  "Use this instead of hand-assembling a summary from `bd list`, which loses blockers and",
  "the rollup.",
 ].join(" ");
@@ -516,11 +669,14 @@ export function registerRunStatus(pi: ExtensionAPI): void {
   async execute(_toolCallId, params: StatusFilter & { full?: boolean }): Promise<AgentToolResult<RunStatusDetails>> {
    try {
     resetReadBudget();
-    const [beads, blockedIds] = await Promise.all([
+    const [beads, blockedIds, readyBeads, cycles] = await Promise.all([
      // Events are `bd set-state`'s audit trail, one closed child per transition; the
      // tree drops them too, so `bd blocked` ids keep lining up with what is shown.
      bdListChecked(["list", "--status", "all", "--exclude-type", "event", "--limit", "0", "--json"]),
      bdBlockedChecked(),
+     // Wisps included, or every review and research queue would read as stranded.
+     bdListChecked(["ready", "--include-ephemeral", "--limit", "0", "--json"]),
+     bdCyclesChecked(),
     ]);
 
     if (beads === null || blockedIds === null) {
@@ -539,15 +695,16 @@ export function registerRunStatus(pi: ExtensionAPI): void {
     if (params.actor !== undefined) filter.actor = params.actor;
 
     const tree = filterTree(buildStatusTree(beads, blockedIds), filter);
+    const closeOut = buildCloseOut(beads, tree, { blocked: blockedIds, ready: readyBeads === null ? null : readyBeads.map(bead => bead.id), cycles });
     return {
-     content: [{ type: "text" as const, text: renderStatus(tree, { full: params.full === true, filter }) }],
-     details: tree,
+     content: [{ type: "text" as const, text: renderStatus(tree, { full: params.full === true, filter, closeOut }) }],
+     details: { ...tree, closeOut },
     };
    } catch (error) {
     // A throw here would surface as a hard tool failure mid-run; degrade instead.
     return {
      content: [{ type: "text" as const, text: `run status could not be built: ${String(error)}` }],
-     details: { epics: [], orphans: [], blocked: [] } satisfies StatusTree,
+     details: { incomplete: true, beads: null, blocked: null },
      isError: true,
     };
    }

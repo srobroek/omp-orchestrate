@@ -387,7 +387,8 @@ provenance, never a gate, and it is the evidence a dead-claim recovery reads fir
 and feature beads to their tasks, at any depth, and resolves blockers with `bd blocked`. Use it
 instead of hand-assembling a summary. `bd list --parent <id>` answers direct children only
 (bd 1.2.2), so a hand-built `--parent <epic>` query misses every task under a feature. The
-queries below are for the questions the report does not answer.
+report ends with a `CLOSE-OUT` section, also returned as `details.closeOut`; the queries
+below are for the questions the report does not answer.
 
 | Question | Command |
 |---|---|
@@ -397,38 +398,35 @@ queries below are for the questions the report does not answer.
 | open waits | `bd gate list`, `bd ready --gated --json`, and the `BLOCKED landing:` comments on open merge beads |
 | resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`. Actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity). Location = `metadata.worktree`/`branch`. Surviving code = `git branch --list 'omp/task/*'` |
 | unintegrated code | integration is cherry-pick or squash, so ancestry and `git cherry` prove nothing: under squash every branch commit reads `+`. Landing proof is tree equality, `git merge-tree --write-tree <merge>^ <head>` equal to `git rev-parse <merge>^{tree}`, or one combined patch-id, `git diff <base> <head> \| git patch-id --stable` equal to `git diff <merge>^ <merge> \| git patch-id --stable` |
-| close-out gate | `bd dep cycles` clean AND no bead beneath the epic, at any depth, is `in_progress` (the check `/orchestrate-stop` makes before it removes the marker; `--force` skips it) AND no `blocked` bead in the `orc_run_status` rollup AND no stranded bead AND no undrainable merge bead AND every captured branch proven landed by the row above |
-| stranded beads | per feature, because `--parent` is direct-only: `comm -13 <(bd ready --parent <feature> --json \| jq -r '.[].id' \| sort) <(bd list --parent <feature> --status open,blocked --no-assignee --json \| jq -r '.[].id' \| sort)`, which lists beads that are unassigned but not ready. Then check each nonempty `assignee` in the `orc_run_status` rollup against a live actor |
+| close-out gate | `orc_run_status` with `epic=<run>`: `CLOSE-OUT: clean` means every row below is known and empty. The unintegrated-code row above proves a `merge_sha` stamp against the tree. `/orchestrate-stop` makes the in-progress check itself before it removes the marker; `--force` skips it |
+| stranded beads | the `stranded` row: open and unassigned, absent from `bd ready --include-ephemeral`, and not blocked, so no worker can ever pull it. Then check each nonempty `assignee` in the rollup against a live actor |
 
 A bead that is neither ready nor claimed counts as stranded. The store never reports a dead
-actor, so the stranded query is the only signal. Two measured cases, both of which pass the
+actor, so the stranded row is the only signal. Two measured cases, both of which pass the
 in-progress and blocked checks of the close-out gate:
 
 - A provider 403 killed two test shepherds before they wrote any claim or comment. Three
   merge beads stayed claimable after both actors died.
 - A bounced bead keeps an owner who never returns.
 
-Merge beads carry no `orc-node` label and no parent, so both queries above skip them. They
+The `CLOSE-OUT` rows, each a list of bead ids or `unknown` when its read did not answer:
+
+| Row | Reads | Lists |
+|---|---|---|
+| `cycles` | `bd dep cycles` | each cycle as the ids it visits |
+| `in_progress` | the rollup | stored status `in_progress` at any depth, whatever `state:` label the bead carries |
+| `blocked` | `bd blocked` and stored status | open beads something still blocks |
+| `stranded` | `bd ready --include-ephemeral` | open, unassigned, not ready, not blocked |
+| `undrainable merge beads` | the whole store | open beads carrying `pr:merge` or `role=shepherd` that lack the label, the role, `repo`, `origin_bead` (or legacy `origin`), or `branch` |
+| `unlanded` | the whole store, narrowed to the report | merge beads not closed, with neither `merge_sha` nor `landing_state=landed`; a merge bead counts when it or the feature it captured is in the tree |
+
+Merge beads carry no `orc-node` label and no parent, so the tree rows skip them. They
 strand a third way: the bead is open and unassigned, yet missing an anchor the cross-run
-queue matches on. Before close-out, run this query.
+queue matches on. The `undrainable` row reads the whole store for that reason: the shepherd
+queue is repository-global, and a merge bead no queue can match belongs to no run.
 
-```bash
-{ bd list --label pr:merge --status open --json
-  bd list --metadata-field role=shepherd --status open --json; } \
-  | jq -r '.[] | select((.labels|index("pr:merge")|not)
-      or (.metadata.role != "shepherd")
-      or ([.metadata.repo,(.metadata.origin_bead // .metadata.origin),.metadata.branch]|any(.==null))) | .id' \
-  | sort -u
-```
-
-The `//` fallback accepts a pre-split merge bead, which carries `origin` where a new one
-carries `origin_bead`.
-
-Empty output passes the gate. Any id listed is drainable by nobody: the cross-run queue
-finds a merge bead only when every anchor is present. A run on bd 1.2.2 made merge beads
-carrying one marker alone, so a single-filter listing returned nothing against beads that
-existed. That is why the net unions both markers and then re-checks each one in `jq`: a
-filter on the marker a bead is missing can never find it.
+The row nets both markers and re-checks each bead. A run on bd 1.2.2 made merge beads
+carrying one marker alone, and a filter on the marker a bead is missing can never find it.
 
 ## SpecKit / external frameworks
 

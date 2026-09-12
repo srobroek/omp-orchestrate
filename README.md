@@ -33,8 +33,7 @@ step and names it.
 | `wt` (Worktrunk) | current | architect feature worktrees |
 | `gh` | 2.100 or later, signed in (`gh auth status`) | conflict and review probes, the landing capability probe, and the merges |
 | `git` | 2.x | every worktree, capture, and integration step |
-| `python3` | 3.x | `skills/orchestrate/scripts/worktree-sweep.sh` at run end |
-| `jq` | current | the stranded-bead and merge-bead queries at close-out |
+| `bun` | 1.3.14 or later, the runtime `omp` itself requires | `skills/orchestrate/scripts/worktree-sweep.ts` at run end |
 
 The architect and implementer may spawn seven helpers. `scout` and `security-reviewer`
 ship with OMP. The other five come from three plugins in the `srobroek-omp` marketplace:
