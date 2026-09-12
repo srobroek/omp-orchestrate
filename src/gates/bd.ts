@@ -19,9 +19,11 @@
  * server, so the block refused correct commands while citing a mechanism that did not
  * apply. `-C` remains legal and harmless; it is simply not demanded.
  *
- * Nothing here fires outside an active run: `readActiveRun` is the whole discriminator,
- * and a plain session in this repository sees no gate at all. That is the defect the
- * conversion exists to fix — a rule condition matched every session that mentioned `bd`.
+ * Nothing here fires outside a pinned run: `pinnedRunActive` — the process pin plus a
+ * valid marker in the session checkout or the pinned repository — is the whole
+ * discriminator, and a plain session in this repository sees no gate at all. That is the
+ * defect the conversion exists to fix — a rule condition matched every session that
+ * mentioned `bd`.
  *
  * Each check is pure and takes the parsed invocation, so the shell parsing stays at the
  * entry point and the predicates are testable without a tool event. A check that cannot
@@ -37,8 +39,8 @@ import { bdShow, commentVerb, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
-import { readActiveRun } from "../run-state";
 import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
+import { pinnedRunActive } from "./readonly";
 
 /** Shell metacharacters that make a command unsafe to rewrite as one invocation. */
 const REWRITE_METACHARACTERS = /[;&|`\n]/;
@@ -318,13 +320,13 @@ const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
  * refuses under `BD_READONLY=1` is the exemption table instead, so the classification
  * tracks the tool rather than a copy of it.
  *
- * `bd ready --claim` is the one write deliberately exempt. Dispatch writes `metadata.actor`
- * onto the bead and every agent body reads it back from there (`src/supervision.ts`), so a
- * queue pull -- which names no bead -- precedes the identity it would have to carry.
- * Nagging it would nag the protocol's first command. A claim that names its bead is not
- * exempt: `bd show` yields `metadata.actor` before the claim.
+ * `bd ready --claim` is the one write deliberately exempt. A queue pull names no bead, so
+ * it precedes the identity it would have to carry: the assignee its report prints is the
+ * identity every later write attributes to (`src/claim-observer.ts`). Nagging it would nag
+ * the protocol's first command. A claim that names its bead is not exempt: `bd show`
+ * yields the bead's `metadata.actor`, which seeds that first claim.
  */
-function writesBeads(invocation: BdInvocation): boolean {
+export function writesBeads(invocation: BdInvocation): boolean {
 	let hasHelp = false;
 	let hasDryRun = false;
 	let hasBlocks = false;
@@ -454,8 +456,8 @@ export const actorNotice: BdCheck = (invocation, env) => {
 	const written = invocation.hasClaim ? `${name} --claim` : name;
 	return (
 		`WARN bd identity: 'bd ${written}' carries neither BEADS_ACTOR nor BD_ACTOR, so the write lands ` +
-		`attributed to nobody. Prefix the command with either variable, set to the claimed bead's metadata.actor: ` +
-		`'BEADS_ACTOR=<actor> bd ${name} ...'.`
+		`attributed to nobody. Prefix the command with either variable, set to the assignee your claim report printed: ` +
+		`'BEADS_ACTOR=<assignee> bd ${name} ...'.`
 	);
 };
 
@@ -665,8 +667,7 @@ export async function gateBdDiscipline(
 	const invocations = bdInvocations(command);
 	if (invocations.length === 0) return undefined;
 
-	const run = await readActiveRun(ctx.cwd).catch(() => null);
-	if (run === null) return undefined;
+	if (!(await pinnedRunActive(ctx.cwd))) return undefined;
 
 	const arbiter = actorNoticeArbiter();
 	if (invocations.length === 1 && isSingleBdCommand(command)) {

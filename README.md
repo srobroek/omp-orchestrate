@@ -87,21 +87,29 @@ bind claims. A warning neither establishes a claim nor makes dispatch safe.
 
 ## Gates
 
-The extension registers a single `tool_call` handler with seven checks. They catch
-protocol mistakes but cannot enforce transactional isolation. G6 delivers notices.
-Unavailable evidence and bounded exit paths can fail open without accepting the work.
+The extension registers a single `tool_call` handler with seven numbered checks and one
+runtime database check. They catch protocol mistakes but cannot enforce transactional
+isolation. G6 delivers notices. Unavailable evidence and bounded exit paths can fail
+open without accepting the work.
 
+Every refusing check runs only under orchestration: the session declares an `ORC-ROLE`,
+or its process carries an absolute `BEADS_DIR` pin and a valid active-run marker sits in
+the session checkout or in the repository beside that pin. A plain session in a
+repository that merely has this plugin installed sees no gate, and a claim it makes by
+hand is never observed. G6 and the contract injection require the pinned run itself.
+
+- **Runtime `BEADS_DIR` (`bash`):** refuses any command text that names `BEADS_DIR`, including inside quotes, so a wrapper such as `env -S` cannot smuggle an override; the variable travels in the tool's `env` field. A structured `env.BEADS_DIR` must identify the pinned database and is rewritten to its canonical path.
 - **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` only when the top-level OMP process has a non-empty absolute `BEADS_DIR` pin from `ensureBeadsPath`. The session checkout or pinned repository must also have a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
   G1 checks the session checkout first, then the pinned repository. This preserves linked-worktree runs whose shared `.beads` lives in the primary checkout.
-- **G2 (`bash`, `edit`, `write`):** blocks edits outside the worktree named by the claimed bead.
+- **G2 (`bash`, `edit`, `write`):** refuses a mutation outside the worktree named by the claimed bead, or outside its `metadata.scope` globs; `bash` is checked by its cwd only. Refuses when the claimed bead is no longer `in_progress` and assigned to the claiming actor; a missing or unreadable bead fails closed. Admits the terminal comment after the release, and a bead you closed yourself ends the claim: your next product edit or comment passes and the gate disarms. Recovery of a closed bead is `bd reopen <id>` then `bd update <id> --claim --json`; a reopened bead may also be handed back with `bd update <id> --assignee ""`.
 - **G3 (`bash`):** blocks mutating `git worktree` commands and `gh pr checkout` because they bypass Worktrunk.
   Inspection remains allowed.
 - **G4 (`yield`):** refuses exits when workers do not meet their contracts.
   A worker with a role but no claim receives one refusal.
   This refusal does not repeat, so revived sessions can exit.
 - **G5 (`bash`):** blocks claims for another role and review states authored by shepherds.
-- **G6 (`bash`):** warns without blocking. Within a run, it checks for:
-  - writes without actors
+- **G6 (`bash`):** warns without blocking. Within a pinned run, it checks for:
+  - writes without actors: the identity is the assignee your claim report printed
   - comments without protocol verbs
   - bug beads unreachable from queues
 - **G7 (`bash`):** blocks claims naming multiple beads. Each activation owns one bead.
