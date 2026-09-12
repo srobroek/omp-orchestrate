@@ -355,8 +355,8 @@ describe("G5 fail-open", () => {
   expect(await gateClaimEligibility(claims, ctxFor(), { command: "bd ready --claim --json" })).toBeUndefined();
  });
 
- test("ignores a command with no bd --claim in it", async () => {
-  for (const command of ["bd show orc-7 --json", "git status", "", "bd update orc-7 --status closed"]) {
+ test("ignores a command with no bd write or claim in it", async () => {
+  for (const command of ["bd show orc-7 --json", "git status", "", "bd update orc-7 --add-label agent:reviewer"]) {
    expect(await gateClaimEligibility(claims, ctxFor("reviewer"), { command })).toBeUndefined();
   }
   expect(shown).toEqual([]);
@@ -921,13 +921,15 @@ describe("G5 the lead never claims", () => {
 });
 
 /**
- * The governor: `metadata.max_inflight` on the run epic caps held code-writing claims.
+ * The governor: `metadata.max_inflight` on the run epic caps held implementer claims.
  * The epic is found through the marker in the session checkout, so no pin is needed.
  */
 describe("G5 capacity governor", () => {
  const PULL = "bd ready --metadata-field role=implementer --unassigned --claim --json";
+ const AT_CAP = (held: number, cap: number) =>
+  `run at capacity (${held}/${cap} implementer claims held; architect epic claims are not counted); retry`;
 
- /** `count` implementer beads held in progress. */
+ /** `count` beads of `role` held in progress. */
  function held(count: number, role = "implementer"): BdBead[] {
   return Array.from({ length: count }, (_, index) => bead(`orc-held-${role}-${index}`, {
    status: "in_progress", assignee: `${role}-${index}`, labels: ["orc-node"], metadata: { role, scope: [`src/${role}${index}/**`] },
@@ -938,11 +940,11 @@ describe("G5 capacity governor", () => {
   beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: 2 } });
  });
 
- test("refuses a queue pull at the cap, naming the count", async () => {
+ test("refuses a queue pull at the cap, naming the count and what it counts", async () => {
   inFlight = held(2);
   const result = await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL });
   expect(result?.block).toBe(true);
-  expect(result?.reason).toBe("run at capacity (2/2); retry");
+  expect(result?.reason).toBe(AT_CAP(2, 2));
   expect(listed).toEqual([["list", "--label", "orc-node", "--status", "in_progress", "--limit", "0", "--json"]]);
  });
 
@@ -955,29 +957,40 @@ describe("G5 capacity governor", () => {
   inFlight = held(3);
   beads["orc-10"] = bead("orc-10", { metadata: { role: "implementer", scope: ["docs/**"] } });
   const result = await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: "BEADS_ACTOR=impl-9 bd update orc-10 --claim" });
-  expect(result?.reason).toBe("run at capacity (3/2); retry");
+  expect(result?.reason).toBe(AT_CAP(3, 2));
   expect(listed).toHaveLength(1);
  });
 
- test("counts architect envelopes, and neither reviewers, researchers, nor unheld nodes", async () => {
+ test("counts implementer claims alone: not architect envelopes, reviewers, researchers, or unheld nodes", async () => {
   inFlight = [
-   ...held(1),
+   ...held(2),
    ...held(1, "architect"),
    ...held(3, "reviewer"),
    ...held(3, "researcher"),
    bead("orc-waiting", { status: "in_progress", assignee: "", metadata: { role: "implementer" } }),
    bead("orc-open", { status: "open", assignee: "impl-x", metadata: { role: "implementer" } }),
   ];
-  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe("run at capacity (2/2); retry");
+  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe(AT_CAP(2, 2));
   inFlight = inFlight.slice(1);
   expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
  });
 
- test("does not cap a reviewer's claim: it is not the claim the cap bounds", async () => {
+ test("at max_inflight=1 the architect's epic claim leaves the one slot to an implementer", async () => {
+  // Counting the architect's epic deadlocked the run: no implementer could ever claim,
+  // and the architect then raised the cap on the epic itself.
+  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: 1 } });
+  inFlight = held(1, "architect");
+  expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
+  inFlight = [...inFlight, ...held(1)];
+  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe(AT_CAP(1, 1));
+ });
+
+ test.each([
+  ["reviewer", "bd ready --metadata-field role=reviewer --unassigned --claim --json"],
+  ["architect", "bd ready --metadata-field role=architect --unassigned --claim --json"],
+ ])("does not cap a %s's claim: it is not the claim the cap bounds", async (role, command) => {
   inFlight = held(5);
-  expect(await gateClaimEligibility(claims, ctxFor("reviewer", runRoot), {
-   command: "bd ready --metadata-field role=reviewer --unassigned --claim --json",
-  })).toBeUndefined();
+  expect(await gateClaimEligibility(claims, ctxFor(role, runRoot), { command })).toBeUndefined();
   expect(listed).toEqual([]);
  });
 
@@ -995,7 +1008,7 @@ describe("G5 capacity governor", () => {
  ])("defaults to eight when max_inflight is %s", async (_label, metadata) => {
   beads["orc-run"] = bead("orc-run", { metadata });
   inFlight = held(8);
-  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe("run at capacity (8/8); retry");
+  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe(AT_CAP(8, 8));
   inFlight = held(7);
   expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
  });
@@ -1003,7 +1016,7 @@ describe("G5 capacity governor", () => {
  test("reads a cap stamped as a string", async () => {
   beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: "3" } });
   inFlight = held(3);
-  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe("run at capacity (3/3); retry");
+  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe(AT_CAP(3, 3));
  });
 
  test("fails open, and says why, when the epic cannot be read", async () => {
@@ -1032,6 +1045,166 @@ describe("G5 capacity governor", () => {
   expect(await gateClaimEligibility(claims, ctxFor("implementer", cwd()), { command: PULL })).toBeUndefined();
   expect(shown).toEqual([]);
   expect(listed).toEqual([]);
+ });
+});
+
+/**
+ * The run epic's governance metadata is the lead's. Found by a run in which an architect,
+ * refused at the cap, raised `max_inflight` on the epic and was never refused.
+ */
+describe("G5 run-epic governance", () => {
+ test.each([
+  ["the cap", "bd update orc-run --set-metadata max_inflight=3", "max_inflight"],
+  ["the cap as JSON", `bd update orc-run --metadata '{"max_inflight":3}'`, "max_inflight"],
+  ["the landing record", `bd -C /run/repo update orc-run --metadata '{"landing":{"mode":"auto"}}'`, "landing"],
+  ["a landing state", "bd update orc-run --set-metadata landing_state=landed", "landing_state"],
+  ["the lead's identity", "bd update orc-run --set-metadata=lead_actor=arch-1", "lead_actor"],
+  ["the lead lease", "bd update orc-run --unset-metadata lease_until", "lease_until"],
+  ["the base the exit contract compares against", "bd update orc-run --set-metadata base_sha=deadbeef", "base_sha"],
+ ])("refuses an architect rewriting %s on the run epic, naming the key", async (_label, command, key) => {
+  const result = await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain(`metadata.${key}`);
+  expect(result?.reason).toContain("orc-run");
+  expect(shown).toEqual([]);
+ });
+
+ test.each(["implementer", "shepherd", "reviewer"])("%s is refused too", async role => {
+  expect((await gateClaimEligibility(claims, ctxFor(role, runRoot), { command: "bd update orc-run --set-metadata max_inflight=9" }))?.block).toBe(true);
+ });
+
+ test.each([
+  ["the lead, which is role-less", () => ctxFor(undefined, runRoot), "bd update orc-run --set-metadata max_inflight=3"],
+  ["a session under no run", () => ctxFor("architect", plainRoot), "bd update orc-run --set-metadata max_inflight=3"],
+  ["the same key on a bead that is not the run epic", () => ctxFor("architect", runRoot), "bd update orc-feature --set-metadata max_inflight=3"],
+  ["an ordinary key on the run epic", () => ctxFor("architect", runRoot), "bd update orc-run --set-metadata worktree=/tmp/wt"],
+  ["a read of the run epic", () => ctxFor("architect", runRoot), "bd show orc-run --json"],
+ ])("leaves %s alone", async (_label, ctx, command) => {
+  expect(await gateClaimEligibility(claims, ctx(), { command })).toBeUndefined();
+ });
+});
+
+/**
+ * A node is closed by the landing sweep, or by the lead. Found by a run in which an
+ * architect closed two tasks `--reason merged` with no reviewer, no PR, and main unchanged.
+ */
+describe("G5 close authority", () => {
+ /** A git task under review: what an architect was seen closing by hand. */
+ function task(overrides: Partial<BdBead> = {}): BdBead {
+  return bead("orc-t", { issue_type: "task", status: "in_progress", assignee: "", labels: ["orc-node", "agent:reviewer"], metadata: { role: "implementer", execution_kind: "git", head_sha: "abc1234" }, ...overrides });
+ }
+ let comments: Record<string, { text: string }[]>;
+ const commentsSpy = spyOn(actualBd, "bdCommentsChecked").mockImplementation(async (id: string) => comments[id] ?? null);
+ afterAll(() => commentsSpy.mockRestore());
+ beforeEach(() => {
+  comments = { "orc-t": [{ text: "REPORTED docs/faq.md changed; head_sha abc1234" }] };
+  beads["orc-t"] = task();
+ });
+
+ test.each([
+  ["architect", "bd close orc-t --reason merged"],
+  ["implementer", "bd close orc-t"],
+  ["shepherd", "bd -C /run/repo update orc-t --status closed"],
+  ["architect", "bd update orc-t -s closed --reason merged"],
+  ["architect", "bd update orc-t --status=closed"],
+ ])("refuses a %s closing a task nothing landed: %s", async (role, command) => {
+  const result = await gateClaimEligibility(claims, ctxFor(role, runRoot), { command });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("orc-t");
+  expect(result?.reason).toContain("no landing evidence");
+  expect(result?.reason).toContain(role);
+ });
+
+ test("a feature is a node too", async () => {
+  beads["orc-t"] = task({ issue_type: "feature", metadata: { role: "architect" } });
+  expect((await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t" }))?.block).toBe(true);
+ });
+
+ test.each([
+  ["a merge_sha", () => { beads["orc-t"] = task({ metadata: { execution_kind: "git", merge_sha: "c86067b" } }); }],
+  ["a LANDED comment", () => { comments["orc-t"] = [{ text: "LANDED c86067b pr=2 head=abc1234 merge=orc-m" }]; }],
+ ])("allows the close once the bead carries %s", async (_label, arrange) => {
+  arrange();
+  expect(await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" })).toBeUndefined();
+ });
+
+ test("the lead may close by hand", async () => {
+  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd close orc-t --reason merged" })).toBeUndefined();
+  expect(shown).toEqual([]);
+ });
+
+ test.each([
+  ["a review wisp", { issue_type: "task", ephemeral: true, wisp_type: "review" }, "reviewer"],
+  ["a merge bead", { issue_type: "task", labels: ["pr:merge"], metadata: { role: "shepherd" } }, "shepherd"],
+  ["a bug bead", { issue_type: "bug" }, "implementer"],
+  ["a non-git node, closed as dismissed", { metadata: { execution_kind: "comment", output_ref: "ref" } }, "architect"],
+ ])("%s is not a landed node and closes as before", async (_label, shape, role) => {
+  beads["orc-t"] = task(shape as Partial<BdBead>);
+  expect(await gateClaimEligibility(claims, ctxFor(role, runRoot), { command: "bd close orc-t --reason dismissed" })).toBeUndefined();
+ });
+
+ test("a node whose kind is undeclared is judged as git work", async () => {
+  beads["orc-t"] = task({ metadata: { role: "implementer" } });
+  expect((await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t" }))?.block).toBe(true);
+ });
+
+ test.each([
+  ["the bead", () => { delete beads["orc-t"]; }, "orc-t"],
+  ["its comments", () => { delete comments["orc-t"]; }, "orc-t"],
+ ])("fails open, and says why, when %s cannot be read", async (_label, arrange, warnedBead) => {
+  arrange();
+  expect(await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t" })).toBeUndefined();
+  expect(warned.map(entry => entry.data?.bead)).toEqual([warnedBead]);
+ });
+
+ test.each(["implementer", "architect", "reviewer", "researcher"])("%s may not stamp merge_sha, on any bead", async role => {
+  const result = await gateClaimEligibility(claims, ctxFor(role, runRoot), { command: "bd update orc-t --set-metadata merge_sha=c86067b" });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("metadata.merge_sha");
+  expect(await gateClaimEligibility(claims, ctxFor("shepherd", runRoot), { command: "bd update orc-t --set-metadata merge_sha=c86067b" })).toBeUndefined();
+ });
+});
+
+/**
+ * A closed feature takes no new children from a role that does not decompose. Found by a
+ * run in which an implementer filed a task under a closed feature and pulled it from the
+ * queue.
+ */
+describe("G5 closed parent", () => {
+ const FILE = `bd create "t" --parent orc-closed --labels orc-node --metadata '{"role":"implementer","scope":["src/x/**"]}'`;
+ beforeEach(() => {
+  beads["orc-closed"] = bead("orc-closed", { issue_type: "feature", status: "closed" });
+  beads["orc-open"] = bead("orc-open", { issue_type: "feature", status: "in_progress" });
+ });
+
+ test.each(["implementer", "shepherd", "researcher"])("refuses a %s filing under a closed bead, naming it", async role => {
+  const result = await gateClaimEligibility(claims, ctxFor(role, runRoot), { command: FILE });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("orc-closed");
+  expect(result?.reason).toContain("closed");
+ });
+
+ test.each([
+  ["the architect", () => ctxFor("architect", runRoot), FILE],
+  ["the lead", () => ctxFor(undefined, runRoot), FILE],
+  ["an open parent", () => ctxFor("implementer", runRoot), FILE.replace("orc-closed", "orc-open")],
+  ["no parent", () => ctxFor("implementer", runRoot), `bd create "bug" --type bug --metadata '{"role":"implementer"}'`],
+ ])("leaves %s alone", async (_label, ctx, command) => {
+  expect(await gateClaimEligibility(claims, ctx(), { command })).toBeUndefined();
+ });
+
+ test("fails open, and says why, when the parent cannot be read", async () => {
+  expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: FILE.replace("orc-closed", "orc-ghost") })).toBeUndefined();
+  expect(warned.map(entry => entry.data?.bead)).toEqual(["orc-ghost"]);
+ });
+
+ test("a queue pull carrying a literal <epic> placeholder is told what the shell did with it", async () => {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), {
+   command: "bd ready --parent <epic> --metadata-field role=implementer --unassigned --claim --json",
+  });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("'<epic>' was parsed as a redirection");
+  expect(result?.reason).toContain("role=implementer");
  });
 });
 
@@ -1121,5 +1294,49 @@ describe("G5 decomposition scope", () => {
    failure.mockRestore();
   }
   expect(warned.map(entry => entry.data?.cause)).toEqual(["bd could not be run"]);
+ });
+
+ /**
+  * Self-inflicted opacity. Found by a run in which `M='{"role":"implementer","scope":["docs/**"]}'`
+  * and two `bd create ... --metadata "$M"` filed siblings with identical scopes: the check saw
+  * no literal scope and allowed both.
+  */
+ test.each([
+  ["a quoted variable", `bd create "t1" --parent orc-feature --metadata "$M"`, "--metadata $M"],
+  ["a bare variable", "bd create t1 --parent orc-feature --metadata $M", "--metadata $M"],
+  ["a braced variable", `bd create "t1" --metadata "\${META}"`, "--metadata ${META}"],
+  ["a quoted command substitution", `bd create "t1" --metadata "$(cat meta.json)"`, "--metadata $(cat meta.json)"],
+  ["a bare command substitution, which splits the segment", `bd create "t1" --metadata $(cat meta.json)`, "--metadata"],
+  ["a heredoc inside a substitution", `bd create "t1" --parent orc-feature --metadata "$(cat <<'EOF'\n{"role":"implementer","scope":["docs/**"]}\nEOF\n)"`, "--metadata $(cat <<'EOF'"],
+  ["a backquoted substitution", "bd create t1 --metadata \"`cat meta.json`\"", "--metadata `cat meta.json`"],
+  ["a file operand", "bd create t1 --metadata @meta.json", "--metadata @meta.json"],
+  ["malformed JSON", `bd create "t1" --metadata '{"scope":[}'`, `--metadata {"scope":[}`],
+  ["a scope glob carrying a variable", `bd update orc-10 --metadata '{"scope":["$DIR/**"]}'`, "$DIR/**"],
+  ["a set-metadata scope carrying a variable", 'bd update orc-10 --set-metadata "scope=$S"', "--set-metadata scope=$S"],
+  ["a set-metadata pair held in a variable", 'bd update orc-10 --set-metadata "$KV"', "--set-metadata $KV"],
+ ])("refuses %s as opaque, spending no read", async (_label, command, quoted) => {
+  const result = await gateClaimEligibility(claims, architect, { command });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("scope must be literal for the overlap check");
+  expect(result?.reason).toContain(quoted);
+  expect(shown).toEqual([]);
+  expect(listed).toEqual([]);
+  expect(warned).toEqual([]);
+ });
+
+ test.each([
+  ["literal JSON on create", `bd create "t2" --parent orc-feature --metadata '{"role":"implementer","scope":["src/other/**"]}'`],
+  ["a variable in a key the overlap check never reads", "bd update orc-10 --set-metadata worktree=$WT"],
+  ["a variable in the bead id, with literal metadata", `bd update $ID --set-metadata scope=docs/**`],
+  ["a variable in a comment body", `bd comment orc-10 "NOTE $MSG"`],
+  ["a variable clearing a key", "bd update orc-10 --unset-metadata $KEY"],
+ ])("still admits %s", async (_label, command) => {
+  expect(await gateClaimEligibility(claims, architect, { command })).toBeUndefined();
+ });
+
+ test("opacity is judged for the architect, whose write the overlap check reads", async () => {
+  for (const role of ["implementer", "shepherd", undefined]) {
+   expect(await gateClaimEligibility(claims, ctxFor(role), { command: `bd create "bug" --type bug --metadata "$M"` })).toBeUndefined();
+  }
  });
 });
