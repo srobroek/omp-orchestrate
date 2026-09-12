@@ -113,10 +113,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     const ownership = gateWorktrunkOwnership(input);
     if (ownership) return ownership;
     // G6 before G5: it is a parse plus one marker read where G5 shells out to
-    // `bd show` and `bd list`. It takes `pi` because its findings are notices
-    // rather than refusals: a notice leaves through `sendMessage`, and the return
+    // `bd show` and `bd list`. It takes `pi` because most of its findings are
+    // notices, which leave through `sendMessage`; a refusal (a routed sync from a
+    // worker, a named database) comes back as a block, and otherwise the return
     // value carries only the actor-prefixed command.
     const discipline = await gateBdDiscipline(pi, ctx, input, event.toolCallId, claims);
+    if (discipline?.block) return discipline;
     if (discipline?.input !== undefined) {
      input = discipline.input as Record<string, unknown>;
      inputRevised = true;

@@ -601,4 +601,30 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    expect(result).toBeUndefined();
   });
  });
+
+ describe("G6 refusals reach the verdict", () => {
+  test("a worker's routed sync under an active marker is blocked, not merely noticed", async () => {
+   await pinnedRun(dir);
+   const { pi, handlers, sent, errors } = workerApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(handlers, call("worker-sync", "bd dolt pull"), { cwd: dir, role: "implementer" });
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("sync is the lead's barrier step");
+   expect(sent).toEqual([]);
+  });
+
+  test("the lead's own sync under the same marker passes G6", async () => {
+   await pinnedRun(dir);
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(handlers, call("lead-sync", "bd dolt push"), { cwd: dir });
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBeUndefined();
+  });
+ });
 });
