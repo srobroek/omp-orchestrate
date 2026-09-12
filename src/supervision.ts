@@ -6,14 +6,22 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdListChecked, bdRun, bdWispListChecked, resetReadBudget } from "./bd";
+import { type BdBead, bdFailureText, bdListChecked, bdRun, bdWispListChecked, lastBdFailure, readBudgetExhausted, resetReadBudget } from "./bd";
 import architect from "./contracts/architect.json";
 import generic from "./contracts/generic.json";
 import implementer from "./contracts/implementer.json";
 import researcher from "./contracts/researcher.json";
 import reviewer from "./contracts/reviewer.json";
 import shepherd from "./contracts/shepherd.json";
-import { applies, collectExitEvidence, completionKindSupported, contractPaused, resourceKind, satisfies } from "./gates/exit";
+import {
+ applies,
+ collectExitEvidence,
+ completionKindSupported,
+ contractPaused,
+ linkedEvidenceNeeds,
+ resourceKind,
+ satisfies,
+} from "./gates/exit";
 import { beadRouting } from "./identity";
 
 /** The `task:subagent:lifecycle` fields this module reads. */
@@ -185,8 +193,13 @@ async function reapBead(bead: BdBead, child: ChildLifecycle, branch: BranchState
   return { bead: bead.id, case: disposition, failures: [], recovery: "not-needed" };
  }
  const branchEvidence = BRANCH_EVIDENCE[branch](`omp/task/${child.id}`);
+ // An unread contract names its cause: the reaper spent its own read cap, or bd
+ // answered nothing and says why. The remedies differ -- re-check with fewer linked
+ // beads against retry once the store answers -- so one word for both sent the
+ // architect to the wrong one.
+ const unreadCause = readBudgetExhausted() ? "the reaper's bd read budget is spent" : bdFailureText(lastBdFailure());
  const contractEvidence = failures === "paused" ? "paused on open escalation; preserve claim until architect resolves escalation"
-  : failures === null ? "contract evidence unknown"
+  : failures === null ? `contract evidence unread (${unreadCause}); the contract is unevaluated, not failed`
    : failures.length > 0 ? `unsatisfied checks: ${failures.join(", ")}` : `contract disposition: ${disposition}`;
  const routing = beadRouting(bead);
  const carrier = routing?.from === "legacy-label" ? `; contract from legacy ${routing.spelling}` : "";
@@ -281,7 +294,7 @@ const CONTRACTS: Record<string, RoleContract> = {
 async function contractFailures(bead: BdBead): Promise<string[] | "paused" | null> {
  const role = beadRouting(bead)?.role ?? "generic";
  const contract: RoleContract = Object.hasOwn(CONTRACTS, role) ? (CONTRACTS[role] ?? generic) : generic;
- const evidence = await collectExitEvidence(bead);
+ const evidence = await collectExitEvidence(bead, linkedEvidenceNeeds(contract));
  if (evidence === null) return null;
  if (!completionKindSupported(role, bead)) return ["unsupported-resource"];
  if (contractPaused(contract, evidence)) return "paused";

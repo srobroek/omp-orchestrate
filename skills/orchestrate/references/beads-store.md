@@ -352,9 +352,13 @@ bd comment <bead> "<VERB> <node> field=… output_ref=<abs artifact path>"
   `bd set-state` emits its own event bead, so transitions are double-anchored.
 
 Alongside these voluntary records, the extension keeps an involuntary one: every child's
-mutating `bd` command is appended to `<artifacts_dir>/audit/<child-id>.bdlog` as
-`ts, child, argv, exitCode`. It is passive provenance, never a gate, and it is the evidence
-the `read-evidence` step of `mol-dead-claim-recovery` wants.
+mutating `bd` command is appended to
+`<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog` as
+`ts, child, argv, exitCode, store`. `store` is the beads directory the command wrote to. A
+row whose store is not the run's pinned database also carries `foreign_store: true`; it is
+provenance of a sandbox or another run, not a run mutation, and a reader counting the run's
+writes skips it. The ledger is passive provenance, never a gate, and it is the evidence the
+`read-evidence` step of `mol-dead-claim-recovery` wants.
 
 ## Shepherd primitives
 
@@ -383,7 +387,7 @@ queries below are for the questions the report does not answer.
 | Question | Command |
 |---|---|
 | one bead's story | `bd show <bead> --json` + `bd comments <bead>` |
-| audit trail | filter `.beads/interactions.jsonl` by `issue_id`/`actor`, plus `<artifacts_dir>/audit/*.bdlog` |
+| audit trail | filter `.beads/interactions.jsonl` by `issue_id`/`actor`, plus `<spawning-session-cwd>/.orchestration/audit/*.bdlog` (skip rows tagged `foreign_store`) |
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
 | open waits | `bd gate list`, `bd merge-slot check`, `bd ready --gated --json` |
 | unanswered patrols | `bd dep list <epic> --direction=up --type relates-to --json` filtered on `wisp_type == "patrol"` and a non-closed status. `bd list` hides ephemeral beads outright, even under `--wisp-type patrol`, and takes no `--include-ephemeral`: only `bd ready` does |

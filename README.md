@@ -127,10 +127,15 @@ bind claims. A warning neither establishes a claim nor makes dispatch safe.
 
 ## Gates
 
-The extension registers a single `tool_call` handler with seven numbered checks and one
-runtime database check. They catch protocol mistakes. They cannot enforce transactional
-isolation. G6 delivers notices. When evidence is unavailable, a bounded exit path can fail
-open without accepting the work.
+The extension registers a single `tool_call` handler with six numbered checks, one
+runtime database check, and one assignment notice. They catch protocol mistakes. They
+cannot enforce transactional isolation.
+
+Every refusal rests on evidence. When `bd` cannot answer, the check that needed it logs
+the cause and lets the call run. A check refuses only what it read and can prove:
+- a bead assigned to another actor
+- a queue that is not yours
+- a scope that overlaps a live node
 
 Every refusing check runs only under orchestration. A session is under orchestration when
 it declares an `ORC-ROLE`, or when its process carries an absolute `BEADS_DIR` pin and a
@@ -141,22 +146,33 @@ hand is never observed. G6 and the contract injection require the pinned run its
 - **Runtime `BEADS_DIR` (`bash`):** refuses any command text that names `BEADS_DIR`, including inside quotes. The variable travels in the tool's `env` field, so a wrapper such as `env -S` cannot smuggle an override. A structured `env.BEADS_DIR` must identify the pinned database. The gate rewrites it to its canonical path.
 - **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` only when the top-level OMP process has a non-empty absolute `BEADS_DIR` pin from `ensureBeadsPath`. The session checkout or pinned repository must also have a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
   G1 checks the session checkout first, then the pinned repository. This preserves linked-worktree runs whose shared `.beads` lives in the primary checkout.
-- **G2 (`bash`, `edit`, `write`):** refuses a mutation outside the worktree named by the claimed bead, or outside its `metadata.scope` globs. `bash` is checked by its cwd only. G2 also refuses when the claimed bead is no longer `in_progress` and assigned to the claiming actor. A missing or unreadable bead fails closed. The terminal comment after the release is admitted. A bead you closed yourself ends the claim: the next product edit or comment passes and the gate disarms. To recover a closed bead, run `bd reopen <id>` and then `bd update <id> --claim --json`. To hand a reopened bead back, run `bd update <id> --assignee ""`.
+- **G2 (`bash`, `edit`, `write`):** refuses a mutation outside the worktree named by the claimed bead, or outside its `metadata.scope` globs. For `bash`, G2 compares the cwd only. G2 reads the claimed bead and nothing else. G5 judges scope overlap between claims, at claim. G2 refuses a mutation when the bead is readable and assigned to another actor, or closed. A released bead refuses nothing, so a worker bounced after its release can repair its evidence. When G2 cannot read the bead, it logs the cause and lets the call run. A bead you closed yourself ends the claim: the next product edit or comment passes and the gate disarms. To recover a closed bead, run `bd reopen <id>`. Then run `bd update <id> --claim --json`. To hand a reopened bead back, run `bd update <id> --assignee ""`.
 - **G3 (`bash`):** blocks mutating `git worktree` commands and `gh pr checkout` because they bypass Worktrunk.
   Inspection remains allowed.
 - **G4 (`yield`):** refuses exits when workers do not meet their contracts.
   A worker with a role but no claim receives one refusal.
   This refusal does not repeat, so revived sessions can exit.
-- **G5 (`bash`):** blocks claims for another role and review states authored by shepherds.
+- **G5 (`bash`):** judges claims and the writes that shape them. It refuses:
+  - a queue pull that names no role, or another role's queue
+  - a named claim of a bead routed to another role
+  - a claim naming two beads: one activation owns one bead
+  - a second claim while the bead you hold is still in progress
+  - a claim whose scope overlaps a held code-writing claim outside its own lineage
+  - a claim while held code-writing claims reach the run epic's `metadata.max_inflight` (default 8). The refusal says `run at capacity (N/N); retry`
+  - a claim that merges stderr into stdout, or redirects stdout away. The observer reads the claim report from stdout
+  - any claim from a role-less session under a pinned run: the lead dispatches and never claims
+  - a routing re-point (`metadata.role`) by any role but the architect
+  - an architect's `scope` that overlaps an open or in-progress node outside the bead's own lineage
+  - review and reporting states authored by shepherds
 - **G6 (`bash`):** warns without blocking. Within a pinned run, it checks for:
   - writes without actors: the identity is the assignee your claim report printed
   - comments without protocol verbs
   - bug beads unreachable from queues
-- **G7 (`bash`):** blocks claims naming multiple beads. Each activation owns one bead.
+- **G8 (every tool, notice):** in a worker session, compares the agent's `ORC-ROLE` and live model against the core contract once. On a mismatch it sends one notice naming the expected model, the live model, and the parking commands. G8 accepts a model that OMP moved the session onto through retry fallback. When G8 cannot read the model, it logs the cause and stays silent.
 
 ## Rules
 
-Five TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
+Four TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
 reminder on a protocol slip. None is a security boundary.
 
 The host matches the raw tool-argument JSON as the model streams it (`session/ttsr-coordinator.ts`,

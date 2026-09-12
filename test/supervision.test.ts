@@ -58,7 +58,10 @@ const bdSpies = [
   return (world.comments[id] ?? []).map(text => ({ text }));
  }),
  // No wisps in these fixtures: linked-comment predicates belong to the exit tests.
- spyOn(realBd, "bdLinkedChecked").mockImplementation(async (): Promise<string[]> => []),
+ spyOn(realBd, "bdLinkedChecked").mockImplementation(async (id: string, type: string): Promise<string[]> => {
+  ran.push(["dep", "list", id, "--type", type]);
+  return [];
+ }),
 ];
 
 // Deliberately import after installing spies: the import-time assertion below
@@ -167,7 +170,47 @@ describe("reapChild recovery observations", () => {
   world.comments["orc-1"] = null;
   const result = await reapChild({ id: "impl-7", status: "completed" }, at(gitWith([])));
   expect(result.reaped[0]).toMatchObject({ case: "unknown", failures: [], recovery: "recorded" });
+  expect(comment()).toContain("contract evidence unread (the bead could not be read); the contract is unevaluated, not failed");
   expect(update()).toBeUndefined();
+ });
+
+ test("an unread contract names its cause: the reaper's own read cap, or what bd did", async () => {
+  // The remedies differ: a spent cap wants a re-check, an unanswering store a retry.
+  // One word for both sent the architect to the wrong one.
+  world.stamped = [bead({ status: "open", assignee: null })];
+  world.comments["orc-1"] = null;
+  const exhausted = spyOn(realBd, "readBudgetExhausted").mockReturnValue(true);
+  try {
+   await reapChild({ id: "impl-7", status: "completed" }, at(gitWith([])));
+   expect(comment()).toContain("contract evidence unread (the reaper's bd read budget is spent)");
+  } finally {
+   exhausted.mockRestore();
+  }
+
+  ran = [];
+  const failure = spyOn(realBd, "lastBdFailure").mockReturnValue("timeout");
+  try {
+   await reapChild({ id: "impl-7", status: "completed" }, at(gitWith([])));
+   expect(comment()).toContain("contract evidence unread (the beads database did not answer in time; retry)");
+  } finally {
+   failure.mockRestore();
+  }
+ });
+
+ test("the contract re-check reads only the links its role's contract consults", async () => {
+  // A shepherd contract names no linked predicate and no escalation pause, so its
+  // re-check spends no reads on `dep list`; an implementer pauses on a linked
+  // escalation, so its re-check reads the links once. Reading everything for every
+  // role is what exhausted the reaper's budget on a child holding several beads.
+  world.stamped = [bead({ status: "open", assignee: null, metadata: { actor: "shepherd-1", role: "shepherd" } })];
+  world.comments["orc-1"] = [];
+  await reapChild({ id: "shepherd-1", status: "completed" }, at(gitWith([])));
+  expect(ran.filter(args => args[0] === "dep")).toEqual([]);
+
+  ran = [];
+  world.stamped = [bead({ status: "open", assignee: null, metadata: { actor: "impl-7", role: "implementer" } })];
+  await reapChild({ id: "impl-7", status: "completed" }, at(gitWith([])));
+  expect(ran.filter(args => args[0] === "dep").map(args => args[4])).toEqual(["relates-to", "replies-to"]);
  });
 
  test.each([null, { code: 1, stdout: "", stderr: "git failed" }])("git failure is not evidence of no work", async result => {

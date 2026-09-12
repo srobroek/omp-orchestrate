@@ -57,6 +57,30 @@ const HOSTILE_TEXT: readonly string[] = [
  "((()))",
  "{}",
  "!",
+ "(",
+ ")",
+ ")(",
+ "$(",
+ "$((",
+ "`",
+ "<(",
+ ">(",
+ ">",
+ ">>",
+ "<",
+ "<<",
+ "<<<",
+ "<<EOF",
+ "2>&1",
+ "2>&1|",
+ ">&-",
+ "&>",
+ "&>>",
+ ">|",
+ "<>",
+ "1>&2>&3",
+ "a>b",
+ "2>",
  "#",
  "../../etc/passwd",
  "/etc/passwd",
@@ -87,9 +111,6 @@ const HOSTILE_TEXT: readonly string[] = [
 
 /** Object-literal lookup tables resolve these through `Object.prototype` if left unguarded. */
 const PROTOTYPE_KEYS: readonly string[] = ["__proto__", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty"];
-
-/** `bd` subcommands the audit ledger is documented to record. */
-const MUTATING = ["update", "close", "create", "comment", "label", "dep", "reopen", "set-state"];
 
 const CLAIM = "bd update orc-1 --claim";
 
@@ -125,20 +146,39 @@ describe("shell parsing under hostile input", () => {
    const found: BdInvocation[] = bdInvocations(command);
    for (const invocation of found) {
     expect(invocation.assignments, label).toBeInstanceOf(Map);
+    for (const name of invocation.unsets) expect(typeof name, label).toBe("string");
     expect(typeof invocation.subcommand, label).toBe("string");
     expect(typeof invocation.hasClaim, label).toBe("boolean");
     for (const id of invocation.positionals) expect(typeof id, label).toBe("string");
-    for (const token of invocation.rest) expect(typeof token, label).toBe("string");
+  for (const token of invocation.rest) expect(typeof token, label).toBe("string");
+  // A redirection is named by its operator, descriptor first; a word that merely
+  // looks like one never lands here because the tokeniser saw it quoted.
+  for (const redirection of invocation.redirections) expect(redirection, label).toMatch(/^(?:\d*(?:<<<|<<|>>|<&|>&|<>|>\||<|>)|&>>?)/);
    }
 
    expect(typeof invokesCommand(command, ["git", "worktree"]), label).toBe("boolean");
    expect(typeof invokesCommand(command, []), label).toBe("boolean");
 
    const mutation = bdMutation(command);
-   // The ledger's own vocabulary. A prototype-chain hit here reported
-   // `constructor`/`toString`/`valueOf` as mutating subcommands and wrote a
-   // phantom provenance line for a command that changed no bead.
-   if (mutation !== undefined) expect(MUTATING, label).toContain(mutation);
+   // A recorded mutation names a subcommand the command actually runs. A
+   // prototype-chain hit here reported `constructor`/`toString`/`valueOf` as
+   // mutating subcommands and wrote a phantom provenance line for a command that
+   // changed no bead.
+   if (mutation !== undefined) expect(bdInvocations(command).map(invocation => invocation.subcommand), label).toContain(mutation);
+  }
+ });
+
+ test("an env operand of any shape is an operand, never the program", () => {
+  // `env -u X bd ...` runs bd whatever X is. The prefix walk used to read X as the
+  // executable, which hid the claim behind it from every gate at once.
+  for (const text of HOSTILE_TEXT) {
+   const operand = `'${text.replaceAll("'", "'\\''")}'`;
+   const label = JSON.stringify(text.slice(0, 60));
+   const unset = bdInvocations(`env -u ${operand} ${CLAIM}`);
+   expect(unset.map(invocation => [invocation.hasClaim, invocation.positionals, invocation.unsets]), label).toEqual([[true, ["orc-1"], [text]]]);
+   const chdir = bdInvocations(`env -C ${operand} ${CLAIM}`);
+   expect(chdir.map(invocation => [invocation.hasClaim, invocation.positionals, invocation.unsets]), label).toEqual([[true, ["orc-1"], []]]);
+   expect(invokesCommand(`env -u ${operand} git worktree add ../x`, ["git", "worktree"]), label).toBe(true);
   }
  });
 
@@ -150,6 +190,13 @@ describe("shell parsing under hostile input", () => {
    '"'.repeat(100_000),
    "\\".repeat(100_000),
    `${"( ".repeat(50_000)}${CLAIM}`,
+   `${"(".repeat(100_000)}${CLAIM}`,
+   `${CLAIM} ${")".repeat(100_000)}`,
+   `${"$(".repeat(50_000)}${CLAIM}`,
+   "`".repeat(100_000),
+   ">".repeat(100_000),
+   `${CLAIM} ${"2>&1 ".repeat(20_000)}`,
+   `${CLAIM} ${"<<x ".repeat(25_000)}`,
    `bd update ${"**/".repeat(30_000)}x --claim`,
   ]) {
    bdInvocations(command);
@@ -171,7 +218,7 @@ describe("shell parsing under hostile input", () => {
  test("a quoted bead id keeps its shell metacharacters instead of splitting the segment", () => {
   // The whole reason the gates tokenise: a claim whose id carries `;` or `&&` must
   // arrive as one operand, or a worker could hide a second claim inside the first.
-  for (const id of ["a;b", "a&&b", "a|b", "a`b`c", "a$(b)c", `a${CONTROLS}b`, `a${ASTRAL}b`, `a${RTL}b`]) {
+  for (const id of ["a;b", "a&&b", "a|b", "a`b`c", "a$(b)c", "a(b)c", "2>&1", "a>b", "{x}", `a${CONTROLS}b`, `a${ASTRAL}b`, `a${RTL}b`]) {
    const found = bdInvocations(`bd update '${id}' --claim`);
    expect(found).toHaveLength(1);
    expect(found[0]?.positionals).toEqual([id]);
@@ -208,10 +255,6 @@ describe("shell parsing under hostile input", () => {
    expect(bdInvocations(`${key} bd ready --claim`)).toEqual([]);
    expect(invokesCommand(`${key} git worktree add /tmp/x`, ["git", "worktree"])).toBe(false);
   }
- });
-
- test("a prototype-named subcommand is not recorded as a bead mutation", () => {
-  for (const key of PROTOTYPE_KEYS) expect(bdMutation(`bd ${key} orc-1`)).toBeUndefined();
  });
 });
 

@@ -39,7 +39,7 @@ import { bdShow, commentVerb, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
-import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations } from "../shell";
+import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, splitFlag } from "../shell";
 import { pinnedRunActive } from "./readonly";
 
 /** Shell metacharacters that make a command unsafe to rewrite as one invocation. */
@@ -97,20 +97,6 @@ const DECLARED_VERBS: Record<string, true> = Object.fromEntries(grammar.verbs.ma
 
 /** The declared verbs as a notice quotes them, built once. */
 const VERB_LIST = grammar.verbs.map(entry => entry.verb).join(" ");
-
-/**
- * A flag token split into its name and its inline `=` operand.
- *
- * A copy of the module-private helper in `./claim`, deliberately: exporting one would
- * widen a just-landed public surface, and consolidating the pair is worth doing on its
- * own rather than inside this conversion.
- */
-function splitFlag(token: string): { flag: string; inline?: string } {
-	if (!token.startsWith("-")) return { flag: token };
-	const cut = token.indexOf("=");
-	if (cut === -1) return { flag: token };
-	return { flag: token.slice(0, cut), inline: token.slice(cut + 1) };
-}
 
 /** A flag and its operand, as written, so a message can quote the spelling it names. */
 interface FlagOperand {
@@ -237,9 +223,9 @@ const ADMIN_SUBCOMMANDS: Record<string, true> = {
 };
 
 /**
- * A real subcommand is a lowercase word. The tokeniser expands no redirections, so
- * `bd 2>&1 | head` presents `2>&1` as its first positional -- that command prints help,
- * and reading the artefact as an unrecognised write would nag it.
+ * A real subcommand is a lowercase word. A bare `bd` prints help -- `bd 2>&1 | head` is
+ * one, its redirection being no word -- and reading that as an unrecognised write would
+ * nag it.
  */
 const SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
 
@@ -354,7 +340,7 @@ export function writesBeads(invocation: BdInvocation): boolean {
 	if (subcommand === "duplicates") {
 		return invocation.rest.includes("--auto-merge") && !invocation.rest.includes("--dry-run");
 	}
-	// A bare `bd`, or a first positional that is really a redirection: both print help.
+	// A bare `bd` prints help.
 	if (!SUBCOMMAND.test(subcommand)) return false;
 	if (ADMIN_SUBCOMMANDS[subcommand] === true) return false;
 
@@ -462,15 +448,6 @@ export const actorNotice: BdCheck = (invocation, env) => {
 };
 
 /**
- * A token the tokeniser produced that a shell would not hand `bd` as a body.
- *
- * Redirections are the case that matters: `src/shell.ts` expands none of them, so
- * `bd comment list <id> 2>&1 | sed ...` presents `2>` where a body would sit. Reading that
- * as a body would nag a command that never carried one.
- */
-const REDIRECTION = /^\d*(?:>>?|<)/;
-
-/**
  * A token in the body position that is really a flag, so the body is elsewhere:
  * `--file`, `--stdin`, `-f`, `--json`.
  *
@@ -512,12 +489,12 @@ interface CommentBody {
  * and `bd comments add [id] [text]` take the body positionally, and otherwise from
  * `--file`/`-f`/`--stdin`. So the body is the token immediately after the bead id -- and a
  * flag in that position means the body is elsewhere, which covers the file and stdin forms
- * without naming them, and covers `bd comment list <id>` too: a read whose next token is a
- * redirection carries no body at all.
+ * without naming them. Redirections are not words, so `bd comment list <id> 2>&1` ends at
+ * the id and carries no body.
  *
- * Adjacency is recovered by consuming `positionals` in order while walking `rest`, the way
- * `src/gates/one-claim.ts` recovers it: a token `parseBdInvocation` did not count as an
- * operand is a token this walk does not match.
+ * Adjacency is recovered by consuming `positionals` in order while walking `rest`: a
+ * token `parseBdInvocation` did not count as an operand is a token this walk does not
+ * match.
  */
 function commentBody(invocation: BdInvocation): CommentBody | undefined {
 	const operands = invocation.positionals;
@@ -532,7 +509,7 @@ function commentBody(invocation: BdInvocation): CommentBody | undefined {
 		// The very next token, not the next operand: a flag here means `--file`, `--stdin`,
 		// or `--json` took the position a body would have held.
 		const text = invocation.rest[index + 1];
-		if (text === undefined || BODY_FLAG.test(text) || REDIRECTION.test(text)) return undefined;
+		if (text === undefined || BODY_FLAG.test(text)) return undefined;
 		return { id: token, text };
 	}
 

@@ -4,7 +4,10 @@
  * Five deterministic observers that record and warn but never gate: stall
  * detection, the bd-mutation audit ledger, agent and dependency preflight,
  * the goal relay, and settings checks. Enforcement stays with G1 and the reaper;
- * a watcher's worst failure is silence.
+ * a watcher's worst failure is silence. The one refusal registered here is the
+ * `task` preflight, which declines to spawn a core agent whose definition is broken;
+ * G8, the assignment notice (`gates/assignment.ts`), runs from the same handler and
+ * only ever speaks.
  *
  * Nothing here throws out of a handler. A throwing `tool_call` handler blocks the
  * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`), and
@@ -24,31 +27,21 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
  coreContractForAgent,
- coreContractForRole,
- ROLE_MARKER,
  type AgentDiscoveryFinding,
  discoverAgentFindings,
  requestedAgentNames,
 } from "./agent-preflight";
-import {
- type BdBead,
- bdCommentsChecked,
- bdList,
- bdRun,
- bdShow,
- claimedBead,
- commentVerb,
- metadataString,
- resetReadBudget,
-} from "./bd";
+import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
 import { ensureBeadsPath } from "./beads-mode";
-import { createClaimState, type ClaimObservation, type ClaimState } from "./claim-state";
-import { bdInvocations, effectiveSegments, parseBdInvocation } from "./shell";
+import { createClaimState, type ClaimState } from "./claim-state";
+import { createAssignmentNotice } from "./gates/assignment";
+import { writesBeads } from "./gates/bd";
+import { type BdInvocation, bdInvocations } from "./shell";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
  Partial<Pick<ExtensionContext, "models">>;
 
@@ -298,49 +291,40 @@ async function sweep(pi: ExtensionAPI): Promise<void> {
 // W2 — audit ledger
 // ============================================================================
 
-/** `bd` subcommands that change bead state. The ledger records only these. */
-const MUTATING_SUBCOMMANDS: Record<string, true> = {
- update: true,
- close: true,
- create: true,
- comment: true,
- label: true,
- dep: true,
- reopen: true,
- "set-state": true,
-};
-
 /**
- * The mutating `bd` subcommand a command line runs, or `undefined` when it runs
+ * The first writing `bd` invocation on a command line, or `undefined` when it runs
  * none.
  *
  * Shell-aware by construction rather than by regex: `shell.ts`'s tokeniser
  * resolves env-var prefixes, `env`/`command` wrappers, and every `;&|` segment
  * boundary, so `FOO=1 bd update x` and `cd /y && bd close z` both resolve while
  * `echo bd update` — where `bd` is an argument, not the command — does not.
+ *
+ * What counts as a write is G6's `writesBeads`, so the ledger and the actor notice
+ * cannot disagree about it; the allowlist this replaced missed `assign`, `delete`,
+ * `note`, `promote`, `link` and `merge-slot` while recording `label list`. The one
+ * shape `writesBeads` exempts, `bd ready --claim`, is exempt for the notice's sake --
+ * a queue pull precedes the identity it would carry -- and is the claim the
+ * dead-claim procedure most wants to see, so the ledger records it.
  */
-export function bdMutation(command: string): string | undefined {
+function bdWrite(command: string): BdInvocation | undefined {
  for (const invocation of bdInvocations(command)) {
-  // `=== true`: a subcommand named `constructor` or `toString` would otherwise
-  // resolve through `Object.prototype` and be recorded as a bead mutation.
-  if (MUTATING_SUBCOMMANDS[invocation.subcommand] === true) return invocation.subcommand;
+  if (writesBeads(invocation) || invocation.hasClaim) return invocation;
  }
  return undefined;
 }
 
-let configuredAuditDir: string | undefined;
-
-/**
- * Point the ledger somewhere other than the default. In production that is a run
- * epic's `metadata.artifacts_dir`; it is also the test seam.
- */
-export function setAuditDir(dir: string | undefined): void {
- configuredAuditDir = dir;
+/** The writing `bd` subcommand a command line runs, or `undefined` when it runs none. */
+export function bdMutation(command: string): string | undefined {
+ return bdWrite(command)?.subcommand;
 }
 
-/** Where this session's ledger lives. */
+/**
+ * Where this session's ledger lives: under the cwd of the session that spawned the
+ * children, which is where the dead-claim procedure reads it.
+ */
 export function auditDir(cwd: string): string {
- return configuredAuditDir ?? path.join(cwd, ".orchestration", "audit");
+ return path.join(cwd, ".orchestration", "audit");
 }
 
 /** One line of the ledger. */
@@ -350,6 +334,14 @@ export interface AuditEntry {
  /** The command line the child ran, verbatim — the provenance a reader needs. */
  argv: string;
  exitCode: number;
+ /** The beads directory the command wrote to, when the call or the session named one. */
+ store?: string;
+ /**
+  * Present when `store` is not the session's pinned database: a sandbox or another
+  * run's store. Such a row is provenance, not a run mutation, and a reader counting
+  * the run's writes skips it.
+  */
+ foreign_store?: true;
 }
 
 /**
@@ -394,6 +386,32 @@ export interface BdMutationEvent {
  child: string;
  command: string;
  exitCode: number;
+ /**
+  * The beads directory the command wrote to: an inline `BEADS_DIR=` assignment on the
+  * invocation, else the call's structured `env`, else the session's pin. `undefined`
+  * when none of the three named one.
+  */
+ store: string | undefined;
+ /** True when `store` is not this session's pinned database. */
+ foreignStore: boolean;
+}
+
+/**
+ * The write a bash call performs, with the store it targets, or `undefined` when the
+ * command writes no bead. Classifying by command text alone attributed a researcher's
+ * sandbox writes to the run; the store is what tells them apart.
+ */
+function bdWriteOf(args: object): Pick<BdMutationEvent, "command" | "store" | "foreignStore"> | undefined {
+ if (!("command" in args) || typeof args.command !== "string") return undefined;
+ const invocation = bdWrite(args.command);
+ if (invocation === undefined) return undefined;
+ let store = invocation.assignments.get("BEADS_DIR");
+ if (store === undefined && "env" in args && args.env !== null && typeof args.env === "object") {
+  if ("BEADS_DIR" in args.env && typeof args.env.BEADS_DIR === "string") store = args.env.BEADS_DIR;
+ }
+ const pin = process.env.BEADS_DIR;
+ store ??= pin;
+ return { command: args.command, store, foreignStore: pin !== undefined && store !== pin };
 }
 
 /**
@@ -422,7 +440,7 @@ function exitCodeOf(result: unknown, isError: boolean): number {
  * `args` off the end event and consequently recorded nothing at all, across a whole
  * run, while every unit test passed against the assumed shape.
  */
-const pendingBd = new Map<string, { child: string; command: string }>();
+const pendingBd = new Map<string, Pick<BdMutationEvent, "child" | "command" | "store" | "foreignStore">>();
 
 /**
  * Cap on un-settled starts. A child killed between start and end leaves its entry
@@ -458,14 +476,13 @@ export function bdMutationEvent(data: unknown): BdMutationEvent | undefined {
 
  if (event.type === "tool_execution_start") {
   if (!("args" in event) || event.args === null || typeof event.args !== "object") return undefined;
-  const args = event.args;
-  if (!("command" in args) || typeof args.command !== "string") return undefined;
-  if (bdMutation(args.command) === undefined) return undefined;
+  const write = bdWriteOf(event.args);
+  if (write === undefined) return undefined;
   if (pendingBd.size >= PENDING_LIMIT) {
    const oldest = pendingBd.keys().next();
    if (!oldest.done) pendingBd.delete(oldest.value);
   }
-  pendingBd.set(key, { child, command: args.command });
+  pendingBd.set(key, { child, ...write });
   return undefined;
  }
 
@@ -482,14 +499,13 @@ export function bdMutationEvent(data: unknown): BdMutationEvent | undefined {
  // (`task/executor.ts:1470-1471`), but a live run records commands through this
  // path -- so it is read when present and correlated when not. Either shape alone
  // would silently record nothing on the runtime that uses the other.
- const own = "args" in event && event.args !== null && typeof event.args === "object" ? event.args : undefined;
- if (own !== undefined && "command" in own && typeof own.command === "string") {
-  if (bdMutation(own.command) === undefined) return undefined;
-  return { child, command: own.command, exitCode };
+ if ("args" in event && event.args !== null && typeof event.args === "object") {
+  const write = bdWriteOf(event.args);
+  return write === undefined ? undefined : { child, ...write, exitCode };
  }
 
  if (pending === undefined) return undefined;
- return { child: pending.child, command: pending.command, exitCode };
+ return { ...pending, exitCode };
 }
 
 // ============================================================================
@@ -571,165 +587,6 @@ function findingKey(finding: AgentDiscoveryFinding): string {
  return `${finding.agent}\0${finding.message}\0${finding.path ?? ""}`;
 }
 
-interface SessionInitIdentity {
- agent?: unknown;
-}
-
-function modelIdentity(model: unknown): string | undefined {
- if (model === null || typeof model !== "object") return undefined;
- const record = model as Record<string, unknown>;
- return typeof record.provider === "string" && typeof record.id === "string"
-  ? `${record.provider}/${record.id}`
-  : undefined;
-}
-
-const FAILURE_VERBS: Record<string, true> = { BLOCKED: true, FAILED: true };
-const FAILURE_REPORT_INPUT_KEYS: Record<string, true> = { command: true, cwd: true, i: true, timeout: true };
-
-/** Unknown ownership, status, or comments never count as durable failure evidence. */
-async function hasMismatchFailureEvidence(claim: ClaimObservation): Promise<boolean> {
- for (const beadId of claim.beadIds) {
-  const bead = await bdShow(beadId);
-  if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "blocked") return false;
-  const comments = await bdCommentsChecked(beadId);
-  if (comments === null || !comments.some(comment => FAILURE_VERBS[commentVerb(comment.text)] === true)) return false;
- }
- return true;
-}
-
-/**
- * Allow only direct, pinned failure-report writes after fresh ownership reads.
- * Wrappers, substitutions, alternate environments, background execution, and
- * mutations of any bead outside this session's claim are refused.
- */
-async function safeFailureReport(
- toolName: string,
- input: unknown,
- claim: ClaimObservation | undefined,
- sourceCwd: string,
-): Promise<boolean> {
- if (toolName !== "bash" || claim === undefined || claim.beadIds.length === 0) return false;
- if (input === null || typeof input !== "object") return false;
- const record = input as Record<string, unknown>;
- if (Object.keys(record).some(key => FAILURE_REPORT_INPUT_KEYS[key] !== true)) return false;
- if (Object.hasOwn(record, "cwd") && record.cwd !== sourceCwd) return false;
- const beadsDir = process.env.BEADS_DIR;
- if (beadsDir === undefined || !path.isAbsolute(beadsDir)) return false;
-
- const command = record.command;
- if (typeof command !== "string" || command.length === 0 || /[`$]/.test(command)) return false;
- const comment = /^bd[ \t]+comment[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+'((?:BLOCKED|FAILED)[ \t]+[^'\r\n]+)'[ \t]*$/.exec(command);
- const update = /^bd[ \t]+update[ \t]+([a-z][a-z0-9]*(?:-[A-Za-z0-9._]+)+)[ \t]+--status[ \t]+blocked[ \t]*$/.exec(command);
- const beadId = comment?.[1] ?? update?.[1];
- if (beadId === undefined || !claim.beadIds.includes(beadId)) return false;
-
- const segments = effectiveSegments(command);
- if (segments.length !== 1) return false;
- const invocation = parseBdInvocation(segments[0]!);
- if (invocation === null || invocation.assignments.size !== 0 || invocation.hasClaim || invocation.positionals[0] !== beadId) {
-  return false;
- }
- if (comment !== null && (invocation.subcommand !== "comment" || invocation.positionals.length < 2)) return false;
- if (
-  update !== null &&
-  (invocation.subcommand !== "update" || invocation.positionals.length !== 1 || invocation.rest.length !== 4)
- ) return false;
-
- const bead = await bdShow(beadId);
- if (bead?.id !== beadId || bead.assignee !== claim.actor || bead.status?.toLowerCase() !== "in_progress") return false;
- if (comment !== null) return true;
- const comments = await bdCommentsChecked(beadId);
- return comments !== null && comments.some(entry => FAILURE_VERBS[commentVerb(entry.text)] === true);
-}
-
-async function allowMismatchTool(
- toolName: string,
- input: unknown,
- claim: ClaimObservation | undefined,
- sourceCwd: string,
-): Promise<boolean> {
- try {
-  if (await safeFailureReport(toolName, input, claim, sourceCwd)) return true;
-  if (toolName !== "yield") return false;
-  if (claim === undefined || claim.beadIds.length === 0) return true;
-  return await hasMismatchFailureEvidence(claim);
- } catch {
-  return false;
- }
-}
-
-function mismatchRefusal(reason: string): ToolCallEventResult {
- return {
-  block: true,
-  reason: `${reason}. To preserve this claim for recovery, run exactly \`bd comment <claimed-id> 'BLOCKED <reason>'\` (or \`'FAILED <reason>'\`), then \`bd update <claimed-id> --status blocked\`. No wrappers, flags, environment changes, or other bead writes are allowed; the claim remains held.`,
- };
-}
-
-/**
- * Enforce the assignment contract inside spawned workers.
- *
- * Task and eval children use the same `tool_call` seam. The current model is
- * checked on every call, so a later model switch cannot evade the contract.
- * This seam runs before tools, not before the initial model invocation.
- */
-export async function childAssignmentGate(
- pi: ExtensionAPI,
- ctx: ExtensionContext,
- toolName: string,
- input: unknown,
- claim: ClaimObservation | undefined,
-): Promise<ToolCallEventResult | undefined> {
- if (sessionRole(pi) !== "worker") return undefined;
- if (
-  ctx.sessionManager === undefined ||
-  typeof ctx.sessionManager.getEntries !== "function" ||
-  ctx.models === undefined ||
-  typeof ctx.models.resolve !== "function" ||
-  typeof ctx.models.current !== "function" ||
-  typeof ctx.getSystemPrompt !== "function"
- ) return undefined;
-
- const entries = ctx.sessionManager.getEntries();
- let init: SessionInitIdentity | undefined;
- for (let index = entries.length - 1; index >= 0; index -= 1) {
-  const entry = entries[index];
-  if (entry !== null && typeof entry === "object" && "type" in entry && entry.type === "session_init") {
-   init = entry as SessionInitIdentity;
-   break;
-  }
- }
- const namedAgent = typeof init?.agent === "string" && init.agent.length > 0 ? init.agent : undefined;
- const namedContract = namedAgent === undefined ? undefined : coreContractForAgent(namedAgent);
- if (namedAgent !== undefined && namedContract === undefined) return undefined;
-
- const marker = ROLE_MARKER.exec(ctx.getSystemPrompt().join("\n"))?.[1];
- const contract = namedContract ?? coreContractForRole(marker ?? "");
- if (contract === undefined) return undefined;
- const sourceAgent = namedAgent ?? `marker-only (${contract.role})`;
-
- if (namedContract !== undefined && marker !== namedContract.role) {
-  const reason = `ORC assignment refused for ${sourceAgent}: expected ORC-ROLE ${namedContract.role}, actual ${marker ?? "missing"}; source agent ${sourceAgent}`;
-  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
-  return mismatchRefusal(reason);
- }
-
- let expectedIdentity: string | undefined;
- let actualIdentity: string | undefined;
- try {
-  expectedIdentity = modelIdentity(ctx.models.resolve(namedContract?.modelAlias ?? contract.modelAlias));
-  actualIdentity = modelIdentity(ctx.models.current());
- } catch {
-  const reason = `ORC assignment refused for ${sourceAgent}: model evidence unavailable; source agent ${sourceAgent}`;
-  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
-  return mismatchRefusal(reason);
- }
- if (expectedIdentity === undefined || expectedIdentity !== actualIdentity) {
-  const reason = `ORC assignment refused for ${sourceAgent}: expected model ${expectedIdentity ?? contract.modelAlias}, actual ${actualIdentity ?? "unavailable"}; source agent ${sourceAgent}`;
-  if (await allowMismatchTool(toolName, input, claim, ctx.cwd)) return undefined;
-  return mismatchRefusal(reason);
- }
- return undefined;
-}
 function findingLine(finding: AgentDiscoveryFinding): string {
  return `${finding.agent}: ${finding.message}${finding.path === undefined ? "" : ` (${finding.path})`}`;
 }
@@ -950,7 +807,6 @@ export function resetWatchers(): void {
  lastPreflightMs = Number.NEGATIVE_INFINITY;
  for (const queue of goalQueues.values()) queue.latest = null;
  goalQueues.clear();
- configuredAuditDir = undefined;
  settingsChecked = false;
  settingsSnapshots.clear();
 }
@@ -1259,8 +1115,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   }
   // W2. Passive provenance of every child's bead mutations. A bus handler is
   // handed no context, so the ledger is rooted at the session's cwd as it was
-  // at start; a run that relocates names its directory through `setAuditDir`,
-  // which is why the path is resolved per write rather than captured here.
+  // at start.
   unsubscribers.push(
    pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
     const mutation = bdMutationEvent(data);
@@ -1271,6 +1126,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
       child: mutation.child,
       argv: mutation.command,
       exitCode: mutation.exitCode,
+      ...(mutation.store === undefined ? {} : { store: mutation.store }),
+      ...(mutation.foreignStore ? { foreign_store: true } : {}),
      });
     } catch (error) {
      logFailure(pi, "audit ledger", error);
@@ -1287,15 +1144,13 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
  pi.on("session_switch", () => settingsSnapshots.clear());
 
  /**
-  * W3, second half: enforce core assignments before observing `task` spawns.
-  * Warning dedupe never weakens refusal: a known bad core request blocks every
-  * invocation, while the narrow durable failure path preserves its claim.
+  * W3, second half: G8's assignment notice, then the `task` preflight. Warning
+  * dedupe never weakens the refusal: a known bad core request blocks every spawn.
   */
+ const noteAssignment = createAssignmentNotice(pi);
  pi.on("tool_call", async (event, ctx) => {
   try {
-   resetReadBudget();
-   const assignment = await childAssignmentGate(pi, ctx, event.toolName, event.input, claims.observedClaim());
-   if (assignment) return assignment;
+   noteAssignment(ctx, claims.observedClaim());
    if (event.toolName !== "task") return undefined;
    const requested = requestedAgentNames(event.input);
    const findings = await runInDiscoveryScope(() =>
