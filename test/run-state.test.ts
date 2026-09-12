@@ -624,7 +624,7 @@ describe("resumeRun", () => {
 		]);
 		const recovered = writes.find(argv => argv[0] === "comment" && argv[1] === "orc-7.1.1")!;
 		// The deadline is the later of `lease_until` and `updated_at + TTL`, so the lapse is at 00:15.
-		expect(recovered[2]).toMatch(/^RECOVERED impl-dead lease lapsed at 2020-01-01T00:15:00\.000Z; released on adoption by lead:session-t/);
+		expect(recovered[2]).toMatch(/^RECOVERED impl-dead lease lapsed at 2020-01-01T00:15:00\.000Z; no live session renewed it; released by lead:session-t/);
 		expect(recovered.slice(3)).toEqual(["--actor", LEAD]);
 	});
 
