@@ -134,17 +134,17 @@ This local check needs an installed `omp`, so CI does not run it.
 | Command | Does |
 | --- | --- |
 | `/orchestrate-run` | activates run enforcement in this repository: pins `BEADS_DIR` to the run's database and writes the marker `.orchestration/.active-run`, `pending` until bound |
-| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms it is open, then arms the patrol wisp; a bind whose patrol did not arm is reported as a warning |
-| `/orchestrate-status` | the marker binding, the run epic's status (or why its liveness could not be verified), and whether the patrol is armed |
+| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp. When the patrol did not arm, it warns |
+| `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and whether the patrol armed |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
-| `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no child is `in_progress`; `--force` skips the child check. `/orchestrate-close pending` undoes an activation that was never bound |
+| `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no child is `in_progress`. `--force` skips the child check. `/orchestrate-close pending` undoes an activation that never bound |
 
 The pin lives in the OMP process environment. After a restart, a lead session that
-finds the marker re-pins at start and reports a pin it cannot establish; re-issue
+finds the marker re-pins at start and reports a pin it cannot establish. Re-issue
 `/orchestrate-run` to re-pin by hand. A marker left behind by a finished run keeps
-injecting the protocol into every `orc-*` session in the repository and refuses the
-next bind until `/orchestrate-close` removes it; the marker's lock file
-`.orchestration/.active-run.lock` is removed with it.
+injecting the protocol into every `orc-*` session in the repository. It also refuses
+the next bind until `/orchestrate-close` removes it, together with the lock file
+`.orchestration/.active-run.lock`.
 
 ## Development
 
