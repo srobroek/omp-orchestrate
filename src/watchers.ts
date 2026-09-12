@@ -28,6 +28,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { findScopedSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
  coreContractForAgent,
  type AgentDiscoveryFinding,
@@ -37,7 +39,6 @@ import {
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
 import { readActiveRun } from "./run-state";
-import { ensureBeadsPath } from "./beads-mode";
 import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
@@ -337,9 +338,10 @@ export interface AuditEntry {
  /** The beads directory the command wrote to, when the call or the session named one. */
  store?: string;
  /**
-  * Present when `store` is not the session's pinned database: a sandbox or another
-  * run's store. Such a row is provenance, not a run mutation, and a reader counting
-  * the run's writes skips it.
+  * Present when the command named a store of its own -- `--db`, `BEADS_DB`, `-C` or
+  * `--directory` -- rather than letting bd resolve the run's. Such a row is provenance
+  * of a sandbox or another repository, not a run mutation, and a reader counting the
+  * run's writes skips it.
   */
  foreign_store?: true;
 }
@@ -387,31 +389,39 @@ export interface BdMutationEvent {
  command: string;
  exitCode: number;
  /**
-  * The beads directory the command wrote to: an inline `BEADS_DIR=` assignment on the
-  * invocation, else the call's structured `env`, else the session's pin. `undefined`
-  * when none of the three named one.
+  * The store the command named, when it named one: the `--db` path, a `BEADS_DB`
+  * assignment on the invocation or in the call's structured `env`, or the directory
+  * given to `-C`/`--directory`. `undefined` when bd resolved the run's database from the
+  * working directory, which is how every call inside a run is meant to reach it; a
+  * named store is foreign to the run by construction.
   */
  store: string | undefined;
- /** True when `store` is not this session's pinned database. */
- foreignStore: boolean;
 }
+
+/** `bd` flags whose value names a store or the directory it is resolved from. */
+const STORE_FLAGS: Record<string, true> = { "--db": true, "-C": true, "--directory": true };
 
 /**
  * The write a bash call performs, with the store it targets, or `undefined` when the
  * command writes no bead. Classifying by command text alone attributed a researcher's
  * sandbox writes to the run; the store is what tells them apart.
  */
-function bdWriteOf(args: object): Pick<BdMutationEvent, "command" | "store" | "foreignStore"> | undefined {
+function bdWriteOf(args: object): Pick<BdMutationEvent, "command" | "store"> | undefined {
  if (!("command" in args) || typeof args.command !== "string") return undefined;
  const invocation = bdWrite(args.command);
  if (invocation === undefined) return undefined;
- let store = invocation.assignments.get("BEADS_DIR");
+ let store = invocation.assignments.get("BEADS_DB");
  if (store === undefined && "env" in args && args.env !== null && typeof args.env === "object") {
-  if ("BEADS_DIR" in args.env && typeof args.env.BEADS_DIR === "string") store = args.env.BEADS_DIR;
+  if ("BEADS_DB" in args.env && typeof args.env.BEADS_DB === "string") store = args.env.BEADS_DB;
  }
- const pin = process.env.BEADS_DIR;
- store ??= pin;
- return { command: args.command, store, foreignStore: pin !== undefined && store !== pin };
+ for (let index = 0; store === undefined && index < invocation.rest.length; index += 1) {
+  const token = invocation.rest[index] as string;
+  const split = token.indexOf("=");
+  const flag = split === -1 ? token : token.slice(0, split);
+  if (STORE_FLAGS[flag] !== true) continue;
+  store = split === -1 ? invocation.rest[index + 1] : token.slice(split + 1);
+ }
+ return { command: args.command, store };
 }
 
 /**
@@ -440,7 +450,7 @@ function exitCodeOf(result: unknown, isError: boolean): number {
  * `args` off the end event and consequently recorded nothing at all, across a whole
  * run, while every unit test passed against the assumed shape.
  */
-const pendingBd = new Map<string, Pick<BdMutationEvent, "child" | "command" | "store" | "foreignStore">>();
+const pendingBd = new Map<string, Pick<BdMutationEvent, "child" | "command" | "store">>();
 
 /**
  * Cap on un-settled starts. A child killed between start and end leaves its entry
@@ -604,7 +614,7 @@ export async function preflightAgents(
  reportedAgentFindings?: Set<string>,
 ): Promise<AgentDiscoveryFinding[]> {
  if (ctx.models === undefined) return [];
- const settings = (await readSettings(ctx.cwd)) ?? {};
+ const settings = readSettings() ?? {};
  const rawOverrides = settings["task.agentModelOverrides"];
  const modelOverrides =
   rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
@@ -808,7 +818,6 @@ export function resetWatchers(): void {
  for (const queue of goalQueues.values()) queue.latest = null;
  goalQueues.clear();
  settingsChecked = false;
- settingsSnapshots.clear();
 }
 
 // ============================================================================
@@ -823,15 +832,14 @@ export function resetWatchers(): void {
  * platform defaults (`merge: patch`, `apply: true`) a worker's commits are applied
  * straight into the spawning tree, so no `omp/task/<id>` branch is captured, the
  * architect's deliberate integration step never happens, and the run looks
- * healthy while the contract it rests on is not in force. Nothing in the
- * extension API exposes settings, so the operator's own CLI is asked.
+ * healthy while the contract it rests on is not in force.
  *
  * `expected` returns the verdict for an observed value. An unreadable setting
  * yields no finding: this warns about what it can prove, never about what it
  * could not read.
  */
 interface SettingRequirement {
- key: string;
+ key: SettingPath;
  /** What the run needs, phrased for a human. */
  want: string;
  /** True when the observed value satisfies the requirement. */
@@ -911,56 +919,33 @@ export function settingsDeviations(observed: Readonly<Record<string, unknown>>):
 }
 
 /**
- * One settings snapshot per cwd per session. `omp config list --json` costs about a
- * second, and every `task` dispatch used to pay it to read a session-constant value;
- * memoising the promise also coalesces the two `session_start` readers into one spawn.
- * An unreadable answer is not kept, so the next caller asks again rather than
- * inheriting a failure for the session.
+ * The settings the preflights read. Every one is a schema path, so the host answers each
+ * with its effective value or its default; there is no unreadable key.
  */
-const settingsSnapshots = new Map<string, Promise<Record<string, unknown> | null>>();
+const OBSERVED_SETTINGS: readonly SettingPath[] = [
+ ...REQUIRED_SETTINGS.map(setting => setting.key),
+ "modelRoles",
+ "task.agentModelOverrides",
+];
 
 /**
- * Read the supported effective-settings snapshot, or `null` when it could not be read.
- * Unreadable values prove nothing, and a caller that treated `{}` as an answer would
- * mark a check done that never ran.
+ * The effective settings of the session this handler runs for, or `null` when no
+ * settings instance is live.
+ *
+ * Read in process through the host's own accessor: the extension runner scopes every
+ * handler to its session's `Settings` (`extensibility/extensions/runner.ts`,
+ * `withActiveSettings`), and `findScopedSettings` answers with that instance, else the
+ * global singleton. The values are the ones `omp config list` prints; spawning that CLI
+ * cost 0.5 s idle and up to 3 s under load on every `task` dispatch. Unreadable proves
+ * nothing, and a caller that treated `{}` as an answer would mark a check done that
+ * never ran.
  */
-function readSettings(cwd: string): Promise<Record<string, unknown> | null> {
- const cached = settingsSnapshots.get(cwd);
- if (cached !== undefined) return cached;
- const reading = spawnSettings(cwd).then(settings => {
-  if (settings === null) settingsSnapshots.delete(cwd);
-  return settings;
- });
- settingsSnapshots.set(cwd, reading);
- return reading;
-}
-
-async function spawnSettings(cwd: string): Promise<Record<string, unknown> | null> {
- const bin = process.env.OMP_BIN ?? "omp";
- try {
-  const proc = Bun.spawn([bin, "config", "list", "--json"], {
-   cwd,
-   stdout: "pipe",
-   stderr: "ignore",
-  });
-  const timer = setTimeout(() => proc.kill(), 10_000);
-  try {
-   const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-   if (code !== 0) return null;
-   const parsed: unknown = JSON.parse(stdout);
-   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-   const observed: Record<string, unknown> = {};
-   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles", "task.agentModelOverrides"]) {
-    const entry: unknown = (parsed as Record<string, unknown>)[key];
-    if (entry !== null && typeof entry === "object" && "value" in entry) observed[key] = entry.value;
-   }
-   return observed;
-  } finally {
-   clearTimeout(timer);
-  }
- } catch {
-  return null;
- }
+function readSettings(): Record<string, unknown> | null {
+ const instance = findScopedSettings();
+ if (instance === undefined) return null;
+ const observed: Record<string, unknown> = {};
+ for (const key of OBSERVED_SETTINGS) observed[key] = instance.get(key);
+ return observed;
 }
 
 /** Set once the settings have actually been read; an unreadable host leaves the check pending. */
@@ -976,19 +961,19 @@ let settingsChecked = false;
  * settings belong to the operator, and refusing to run would strand a repository
  * whose owner cannot reach its configuration.
  *
- * "Once" means once the settings were actually read. A host where `omp` is missing
- * or hangs leaves the check pending, says so, and runs it again on the next
+ * "Once" means once the settings were actually read. A process with no live settings
+ * instance leaves the check pending, says so, and runs it again on the next
  * activation, instead of marking a check done that never happened.
  */
 export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<SettingDeviation[]> {
  resetReadBudget();
  if (settingsChecked) return [];
- const observed = await readSettings(cwd);
+ const observed = readSettings();
  const lines: string[] = [];
  let deviations: SettingDeviation[] = [];
  if (observed === null) {
   lines.push(
-   "the effective settings could not be read (`omp config list --json` failed or timed out), so the required task settings are unverified; the check runs again on the next /orchestrate-run",
+   "the effective settings could not be read (no settings instance is live for this session), so the required task settings are unverified; the check runs again on the next /orchestrate-run",
   );
  } else {
   settingsChecked = true;
@@ -1015,25 +1000,14 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   }
  }
 
- // The database pin is independent of the settings, and of whether they could be read.
- // The pin lives in this process's environment, so it does not survive a restart: a
- // lead that comes back to a marked repository has G1 inert and every isolated worker
- // resolving its own database until something re-pins. This is that something. Probe
- // through bd itself instead of looking only for cwd/.beads: linked worktrees share the
- // primary checkout's database and intentionally have no local .beads directory, a copied
- // checkout can resolve a private or unrelated ancestor database because `.beads/` is
- // gitignored. `ensureBeadsPath` asks bd for the active database, accepts the checkout or
- // its Git-shared primary database, rejects unrelated external databases, validates an
- // inherited pin, and exports the canonical path. Only refusal merits a line.
- //
- // An earlier version of this block demanded a per-project Dolt server instead. That server
- // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
- // rather than from the port, so a removed pid file made every later call start a rival --
- // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
- const pinned = await ensureBeadsPath(cwd);
- if (!pinned.ok) {
+ // The run's database is independent of the settings, and of whether they could be read.
+ // Every isolated copy redirects its own `.beads` to the `beads_dir` the marker records
+ // (`src/clone-adopt.ts`); a marker written before that field existed leaves each copy
+ // writing to its private store. Re-activation records it, so that is the repair named.
+ const run = await readActiveRun(cwd);
+ if (run !== null && run.beads_dir === undefined) {
   lines.push(
-   `BEADS_DIR could not be pinned, so generic helpers are not sandboxed and an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+   "the run marker names no beads database, so an isolated worker resolves its own store rather than this run's: run /orchestrate-run again to record it",
   );
  }
 
@@ -1105,8 +1079,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   // orchestrated runs, and a repository that merely tracks work in beads has no
   // claims to split until one starts. `/orchestrate-run` runs the settings check
   // at activation, and the `task` handler below checks agents at spawn, so a
-  // session that never orchestrates hears nothing. The two preflights share one
-  // settings read through the per-cwd memo.
+  // session that never orchestrates hears nothing. Both preflights read the settings
+  // in process, so neither costs a spawn.
   if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
@@ -1126,8 +1100,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
       child: mutation.child,
       argv: mutation.command,
       exitCode: mutation.exitCode,
-      ...(mutation.store === undefined ? {} : { store: mutation.store }),
-      ...(mutation.foreignStore ? { foreign_store: true } : {}),
+      ...(mutation.store === undefined ? {} : { store: mutation.store, foreign_store: true }),
      });
     } catch (error) {
      logFailure(pi, "audit ledger", error);
@@ -1140,8 +1113,6 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   unsubscribers.push(pi.events.on(LSP_STARTUP_CHANNEL, noteLspStartup));
  });
  pi.on("session_shutdown", () => dispose());
- // A switched session may sit in a different cwd with different effective settings.
- pi.on("session_switch", () => settingsSnapshots.clear());
 
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning

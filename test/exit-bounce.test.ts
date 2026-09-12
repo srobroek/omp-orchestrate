@@ -20,12 +20,17 @@ let fixture: string;
 let claims = createClaimState();
 let gateExitContract: ReturnType<typeof createExitGuard>;
 const spies = [
- spyOn(actualBd, "bdShow").mockImplementation(async id => id === BEAD ? bead : linkedBead),
- // Linked beads arrive through the one-call hydration; an unreadable linked bead is a
- // failed read, so the whole map is unknown rather than one entry missing.
+ // The claimed beads and the linked beads both arrive through the one-call hydration; an
+ // unreadable bead among them is a failed read, so the whole map is unknown rather than
+ // one entry missing.
  spyOn(actualBd, "bdShowMany").mockImplementation(async ids => {
-  const hydrated = linkedBead;
-  return hydrated === null ? null : new Map(ids.map(id => [id, hydrated]));
+  const hydrated = new Map<string, BdBead>();
+  for (const id of ids) {
+   const row = id === BEAD ? bead : linkedBead;
+   if (row === null) return null;
+   hydrated.set(id, row);
+  }
+  return hydrated;
  }),
  spyOn(actualBd, "bdCommentsChecked").mockImplementation(async id => id === BEAD ? comments : linkedComments),
  spyOn(actualBd, "bdLinkedChecked").mockImplementation(async (_id, _type, _timeout, direction) => {

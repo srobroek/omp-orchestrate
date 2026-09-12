@@ -179,7 +179,6 @@ Claim foreground observation remains mandatory even if a settings warning is acc
 | `task.enableEffort` | `true` for per-entry effort |
 | `task.maxRecursionDepth` | `3` for worker helpers; each spawner also needs its explicit allowlist |
 | `bash.autoBackground.enabled` | `false` |
-| `BEADS_DIR` | the same absolute embedded run database in every child |
 
 Architects use persistent Worktrunk feature trees, not isolated spawns. Worker entry:
 
@@ -203,9 +202,6 @@ Verify the architect session root matches before any write or dispatch.
 When re-entry changes the discovery root, use the supported rooted lead CLI and
 preserve the loaded native agent's role and spawn policy. Run it through the Bash
 tool with the marker in the call's `env` field, never as an inline `NAME=value`
-prefix. Do not pass `BEADS_DIR`: the run's pin already rides on every Bash call
-(the gate and the beads plugin both mirror it), and the gate refuses `BEADS_DIR=`
-in command text.
 
 ```json
 {

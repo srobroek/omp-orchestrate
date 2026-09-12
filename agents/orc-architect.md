@@ -17,7 +17,7 @@ inherit the parent session's cwd; isolated workers run in runtime-created copies
 snapshotted from that cwd. `metadata.worktree` filters queue ownership and scope
 but never changes cwd. If the runtime is rooted elsewhere, use the supported rooted
 `omp --cwd "<canonical-worktree>" --config "<run-overlay>"` re-entry with the same
-absolute `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`; follow planning.md's recovery
+absolute `ORCHESTRATE_MARKER_FILE`; follow planning.md's recovery
 procedure when relocating. Do not invent per-child cwd fields.
 
 Derive `<canonical-worktree>` from the architect session root (`pwd -P`) and use

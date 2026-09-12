@@ -22,9 +22,9 @@
  * Scope disjointness between claims is judged once, at claim, by G5. This gate reads
  * only the claimed beads and compares each write against the territory they name.
  *
- * The dispatcher (`src/index.ts`) runs this gate and the runtime database check only
- * under orchestration: a declared `ORC-ROLE`, or the pinned run `pinnedRunActive`
- * recognises. A plain session that claims a bead by hand is never contained by it.
+ * The dispatcher (`src/index.ts`) runs this gate only under orchestration: a declared
+ * `ORC-ROLE`, or the marked run `pinnedRunActive` recognises. A plain session that
+ * claims a bead by hand is never contained by it.
  */
 
 import path from "node:path";
@@ -57,7 +57,7 @@ interface Target {
  * Comparing unresolved paths would let a symlink into another agent's tree pass, so
  * an unresolvable path fails open rather than comparing something misleading.
  */
-async function realpathOrUndefined(target: string): Promise<string | undefined> {
+export async function realpathOrUndefined(target: string): Promise<string | undefined> {
  try {
   return await fs.realpath(target);
  } catch {
@@ -65,118 +65,39 @@ async function realpathOrUndefined(target: string): Promise<string | undefined> 
  }
 }
 
-type RuntimeBeadsDirValidation =
- | { ok: true; input: Record<string, unknown>; changed: boolean }
- | { ok: false; refusal: ToolCallEventResult };
-
-/**
- * Command text cannot grant database authority; BEADS_DIR belongs in structured env.
- *
- * Every whitespace-separated word of every token is inspected, so a wrapper such as
- * `env -S 'BEADS_DIR=… bd update'` or `sh -c 'BEADS_DIR=… bd …'` is caught without
- * parsing it. That also refuses a bare mention inside quoted text, which is the price
- * of the wrapper coverage and why the dispatcher runs this only under orchestration.
- */
-function commandNamesBeadsDir(command: string): boolean {
- return splitSegments(command).some(segment => segment.some(token =>
-  token.split(/[ \t]+/).some(word => word === "BEADS_DIR" || word.startsWith("BEADS_DIR=")),
- ));
-}
-
-/**
- * Validate and canonicalize a structured Bash BEADS_DIR override against the run's pin.
- *
- * Runs only under orchestration (see the module header), where the process pin names
- * the run's database. A mention in command text is refused outright, and a structured
- * override must identify the pinned directory, so a worker cannot redirect `bd` writes
- * to a database the run never reads.
- */
-export async function normalizeRuntimeBeadsDir(
- ctx: ExtensionContext,
- input: Record<string, unknown>,
-): Promise<RuntimeBeadsDirValidation> {
- const rawEnvironment = input.env;
- const hasOverride =
-  rawEnvironment !== null &&
-  typeof rawEnvironment === "object" &&
-  !Array.isArray(rawEnvironment) &&
-  Object.hasOwn(rawEnvironment, "BEADS_DIR");
- const command = input.command;
- if (typeof command === "string" && commandNamesBeadsDir(command)) {
-  return { ok: false, refusal: { block: true, reason: "BEADS_DIR must be supplied through the Bash tool environment, not command text" } };
- }
- if (!hasOverride) return { ok: true, input, changed: false };
-
- const environment = rawEnvironment as Record<string, unknown>;
- const requested = environment.BEADS_DIR;
- if (typeof requested !== "string" || requested.length === 0) {
-  return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must name a database directory" } };
- }
- const pinned = process.env.BEADS_DIR;
- if (pinned === undefined || !path.isAbsolute(pinned)) {
-  return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR requires an absolute session-pinned database" } };
- }
-
- let executionCwd = ctx.cwd;
- if (typeof input.cwd === "string" && input.cwd.length > 0) {
-  try {
-   executionCwd = resolveToCwd(input.cwd, ctx.cwd);
-  } catch {
-   return { ok: false, refusal: { block: true, reason: "cannot resolve runtime BEADS_DIR against the Bash cwd" } };
-  }
- }
- const canonicalCwd = await realpathOrUndefined(executionCwd);
- if (canonicalCwd === undefined) {
-  return { ok: false, refusal: { block: true, reason: "cannot resolve runtime BEADS_DIR against the Bash cwd" } };
- }
-
- try {
-  const requestedPath = path.isAbsolute(requested) ? requested : path.resolve(canonicalCwd, requested);
-  const [canonicalPinned, canonicalRequested] = await Promise.all([fs.realpath(pinned), fs.realpath(requestedPath)]);
-  const [pinnedStat, requestedStat] = await Promise.all([fs.stat(canonicalPinned), fs.stat(canonicalRequested)]);
-  if (
-   !pinnedStat.isDirectory() ||
-   !requestedStat.isDirectory() ||
-   canonicalPinned !== canonicalRequested ||
-   pinnedStat.dev !== requestedStat.dev ||
-   pinnedStat.ino !== requestedStat.ino
-  ) {
-   return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR does not identify the session-pinned database" } };
-  }
-  if (requested === canonicalPinned) return { ok: true, input, changed: false };
-  return {
-   ok: true,
-   input: { ...input, env: { ...environment, BEADS_DIR: canonicalPinned } },
-   changed: true,
-  };
- } catch {
-  return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must resolve to the existing session-pinned database" } };
- }
-}
-
 /** Whether `child` is `parent` or sits beneath it. Both must already be resolved. */
-function within(child: string, parent: string): boolean {
+export function within(child: string, parent: string): boolean {
  return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
 }
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Isolated roots by resolved cwd and the base in force, so the `git rev-parse` behind
+ * each verdict runs once per session directory rather than once per gated call. A
+ * verdict git could not give is not cached; the next call asks again.
+ */
+const isolatedRoots = new Map<string, string | undefined>();
 
 async function isolatedRoot(cwd: string): Promise<string | undefined> {
+ // The shared base is only a discovery hint, never mutation authority.
+ const base = await realpathOrUndefined(getWorktreesDir());
+ if (base === undefined || cwd === base || !within(cwd, base)) return undefined;
+ const key = `${base}\u0000${cwd}`;
+ if (isolatedRoots.has(key)) return isolatedRoots.get(key);
  try {
-  // The shared base is only a discovery hint, never mutation authority.
-  const base = await realpathOrUndefined(getWorktreesDir());
-  if (base === undefined || cwd === base || !within(cwd, base)) return undefined;
   const env = { ...process.env };
   // Repository-selection overrides must not turn another checkout into authority.
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+  for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
   const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
    env,
    timeout: 1500,
    maxBuffer: 16 * 1024,
   });
   const root = await realpathOrUndefined(stdout.trim());
-  return root !== undefined && root !== base && within(root, base) && within(cwd, root) ? root : undefined;
+  const verdict = root !== undefined && root !== base && within(root, base) && within(cwd, root) ? root : undefined;
+  isolatedRoots.set(key, verdict);
+  return verdict;
  } catch {
   return undefined;
  }
@@ -385,7 +306,6 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  let hasExplicitActor = false;
  let actorMismatch = false;
  for (const [key, value] of Object.entries(environment)) {
-  if (key === "BEADS_DIR" && typeof value === "string") continue;
   if ((key !== "BEADS_ACTOR" && key !== "BD_ACTOR") || typeof value !== "string") {
    trustedEnvironment = false;
   } else {
@@ -497,15 +417,9 @@ export async function gateWorktreeScope(
  input: Record<string, unknown>,
 ): Promise<ToolCallEventResult | undefined> {
  if (!Object.hasOwn(GATED_WRITE_TOOLS, toolName)) return undefined;
- let normalizedInput = input;
- if (toolName === "bash") {
-  const validation = await normalizeRuntimeBeadsDir(ctx, input);
-  if (!validation.ok) return validation.refusal;
-  normalizedInput = validation.input;
- }
  const claim = claims.observedClaim();
  if (!claim || claim.beadIds.length === 0) return undefined;
- const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(normalizedInput, claim.actor, beadId) : undefined);
+ const controls = claim.beadIds.map(beadId => toolName === "bash" ? conflictControl(input, claim.actor, beadId) : undefined);
  const hasControl = controls.some(control => control !== undefined);
  const beadViews: BeadView[] = [];
  for (const [index, beadId] of claim.beadIds.entries()) {
@@ -521,7 +435,7 @@ export async function gateWorktreeScope(
  // the recovery grammar: reopen and reclaim keep the claim so the recovery stays
  // observed, and a mention that is not one is refused with the grammar named.
  if (beadViews.every(({ bead }) => bead?.status === "closed" && bead.assignee === claim.actor)) {
-  const command = toolName === "bash" ? normalizedInput.command : undefined;
+  const command = toolName === "bash" ? input.command : undefined;
   const namesBd = typeof command === "string" &&
    splitSegments(command).some(segment => segment.some(token => token.split(/[ \t]+/).includes("bd")));
   if (!namesBd || controls.some(control => control === "comment")) {
@@ -564,9 +478,9 @@ export async function gateWorktreeScope(
  const sessionCwd = await realpathOrUndefined(ctx.cwd);
  if (sessionCwd === undefined) return undefined;
  let executionCwd = ctx.cwd;
- if (toolName === "bash" && typeof normalizedInput.cwd === "string" && normalizedInput.cwd.length > 0) {
+ if (toolName === "bash" && typeof input.cwd === "string" && input.cwd.length > 0) {
   try {
-   executionCwd = resolveToCwd(normalizedInput.cwd, ctx.cwd);
+   executionCwd = resolveToCwd(input.cwd, ctx.cwd);
   } catch {
    return { block: true, reason: "cannot establish bash input.cwd containment; use a local filesystem cwd" };
   }
@@ -574,7 +488,7 @@ export async function gateWorktreeScope(
  const cwd = await resolveTarget(sessionCwd, executionCwd);
  if (cwd === undefined || (await realpathOrUndefined(cwd)) === undefined) return undefined;
  const isolation = await isolatedRoot(sessionCwd);
- const declaredPaths = declaredTargets(toolName, normalizedInput);
+ const declaredPaths = declaredTargets(toolName, input);
  if (declaredPaths === undefined) {
   return { block: true, reason: "cannot inspect edit mutation targets; use a supported edit payload with explicit targets" };
  }
