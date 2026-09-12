@@ -22,15 +22,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
+      # The digest is the one published in vale_3.17.1_checksums.txt for this asset;
+      # bump both together.
       - name: Install Vale
         env:
           GH_TOKEN: ${{ github.token }}
+          VALE_SHA256: db947f89f2292e6a0381a61de155f6a5f5cb4cb460ca178ea412ef605559cefd
         run: |
           gh release download v3.17.1 --repo errata-ai/vale --pattern 'vale_3.17.1_Linux_64-bit.tar.gz' --dir "$RUNNER_TEMP/vale"
+          echo "$VALE_SHA256  $RUNNER_TEMP/vale/vale_3.17.1_Linux_64-bit.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/vale/vale_3.17.1_Linux_64-bit.tar.gz" -C "$RUNNER_TEMP/vale"
           echo "$RUNNER_TEMP/vale" >> "$GITHUB_PATH"
 
@@ -41,23 +45,7 @@ jobs:
           set -eu
           gh pr view "${{ github.event.pull_request.number }}" --json body -q .body > pr-body.md
 
+      # Errors-only, the same policy as ci.yml's README gate; the score lands in the
+      # step summary and never fails the job.
       - name: Gate PR body
-        run: |
-          set +e
-          uvx --from slopvac==1.0.1 python scripts/prose-gate.py pr-body.md --profile normal --format json > slopvac-pr-body.json
-          status=$?
-          set -e
-          # Exit 1 is a prose threshold failure; retain the errors-only policy.
-          # All other nonzero exits mean the tool did not complete reliably.
-          case "$status" in
-            0|1) ;;
-            *)
-              echo "slopvac failed to run reliably (exit $status)"
-              exit "$status"
-              ;;
-          esac
-          if [ ! -s slopvac-pr-body.json ]; then
-            echo "slopvac wrote no report (exit $status)"
-            exit 1
-          fi
-          python3 scripts/check-prose-report.py slopvac-pr-body.json
+        run: uvx --from slopvac==1.0.1 python scripts/check-prose-report.py --gate pr-body.md

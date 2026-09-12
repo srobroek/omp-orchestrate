@@ -88,14 +88,14 @@ describe("extension factory", () => {
 		expect(registered.filter(event => !known.includes(event))).toEqual([]);
 	});
 
-	test("registers the six commands and five schema-visible tools", () => {
+	test("registers the seven commands and six schema-visible tools", () => {
 		const { pi, seen } = recordingApi();
 		ompOrchestrate(pi);
 		expect(seen.commands.sort()).toEqual(
-			["orchestrate-bind", "orchestrate-close", "orchestrate-roster", "orchestrate-run", "orchestrate-status", "orchestrate-stop"].sort(),
+			["orchestrate-answer", "orchestrate-doctor", "orchestrate-resume", "orchestrate-roster", "orchestrate-start", "orchestrate-status", "orchestrate-stop"].sort(),
 		);
 		expect(seen.tools.sort()).toEqual(
-			["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_review_round_policy", "orc_run_status"].sort(),
+			["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_doctor", "orc_review_round_policy", "orc_run_status"].sort(),
 		);
 	});
 	test("keeps claim and exit state private to reused factory bindings", async () => {

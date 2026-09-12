@@ -333,7 +333,7 @@ describe("W5 shared-database precondition", () => {
 		await preflightSettings(rig.pi, cwd);
 		const notice = String(rig.messages.at(-1)?.content ?? "");
 		expect(notice).toContain("the run marker names no beads database");
-		expect(notice).toContain("/orchestrate-run");
+		expect(notice).toContain("/orchestrate-start");
 		expect((await bdCalls()).map(call => call[0])).not.toContain("where");
 	});
 

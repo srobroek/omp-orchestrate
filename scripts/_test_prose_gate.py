@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import string
 import subprocess
 import sys
@@ -153,6 +154,58 @@ class ProseReportPolicyTests(unittest.TestCase):
     def test_nonfinite_score_fails(self) -> None:
         self.report["summary"]["score"] = float("nan")
         self.assertNotEqual(self.run_policy().returncode, 0)
+
+
+class ProseGateModeTests(unittest.TestCase):
+    """`--gate` runs prose-gate.py itself and applies the same errors-only policy."""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+
+    def run_gate(self, text: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        path = self.root / "prose.md"
+        path.write_text(text, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(HERE / "check-prose-report.py"), "--gate", str(path), "--profile", "normal"],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+            env={**os.environ, "GITHUB_STEP_SUMMARY": "", **(env or {})},
+        )
+
+    def test_a_document_with_warnings_only_passes(self) -> None:
+        # A one-line heading scores far below slopvac's own threshold, which is exactly
+        # the verdict the policy replaces: no error finding, so the gate passes.
+        result = self.run_gate("# Reference\n\nInstall the tool.\n")
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        self.assertIn("prose gate passed", result.stdout)
+
+    def test_an_error_finding_fails(self) -> None:
+        result = self.run_gate("# Reference\n\n## " + chr(0x1F680) + " Install\n")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("prose gate failed", result.stderr)
+
+    def test_score_is_appended_to_the_step_summary(self) -> None:
+        summary = self.root / "summary.md"
+        result = self.run_gate("# Reference\n\nInstall the tool.\n", {"GITHUB_STEP_SUMMARY": str(summary)})
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        text = summary.read_text(encoding="utf-8")
+        self.assertRegex(text, r"^- prose gate \(.*prose\.md\): slopvac score=\S+ errors=0 warnings=\d+\n$")
+
+    def test_no_document_is_a_usage_error(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(HERE / "check-prose-report.py"), "--gate"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("usage", result.stderr)
 
 
 if __name__ == "__main__":

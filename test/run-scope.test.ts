@@ -270,7 +270,7 @@ describe("outside a run scope the plugin is inert", () => {
 		expect(await listing(sandbox)).toEqual(before);
 		// The only surface left: the slash commands, registered whatever the checkout holds.
 		expect(lead.commands.sort()).toEqual(
-			["orchestrate-bind", "orchestrate-close", "orchestrate-roster", "orchestrate-run", "orchestrate-status", "orchestrate-stop"].sort(),
+			["orchestrate-answer", "orchestrate-doctor", "orchestrate-resume", "orchestrate-roster", "orchestrate-start", "orchestrate-status", "orchestrate-stop"].sort(),
 		);
 	});
 

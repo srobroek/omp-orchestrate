@@ -1,0 +1,40 @@
+# omp-orchestrate settings overlay: the six constants every run needs.
+#
+# Apply it to the lead session with OMP's config overlay flag:
+#
+#   omp --config <absolute path to this file>
+#
+# `/orchestrate-doctor` prints that path and command. An overlay is a layer above
+# your global and project config.yml, loaded after both; nothing here rewrites
+# either file, and a mistyped path is a startup error rather than a silent
+# fallback. The settings preflight (W5) reads the merged result, so a run started
+# through this file passes it.
+#
+# Each key names the value the coordination contract needs and what silently
+# breaks while it deviates. None of them is a preference: there is no run in
+# which the other value is right.
+
+task:
+  isolation:
+    # Workers run in isolated copies. Off, they share the architect's tree and two claims can edit one file.
+    enabled: true
+    # A worker's commits are captured as an omp/task/<id> branch. `patch` replays them into the parent tree and leaves no branch to integrate or to recover after a crash.
+    merge: branch
+    # The architect integrates deliberately. `true` merges child work into the spawning tree automatically, so the architect never owns integration.
+    apply: false
+  # Per-spawn `effort` is honoured. Off, every agent runs at the session default.
+  enableEffort: true
+  # A worker's helper sits at depth 3. At the default 2 no worker can spawn librarian, scout, or operator.
+  maxRecursionDepth: 3
+
+bash:
+  autoBackground:
+    # A claim must finish in the foreground. A backgrounded claim's result bypasses the tool_result observer and the claim is never adopted.
+    enabled: false
+
+# The seventh setting is yours to choose: `orc-reviewer` selects its model through the
+# `reviewer` role. Left unset, the preflight warns once and review may fall back to the
+# session model. Uncomment and name one selector (bare family or provider/id):
+#
+# modelRoles:
+#   reviewer: claude-opus-5

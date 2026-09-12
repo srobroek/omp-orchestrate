@@ -7,7 +7,7 @@
  *
  * Every handler opens with `runScope` (`src/run-scope.ts`). Outside a run scope the plugin
  * spawns no process, writes no file, sends no message and refuses no tool call; the slash
- * commands, the five tools, the agents and the skill are its whole surface there.
+ * commands, the six tools, the agents and the skill are its whole surface there.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -34,6 +34,7 @@ import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
 import { registerConflictProbe } from "./tools/conflict-probe";
+import { registerDoctor } from "./tools/doctor";
 import { registerRunStatus } from "./tools/run-status";
 import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 import { preflightSettings, registerWatchers } from "./watchers";
@@ -55,6 +56,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerRunCommands(pi, cwd => preflightSettings(pi, cwd));
  registerConflictProbe(pi);
  registerRunStatus(pi);
+ registerDoctor(pi);
  registerBotReviewProbe(pi);
  registerBotReviewRequest(pi);
  registerReviewRoundPolicy(pi);
