@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { ensureBeadsPath } from "./beads-mode";
+import { locateBeadsDir } from "./beads-mode";
 import { type BdBead, bdListChecked, bdShow, resetReadBudget } from "./bd";
 import { ensurePatrolWisp, patrolState } from "./supervision";
 
@@ -406,7 +406,7 @@ export async function runStatusReport(cwd: string): Promise<RunStatusReport> {
  * registry. `orchestrate-roster` reads queues, not the marker, and stays with the
  * entry point.
  *
- * `onActivate` runs after the marker is written and the database is pinned. The
+ * `onActivate` runs after the marker is written with the run's database in it. The
  * settings preflight lives in `watchers.ts`, which imports this module, so the
  * hook is injected rather than imported.
  */
@@ -416,19 +416,14 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
   handler: async (_args, ctx) => {
    const cwd = ctx.sessionManager.getCwd();
    // Refusing here is the point. Activation arms enforcement for every agent the run
-   // spawns, and bd resolves its database by walking up from the working directory, so
-   // a worker in an isolated checkout can reach a database nobody else reads. This
-   // pins one path for the run and every child that inherits its environment.
-   const beads = await ensureBeadsPath(cwd);
+   // spawns, and the database recorded here is what every isolated copy redirects its
+   // own `.beads` to; a run activated without one would leave each copy writing to a
+   // store nobody else reads.
+   const beads = await locateBeadsDir(cwd);
    if (!beads.ok) {
     ctx.ui.notify(`orchestrate run NOT activated: ${beads.reason}`, "error");
     return;
    }
-   if (beads.tracked === false) {
-    ctx.ui.notify("orchestrate run NOT activated: no active Beads workspace was found", "error");
-    return;
-   }
-   if (beads.note !== undefined) ctx.ui.notify(beads.note, "info");
    try {
     const state = await activateRun(cwd, ctx.sessionManager.getSessionId(), beads.beadsDir);
     ctx.ui.notify(

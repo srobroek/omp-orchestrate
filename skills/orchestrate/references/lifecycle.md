@@ -219,8 +219,6 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    A missing Git object or capture is a separate setup failure, not cwd repair.
 4. While that same window remains held, stamp the updated `metadata.worktree` and WT
    `bead` binding for the exact owning epic, read both back, and require equality before
-   actor re-entry. Do not release a retained claim merely to relocate; a mismatch
-   preserves the claim, checkout, capture, terminal result, and evidence for recovery.
    Re-enter only through the rooted `omp --cwd "<canonical-worktree>" --config
    "<run-overlay>"` procedure in `planning.md`, with the same absolute
    `BEADS_DIR` and `ORCHESTRATE_MARKER_FILE`.

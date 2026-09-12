@@ -172,7 +172,7 @@ obtain explicit acceptance of the reported limitations. Preflight never rewrites
 Claim foreground observation remains mandatory even if a settings warning is accepted.
 
 | Setting | Value |
-|---|---|
+| `.beads/redirect` | written into every isolated copy at its first `session_start`; nothing to set |
 | `task.isolation.enabled` | `true` |
 | `task.isolation.merge` | `branch` |
 | `task.isolation.apply` | `false` |
@@ -197,7 +197,6 @@ MCP/LSP degradation is recorded as `WARN preflight` on the epic; it does not hol
 Start the architect in the canonical Worktrunk root derived from the session before
 claiming or dispatching. Non-isolated children inherit the parent session's cwd;
 isolated children run in a runtime-created copy snapshotted from that cwd.
-`metadata.worktree` routes queue ownership and scope; it never switches cwd.
 Verify the architect session root matches before any write or dispatch.
 
 When re-entry changes the discovery root, use the supported rooted lead CLI and

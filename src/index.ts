@@ -19,7 +19,7 @@ import { createExitGuard } from "./gates/exit";
 import { createLeadExitWatch } from "./gates/lead-exit";
 import { gateBeadWriteFree, pinnedRunActive, rebuildBashInput } from "./gates/readonly";
 import { gateImplementerIsolation } from "./gates/spawn";
-import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
+import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
 import { isBoundRunActive, registerRunCommands } from "./run-state";
@@ -37,13 +37,11 @@ const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true,
 
 /**
  * Whether this session is under orchestration: it declares an `ORC-ROLE`, or an
- * orchestrate run pins its process and marks its checkout (G1's predicate, shared
- * through `pinnedRunActive`).
+ * orchestrate run marks its checkout (G1's predicate, shared through `pinnedRunActive`).
  *
  * Every refusing check below hangs off this. Without it the plugin's mere installation
- * refused `git worktree add`, `printenv BEADS_DIR`, and every edit after a hand-closed
- * bead, in repositories no run ever touched. The role check comes first because it
- * costs no read.
+ * refused `git worktree add` and every edit after a hand-closed bead, in repositories
+ * no run ever touched. The role check comes first because it costs no read.
  */
 async function orchestrated(ctx: ExtensionContext): Promise<boolean> {
  return orcRole(ctx) !== undefined || (await pinnedRunActive(ctx.cwd));
@@ -79,9 +77,8 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * Blocking gates run before G1's rewrite, because a handler returns a single
   * result: a refusal must win over a revision of an input that will not run.
   *
-  * The runtime database check, G3, G6, G2, the spawn gate and the in-flight claim
-  * mark run only under orchestration. G5 scopes itself by the session's role, and G1
-  * by its own pinned-run read.
+  * G3, G6, G2, the spawn gate and the in-flight claim mark run only under
+  * orchestration. G5 scopes itself by the session's role, and G1 by its own run read.
   *
   * The whole body is wrapped, because a throwing `tool_call` handler blocks the
   * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`). A bug here
@@ -107,13 +104,13 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
    if (event.toolName === "bash" && scoped) {
     // An isolated copy whose first session_start predates this plugin, or whose store
-    // came back with a Worktrunk hook, is repaired before its bd call runs.
-    await adoptAtCwd(pi, ctx.cwd);
-
-    const runtimeDatabase = await normalizeRuntimeBeadsDir(ctx, input);
-    if (!runtimeDatabase.ok) return runtimeDatabase.refusal;
-    input = runtimeDatabase.input;
-    inputRevised = runtimeDatabase.changed;
+    // came back with a Worktrunk hook, is repaired before its bd call runs. While the
+    // copy still holds a private store, a bd read there answers from the wrong data and
+    // a bd write forks the run, so bd commands are refused; other commands may proceed.
+    const adoption = await adoptAtCwd(pi, ctx.cwd);
+    if (adoption?.kind === "refused" && typeof input.command === "string" && bdInvocations(input.command).length > 0) {
+     return { block: true, reason: adoptionRefusalNotice(adoption.reason) };
+    }
 
     const ownership = gateWorktrunkOwnership(input);
     if (ownership) return ownership;
@@ -149,10 +146,10 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     if (scope) return scope;
    }
 
-   // Last, and only for `bash`: G1 asynchronously checks the process-local pin and
-   // active-run marker. A sandboxed helper whose command edits the sandbox variable is
-   // refused; otherwise the call leaves with the pin mirror and the readonly flag added.
-   // A missing or invalid marker fails open, while blocking gates above still win.
+   // Last, and only for `bash`: G1 reads the active-run marker. A sandboxed helper whose
+   // command edits the sandbox variable is refused; otherwise the call leaves with the
+   // readonly flag added. A missing or invalid marker fails open, while blocking gates
+   // above still win.
    if (event.toolName === "bash") {
     const sandbox = await gateBeadWriteFree(pi, ctx, input);
     if (sandbox?.block) return sandbox;
@@ -182,10 +179,8 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * than as something the model said to itself.
   *
   * The run is read for one reason only: it is the run gate. The marker's `repo_root`
-  * used to be substituted into the contract for a `bd -C` pin, and both are gone -- the
-  * run pins BEADS_DIR once at activation and every child inherits it, so a worker needs
-  * no path substituted per call. The same pin is what locates the marker for an
-  * isolated worker whose own cwd holds none.
+  * used to be substituted into the contract for a `bd -C` pin; the copy's redirect makes
+  * every `bd` call reach the run's database, so a worker needs no path per call.
   */
  pi.on("session_start", async (_event, ctx) => {
   if (sessionRole(pi) === "lead") return;
