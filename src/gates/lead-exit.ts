@@ -2,7 +2,8 @@ import type { AgentEndEvent, ExtensionContext } from "@oh-my-pi/pi-coding-agent"
 import grammar from "../contracts/grammar.json";
 import type { ClaimState } from "../claim-state";
 import { orcRole } from "../identity";
-import { isBoundRunActive, readActiveRun } from "../run-state";
+import { runScope } from "../run-scope";
+import { isBoundRunActive } from "../run-state";
 
 const MAX_FOLLOW_UPS = 3;
 const PENDING_RUN = "pending";
@@ -61,8 +62,8 @@ export function createLeadExitWatch(claims: ClaimState, cwd: string, sendMessage
    if (ctx.hasTool?.("yield") === true || orcRole(ctx) !== undefined) return;
 
    const runCwd = ctx.cwd || cwd;
-   const marker = await readActiveRun(runCwd);
-   if (marker === null || marker.run_id === PENDING_RUN) return;
+   const scope = await runScope({ cwd: runCwd });
+   if (scope === null || scope.runId === PENDING_RUN) return;
    if (!(await isBoundRunActive(runCwd))) return;
 
    const claim = claims.observedClaim();

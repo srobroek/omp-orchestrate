@@ -27,7 +27,7 @@ import fs, { type FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { locateBeadsDir } from "./beads-mode";
 import { type BdBead, bdListChecked, bdShow, resetReadBudget } from "./bd";
 import { ensurePatrolWisp, patrolState } from "./supervision";
@@ -406,6 +406,9 @@ export async function runStatusReport(cwd: string): Promise<RunStatusReport> {
  * registry. `orchestrate-roster` reads queues, not the marker, and stays with the
  * entry point.
  *
+ * `/orchestrate-stop` is `/orchestrate-close` under the name an operator reaches for
+ * when the question is "how do I switch this off": one handler, registered twice, so
+ * the two can never drift.
  * `onActivate` runs after the marker is written with the run's database in it. The
  * settings preflight lives in `watchers.ts`, which imports this module, so the
  * hook is injected rather than imported.
@@ -475,23 +478,23 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
   },
  });
 
- pi.registerCommand("orchestrate-close", {
-  description: "End the run: remove the marker once it names <epic> and no bead beneath it, at any depth, is in_progress (--force skips the check)",
-  handler: async (args, ctx) => {
-   const words = args.trim().split(/\s+/).filter(word => word.length > 0);
-   const ids = words.filter(word => word !== "--force");
-   const runId = ids[0];
-   if (runId === undefined || ids.length > 1) {
-    ctx.ui.notify("usage: /orchestrate-close <epic> [--force]", "error");
-    return;
-   }
-   try {
-    await closeRun(ctx.sessionManager.getCwd(), runId, { force: words.length > ids.length });
-    ctx.ui.notify(`orchestrate run ${runId} closed; marker removed`, "info");
-   } catch (error) {
-    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-   }
-  },
- });
+ const close = (name: string) => async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+  const words = args.trim().split(/\s+/).filter(word => word.length > 0);
+  const ids = words.filter(word => word !== "--force");
+  const runId = ids[0];
+  if (runId === undefined || ids.length > 1) {
+   ctx.ui.notify(`usage: /${name} <epic> [--force]`, "error");
+   return;
+  }
+  try {
+   await closeRun(ctx.sessionManager.getCwd(), runId, { force: words.length > ids.length });
+   ctx.ui.notify(`orchestrate run ${runId} closed; marker removed`, "info");
+  } catch (error) {
+   ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+  }
+ };
+ const closeDescription = "End the run: remove the marker once it names <epic> and no bead beneath it, at any depth, is in_progress (--force skips the check)";
+ pi.registerCommand("orchestrate-close", { description: closeDescription, handler: close("orchestrate-close") });
+ pi.registerCommand("orchestrate-stop", { description: `Alias of /orchestrate-close. ${closeDescription}`, handler: close("orchestrate-stop") });
 }
 

@@ -1,6 +1,6 @@
 /**
- * G6 — bd call discipline: the identity, the comment verb, the bug route; and two
- * refusals, the routed sync and a named database.
+ * G6 — bd call discipline: the identity, the comment verb, the bug route, the nested
+ * `omp`; and two refusals, the routed sync and a named database.
  *
  * TTSR rules, converted. Each was advisory because a regex over a command string cannot
  * see whether a run is active and cannot parse a shell line. The verb condition ran from
@@ -28,10 +28,12 @@
  * walk-up-from-cwd hazard the check guarded against is closed at the store rather than at
  * each call site. `-C` remains legal and harmless; the redirect makes it correct.
  *
- * Nothing here fires outside a pinned run: `pinnedRunActive` — a valid marker in the
- * session checkout — is the whole discriminator, and a plain session in this repository
- * sees no gate at all. That is the defect the conversion exists to fix — a rule condition
- * matched every session that mentioned `bd`.
+ * Nothing here fires outside a run: `runScope` (`src/run-scope.ts`) — a valid marker in
+ * the session checkout — is the whole discriminator, and a plain session in this
+ * repository sees no gate at all. That is the defect the conversion exists to fix — a rule
+ * condition matched every session that mentioned `bd`. The nested-`omp` notice moved here
+ * from `rules/orc-no-nested-omp.md` for the same reason: its shell condition fired on an
+ * `omp -p` probe in a session no run ever touched.
  *
  * Each check is pure and takes the parsed invocation, so the shell parsing stays at the
  * entry point and the predicates are testable without a tool event. A check that cannot
@@ -47,8 +49,8 @@ import { bdShow, commentVerb, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, ROUTING_KEY, sessionRole } from "../identity";
-import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, splitFlag } from "../shell";
-import { pinnedRunActive } from "./readonly";
+import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, effectiveSegments, splitFlag } from "../shell";
+import { runScope } from "../run-scope";
 
 /** Shell metacharacters that make a command unsafe to rewrite as one invocation. */
 const REWRITE_METACHARACTERS = /[;&|`\n]/;
@@ -636,6 +638,46 @@ export const bugRouteNotice: BdCheck = invocation => {
 /** The advisory checks, in the order their notices read best. */
 const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice];
 
+/** `omp` flags that start a fresh agent session rather than answer a query. */
+const NESTED_OMP_FLAGS: Record<string, true> = {
+	"-p": true, "--print": true, "--prompt": true, "--cwd": true, "--agent": true, "--session-dir": true,
+};
+
+/** Leading `NAME=value` words a shell strips before the program name. */
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Notice: a role launched as a nested `omp` process instead of a `task` subagent.
+ *
+ * Reads the command's leaf segments, wrapper shells expanded, and speaks when one runs
+ * `omp` with a flag that opens a session. `--config` anywhere on that segment exempts it:
+ * the lead's rooted re-entry carries a run overlay and is the one sanctioned nested
+ * process. Advisory, because the process runs either way; the notice tells the agent why
+ * its claims from there will be dead and what to do instead.
+ */
+export function nestedOmpNotice(command: string): string | undefined {
+	for (const segment of effectiveSegments(command)) {
+		let index = 0;
+		while (index < segment.length && ASSIGNMENT_WORD.test(segment[index] as string)) index++;
+		const head = segment[index];
+		if (head === undefined || head.slice(head.lastIndexOf("/") + 1) !== "omp") continue;
+		const flags = segment.slice(index + 1).map(token => splitFlag(token).flag);
+		if (flags.includes("--config")) continue;
+		const opener = flags.find(flag => NESTED_OMP_FLAGS[flag] === true);
+		if (opener === undefined) continue;
+		return (
+			`WARN nested omp: 'omp ${opener}' from a shell starts a process with no parent link. It does not ` +
+			`inherit BEADS_ACTOR, its claims are dead claims, and its receipts never reach the wave barrier; ` +
+			`stopping and restarting it replays the same failure. Roles in a run are spawned with 'task' ` +
+			`(isolated: true for an implementer). Read the cancelled worker's transcript (history://<name>) for ` +
+			`the refusal it hit, fix the cause on the bead, and re-dispatch; when the cause is outside the run, ` +
+			`write the escalation wisp and stop the wave. A probe outside the run, or the lead's rooted re-entry ` +
+			`with --config <run-overlay>, is exempt.`
+		);
+	}
+	return undefined;
+}
+
 /**
  * One refusal on one parsed invocation: the reason, or `undefined` to let it run.
  *
@@ -695,7 +737,8 @@ const REFUSALS: readonly BdRefusal[] = [syncRefusal, databaseRefusal];
 
 /**
  * Refuse a `bd` call that would open a second store or a second engine; otherwise warn
- * about one this run cannot attribute, cannot read, or cannot route.
+ * about one this run cannot attribute, cannot read, or cannot route, and about a role
+ * started as a nested `omp` process.
  */
 export async function gateBdDiscipline(
 	pi: ExtensionAPI,
@@ -708,9 +751,10 @@ export async function gateBdDiscipline(
 	if (typeof command !== "string" || command.length === 0) return undefined;
 
 	const invocations = bdInvocations(command);
-	if (invocations.length === 0) return undefined;
+	const nestedOmp = nestedOmpNotice(command);
+	if (invocations.length === 0 && nestedOmp === undefined) return undefined;
 
-	if (!(await pinnedRunActive(ctx.cwd))) return undefined;
+	if ((await runScope(ctx)) === null) return undefined;
 
 	const lead = sessionRole(pi) === "lead";
 	for (const invocation of invocations) {
@@ -742,7 +786,7 @@ export async function gateBdDiscipline(
 			(invocation.subcommand === "claim" || invocation.hasClaim) &&
 			!invocationCarriesActor(invocation, input.env),
 	);
-	const notices: string[] = [];
+	const notices: string[] = nestedOmp === undefined ? [] : [nestedOmp];
 	let deliveredActorNotice = false;
 	for (const invocation of invocations) {
 		for (const notice of NOTICES) {

@@ -15,13 +15,14 @@
 # Local gate, deliberately not in CI: it needs an installed `omp`, which the CI
 # runners do not have. Run it after touching any rule frontmatter.
 #
-# Six rules used to live here -- the -C pin, the actor prefix, the comment verb, the
-# bug-bead route, the one-claim count and the implementer spawn shape. They are tool_call
-# gates now, because a regex cannot see whether a run is active and so nagged every
-# session that mentioned `bd`, and a regex over streamed JSON cannot see a parsed argument.
-# The pin is retired as a regex rule: the run explicitly pins its embedded database with
-# BEADS_DIR. Their corpus moved to `test/gate-bd.test.ts`, `test/claim.test.ts` and
-# `test/wiring.test.ts`, which run in CI. Do not re-add them here.
+# Seven rules used to live here -- the -C pin, the actor prefix, the comment verb, the
+# bug-bead route, the one-claim count, the implementer spawn shape and the shell half of
+# the nested-omp rule. They are tool_call gates now, because a regex cannot see whether a
+# run is active and so nagged every session that mentioned `bd` or ran an `omp -p` probe,
+# and a regex over streamed JSON cannot see a parsed argument. The retired WAIT/CLAIM
+# grammar canary is gone too: it matched ordinary prose. Their corpus moved to
+# `test/gate-bd.test.ts`, `test/claim.test.ts` and `test/wiring.test.ts`, which run in
+# CI. Do not re-add them here.
 set -u
 cd "$(dirname "$0")/.." 2>/dev/null || exit 2
 
@@ -90,23 +91,11 @@ check orc-shepherd-no-parent.md miss bash 'bd ready --parent orc-1 --metadata-fi
 check orc-shepherd-no-parent.md fire bash 'cd /x && bd ready --parent orc-1 --label pr:merge --claim --json'
 check orc-shepherd-no-parent.md miss bash 'bd ready --parent orc-1 --json\nbd ready --label pr:merge --json'
 
-# orc-no-nested-omp: conditions 1-2 read hub start, condition 3 reads the bash envelope.
+# orc-no-nested-omp: both conditions read hub start. The bash shape is G6's notice.
 check orc-no-nested-omp.md fire hub '{"op":"start","name":"arch","application":"omp","args":["-p","hi"]}'
 check orc-no-nested-omp.md fire hub '{"op":"start","name":"arch","application":"sh","args":["-c","omp -p hi"]}'
 check orc-no-nested-omp.md miss hub '{"op":"start","name":"web","application":"bun","args":["run","dev"]}'
-check orc-no-nested-omp.md fire bash 'omp -p \"hi\"'
-check orc-no-nested-omp.md fire bash 'omp --print \"hi\"'
-check orc-no-nested-omp.md fire bash 'cd /x && omp -p \"hi\"'
-check orc-no-nested-omp.md fire bash 'FOO=1 omp -p \"hi\"'
-check orc-no-nested-omp.md fire bash 'echo start\nomp --cwd /x -p \"hi\"'
-check orc-no-nested-omp.md fire bash 'sh -c \"omp -p hi\"'
-check orc-no-nested-omp.md miss bash 'omp --cwd \"/wt\" --config \"/overlay.yml\" --print \"Lead: dispatch the loaded native orc-architect\" </dev/null'
-check orc-no-nested-omp.md miss bash 'omp ttsr test --rule rules/x.md snippet'
-check orc-no-nested-omp.md miss bash 'omp --version'
-check orc-no-nested-omp.md miss bash 'rg omp -p docs/'
-
-check orc-wait-grammar.md fire text 'WAIT: then CLAIM the bead'
-check orc-wait-grammar.md miss text 'WAITING_HUMAN on the gate'
+check orc-no-nested-omp.md miss bash 'omp -p \"hi\"'
 
 printf '\n%s\n' "$([ "$fail" -eq 0 ] && echo 'ALL HOST-ENGINE CHECKS PASS' || echo "$fail HOST-ENGINE FAILURES")"
 exit "$fail"

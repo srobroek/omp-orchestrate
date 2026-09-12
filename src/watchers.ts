@@ -38,7 +38,7 @@ import {
 } from "./agent-preflight";
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
-import { readActiveRun } from "./run-state";
+import { runScope } from "./run-scope";
 import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
@@ -95,9 +95,9 @@ function logFailure(pi: ExtensionAPI, watcher: string, error: unknown): void {
  * bound run.
  */
 async function boundEpic(cwd: string): Promise<string | undefined> {
- const run = await readActiveRun(cwd);
- if (run === null || run.run_id === PENDING_RUN) return undefined;
- return run.run_id;
+ const scope = await runScope({ cwd });
+ if (scope === null || scope.runId === PENDING_RUN) return undefined;
+ return scope.runId;
 }
 
 // ============================================================================
@@ -1004,8 +1004,8 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
  // Every isolated copy redirects its own `.beads` to the `beads_dir` the marker records
  // (`src/clone-adopt.ts`); a marker written before that field existed leaves each copy
  // writing to its private store. Re-activation records it, so that is the repair named.
- const run = await readActiveRun(cwd);
- if (run !== null && run.beads_dir === undefined) {
+ const scope = await runScope({ cwd });
+ if (scope !== null && scope.beadsDir === undefined) {
   lines.push(
    "the run marker names no beads database, so an isolated worker resolves its own store rather than this run's: run /orchestrate-run again to record it",
   );
@@ -1062,8 +1062,11 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
    }),
   );
   // Returning the promise is deliberate: the managed timer contains a
-  // rejection only when it can see one (`managed-timers.ts:66-75`).
+  // rejection only when it can see one (`managed-timers.ts:66-75`). Nothing runs
+  // outside a run scope: a silent child in a plain session is not this plugin's
+  // business, and the sweep would otherwise spawn `bd list` for it every minute.
   const timer = ctx.setInterval(async () => {
+   if ((await runScope({ cwd })) === null) return;
    await sweep(pi);
    if (sessionRole(pi) === "lead") {
     await retryGoal(pi, cwd, true).catch(error => logFailure(pi, "goal retry", error));
@@ -1081,7 +1084,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   // at activation, and the `task` handler below checks agents at spawn, so a
   // session that never orchestrates hears nothing. Both preflights read the settings
   // in process, so neither costs a spawn.
-  if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
+  if (sessionRole(pi) === "lead" && (await runScope(ctx)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
     logFailure(pi, "agent discovery preflight", error),
@@ -1089,11 +1092,13 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   }
   // W2. Passive provenance of every child's bead mutations. A bus handler is
   // handed no context, so the ledger is rooted at the session's cwd as it was
-  // at start.
+  // at start. Read per event: a run activated mid-session starts recording without
+  // re-subscribing, and a plain session never gains an `.orchestration/audit/`.
   unsubscribers.push(
    pi.events.on(SUBAGENT_EVENT_CHANNEL, async data => {
     const mutation = bdMutationEvent(data);
     if (mutation === undefined) return;
+    if ((await runScope({ cwd })) === null) return;
     try {
      await appendAudit(auditDir(cwd), {
       ts: new Date().toISOString(),
@@ -1117,10 +1122,13 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning
   * dedupe never weakens the refusal: a known bad core request blocks every spawn.
+  * Both wait for a run scope: spawning an `orc-*` agent outside a run gets no refusal
+  * and costs no `omp config list`.
   */
  const noteAssignment = createAssignmentNotice(pi);
  pi.on("tool_call", async (event, ctx) => {
   try {
+   if ((await runScope(ctx)) === null) return undefined;
    noteAssignment(ctx, claims.observedClaim());
    if (event.toolName !== "task") return undefined;
    const requested = requestedAgentNames(event.input);

@@ -22,9 +22,9 @@
  * Scope disjointness between claims is judged once, at claim, by G5. This gate reads
  * only the claimed beads and compares each write against the territory they name.
  *
- * The dispatcher (`src/index.ts`) runs this gate only under orchestration: a declared
- * `ORC-ROLE`, or the marked run `pinnedRunActive` recognises. A plain session that
- * claims a bead by hand is never contained by it.
+ * The dispatcher (`src/index.ts`) runs this gate only inside a run scope: the marked run
+ * `runScope` (`src/run-scope.ts`) recognises. A plain session that claims a bead by hand
+ * is never contained by it.
  */
 
 import path from "node:path";
