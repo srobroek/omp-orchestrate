@@ -13,7 +13,8 @@
  * names the variable, so editing it is the plausible next slip, not only an evasion.
  *
  * The run check is deliberate. A helper in an unrelated OMP process, or in a checkout
- * no run has marked, remains writable. Contract-bound `orc-*` roles remain writable
+ * no run has marked, remains writable: `runScope` (`src/run-scope.ts`) is the predicate
+ * every run-scoped check shares. Contract-bound `orc-*` roles remain writable
  * because their exit contracts require bead comments and state transitions.
  *
  * Verified against a scratch database: under `BD_READONLY=1`, `bd show`,
@@ -27,7 +28,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { isBeadWriteFree } from "../identity";
-import { readActiveRunStrict } from "../run-state";
+import { runScope } from "../run-scope";
 import { editsVariable, effectiveSegments } from "../shell";
 
 /** The variable the sandbox sets, so the refusal can name it. */
@@ -44,32 +45,13 @@ const SANDBOX_VARIABLE = "BD_READONLY";
  */
 const BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"] as const;
 
-/**
- * Whether an orchestrate run marks this session: a valid active-run marker in the
- * session checkout. An isolated copy carries the primary's marker with it, so the one
- * root is enough; a linked worktree holds none and is under no run unless it declares a
- * role. `readActiveRunStrict` rejects malformed authority, so an uncertain marker reads
- * as no run.
- *
- * This is the run predicate every run-scoped check shares: G1 here, and in
- * `src/index.ts` G3, G6, the claim observer and G2.
- */
-export async function pinnedRunActive(cwd: string): Promise<boolean> {
-	try {
-		return (await readActiveRunStrict(cwd)) !== null;
-	} catch {
-		// An unreadable or malformed marker is not positive run authority.
-		return false;
-	}
-}
-
 /** Return the G1 environment addition for a generic helper in an active run. */
 export async function beadWriteFreeEnv(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 ): Promise<Record<string, string> | undefined> {
 	if (!isBeadWriteFree(pi, ctx)) return undefined;
-	return (await pinnedRunActive(ctx.cwd)) ? { BD_READONLY: "1" } : undefined;
+	return (await runScope(ctx)) === null ? undefined : { BD_READONLY: "1" };
 }
 
 /** Rebuild raw Bash input from the allowlist, dropping derived gate-only fields. */

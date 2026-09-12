@@ -88,11 +88,11 @@ describe("extension factory", () => {
 		expect(registered.filter(event => !known.includes(event))).toEqual([]);
 	});
 
-	test("registers the five commands and five schema-visible tools", () => {
+	test("registers the six commands and five schema-visible tools", () => {
 		const { pi, seen } = recordingApi();
 		ompOrchestrate(pi);
 		expect(seen.commands.sort()).toEqual(
-			["orchestrate-bind", "orchestrate-close", "orchestrate-roster", "orchestrate-run", "orchestrate-status"].sort(),
+			["orchestrate-bind", "orchestrate-close", "orchestrate-roster", "orchestrate-run", "orchestrate-status", "orchestrate-stop"].sort(),
 		);
 		expect(seen.tools.sort()).toEqual(
 			["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_review_round_policy", "orc_run_status"].sort(),
@@ -105,6 +105,14 @@ describe("extension factory", () => {
 			["orc-child-2", { id: "orc-child-2", status: "open", assignee: "" }],
 		]);
 		const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async id => beads.get(id) ?? null);
+		// Three checkouts, each under the run: the gates arm on the marker, never on the role.
+		const root = await mkdtemp(join(tmpdir(), "orc-index-bindings-"));
+		const marked = async (name: string): Promise<string> => {
+			const cwd = join(root, name);
+			await mkdir(join(cwd, ".orchestration"), { recursive: true });
+			await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
+			return cwd;
+		};
 		try {
 			const parent = recordingApi("worker");
 			const child = recordingApi("worker");
@@ -115,11 +123,11 @@ describe("extension factory", () => {
 			const parentResult = parent.seen.eventHandlers.get("tool_result")!.at(-1)!;
 			const childResult = child.seen.eventHandlers.get("tool_result")!.at(-1)!;
 			const parentCtx = {
-				cwd: "/tmp/orc-parent",
+				cwd: await marked("parent"),
 				getSystemPrompt: () => ["ORC-ROLE: implementer"],
 			} as unknown as ExtensionContext;
 			const childCtx = {
-				cwd: "/tmp/orc-child",
+				cwd: await marked("child"),
 				getSystemPrompt: () => ["ORC-ROLE: implementer"],
 			} as unknown as ExtensionContext;
 			const claimReport = (id: string, actor: string) => ({
@@ -141,15 +149,17 @@ describe("extension factory", () => {
 			)).toMatchObject({ block: true, reason: expect.stringContaining("orc-parent-1") });
 
 			await childResult(claimReport("orc-child-1", "child"), childCtx);
-			expect(await childToolCall(
+			// Under the marked run G6 prefixes the child's writes with its observed actor; the
+			// question here is only that its own claim state refuses nothing.
+			expect((await childToolCall(
 				{ toolName: "bash", input: { command: "bd update orc-child-1 --status open" } },
 				childCtx,
-			)).toBeUndefined();
+			) as { block?: boolean } | undefined)?.block).toBeUndefined();
 			beads.set("orc-child-1", { id: "orc-child-1", status: "open", assignee: "" });
-			expect(await childToolCall(
+			expect((await childToolCall(
 				{ toolName: "bash", input: { command: "bd update orc-child-2 --claim" } },
 				childCtx,
-			)).toBeUndefined();
+			) as { block?: boolean } | undefined)?.block).toBeUndefined();
 			expect(await parentToolCall(
 				{ toolName: "bash", input: { command: "bd update orc-parent-2 --claim" } },
 				parentCtx,
@@ -163,7 +173,7 @@ describe("extension factory", () => {
 			const unclaimedParentToolCall = unclaimedParent.seen.eventHandlers.get("tool_call")!.at(-1)!;
 			const unclaimedChildToolCall = unclaimedChild.seen.eventHandlers.get("tool_call")!.at(-1)!;
 			const unclaimedCtx = {
-				cwd: "/tmp/orc-unclaimed",
+				cwd: await marked("unclaimed"),
 				getSystemPrompt: () => ["ORC-ROLE: implementer"],
 			} as unknown as ExtensionContext;
 			const yieldEvent = { toolName: "yield", input: { result: { data: "finished" } } };
@@ -172,6 +182,7 @@ describe("extension factory", () => {
 			expect(await unclaimedChildToolCall(yieldEvent, unclaimedCtx)).toMatchObject({ block: true });
 		} finally {
 			showSpy.mockRestore();
+			await rm(root, { recursive: true, force: true });
 		}
 	});
 });

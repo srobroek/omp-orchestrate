@@ -10,12 +10,12 @@
  * claims only a bead routed to its role, one bead at a time, with the claim report left
  * on stdout for the observer, while the run has capacity for another code-writing claim,
  * and only where the candidate's scope is disjoint from every held code-writing claim
- * outside its own lineage. A session declaring no role under a pinned run is the lead,
+ * outside its own lineage. A session declaring no role under a marked run is the lead,
  * or a helper, and claims nothing but the run epic, whose assignee carries the lead
  * lease (`src/run-state.ts`). v19's `orchestrator-claim-deny.py` compared actor
  * names against a regex for "looks like a worker, not a lead", which a cooperative name
- * defeated; here the refusal keys on the absent `ORC-ROLE` marker and the run pin,
- * neither of which the agent writes.
+ * defeated; here the refusal keys on the absent `ORC-ROLE` marker and the run marker
+ * `runScope` reads, neither of which the agent writes.
  *
  * Two checks are on writes rather than claims, because the write is where the authority
  * is spent: a routing re-point of `metadata.role`, and an architect's `scope` that
@@ -40,10 +40,9 @@ import type { BdBead } from "../bd";
 import { bdFailureText, bdList, bdShow, bdShowMany, lastBdFailure, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
-import { readActiveRunStrict } from "../run-state";
+import { runScope } from "../run-scope";
 import { scopeOf, scopesOverlap } from "../scope";
 import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments, splitFlag } from "../shell";
-import { pinnedRunActive } from "./readonly";
 
 /** A queue filter on a `bd ready`, resolved to the role it pulls for. */
 interface QueueFilter {
@@ -543,17 +542,13 @@ const PENDING_RUN = "pending";
 
 /**
  * The epic the active-run marker binds this session to, or `undefined` when there is
- * none. Read from the session checkout, the one root `pinnedRunActive` reads: an
- * isolated copy carries the primary checkout's marker. A malformed marker is no run.
+ * none. The one root `runScope` reads: an isolated copy carries the primary checkout's
+ * marker. A malformed marker is no run.
  */
 async function boundEpic(cwd: string): Promise<string | undefined> {
- try {
-  const marker = await readActiveRunStrict(cwd);
-  if (marker !== null) return marker.run_id === PENDING_RUN ? undefined : marker.run_id;
- } catch {
-  // Not positive run authority.
- }
- return undefined;
+ const scope = await runScope({ cwd });
+ if (scope === null || scope.runId === PENDING_RUN) return undefined;
+ return scope.runId;
 }
 
 /**
@@ -747,7 +742,7 @@ export async function gateClaimEligibility(
 
  const claimInvocations = invocations.filter(invocation => invocation.hasClaim);
  if (claimInvocations.length === 0) return undefined;
- if (sessionRoleName === undefined && cwd !== undefined && (await pinnedRunActive(cwd)) && !(await leadLeaseClaim(claimInvocations, cwd))) {
+ if (sessionRoleName === undefined && cwd !== undefined && (await runScope(ctx)) !== null && !(await leadLeaseClaim(claimInvocations, cwd))) {
   return { block: true, reason: "the lead never claims work beads; dispatch a worker through its queue" };
  }
  if (input.async === true) {

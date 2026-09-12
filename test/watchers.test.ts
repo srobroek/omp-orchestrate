@@ -302,10 +302,14 @@ function settingsReads(): number {
 	return settingsSpy.mock.calls.length;
 }
 
-/** A run marker at `cwd`, recording the run's database unless `beadsDir` is `null`. */
-async function marked(beadsDir: string | null = join(cwd, ".beads")): Promise<void> {
+/**
+ * A run marker at `cwd`, recording the run's database unless `beadsDir` is `null`. The
+ * watchers arm on it and on nothing else; `pending` names a run activated but not bound,
+ * which arms them without giving the settings preflight an epic to comment on.
+ */
+async function marked(beadsDir: string | null = join(cwd, ".beads"), runId = "orc-w5"): Promise<void> {
 	await mkdir(join(cwd, ".orchestration"), { recursive: true });
-	await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-w5", ...(beadsDir === null ? {} : { beads_dir: beadsDir }) }));
+	await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: runId, ...(beadsDir === null ? {} : { beads_dir: beadsDir }) }));
 }
 
 describe("W5 shared-database precondition", () => {
@@ -838,6 +842,9 @@ function assignmentNotices(rig: Harness): string[] {
 }
 
 describe("assignment enforcement", () => {
+	// G8 is a run-scoped notice: every seat below sits in a marked checkout.
+	beforeEach(() => marked());
+
 	test("refuses repeated requests for a malformed core assignment but leaves helpers available", async () => {
 		await coreFixture("orc-reviewer", "researcher", "@reviewer");
 		const rig = harness(undefined, true);
@@ -993,6 +1000,7 @@ describe("assignment enforcement", () => {
 describe("registerWatchers", () => {
 	test("reports an unresolved discovery defect again in the next session", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		const rig = harness(undefined, true);
 		await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "empty-agent-fixture", omp: {} }));
 		withOmpExtensionRootScope(
@@ -1016,6 +1024,7 @@ describe("registerWatchers", () => {
 
 	test("records an already displayed discovery warning after an epic is bound", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		const rig = harness(undefined, true);
 		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
 		await rig.fire("session_start", {});
@@ -1023,8 +1032,8 @@ describe("registerWatchers", () => {
 		expect(rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight")).toHaveLength(1);
 		expect((await bdCalls()).filter(call => call[0] === "comment")).toEqual([]);
 
-		await mkdir(join(cwd, ".orchestration"), { recursive: true });
-		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
+		// Binding rewrites the marker in place; the scope memo must see the new epic.
+		await marked(undefined, "bd-1");
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		await rig.fire("tool_call", { toolName: "task", input: {} });
 		const comments = (await bdCalls()).filter(call => call[0] === "comment");
@@ -1087,6 +1096,7 @@ describe("registerWatchers", () => {
 	});
 
 	test("repeated starts replace timers and audit subscriptions", async () => {
+		await marked(undefined, "pending");
 		const rig = harness();
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
@@ -1107,6 +1117,7 @@ describe("registerWatchers", () => {
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {
+		await marked(undefined, "pending");
 		const rig = harness();
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
@@ -1151,6 +1162,7 @@ describe("registerWatchers", () => {
 
 	test("W1 comments STALL on the stalled child's bead, once, and creates nothing", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
 
 		const rig = harness();
@@ -1175,6 +1187,7 @@ describe("registerWatchers", () => {
 
 	test("W1 eventually reports stalls beyond the read budget", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		const beads = Array.from({ length: 13 }, (_, i) => ({ id: `bd-${i}`, status: "in_progress", assignee: `kid-${i}` }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify(beads);
 		const rig = harness();
@@ -1189,6 +1202,7 @@ describe("registerWatchers", () => {
 
 	test("W1 retries a failed STALL comment until it lands, then never repeats it", async () => {
 		await fakeBd();
+		await marked(undefined, "pending");
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-7", status: "in_progress", assignee: "kid-1" }]);
 		const rig = harness();
 		registerWatchers(rig.pi);

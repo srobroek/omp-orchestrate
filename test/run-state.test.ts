@@ -584,6 +584,7 @@ describe("registerRunCommands", () => {
 			bind: command("orchestrate-bind"),
 			status: command("orchestrate-status"),
 			close: command("orchestrate-close"),
+			stop: command("orchestrate-stop"),
 			notices,
 		};
 	}
@@ -597,8 +598,19 @@ describe("registerRunCommands", () => {
 		process.env.BD_BIN = bd;
 	});
 
-	test("registers the four marker commands", () => {
-		expect(rig().registered).toEqual(["orchestrate-run", "orchestrate-bind", "orchestrate-status", "orchestrate-close"]);
+	test("registers the five marker commands", () => {
+		expect(rig().registered).toEqual(["orchestrate-run", "orchestrate-bind", "orchestrate-status", "orchestrate-close", "orchestrate-stop"]);
+	});
+
+	test("/orchestrate-stop is /orchestrate-close under its own name", async () => {
+		const { run, bind, stop, notices } = rig();
+		await run();
+		await bind("orc-7");
+		await stop("");
+		expect(notices.at(-1)).toEqual(["error", "usage: /orchestrate-stop <epic> [--force]"]);
+		await stop("orc-7");
+		expect(notices.at(-1)).toEqual(["info", "orchestrate run orc-7 closed; marker removed"]);
+		expect(await readActiveRun(cwd)).toBeNull();
 	});
 
 	test("/orchestrate-run calls the activation hook once, after the marker exists", async () => {
