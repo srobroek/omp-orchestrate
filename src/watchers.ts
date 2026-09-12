@@ -28,6 +28,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { findScopedSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
  coreContractForAgent,
  type AgentDiscoveryFinding,
@@ -612,7 +614,7 @@ export async function preflightAgents(
  reportedAgentFindings?: Set<string>,
 ): Promise<AgentDiscoveryFinding[]> {
  if (ctx.models === undefined) return [];
- const settings = (await readSettings(ctx.cwd)) ?? {};
+ const settings = readSettings() ?? {};
  const rawOverrides = settings["task.agentModelOverrides"];
  const modelOverrides =
   rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
@@ -816,7 +818,6 @@ export function resetWatchers(): void {
  for (const queue of goalQueues.values()) queue.latest = null;
  goalQueues.clear();
  settingsChecked = false;
- settingsSnapshots.clear();
 }
 
 // ============================================================================
@@ -831,15 +832,14 @@ export function resetWatchers(): void {
  * platform defaults (`merge: patch`, `apply: true`) a worker's commits are applied
  * straight into the spawning tree, so no `omp/task/<id>` branch is captured, the
  * architect's deliberate integration step never happens, and the run looks
- * healthy while the contract it rests on is not in force. Nothing in the
- * extension API exposes settings, so the operator's own CLI is asked.
+ * healthy while the contract it rests on is not in force.
  *
  * `expected` returns the verdict for an observed value. An unreadable setting
  * yields no finding: this warns about what it can prove, never about what it
  * could not read.
  */
 interface SettingRequirement {
- key: string;
+ key: SettingPath;
  /** What the run needs, phrased for a human. */
  want: string;
  /** True when the observed value satisfies the requirement. */
@@ -919,56 +919,33 @@ export function settingsDeviations(observed: Readonly<Record<string, unknown>>):
 }
 
 /**
- * One settings snapshot per cwd per session. `omp config list --json` costs about a
- * second, and every `task` dispatch used to pay it to read a session-constant value;
- * memoising the promise also coalesces the two `session_start` readers into one spawn.
- * An unreadable answer is not kept, so the next caller asks again rather than
- * inheriting a failure for the session.
+ * The settings the preflights read. Every one is a schema path, so the host answers each
+ * with its effective value or its default; there is no unreadable key.
  */
-const settingsSnapshots = new Map<string, Promise<Record<string, unknown> | null>>();
+const OBSERVED_SETTINGS: readonly SettingPath[] = [
+ ...REQUIRED_SETTINGS.map(setting => setting.key),
+ "modelRoles",
+ "task.agentModelOverrides",
+];
 
 /**
- * Read the supported effective-settings snapshot, or `null` when it could not be read.
- * Unreadable values prove nothing, and a caller that treated `{}` as an answer would
- * mark a check done that never ran.
+ * The effective settings of the session this handler runs for, or `null` when no
+ * settings instance is live.
+ *
+ * Read in process through the host's own accessor: the extension runner scopes every
+ * handler to its session's `Settings` (`extensibility/extensions/runner.ts`,
+ * `withActiveSettings`), and `findScopedSettings` answers with that instance, else the
+ * global singleton. The values are the ones `omp config list` prints; spawning that CLI
+ * cost 0.5 s idle and up to 3 s under load on every `task` dispatch. Unreadable proves
+ * nothing, and a caller that treated `{}` as an answer would mark a check done that
+ * never ran.
  */
-function readSettings(cwd: string): Promise<Record<string, unknown> | null> {
- const cached = settingsSnapshots.get(cwd);
- if (cached !== undefined) return cached;
- const reading = spawnSettings(cwd).then(settings => {
-  if (settings === null) settingsSnapshots.delete(cwd);
-  return settings;
- });
- settingsSnapshots.set(cwd, reading);
- return reading;
-}
-
-async function spawnSettings(cwd: string): Promise<Record<string, unknown> | null> {
- const bin = process.env.OMP_BIN ?? "omp";
- try {
-  const proc = Bun.spawn([bin, "config", "list", "--json"], {
-   cwd,
-   stdout: "pipe",
-   stderr: "ignore",
-  });
-  const timer = setTimeout(() => proc.kill(), 10_000);
-  try {
-   const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-   if (code !== 0) return null;
-   const parsed: unknown = JSON.parse(stdout);
-   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-   const observed: Record<string, unknown> = {};
-   for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles", "task.agentModelOverrides"]) {
-    const entry: unknown = (parsed as Record<string, unknown>)[key];
-    if (entry !== null && typeof entry === "object" && "value" in entry) observed[key] = entry.value;
-   }
-   return observed;
-  } finally {
-   clearTimeout(timer);
-  }
- } catch {
-  return null;
- }
+function readSettings(): Record<string, unknown> | null {
+ const instance = findScopedSettings();
+ if (instance === undefined) return null;
+ const observed: Record<string, unknown> = {};
+ for (const key of OBSERVED_SETTINGS) observed[key] = instance.get(key);
+ return observed;
 }
 
 /** Set once the settings have actually been read; an unreadable host leaves the check pending. */
@@ -984,19 +961,19 @@ let settingsChecked = false;
  * settings belong to the operator, and refusing to run would strand a repository
  * whose owner cannot reach its configuration.
  *
- * "Once" means once the settings were actually read. A host where `omp` is missing
- * or hangs leaves the check pending, says so, and runs it again on the next
+ * "Once" means once the settings were actually read. A process with no live settings
+ * instance leaves the check pending, says so, and runs it again on the next
  * activation, instead of marking a check done that never happened.
  */
 export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<SettingDeviation[]> {
  resetReadBudget();
  if (settingsChecked) return [];
- const observed = await readSettings(cwd);
+ const observed = readSettings();
  const lines: string[] = [];
  let deviations: SettingDeviation[] = [];
  if (observed === null) {
   lines.push(
-   "the effective settings could not be read (`omp config list --json` failed or timed out), so the required task settings are unverified; the check runs again on the next /orchestrate-run",
+   "the effective settings could not be read (no settings instance is live for this session), so the required task settings are unverified; the check runs again on the next /orchestrate-run",
   );
  } else {
   settingsChecked = true;
@@ -1102,8 +1079,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   // orchestrated runs, and a repository that merely tracks work in beads has no
   // claims to split until one starts. `/orchestrate-run` runs the settings check
   // at activation, and the `task` handler below checks agents at spawn, so a
-  // session that never orchestrates hears nothing. The two preflights share one
-  // settings read through the per-cwd memo.
+  // session that never orchestrates hears nothing. Both preflights read the settings
+  // in process, so neither costs a spawn.
   if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
@@ -1136,8 +1113,6 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   unsubscribers.push(pi.events.on(LSP_STARTUP_CHANNEL, noteLspStartup));
  });
  pi.on("session_shutdown", () => dispose());
- // A switched session may sit in a different cwd with different effective settings.
- pi.on("session_switch", () => settingsSnapshots.clear());
 
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning

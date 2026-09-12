@@ -2,8 +2,7 @@
  * The one place that shells out to `bd`.
  *
  * Gates never assemble `bd` argv themselves, so the JSON-envelope handling, the
- * timeout, the per-dispatch read budget, and the per-dispatch `show` memo live in
- * exactly one file.
+ * timeout, the per-dispatch read budget, and the read cache live in exactly one file.
  *
  * **Nothing here throws.** A throw inside a `tool_call` handler blocks the tool it
  * was inspecting (`extensibility/extensions/wrapper.ts:237` turns any handler
@@ -13,9 +12,38 @@
  * uniformly, fail open. What the gate cannot see from `null` alone is *why*, so the
  * kind of the failure is recorded alongside ({@link lastBdFailure}) for the refusal
  * or log line that names it.
+ *
+ * **The read cache.** Every `bd` spawn costs 0.4-1.2 s of engine bootstrap whatever it
+ * asks, so reads are served from a process-wide cache validated by a token derived from
+ * the store itself ({@link storeToken}): the embedded Dolt journal's inode and size, and
+ * the manifest's lock and root hashes. Every mutation appends to the journal and moves
+ * the root before the writing `bd` exits; no read moves either. The token therefore
+ * changes on every write by anyone -- this process, a worker, a human shell, a `wt`
+ * hook -- and on nothing else, and a cached answer is served only while the token it
+ * was read under still holds. The invariants, stated so a change can be checked against
+ * them:
+ *
+ * - I1, write visibility: a mutation changes the token before the mutating `bd` exits.
+ * - I2, read silence: no read-only `bd` command changes the token.
+ * - I3, validity: an entry is served only if the token captured before its spawn began
+ *   equals the token now; then no write completed in between, so the entry is as fresh
+ *   as a spawn issued now.
+ * - I4, capture order: the token is read before the spawn, never after; this process's
+ *   own writes through {@link bdRun} also drop the cache outright.
+ * - I5, equality, not order: any difference invalidates, including a smaller journal, a
+ *   new inode, or a rewritten manifest lock (GC, conjoin, journal repair, `bd dolt pull`).
+ * - I6, scope: the store is the one the active-run marker names; no marker, a
+ *   non-embedded store, or unreadable files means nothing is cached.
+ * - I7, no negative caching: failures, non-zero exits, and empty answers are never stored.
+ *
+ * There is no time-based expiry anywhere. A cached value is shared by every reader and
+ * must be treated as immutable; {@link asBead} is the one normaliser and is idempotent.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { markerPath } from "./run-state";
 
 /** A bead as the gates need it. Extra fields pass through untouched. */
 export interface BdBead {
@@ -51,13 +79,14 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const OPERATION_TIMEOUT_MS = 20_000;
 
 /**
- * Reads allowed per dispatch, mirroring `rules-eval.py`'s `BD_READ_BUDGET = 12`.
+ * Spawned reads allowed per dispatch, mirroring `rules-eval.py`'s `BD_READ_BUDGET = 12`.
  *
  * A gate chain hydrates a bead, its lineage, and the in-flight list on every gated
  * tool call, so an unbounded chain can issue dozens of subprocess calls while the
  * model waits. The budget caps that; exhausting it degrades to fail open, which is
  * the same outcome as `bd` being unavailable -- and is recorded as `"budget"` so the
- * caller can tell the two apart.
+ * caller can tell the two apart. Cache hits spend nothing, so the cap is a ceiling on
+ * miss storms rather than the cost of a call.
  */
 const READ_BUDGET = 12;
 
@@ -84,17 +113,6 @@ interface ReadBudget {
  exhausted: boolean;
  /** Cleared at the start of every call, so it describes the most recent one. */
  lastFailure: BdFailure | undefined;
- /**
-  * `bd show` answers already read in this dispatch, keyed by {@link showKey}.
-  *
-  * A gate chain reads the same bead several times per tool call -- the claimed bead
-  * for freshness, then again for its lineage, and shared ancestors once per in-flight
-  * peer. Within one dispatch those cannot legitimately differ, so the second read is
-  * free. Any write through {@link bdRun} clears the memo, because a write in the same
-  * dispatch is the one thing that can change the answer; the memo dies with the store
-  * at the next {@link resetReadBudget}, so it never spans tool calls.
-  */
- shows: Map<string, BdBead>;
 }
 
 const readBudget = new AsyncLocalStorage<ReadBudget>();
@@ -114,7 +132,6 @@ export function resetReadBudget(reads = READ_BUDGET): void {
   deadline: performance.now() + OPERATION_TIMEOUT_MS,
   exhausted: false,
   lastFailure: undefined,
-  shows: new Map(),
  });
 }
 
@@ -148,9 +165,103 @@ function fail<T>(kind: BdFailure, value: T): T {
  return value;
 }
 
-function showKey(id: string, cwd: string | undefined): string {
- return `${cwd ?? ""}\u0000${id}`;
+/** A hit is a successful read: it clears the failure the previous call may have left. */
+function succeed(): void {
+ const budget = readBudget.getStore();
+ if (budget) budget.lastFailure = undefined;
 }
+
+// ============================================================================
+// The store token and the cache it validates
+// ============================================================================
+
+/** Dolt's constant chunk-journal file name (`journalAddr`, `go/store/nbs/journal.go`). */
+const JOURNAL_FILE = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
+
+/**
+ * The token of an embedded store: `<journal ino>:<journal size>|<manifest lock>:<manifest root>`.
+ *
+ * `beadsDir` is the `.beads` directory; its `metadata.json` names the mode and the
+ * database, and the journal and manifest sit under
+ * `embeddeddolt/<database>/.dolt/noms/`. The journal gains a root-hash record on every
+ * mutation and the manifest's `lock:root` fields (the third and fourth colon-separated
+ * fields of a version-5 manifest) move with it, while `bd`'s reads leave the journal's
+ * size and the manifest's text alone: they rewrite the manifest file (new inode, same
+ * bytes) and touch mtimes, which is why neither inode nor mtime of the manifest is read.
+ *
+ * `undefined` for a non-embedded store, a store without a journal, or any read error;
+ * the caller caches nothing then. Costs three system calls, roughly 0.1 ms.
+ */
+export function storeToken(beadsDir: string): string | undefined {
+ try {
+  const metadata = metadataRecord(JSON.parse(readFileSync(path.join(beadsDir, "metadata.json"), "utf8")));
+  if (metadata?.dolt_mode !== "embedded") return undefined;
+  const database = metadata.dolt_database;
+  if (typeof database !== "string" || database.length === 0) return undefined;
+  const noms = path.join(beadsDir, "embeddeddolt", database, ".dolt", "noms");
+  const { ino, size } = statSync(path.join(noms, JOURNAL_FILE));
+  const manifest = readFileSync(path.join(noms, "manifest"), "utf8").split(":");
+  if (manifest.length < 4) return undefined;
+  return `${ino}:${size}|${manifest[2]}:${manifest[3]}`;
+ } catch {
+  return undefined;
+ }
+}
+
+/**
+ * The `.beads` directory the active-run marker at `cwd` names, or `undefined`.
+ *
+ * The marker is the product's declaration of the run's store: activation writes its
+ * canonical path as `beads_dir`, every worker clone carries a copy, and the clone's
+ * `.beads/redirect` makes `bd` resolve the same store from any directory of the run. A
+ * marker without the field -- written before the field existed, or a bare run id --
+ * means the store is not known here, and nothing is cached. Read synchronously so a
+ * lookup adds no turn to the spawn it may save.
+ */
+function runStoreDir(cwd: string | undefined): string | undefined {
+ let marker: unknown;
+ try {
+  marker = JSON.parse(readFileSync(markerPath(cwd ?? process.cwd()), "utf8"));
+ } catch {
+  return undefined;
+ }
+ const dir = metadataRecord(marker)?.beads_dir;
+ return typeof dir === "string" && path.isAbsolute(dir) ? dir : undefined;
+}
+
+/**
+ * Everything cached under one token. `payloads` is keyed by argv; `beads` by id, fed by
+ * `show` and `list --id` alike so either read serves the other.
+ */
+interface Generation {
+ dir: string;
+ token: string;
+ payloads: Map<string, unknown>;
+ beads: Map<string, BdBead>;
+}
+
+/**
+ * The one live generation. A process talks to one store, so one generation bounds the
+ * cache to a snapshot's worth of payloads; a different store or a moved token replaces
+ * it wholesale.
+ */
+let live: Generation | undefined;
+
+/** The generation reads at `cwd` may use, or `undefined` when nothing may be cached (I6). */
+function generationFor(cwd: string | undefined): Generation | undefined {
+ const dir = runStoreDir(cwd);
+ if (dir === undefined) return undefined;
+ const token = storeToken(dir);
+ if (token === undefined) return undefined;
+ if (live === undefined || live.dir !== dir || live.token !== token) {
+  live = { dir, token, payloads: new Map(), beads: new Map() };
+ }
+ return live;
+}
+
+// ============================================================================
+// Spawning
+// ============================================================================
 
 /**
  * Run `bd` and capture its result, or `null` when it could not run at all.
@@ -161,15 +272,15 @@ function showKey(id: string, cwd: string | undefined): string {
  * from the working directory, so an inherited cwd silently writes to a different
  * run's beads.
  *
- * Every call through here may write, so it drops the dispatch's `show` memo first.
- * Reads take {@link spawnBd} directly and keep it.
+ * Every call through here may write, so it drops the read cache first (I4). Reads take
+ * {@link readJson}, which keeps it.
  */
 export async function bdRun(
  args: string[],
  timeoutMs = DEFAULT_TIMEOUT_MS,
  cwd?: string,
 ): Promise<BdResult | null> {
- readBudget.getStore()?.shows.clear();
+ live = undefined;
  return await spawnBd(args, timeoutMs, cwd);
 }
 
@@ -223,21 +334,46 @@ async function spawnBd(args: string[], timeoutMs: number, cwd: string | undefine
  * Parse a `bd --json` payload, unwrapping the `{ schema_version, data }` envelope
  * when present. `BD_JSON_ENVELOPE=1` asks for the envelope, but fixtures and older
  * subcommands emit a bare value, so both shapes are accepted.
+ *
+ * `bd` may print a warning line before the payload (a cold server, a redirect target it
+ * could not follow), so parsing starts at the first brace or bracket rather than byte 0.
+ * `undefined` when there is no JSON value there; a bare `null` is folded into that,
+ * because no read answers `null` and means something by it.
  */
 function parsePayload(stdout: string): unknown {
+ const starts = [stdout.indexOf("{"), stdout.indexOf("[")].filter(index => index !== -1);
+ if (starts.length === 0) return undefined;
  try {
-  const parsed: unknown = JSON.parse(stdout);
+  const parsed: unknown = JSON.parse(stdout.slice(Math.min(...starts)));
   if (parsed !== null && typeof parsed === "object" && "schema_version" in parsed && "data" in parsed) {
-   return parsed.data;
+   return parsed.data ?? undefined;
   }
-  return parsed;
+  return parsed ?? undefined;
  } catch {
   return undefined;
  }
 }
 
-/** Run a read, honouring the per-dispatch budget, and return its parsed payload. */
-async function readJson(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<unknown> {
+/**
+ * Run a read and return its parsed payload, from the cache when the token holds.
+ *
+ * A hit spends no budget and clears the recorded failure. A miss spawns, and a payload
+ * that parsed from a zero exit is stored under the generation the caller resolved
+ * before the spawn began (I4); a generation replaced meanwhile is simply garbage.
+ * Nothing else is stored (I7).
+ */
+async function readJson(
+ args: string[],
+ timeoutMs = DEFAULT_TIMEOUT_MS,
+ cwd?: string,
+ generation: Generation | undefined = generationFor(cwd),
+): Promise<unknown> {
+ const key = args.join("\u0000");
+ const hit = generation?.payloads.get(key);
+ if (hit !== undefined) {
+  succeed();
+  return hit;
+ }
  const budget = readBudget.getStore();
  if (budget && budget.readsUsed++ >= budget.reads) {
   budget.exhausted = true;
@@ -247,7 +383,9 @@ async function readJson(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: st
  if (!result) return undefined;
  if (result.code !== 0) return fail("exit", undefined);
  const payload = parsePayload(result.stdout);
- return payload === undefined ? fail("missing", undefined) : payload;
+ if (payload === undefined) return fail("missing", undefined);
+ generation?.payloads.set(key, payload);
+ return payload;
 }
 
 export function metadataRecord(raw: unknown): Record<string, unknown> | undefined {
@@ -281,23 +419,21 @@ function asBead(value: unknown): BdBead | null {
  * One bead by id, or `null` when it does not exist or could not be read.
  *
  * `bd show --json` returns a single-element array, so both an array and a bare
- * object are accepted. Answered from the dispatch memo when this dispatch already
- * read the bead; see {@link ReadBudget.shows}.
+ * object are accepted. Answered from the live generation when any read under the
+ * current token already carried the bead; see {@link Generation.beads}.
  */
 export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead | null> {
- const budget = readBudget.getStore();
- if (budget !== undefined) {
-  const memoised = budget.shows.get(showKey(id, cwd));
-  if (memoised !== undefined) {
-   budget.lastFailure = undefined;
-   return memoised;
-  }
+ const generation = generationFor(cwd);
+ const known = generation?.beads.get(id);
+ if (known !== undefined) {
+  succeed();
+  return known;
  }
- const payload = await readJson(["show", id, "--json"], timeoutMs, cwd);
+ const payload = await readJson(["show", id, "--json"], timeoutMs, cwd, generation);
  if (payload === undefined) return null;
  const bead = asBead(Array.isArray(payload) ? payload[0] : payload);
  if (bead === null) return fail("missing", null);
- budget?.shows.set(showKey(id, cwd), bead);
+ generation?.beads.set(id, bead);
  return bead;
 }
 
@@ -306,30 +442,34 @@ export async function bdShow(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: s
  *
  * `bd list --id` takes the ids comma-joined; `--status all` keeps closed beads and
  * `--include-infra` keeps ephemeral wisps, both of which plain `bd list` hides
- * (measured on bd 1.2.2). Ids this dispatch already holds are served from the memo
- * and left out of the query; every bead read is memoised for the rest of it. An id
- * absent from the result is absent from the map: the caller decides what an
- * unresolvable link means.
+ * (measured on bd 1.2.2). Ids the live generation already holds are served from it and
+ * left out of the query; every bead read is kept for later `show`s under the same
+ * token. An id absent from the result is absent from the map: the caller decides what
+ * an unresolvable link means.
  */
 export async function bdShowMany(ids: readonly string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<Map<string, BdBead> | null> {
+ const generation = generationFor(cwd);
  const beads = new Map<string, BdBead>();
- const budget = readBudget.getStore();
  const unread: string[] = [];
  for (const id of ids) {
-  const memoised = budget?.shows.get(showKey(id, cwd));
-  if (memoised !== undefined) beads.set(id, memoised);
+  const known = generation?.beads.get(id);
+  if (known !== undefined) beads.set(id, known);
   else if (!unread.includes(id)) unread.push(id);
  }
- if (unread.length === 0) return beads;
- const rows = await bdListChecked(
+ if (unread.length === 0) {
+  succeed();
+  return beads;
+ }
+ const rows = await listChecked(
   ["list", "--id", unread.join(","), "--status", "all", "--include-infra", "--include-gates", "--limit", "0", "--json"],
   timeoutMs,
   cwd,
+  generation,
  );
  if (rows === null) return null;
  for (const row of rows) {
   beads.set(row.id, row);
-  budget?.shows.set(showKey(row.id, cwd), row);
+  generation?.beads.set(row.id, row);
  }
  return beads;
 }
@@ -340,21 +480,25 @@ export async function bdList(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd
 }
 
 function asBeadArray(payload: unknown): BdBead[] | null {
-	if (!Array.isArray(payload)) return null;
-	const beads: BdBead[] = [];
-	for (const entry of payload) {
-		const bead = asBead(entry);
-		if (!bead) return null;
-		beads.push(bead);
-	}
-	return beads;
+ if (!Array.isArray(payload)) return null;
+ const beads: BdBead[] = [];
+ for (const entry of payload) {
+  const bead = asBead(entry);
+  if (!bead) return null;
+  beads.push(bead);
+ }
+ return beads;
 }
 
 export async function bdListChecked(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdBead[] | null> {
-	const payload = await readJson(args, timeoutMs, cwd);
-	if (payload === undefined) return null;
-	const beads = asBeadArray(payload);
-	return beads === null ? fail("missing", null) : beads;
+ return await listChecked(args, timeoutMs, cwd, generationFor(cwd));
+}
+
+async function listChecked(args: string[], timeoutMs: number, cwd: string | undefined, generation: Generation | undefined): Promise<BdBead[] | null> {
+ const payload = await readJson(args, timeoutMs, cwd, generation);
+ if (payload === undefined) return null;
+ const beads = asBeadArray(payload);
+ return beads === null ? fail("missing", null) : beads;
 }
 
 /**
@@ -378,6 +522,24 @@ export async function bdWispListChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: st
   wisps.push(bead);
  }
  return wisps;
+}
+
+/**
+ * Ids `bd blocked --json` reports, or `null` when the read failed or the payload was
+ * malformed. An empty list is a real answer: nothing is blocked. `bd` emits one object
+ * per blocked bead, each carrying `id`; a lone object is accepted as a list of one.
+ */
+export async function bdBlockedChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<string[] | null> {
+ const payload = await readJson(["blocked", "--json"], timeoutMs, cwd);
+ if (payload === undefined) return null;
+ const ids: string[] = [];
+ for (const entry of Array.isArray(payload) ? payload : [payload]) {
+  if (entry === null || typeof entry !== "object") return fail("missing", null);
+  const id = (entry as Record<string, unknown>).id;
+  if (typeof id !== "string" || id.length === 0) return fail("missing", null);
+  ids.push(id);
+ }
+ return ids;
 }
 
 /** Comments on a bead, oldest first as `bd` returns them. */

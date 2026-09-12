@@ -36,7 +36,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../bd";
-import { bdFailureText, bdList, bdShow, lastBdFailure, metadataRecord } from "../bd";
+import { bdFailureText, bdList, bdShow, bdShowMany, lastBdFailure, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
 import { readActiveRunStrict } from "../run-state";
@@ -237,40 +237,61 @@ interface Lineage {
 }
 
 /**
- * IDs of a bead's ancestors, loading each link through the memoised show seam.
+ * The ancestries of several beads at once, walked one generation at a time.
  *
- * The bead's own row is trusted for its parent: `bd list --json` and `bd show --json`
- * both emit `parent` when there is one and omit the key when there is none (measured on
- * bd 1.2.2), so a bead handed in without one has none, and re-reading it would only
- * spend a read to learn that again.
+ * Each seed is the first ancestor of one chain: a bead's own `parent`, or the parent a
+ * bead not yet created is filed under; `undefined` seeds an empty chain. `graph` holds
+ * rows already in hand -- `bd list --json` emits `parent` on every row that has one and
+ * omits the key otherwise (measured on bd 1.2.2), so the in-flight list resolves most
+ * links without a read. The ancestors every chain still needs at a depth are read
+ * together, in one `bd list --id`, so the walk costs at most `MAX_LINEAGE_DEPTH - 1`
+ * reads however many chains it carries, and the rows it reads join the graph.
+ *
+ * The guard's own horizon: an ancestor beyond it would be discarded, so the last
+ * ancestor kept is never read for its parent.
  */
-async function parentChain(bead: BdBead): Promise<Lineage> {
- const ancestors = new Set<string>();
- let parent = parentId(bead);
- for (let depth = 0; parent !== undefined; depth++) {
-  if (ancestors.has(parent)) break;
-  ancestors.add(parent);
-  // The guard's own horizon: an ancestor beyond it would be discarded, so the last
-  // ancestor kept is never read for its parent.
+async function parentChains(seeds: readonly (string | undefined)[], graph: Map<string, BdBead>): Promise<Lineage[]> {
+ const chains = seeds.map(seed => ({ ancestors: new Set<string>(), complete: true, next: seed }));
+ for (let depth = 0; ; depth++) {
+  for (const chain of chains) {
+   if (chain.next === undefined) continue;
+   if (chain.ancestors.has(chain.next)) {
+    chain.next = undefined;
+    continue;
+   }
+   chain.ancestors.add(chain.next);
+  }
   if (depth + 1 >= MAX_LINEAGE_DEPTH) break;
-  const current = await bdShow(parent);
-  if (current === null) return { ancestors, complete: false };
-  parent = parentId(current);
+  const wanted = new Set<string>();
+  for (const chain of chains) {
+   if (chain.next !== undefined && !graph.has(chain.next)) wanted.add(chain.next);
+  }
+  if (wanted.size > 0) {
+   const rows = await bdShowMany([...wanted]);
+   if (rows === null) {
+    for (const chain of chains) {
+     if (chain.next !== undefined) chain.complete = false;
+    }
+    break;
+   }
+   for (const [id, row] of rows) graph.set(id, row);
+  }
+  let walking = false;
+  for (const chain of chains) {
+   if (chain.next === undefined) continue;
+   const row = graph.get(chain.next);
+   if (row === undefined) {
+    // The link exists but its bead does not answer: a prefix, not the lineage.
+    chain.complete = false;
+    chain.next = undefined;
+    continue;
+   }
+   chain.next = parentId(row);
+   walking ||= chain.next !== undefined;
+  }
+  if (!walking) break;
  }
- return { ancestors, complete: true };
-}
-
-/**
- * The ancestry of a bead that does not exist yet: the parent it is filed under, and
- * that parent's own chain. Filed with no parent, it has none.
- */
-async function parentChainFrom(parent: string | undefined): Promise<Lineage> {
- if (parent === undefined) return { ancestors: new Set(), complete: true };
- const bead = await bdShow(parent);
- if (bead === null) return { ancestors: new Set([parent]), complete: false };
- const chain = await parentChain(bead);
- chain.ancestors.add(parent);
- return chain;
+ return chains.map(({ ancestors, complete }) => ({ ancestors, complete }));
 }
 
 /** A promise computed on first call and shared by every later one. */
@@ -304,7 +325,8 @@ interface Territory {
  /** Set for an existing bead: it is not its own peer, and its descendants are exempt. */
  id: string | undefined;
  scope: string[];
- lineage: () => Promise<Lineage>;
+ /** The first ancestor: the bead's parent, or the parent a new bead is filed under. */
+ parent: string | undefined;
 }
 
 /** The peer an overlap was found with, quoted back in the refusal. */
@@ -323,21 +345,13 @@ interface Overlap {
  * reading; decomposition reads every live node, held or waiting.
  *
  * Reads are spent only where a verdict needs them. A peer whose scope is empty or
- * disjoint costs nothing, because lineage is purely an exemption for an overlap. Only an
- * overlapping pair walks lineage -- the subject's once per call, the peer's once per
- * peer -- through the dispatch-memoised show seam, so shared ancestors are read once
- * however many peers share them.
+ * disjoint costs nothing, because lineage is purely an exemption for an overlap. Only
+ * when some peer overlaps is lineage read, and then once for the subject and every
+ * overlapping peer together, through {@link parentChains}, so the cost does not grow
+ * with the number of peers.
  */
 async function overlappingPeer(subject: Territory, peers: readonly BdBead[], heldOnly: boolean): Promise<Overlap | undefined> {
- const lineages = new Map<string, () => Promise<Lineage>>();
- const lineage = (of: BdBead): Promise<Lineage> => {
-  let pending = lineages.get(of.id);
-  if (pending === undefined) {
-   pending = once(() => parentChain(of));
-   lineages.set(of.id, pending);
-  }
-  return pending();
- };
+ const overlapping: { peer: BdBead; scope: string[] }[] = [];
  for (const other of peers) {
   if (other.id === subject.id) continue;
   if (heldOnly && (typeof other.assignee !== "string" || other.assignee.trim().length === 0)) continue;
@@ -346,14 +360,19 @@ async function overlappingPeer(subject: Territory, peers: readonly BdBead[], hel
   const otherScope = scopeOf(metadataRecord(other.metadata));
   if (otherScope.length === 0) continue;
   if (!scopesOverlap(subject.scope, otherScope)) continue;
-  const mine = await subject.lineage();
-  if (mine.ancestors.has(other.id)) continue;
-  let complete = mine.complete;
-  // A bead not yet created has no descendants, so the peer's chain is not consulted.
+  overlapping.push({ peer: other, scope: otherScope });
+ }
+ if (overlapping.length === 0) return undefined;
+ // A bead not yet created has no descendants, so the peers' chains are not consulted.
+ const peerSeeds = subject.id === undefined ? [] : overlapping.map(({ peer }) => parentId(peer));
+ const [mine, ...theirs] = await parentChains([subject.parent, ...peerSeeds], new Map(peers.map(peer => [peer.id, peer])));
+ for (const [index, { peer, scope }] of overlapping.entries()) {
+  if (mine!.ancestors.has(peer.id)) continue;
+  let complete = mine!.complete;
   if (subject.id !== undefined) {
-   const theirs = await lineage(other);
-   if (theirs.ancestors.has(subject.id)) continue;
-   complete &&= theirs.complete;
+   const chain = theirs[index]!;
+   if (chain.ancestors.has(subject.id)) continue;
+   complete &&= chain.complete;
   }
   if (!complete) {
    // An overlap whose lineage could not be read is unknown, not unrelated: refusing it
@@ -361,12 +380,12 @@ async function overlappingPeer(subject: Territory, peers: readonly BdBead[], hel
    // task. Unknown fails open, as every gate's unreadable evidence does.
    logger.warn("orchestrate scope friction unresolved: lineage unreadable", {
     bead: subject.id,
-    other: other.id,
+    other: peer.id,
     cause: bdFailureText(lastBdFailure()),
    });
    continue;
   }
-  return { id: other.id, scope: otherScope };
+  return { id: peer.id, scope };
  }
  return undefined;
 }
@@ -382,7 +401,7 @@ async function scopeConflict(bead: BdBead, inFlight: () => Promise<BdBead[] | un
  if (candidate.length === 0) return undefined;
  const peers = await inFlight();
  if (peers === undefined) return undefined;
- const overlap = await overlappingPeer({ id: bead.id, scope: candidate, lineage: once(() => parentChain(bead)) }, peers, true);
+ const overlap = await overlappingPeer({ id: bead.id, scope: candidate, parent: parentId(bead) }, peers, true);
  if (overlap === undefined) return undefined;
  return {
   block: true,
@@ -461,9 +480,9 @@ async function decompositionConflict(invocation: BdInvocation): Promise<ToolCall
    return undefined;
   }
   role ??= beadRouting(bead)?.role;
-  subject = { id, scope: written.scope, lineage: once(() => parentChain(bead)) };
+  subject = { id, scope: written.scope, parent: parentId(bead) };
  } else {
-  subject = { id: undefined, scope: written.scope, lineage: once(() => parentChainFrom(parentFlag(invocation))) };
+  subject = { id: undefined, scope: written.scope, parent: parentFlag(invocation) };
  }
  if (role !== undefined && READ_ONLY_ROLES[role] === true) return undefined;
 

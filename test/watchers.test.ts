@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import * as hostSettings from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import type { BdBead } from "../src/bd";
 import * as bd from "../src/bd";
@@ -32,13 +35,14 @@ const MINUTE = 60_000;
 
 let cwd: string;
 
-const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "OMP_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET", "ORC_TEST_BD_WHERE", "ORC_TEST_BD_SHOW", "ORC_TEST_BD_COMMENTS"] as const;
+const ENV_KEYS = ["ORC_STALL_MINUTES", "BD_BIN", "ORC_TEST_BD_LOG", "ORC_TEST_BD_LIST", "ORC_TEST_BD_FAIL", "ORC_TEST_BD_TARGET", "ORC_TEST_BD_WHERE", "ORC_TEST_BD_SHOW", "ORC_TEST_BD_COMMENTS"] as const;
 
 beforeEach(async () => {
 	cwd = join(tmpdir(), `orc-watchers-${Math.random().toString(36).slice(2)}`);
 	await mkdir(cwd, { recursive: true });
 	for (const key of ENV_KEYS) delete process.env[key];
-	process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+	stubbed = undefined;
+	settingsSpy.mockClear();
 	resetWatchers();
 });
 
@@ -266,25 +270,36 @@ describe("bdMutationEvent across both runtime shapes", () => {
 	});
 });
 
+/** Every required setting at the value the run wants, and the declared role configured: a preflight with nothing to say. */
+const COMPLIANT_SETTINGS: Partial<Record<SettingPath, unknown>> = {
+	"task.isolation.enabled": true,
+	"task.isolation.merge": "branch",
+	"task.isolation.apply": false,
+	"task.enableEffort": true,
+	"task.maxRecursionDepth": 3,
+	"bash.autoBackground.enabled": false,
+	modelRoles: { reviewer: "x/y" },
+};
+
+/** The settings instance the watchers read, or none. Set by {@link stubSettings}; cleared before every test. */
+let stubbed: Settings | undefined;
+const settingsSpy = spyOn(hostSettings, "findScopedSettings").mockImplementation(() => stubbed);
+afterAll(() => settingsSpy.mockRestore());
+
 /**
- * The precondition that outranks the settings block: isolation working correctly is
- * exactly what splits the beads database, so a run with perfect settings can still
- * lose every claim. Verified against a real checkout copy, where a bead created in
- * the copy is invisible in the original.
- *
- * Every invocation appends a line to `omp.log`, so a test can count spawns.
+ * Make these the session's effective settings; anything unnamed takes its schema default,
+ * as it does for a real session. The precondition that outranks the settings block:
+ * isolation working correctly is exactly what splits the beads database, so a run with
+ * perfect settings can still lose every claim. Verified against a real checkout copy,
+ * where a bead created in the copy is invisible in the original.
  */
-async function stubSettings(values: Record<string, unknown>): Promise<void> {
-	const snapshot = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { value }]));
-	const bin = join(cwd, "fake-omp");
-	await writeFile(bin, `#!/bin/sh\necho "$@" >> '${join(cwd, "omp.log")}'\n[ "$1 $2 $3" = "config list --json" ] || exit 1\nprintf '%s' '${JSON.stringify(snapshot).replace(/'/g, "'\\''")}'\n`, { mode: 0o755 });
-	process.env.OMP_BIN = bin;
+async function stubSettings(values: Partial<Record<SettingPath, unknown>>): Promise<void> {
+	stubbed = Settings.isolated(values);
 }
 
-/** How many times the settings CLI was spawned. */
-async function ompCalls(): Promise<number> {
-	const log = await readFile(join(cwd, "omp.log"), "utf8").catch(() => "");
-	return log.split("\n").filter(line => line.length > 0).length;
+/** How many times the settings were read in process. */
+function settingsReads(): number {
+	return settingsSpy.mock.calls.length;
 }
 
 /** A run marker at `cwd`, recording the run's database unless `beadsDir` is `null`. */
@@ -295,18 +310,14 @@ async function marked(beadsDir: string | null = join(cwd, ".beads")): Promise<vo
 
 describe("W5 shared-database precondition", () => {
 	/**
-	 * Stub the settings CLI. Without it these tests read whatever this host is
-	 * configured for -- which passed locally and failed on a CI runner that has no
-	 * `omp` at all, where every key reads as unknown and the check correctly stays
-	 * quiet. The precondition under test is the database, so isolation is pinned on.
+	 * Inject the settings. Without them these tests would read whatever this host is
+	 * configured for, or nothing at all on a CI runner with no settings instance, where
+	 * the check correctly stays quiet. The precondition under test is the database, so
+	 * isolation alone varies and every other requirement is satisfied.
 	 */
 	async function stubOmp(enabled: boolean): Promise<void> {
-		await stubSettings({ "task.isolation.enabled": enabled });
+		await stubSettings({ ...COMPLIANT_SETTINGS, "task.isolation.enabled": enabled });
 	}
-
-	afterEach(() => {
-		delete process.env.OMP_BIN;
-	});
 
 	test("a marker without the run's database asks for a re-activation", async () => {
 		// A marker written before the field existed leaves every isolated copy on its private
@@ -346,16 +357,12 @@ describe("W5 shared-database precondition", () => {
 	 * to undefined with no warning and falls back to the session default, so the whole
 	 * value of declaring one is that its absence is announced.
 	 */
-	async function stubOmpRoles(roles: string | undefined): Promise<void> {
-		await stubSettings(roles === undefined ? {} : { modelRoles: JSON.parse(roles) });
-	}
-
 	test.each([
-		["an empty roles object", "{}", true],
-		["roles that omit it", '{"plan":"x/y:high","task":"x/y:auto"}', true],
-		["roles that configure it", '{"reviewer":"mantle/openai.gpt-5.6-sol:medium"}', false],
-	])("a declared model role missing from %s warns=%p", async (_label, roles, wantWarning) => {
-		await stubOmpRoles(roles);
+		["an empty roles object", {}, true],
+		["roles that omit it", { plan: "x/y:high", task: "x/y:auto" }, true],
+		["roles that configure it", { reviewer: "mantle/openai.gpt-5.6-sol:medium" }, false],
+	])("a declared model role missing from %s warns=%p", async (_label, modelRoles, wantWarning) => {
+		await stubSettings({ ...COMPLIANT_SETTINGS, modelRoles });
 		await marked();
 		const rig = harness();
 		resetWatchers();
@@ -364,22 +371,10 @@ describe("W5 shared-database precondition", () => {
 		expect(notice.includes("modelRoles.reviewer is not configured")).toBe(wantWarning);
 	});
 
-	test("an unreadable roles setting says nothing, since it proves nothing", async () => {
-		// This function's rule is to warn only about what it can prove. A setting that did
-		// not answer is not evidence the role is absent.
-		await stubOmpRoles(undefined);
-		await marked();
-		const rig = harness();
-		resetWatchers();
-		await preflightSettings(rig.pi, cwd);
-		expect(rig.messages).toEqual([]);
-	});
-
-	test("an unreadable settings snapshot is reported as unverified, never as a deviation", async () => {
-		// `omp` absent: nothing is known about the settings, so no setting is named --
-		// reading a missing key as "isolating" would warn about a split database on a run
-		// with no isolation. What the operator is told is that the check did not run.
-		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+	test("no live settings instance is reported as unverified, never as a deviation", async () => {
+		// Nothing is known about the settings, so no setting is named -- reading a missing
+		// value as "isolating" would warn about a split database on a run with no
+		// isolation. What the operator is told is that the check did not run.
 		await marked();
 		const rig = harness();
 		resetWatchers();
@@ -406,7 +401,7 @@ describe("W5 shared-database precondition", () => {
 describe("the settings preflight preserves user configuration", () => {
 	async function deviantSettings(): Promise<void> {
 		await stubSettings({
-			"task.isolation.enabled": true,
+			...COMPLIANT_SETTINGS,
 			"task.isolation.merge": "patch",
 			"task.isolation.apply": true,
 			"task.enableEffort": false,
@@ -1044,7 +1039,7 @@ describe("registerWatchers", () => {
 		// Every lead session in every repository that tracks work in beads used to hear
 		// the contract warnings at start, orchestrated or not. The contract governs runs.
 		await fakeBd();
-		await stubSettings({ "task.isolation.enabled": true });
+		await stubSettings(COMPLIANT_SETTINGS);
 		await mkdir(join(cwd, ".beads"), { recursive: true });
 		const rig = harness(undefined, true);
 		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
@@ -1053,24 +1048,25 @@ describe("registerWatchers", () => {
 		await rig.fire("session_shutdown", {});
 	});
 
-	test("the settings CLI is spawned once per session, shared by both preflights and every task", async () => {
-		// Measured at 1-3 s per spawn; every `task` dispatch used to pay it to read a
-		// session-constant value, and `session_start` paid it twice at once.
+	test("the settings are read in process, never through a spawned CLI", async () => {
+		// `omp config list --json` measured 0.5 s idle and 1-3 s under load, and every
+		// `task` dispatch used to pay it to read a session-constant value.
 		await fakeBd();
-		await stubSettings({ "task.isolation.enabled": true, "task.agentModelOverrides": {} });
+		await stubSettings({ ...COMPLIANT_SETTINGS, "task.agentModelOverrides": {} });
 		await mkdir(join(cwd, ".orchestration"), { recursive: true });
 		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		const rig = harness(undefined, true);
-		withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
-		await rig.fire("session_start", {});
-		await rig.fire("tool_call", { toolName: "task", input: {} });
-		await rig.fire("tool_call", { toolName: "task", input: {} });
-		expect(await ompCalls()).toBe(1);
-
-		// A switched session may sit in a different cwd; the snapshot is read again.
-		await rig.fire("session_switch", {});
-		await rig.fire("tool_call", { toolName: "task", input: {} });
-		expect(await ompCalls()).toBe(2);
+		const spawn = spyOn(Bun, "spawn");
+		try {
+			withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+			await rig.fire("session_start", {});
+			await rig.fire("tool_call", { toolName: "task", input: {} });
+			await rig.fire("tool_call", { toolName: "task", input: {} });
+			expect(settingsReads()).toBeGreaterThanOrEqual(3);
+			expect(spawn.mock.calls.map(call => (call[0] as string[])[0]).filter(bin => bin !== process.env.BD_BIN)).toEqual([]);
+		} finally {
+			spawn.mockRestore();
+		}
 		await rig.fire("session_shutdown", {});
 	});
 
@@ -1417,10 +1413,7 @@ describe("registerWatchers", () => {
 		await fakeBd();
 		// The session starts under a marker, so W5 runs too; keep it satisfied so the
 		// comments below are W4's alone.
-		await stubSettings({
-			"task.isolation.enabled": true, "task.isolation.merge": "branch", "task.isolation.apply": false,
-			"task.enableEffort": true, "bash.autoBackground.enabled": false, modelRoles: { reviewer: "x/y" },
-		});
+		await stubSettings(COMPLIANT_SETTINGS);
 		await mkdir(join(cwd, ".orchestration"));
 		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
@@ -1441,13 +1434,9 @@ describe("registerWatchers", () => {
 
 	test("W4 clearing a failed goal cancels managed retries", async () => {
 		await fakeBd();
-		// Complete settings, or the lead's session_start pin makes the settings preflight
-		// warn (it does on Linux, where the tmpdir has no symlink) and the message
-		// assertion below would not be W4's alone.
-		await stubSettings({
-			"task.isolation.enabled": true, "task.isolation.merge": "branch", "task.isolation.apply": false,
-			"task.enableEffort": true, "bash.autoBackground.enabled": false, modelRoles: { reviewer: "x/y" },
-		});
+		// Complete settings, or the lead's session_start makes the settings preflight warn
+		// and the message assertion below would not be W4's alone.
+		await stubSettings(COMPLIANT_SETTINGS);
 		await mkdir(join(cwd, ".orchestration"));
 		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1", beads_dir: join(cwd, ".beads") }));
 		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-1" }]);
@@ -1533,7 +1522,7 @@ describe("W5 settings preflight", () => {
 	});
 
 	test.each([true, "false"])("an unsafe automatic background snapshot (%p) warns without changing config", async enabled => {
-		await stubSettings({ "bash.autoBackground.enabled": enabled });
+		await stubSettings({ ...COMPLIANT_SETTINGS, "bash.autoBackground.enabled": enabled });
 		await mkdir(join(cwd, ".omp"));
 		const file = join(cwd, ".omp", "config.yml");
 		const config = "# operator owned\nbash:\n  autoBackground:\n    enabled: true\n";
@@ -1550,15 +1539,15 @@ describe("W5 settings preflight", () => {
 	});
 
 	test("a disabled automatic background snapshot satisfies claim observation", async () => {
-		await stubSettings({ "bash.autoBackground.enabled": false });
+		await stubSettings({ ...COMPLIANT_SETTINGS, "bash.autoBackground.enabled": false });
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		expect(rig.messages).toEqual([]);
 	});
 
-	test("an unreadable setting is not a finding", () => {
-		// The whole point of the fail-open rule: a CLI that could not answer must not
-		// manufacture a warning about a setting that may well be correct.
+	test("a key the reader did not carry is not a finding", () => {
+		// The fail-open rule: what was not read must not manufacture a warning about a
+		// setting that may well be correct.
 		expect(settingsDeviations({})).toEqual([]);
 	});
 
@@ -1568,32 +1557,31 @@ describe("W5 settings preflight", () => {
 		expect(settingsDeviations({ "task.isolation.apply": "false" })).toHaveLength(1);
 	});
 
-	test("a missing omp binary finds nothing, does not throw, and says the check did not run", async () => {
-		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+	test("no live settings instance finds nothing, does not throw, and says the check did not run", async () => {
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		expect(String(rig.messages[0]?.content)).toContain("could not be read");
 	});
 
 	test("the check runs once per session, once it has run", async () => {
-		await stubSettings({ "task.isolation.enabled": true });
+		await stubSettings(COMPLIANT_SETTINGS);
 		const rig = harness();
 		await preflightSettings(rig.pi, cwd);
-		expect(await ompCalls()).toBe(1);
+		expect(settingsReads()).toBe(1);
 		// A second call short-circuits, so a re-fired `session_start` cannot spam the
-		// epic with duplicate comments -- and does not spawn the CLI again.
-		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
+		// epic with duplicate comments -- and does not read the settings again.
+		stubbed = undefined;
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
 		expect(rig.messages).toEqual([]);
+		expect(settingsReads()).toBe(1);
 	});
 
 	test("an unreadable host leaves the check pending for the next activation", async () => {
-		// Marking the check done on a host where `omp` was missing meant the
+		// Marking the check done on a host where the settings could not be read meant the
 		// `/orchestrate-run` hook returned [] forever with no notice.
-		process.env.OMP_BIN = "definitely-not-a-real-omp-xyz";
 		const rig = harness();
 		expect(await preflightSettings(rig.pi, cwd)).toEqual([]);
-		await stubSettings({ "task.isolation.enabled": true, "task.isolation.merge": "patch" });
+		await stubSettings({ ...COMPLIANT_SETTINGS, "task.isolation.merge": "patch" });
 		expect((await preflightSettings(rig.pi, cwd)).map(item => item.key)).toEqual(["task.isolation.merge"]);
 		expect(rig.messages).toHaveLength(2);
 		expect(String(rig.messages[1]?.content)).toContain("task.isolation.merge");

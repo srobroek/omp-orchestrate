@@ -5,8 +5,8 @@
  * real scope-overlap arithmetic, with only `../src/bd` replaced: what matters is which
  * command lines it refuses, and every input it decides on arrives as a shell string.
  *
- * `bdShow` calls are recorded rather than counted, so the `ready --claim` shortcut can
- * be asserted as "no bead was looked up" instead of as a call total.
+ * `bdShow` and `bdShowMany` calls are recorded rather than counted, so the `ready --claim`
+ * shortcut can be asserted as "no bead was looked up" instead of as a call total.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -21,7 +21,7 @@ import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
 import { markerPath } from "../src/run-state";
 
-/** Beads `bdShow` resolves, by id. A missing key models an unreadable bead. */
+/** Beads `bdShow` and `bdShowMany` resolve, by id. A missing key models an unreadable bead. */
 let beads: Record<string, BdBead>;
 let claims = createClaimState();
 /** What `bd list --label orc-node --status in_progress` reports. */
@@ -35,6 +35,16 @@ const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async (id: string) 
  shown.push(id);
  return beads[id] ?? null;
 });
+/** Lineage reads arrive here in batches; each id is recorded, and an unreadable one is left out of the map. */
+const showManySpy = spyOn(actualBd, "bdShowMany").mockImplementation(async (ids: readonly string[]) => {
+ const found = new Map<string, BdBead>();
+ for (const id of ids) {
+  shown.push(id);
+  const bead = beads[id];
+  if (bead !== undefined) found.set(id, bead);
+ }
+ return found;
+});
 const listSpy = spyOn(actualBd, "bdList").mockImplementation(async (args: string[]) => {
  listed.push(args);
  return inFlight;
@@ -47,6 +57,7 @@ const warnSpy = spyOn(logger, "warn").mockImplementation(((message: string, data
 
 afterAll(() => {
  showSpy.mockRestore();
+ showManySpy.mockRestore();
  listSpy.mockRestore();
  warnSpy.mockRestore();
 });
