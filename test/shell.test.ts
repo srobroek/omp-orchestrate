@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bdInvocations, invokesCommand, parseBdInvocation, splitSegments } from "../src/shell";
+import { bdInvocations, editsVariable, effectiveSegments, invokesCommand, parseBdInvocation, splitSegments } from "../src/shell";
 
 describe("splitSegments", () => {
 	test("splits on every shell operator", () => {
@@ -292,6 +292,57 @@ describe("transparent runners and wrapper shells", () => {
 		expect(bdInvocations(`/usr/bin/env FOO=1 ${CLAIM}`)[0]?.assignments.get("FOO")).toBe("1");
 	});
 
+	test("an env flag that takes an operand does not hand the operand over as the program", () => {
+		// `env -u X bd ...` used to read `X` as the executable, so the claim behind it was
+		// invisible to every gate at once. Both spellings of each flag, and getopt's glued
+		// short form, consume their operand.
+		for (const command of [
+			`env -u FOO ${CLAIM}`,
+			`env --unset FOO ${CLAIM}`,
+			`env --unset=FOO ${CLAIM}`,
+			`env -uFOO ${CLAIM}`,
+			`env -C /tmp ${CLAIM}`,
+			`env --chdir /tmp ${CLAIM}`,
+			`env --chdir=/tmp ${CLAIM}`,
+			`env -P /usr/bin ${CLAIM}`,
+			`env -i -u FOO BAR=1 ${CLAIM}`,
+			`env -0 ${CLAIM}`,
+			`env -- ${CLAIM}`,
+		]) {
+			const found = bdInvocations(command);
+			expect(found, command).toHaveLength(1);
+			expect(found[0]?.hasClaim, command).toBe(true);
+			expect(found[0]?.positionals, command).toEqual(["orc-1"]);
+		}
+		expect(bdInvocations(`env -u FOO --unset=BAR -uBAZ ${CLAIM}`)[0]?.unsets).toEqual(["FOO", "BAR", "BAZ"]);
+		expect(bdInvocations(`env -i -u FOO BAR=1 ${CLAIM}`)[0]?.assignments.get("BAR")).toBe("1");
+		expect(bdInvocations(`env -C /tmp ${CLAIM}`)[0]?.unsets).toEqual([]);
+		// An operand flag with nothing after it names no program.
+		expect(bdInvocations("env -u")).toEqual([]);
+	});
+
+	test("env -S splits its string into further env words", () => {
+		// The shebang idiom: env itself word-splits the operand, so the program and its
+		// assignments may sit inside it and the rest of the line continues after it.
+		for (const command of [
+			`env -S '${CLAIM}'`,
+			`env -S'${CLAIM}'`,
+			`env --split-string='${CLAIM}'`,
+			"env -S 'FOO=1 bd' update orc-1 --claim",
+			"env -u BAR -S 'bd update' orc-1 --claim",
+		]) {
+			const found = bdInvocations(command);
+			expect(found, command).toHaveLength(1);
+			expect(found[0]?.subcommand, command).toBe("update");
+			expect(found[0]?.positionals, command).toEqual(["orc-1"]);
+			expect(found[0]?.hasClaim, command).toBe(true);
+		}
+		expect(bdInvocations("env -S 'FOO=1 bd' update orc-1 --claim")[0]?.assignments.get("FOO")).toBe("1");
+		expect(invokesCommand("env -S 'git worktree add ../x'", ["git", "worktree"])).toBe(true);
+		// Handed a raw segment, the parser reads the string as an operand and finds no program.
+		expect(parseBdInvocation(["env", "-S", CLAIM])).toBeNull();
+	});
+
 	test("xargs runs the command it is given", () => {
 		// The batch shapes: ids arrive on stdin, so the claim names no bead on the line.
 		const piped = bdInvocations("echo orc-1 | xargs bd update --claim");
@@ -347,6 +398,9 @@ describe("transparent runners and wrapper shells", () => {
 			"if true; then git worktree add x; fi",
 			"echo ../x | xargs git worktree add",
 			"/usr/bin/env git worktree add ../x",
+			"env -u FOO git worktree add ../x",
+			"env -C /tmp git worktree add ../x",
+			"env --chdir=/tmp -i git worktree add ../x",
 		]) {
 			expect(invokesCommand(command, ["git", "worktree"]), command).toBe(true);
 		}
@@ -382,5 +436,41 @@ describe("invokesCommand", () => {
 
 	test("does not match the words inside a quoted payload", () => {
 		expect(invokesCommand(`bd comment x "do not run git worktree add"`, ["git", "worktree"])).toBe(false);
+	});
+});
+
+describe("editsVariable", () => {
+	const NAME = "BD_READONLY";
+
+	/** Whether any segment the shell would run edits the variable, as the readonly gate asks. */
+	const edits = (command: string): boolean => effectiveSegments(command).some(segment => editsVariable(segment, NAME));
+
+	test.each([
+		["an inline assignment", "BD_READONLY=0 bd update x"],
+		["an empty inline assignment", "BD_READONLY= bd update x"],
+		["a bare shell assignment", "BD_READONLY=0; bd update x"],
+		["an env assignment", "env BD_READONLY=0 bd update x"],
+		["env -u", "env -u BD_READONLY bd update x"],
+		["env --unset=", "env --unset=BD_READONLY bd update x"],
+		["env -S carrying the assignment", "env -S 'BD_READONLY=0 bd update x'"],
+		["unset", "unset BD_READONLY; bd update x"],
+		["unset -v", "unset -v BD_READONLY"],
+		["export", "export BD_READONLY=0"],
+		["declare -x", "declare -x BD_READONLY=0"],
+		["a wrapper shell", "sh -c 'BD_READONLY=0 bd update x'"],
+		["a reserved word in front", "if true; then unset BD_READONLY; fi"],
+	])("sees %s", (_label, command) => {
+		expect(edits(command)).toBe(true);
+	});
+
+	test.each([
+		["a read of the variable", "printenv BD_READONLY"],
+		["an expansion", "echo $BD_READONLY"],
+		["a bare export of the current value", "export BD_READONLY"],
+		["the name inside an operand", "grep BD_READONLY= notes.md"],
+		["another variable", "BEADS_ACTOR=a bd update x"],
+		["a plain bd call", "bd show x"],
+	])("leaves %s alone", (_label, command) => {
+		expect(edits(command)).toBe(false);
 	});
 });
