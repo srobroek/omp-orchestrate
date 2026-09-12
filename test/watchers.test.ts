@@ -7,7 +7,7 @@ import { withOmpExtensionRootScope } from "@oh-my-pi/pi-coding-agent/discovery/o
 import type { BdBead } from "../src/bd";
 import * as bd from "../src/bd";
 import { createClaimState } from "../src/claim-state";
-import { createExitGuard } from "../src/gates/exit";
+import { ASSIGNMENT_NOTICE_MESSAGE } from "../src/gates/assignment";
 import {
 	appendAudit,
 	auditDir,
@@ -24,7 +24,6 @@ import {
 	resetWatchers,
 	settingsDeviations,
 	runEpics,
-	setAuditDir,
 	stallMinutes,
 	sweepStalls,
 } from "../src/watchers";
@@ -96,6 +95,28 @@ describe("bdMutation", () => {
 		expect(bdMutation("bd label add bd-1 orc-node")).toBe("label");
 	});
 
+	test("classifies by G6's write table, so bd's shorthand mutators leave a line", () => {
+		// The allowlist this replaced named eight verbs; a child that released,
+		// relabelled, or took the merge slot through any of these left no ledger line.
+		expect(bdMutation("bd assign bd-1 alice")).toBe("assign");
+		expect(bdMutation("bd delete bd-1")).toBe("delete");
+		expect(bdMutation("bd note bd-1 'a note'")).toBe("note");
+		expect(bdMutation("bd promote bd-1")).toBe("promote");
+		expect(bdMutation("bd link bd-1 bd-2")).toBe("link");
+		expect(bdMutation("bd merge-slot acquire orc-1 --claim")).toBe("merge-slot");
+		expect(bdMutation("bd mol pour mol-bounce")).toBe("mol");
+		expect(bdMutation("bd comments add bd-1 'REPORTED done'")).toBe("comments");
+		// A queue pull is the claim the dead-claim procedure most wants to see.
+		expect(bdMutation("bd ready --claim")).toBe("ready");
+	});
+
+	test("does not record a grouped read as a mutation", () => {
+		expect(bdMutation("bd label list")).toBeUndefined();
+		expect(bdMutation("bd dep tree orc-1")).toBeUndefined();
+		expect(bdMutation("bd mol pour mol-bounce --dry-run")).toBeUndefined();
+		expect(bdMutation("bd update --help")).toBeUndefined();
+	});
+
 	test("sees through an env-var prefix", () => {
 		expect(bdMutation("FOO=1 bd update x")).toBe("update");
 		expect(bdMutation("BEADS_ACTOR=arch-1 BD_ACTOR=arch-1 bd update x --claim")).toBe("update");
@@ -129,17 +150,86 @@ describe("bdMutation", () => {
 	});
 });
 
+/** The event `bdMutationEvent` reports for a clean write against the session's own store. */
+function ownWrite(child: string, command: string) {
+	return { child, command, exitCode: 0, store: process.env.BEADS_DIR, foreignStore: false };
+}
+
 describe("bdMutationEvent", () => {
 	test("a start alone records nothing; the end completes it", () => {
 		// The regression this pins: the command lives on the start, the status on the
 		// end, so only the pair is a ledger line. Reading one event was silently a
 		// no-op for an entire live run.
 		expect(bdMutationEvent(bashStart("kid-1", "bd update bd-7 --claim"))).toBeUndefined();
-		expect(bdMutationEvent(bashEnd("kid-1"))).toEqual({
-			child: "kid-1",
-			command: "bd update bd-7 --claim",
-			exitCode: 0,
+		expect(bdMutationEvent(bashEnd("kid-1"))).toEqual(ownWrite("kid-1", "bd update bd-7 --claim"));
+	});
+
+	test("attributes the write to the store it targeted", () => {
+		// A researcher's sandbox writes were counted as run mutations because the
+		// ledger classified by command text alone. The pin is the run's store; a
+		// call that names another one is provenance, not a run mutation.
+		process.env.BEADS_DIR = "/run/.beads";
+		bdMutationEvent(bashStart("kid-1", "bd update bd-7 --claim"));
+		expect(bdMutationEvent(bashEnd("kid-1"))).toMatchObject({ store: "/run/.beads", foreignStore: false });
+
+		bdMutationEvent({
+			id: "kid-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "call-2",
+				toolName: "bash",
+				args: { command: "bd create 'sandbox' --type task", env: { BEADS_DIR: "/tmp/sandbox/.beads" } },
+			},
 		});
+		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-2"))).toMatchObject({
+			store: "/tmp/sandbox/.beads",
+			foreignStore: true,
+		});
+
+		// An inline assignment is what the shell applies last, so it outranks the call's env.
+		bdMutationEvent({
+			id: "kid-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "call-3",
+				toolName: "bash",
+				args: { command: "BEADS_DIR=/tmp/inline/.beads bd close bd-7", env: { BEADS_DIR: "/run/.beads" } },
+			},
+		});
+		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-3"))).toMatchObject({
+			store: "/tmp/inline/.beads",
+			foreignStore: true,
+		});
+
+		// A structured env naming the pin itself is the run's store.
+		bdMutationEvent({
+			id: "kid-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "call-4",
+				toolName: "bash",
+				args: { command: "bd close bd-7", env: { BEADS_DIR: "/run/.beads" } },
+			},
+		});
+		expect(bdMutationEvent(bashEnd("kid-1", undefined, false, "call-4"))).toMatchObject({
+			store: "/run/.beads",
+			foreignStore: false,
+		});
+	});
+
+	test("an unpinned session records the named store and calls nothing foreign", () => {
+		bdMutationEvent({
+			id: "kid-1",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "call-1",
+				toolName: "bash",
+				args: { command: "bd close bd-7", env: { BEADS_DIR: "/tmp/sandbox/.beads" } },
+			},
+		});
+		expect(bdMutationEvent(bashEnd("kid-1"))).toMatchObject({ store: "/tmp/sandbox/.beads", foreignStore: false });
+		bdMutationEvent(bashStart("kid-1", "bd close bd-8"));
+		expect(bdMutationEvent(bashEnd("kid-1"))).toMatchObject({ store: undefined, foreignStore: false });
 	});
 
 	test("carries the reported exit code through", () => {
@@ -205,11 +295,9 @@ describe("bdMutationEvent across both runtime shapes", () => {
 	}
 
 	test("an end event carrying its own args needs no start", () => {
-		expect(bdMutationEvent(bashEndWithArgs("kid-7", "bd update orc-9 --claim"))).toEqual({
-			child: "kid-7",
-			command: "bd update orc-9 --claim",
-			exitCode: 0,
-		});
+		expect(bdMutationEvent(bashEndWithArgs("kid-7", "bd update orc-9 --claim"))).toEqual(
+			ownWrite("kid-7", "bd update orc-9 --claim"),
+		);
 	});
 
 	test("the end event's own args win over a stale correlated start", () => {
@@ -496,10 +584,8 @@ describe("the audit ledger on disk", () => {
 		expect(await readdir(dir)).toEqual(["_escape.bdlog"]);
 	});
 
-	test("defaults under the session cwd and honours the override", () => {
+	test("lives under the spawning session's cwd", () => {
 		expect(auditDir("/repo")).toBe(join("/repo", ".orchestration", "audit"));
-		setAuditDir("/artifacts/run-7/audit");
-		expect(auditDir("/repo")).toBe("/artifacts/run-7/audit");
 	});
 });
 
@@ -757,6 +843,7 @@ interface Harness {
 	sweeps: Array<() => unknown>;
 	messages: Array<Record<string, unknown>>;
 	failures: string[];
+	warnings: string[];
 }
 
 interface ChildHarnessOptions {
@@ -776,6 +863,7 @@ function harness(
 	const sweeps: Array<() => unknown> = [];
 	const messages: Array<Record<string, unknown>> = [];
 	const failures: string[] = [];
+	const warnings: string[] = [];
 	const timeouts = new Set<() => unknown>();
 
 	const ctx = {
@@ -811,7 +899,10 @@ function harness(
 
 	const pi = {
 		getAllTools: () => tools.map(name => ({ name, description: "" })),
-		logger: { error: (message: string) => failures.push(message) },
+		logger: {
+			error: (message: string) => failures.push(message),
+			warn: (message: string) => warnings.push(message),
+		},
 		events: {
 			on: (channel: string, handler: (data: unknown) => unknown) => {
 				const list = listeners.get(channel) ?? [];
@@ -847,6 +938,7 @@ function harness(
 		sweeps,
 		messages,
 		failures,
+		warnings,
 	};
 }
 
@@ -861,6 +953,13 @@ async function coreFixture(name: string, marker: string, model = "@task"): Promi
 
 function registerFixture(rig: Harness): void {
 	withOmpExtensionRootScope([cwd], "explicit-only", () => registerWatchers(rig.pi));
+}
+
+/** The G8 notices a harness received. */
+function assignmentNotices(rig: Harness): string[] {
+	return rig.messages
+		.filter(message => message.customType === ASSIGNMENT_NOTICE_MESSAGE)
+		.map(message => String(message.content));
 }
 
 describe("assignment enforcement", () => {
@@ -884,8 +983,56 @@ describe("assignment enforcement", () => {
 		expect(await helper.fire("tool_call", { toolName: "task", input: { agent: "orc-helper" } })).toEqual([undefined]);
 	});
 
-	test("checks marker identity and the live model on every worker tool call", async () => {
+	test("a model mismatch is one notice naming both models and the parking command, never a block", async () => {
+		// The refusal this replaced bricked a worker whose model OMP's retry fallback had
+		// moved: every tool including `yield` was refused for a condition already recovered.
 		const expected = { provider: "test-provider", id: "task-model" };
+		let current: unknown = expected;
+		const claims = createClaimState();
+		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
+		const rig = harness(["bash", "read", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-implementer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@task" ? expected : undefined),
+			current: () => current,
+		});
+		registerWatchers(rig.pi, claims);
+		expect(await rig.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(rig)).toEqual([]);
+
+		current = { provider: "test-provider", id: "other-model" };
+		for (const toolName of ["read", "bash", "yield"]) {
+			expect(await rig.fire("tool_call", { toolName, input: {} })).toEqual([undefined]);
+		}
+		const notices = assignmentNotices(rig);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("orc-implementer");
+		expect(notices[0]).toContain("expected model test-provider/task-model (from @task)");
+		expect(notices[0]).toContain("live model test-provider/other-model");
+		expect(notices[0]).toContain("`bd comment bd-claim 'BLOCKED model mismatch: expected test-provider/task-model, live test-provider/other-model'` then `bd update bd-claim --status blocked`");
+		expect(rig.failures).toEqual([]);
+	});
+
+	test("a role marker mismatch is a notice too, with a placeholder when no claim is known", async () => {
+		const expected = { provider: "test-provider", id: "task-model" };
+		const rig = harness(["read", "yield"], false, {
+			entries: [{ type: "session_init", agent: "orc-reviewer" }],
+			systemPrompt: "ORC-ROLE: implementer",
+			resolve: spec => (spec === "@reviewer" ? expected : undefined),
+			current: () => expected,
+		});
+		registerWatchers(rig.pi);
+		expect(await rig.fire("tool_call", { toolName: "read", input: {} })).toEqual([undefined]);
+		expect(await rig.fire("tool_call", { toolName: "read", input: {} })).toEqual([undefined]);
+		const notices = assignmentNotices(rig);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("expected ORC-ROLE reviewer, actual implementer");
+		expect(notices[0]).toContain("`bd comment <claimed-id> 'BLOCKED assignment mismatch:");
+	});
+
+	test("a fallback OMP applied is accepted for the rest of the session", async () => {
+		const expected = { provider: "test-provider", id: "task-model" };
+		const fallback = { provider: "other-provider", id: "fallback-model" };
 		let current: unknown = expected;
 		const rig = harness(["bash", "yield"], false, {
 			entries: [{ type: "session_init", agent: "orc-implementer" }],
@@ -896,23 +1043,24 @@ describe("assignment enforcement", () => {
 		registerWatchers(rig.pi);
 		expect(await rig.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
 
-		current = { provider: "test-provider", id: "other-model" };
-		const blocked = await rig.fire("tool_call", { toolName: "bash", input: {} });
-		expect(blocked[0]).toMatchObject({ block: true });
-		expect(String((blocked[0] as Record<string, unknown>).reason)).toContain("test-provider/task-model");
-		expect(String((blocked[0] as Record<string, unknown>).reason)).toContain("test-provider/other-model");
+		// OMP swaps the model before it emits the event (`turn-recovery.ts`), so the live
+		// model at that moment is the fallback it chose.
+		current = fallback;
+		await rig.fire("retry_fallback_applied", { from: "test-provider/task-model", to: "other-provider/fallback-model", role: "task" });
+		expect(await rig.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
 		expect(await rig.fire("tool_call", { toolName: "yield", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(rig)).toEqual([]);
 
-		const mismatched = harness(["read", "yield"], false, {
-			entries: [{ type: "session_init", agent: "orc-reviewer" }],
-			systemPrompt: "ORC-ROLE: implementer",
-			resolve: spec => (spec === "@reviewer" ? expected : undefined),
-			current: () => expected,
-		});
-		registerWatchers(mismatched.pi);
-		expect((await mismatched.fire("tool_call", { toolName: "read", input: {} }))[0]).toMatchObject({ block: true });
+		// A model nobody sanctioned is still noticed.
+		current = { provider: "test-provider", id: "rogue-model" };
+		expect(await rig.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(rig)).toHaveLength(1);
+		expect(assignmentNotices(rig)[0]).toContain("live model test-provider/rogue-model");
+	});
 
-		const unavailable = harness(["read", "yield"], false, {
+	test("unavailable model evidence is logged once and proves nothing", async () => {
+		const expected = { provider: "test-provider", id: "task-model" };
+		const rig = harness(["read", "yield"], false, {
 			entries: [{ type: "session_init", agent: "orc-implementer" }],
 			systemPrompt: "ORC-ROLE: implementer",
 			resolve: spec => (spec === "@task" ? expected : undefined),
@@ -920,112 +1068,27 @@ describe("assignment enforcement", () => {
 				throw new Error("model registry unavailable");
 			},
 		});
-		registerWatchers(unavailable.pi);
-		const unavailableResult = await unavailable.fire("tool_call", { toolName: "read", input: {} });
-		expect(unavailableResult[0]).toMatchObject({ block: true });
-		expect(String((unavailableResult[0] as Record<string, unknown>).reason)).toContain("model evidence unavailable");
+		registerWatchers(rig.pi);
+		expect(await rig.fire("tool_call", { toolName: "read", input: {} })).toEqual([undefined]);
+		expect(await rig.fire("tool_call", { toolName: "read", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(rig)).toEqual([]);
+		expect(rig.warnings).toEqual(["orchestrate assignment check skipped: model evidence unavailable"]);
+		expect(rig.failures).toEqual([]);
 	});
 
-	test("permits only checked failure reporting and yields with complete retained-claim evidence", async () => {
-		await fakeBd();
-		process.env.BEADS_DIR = cwd;
-		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "worker-1" }]);
-		const expected = { provider: "test-provider", id: "task-model" };
-		const claims = createClaimState();
-		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
-		const rig = harness(["bash", "yield"], false, {
+	test("a lead session is never checked", async () => {
+		const rig = harness(["bash", "task"], false, {
 			entries: [{ type: "session_init", agent: "orc-implementer" }],
 			systemPrompt: "ORC-ROLE: implementer",
-			resolve: spec => (spec === "@task" ? expected : undefined),
-			current: () => ({ provider: "test-provider", id: "wrong-model" }),
+			resolve: () => ({ provider: "test-provider", id: "task-model" }),
+			current: () => ({ provider: "test-provider", id: "other-model" }),
 		});
-		registerWatchers(rig.pi, claims);
-
-		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
-		bd.resetReadBudget();
-		// Distinct ids: a repeated id would be served from the per-dispatch memo without spending budget.
-		let exhausted = false;
-		for (let read = 0; read < 50; read += 1) {
-			if ((await bd.bdShow(`bd-claim-${read}`)) !== null) continue;
-			exhausted = true;
-			break;
-		}
-		expect(exhausted).toBe(true);
-		expect(await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'FAILED assignment mismatch'" } })).toEqual([undefined]);
-		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
-
-		process.env.ORC_TEST_BD_COMMENTS = JSON.stringify({ "bd-claim": [{ text: "FAILED assignment mismatch" }] });
-		expect(await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } })).toEqual([undefined]);
-		expect((await rig.fire("tool_call", { toolName: "yield", input: {} }))[0]).toMatchObject({ block: true });
-
-		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "blocked", assignee: "worker-1" }]);
-		expect(await rig.fire("tool_call", { toolName: "yield", input: {} })).toEqual([undefined]);
-		expect(claims.observedClaim()).toEqual({ actor: "worker-1", beadIds: ["bd-claim"] });
+		registerWatchers(rig.pi);
+		expect(await rig.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(rig)).toEqual([]);
 	});
 
-	test("rejects wrappers, alternate authority, background execution, other beads, and stale ownership", async () => {
-		await fakeBd();
-		process.env.BEADS_DIR = cwd;
-		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "worker-1" }]);
-		const expected = { provider: "test-provider", id: "task-model" };
-		const claims = createClaimState();
-		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
-		const rig = harness(["bash", "yield"], false, {
-			entries: [{ type: "session_init", agent: "orc-implementer" }],
-			systemPrompt: "ORC-ROLE: implementer",
-			resolve: spec => (spec === "@task" ? expected : undefined),
-			current: () => ({ provider: "test-provider", id: "wrong-model" }),
-		});
-		registerWatchers(rig.pi, claims);
-
-		for (const input of [
-			{ command: "bd comment bd-other 'BLOCKED not mine'" },
-			{ command: "bd comment bd-claim 'BLOCKED safe' && bd close bd-claim" },
-			{ command: "sh -c \"bd comment bd-claim 'BLOCKED wrapped'\"" },
-			{ command: "bd comment bd-claim 'BLOCKED $(whoami)'" },
-			{ command: "BEADS_DIR=/tmp/other bd comment bd-claim 'BLOCKED reassigned'" },
-			{ command: "bd --db /tmp/other update bd-claim --status blocked" },
-			{ command: "bd comment bd-claim 'BLOCKED changed cwd'", cwd: join(cwd, "other") },
-			{ command: "bd comment bd-claim 'BLOCKED changed env'", env: { BEADS_DIR: cwd } },
-			{ command: "bd comment bd-claim 'BLOCKED background'", async: true },
-		]) {
-			expect((await rig.fire("tool_call", { toolName: "bash", input }))[0]).toMatchObject({ block: true });
-		}
-
-		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "different-worker" }]);
-		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'BLOCKED stale owner'" } }))[0]).toMatchObject({ block: true });
-		process.env.ORC_TEST_BD_SHOW = JSON.stringify([{ id: "bd-claim", status: "closed", assignee: "worker-1" }]);
-		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd comment bd-claim 'BLOCKED terminal claim'" } }))[0]).toMatchObject({ block: true });
-	});
-
-	test("does not consume its way past mismatch refusal and fails closed on unreadable evidence", async () => {
-		await fakeBd();
-		process.env.BEADS_DIR = cwd;
-		process.env.ORC_TEST_BD_LIST = JSON.stringify([{ id: "bd-claim", status: "in_progress", assignee: "worker-1" }]);
-		const expected = { provider: "test-provider", id: "task-model" };
-		const claims = createClaimState();
-		claims.recordClaim({ actor: "worker-1", beadIds: ["bd-claim"] });
-		const rig = harness(["bash", "yield"], false, {
-			entries: [{ type: "session_init", agent: "orc-implementer" }],
-			systemPrompt: "ORC-ROLE: implementer",
-			resolve: spec => (spec === "@task" ? expected : undefined),
-			current: () => ({ provider: "test-provider", id: "wrong-model" }),
-		});
-		registerWatchers(rig.pi, claims);
-		const exit = createExitGuard(claims);
-		const exitContext = { cwd, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
-
-		for (let attempt = 0; attempt < 5; attempt += 1) {
-			await exit(exitContext, {});
-			expect((await rig.fire("tool_call", { toolName: "yield", input: {} }))[0]).toMatchObject({ block: true });
-		}
-		process.env.ORC_TEST_BD_FAIL = "comments";
-		process.env.ORC_TEST_BD_COMMENTS = JSON.stringify({ "bd-claim": [{ text: "BLOCKED assignment mismatch" }] });
-		expect((await rig.fire("tool_call", { toolName: "yield", input: {} }))[0]).toMatchObject({ block: true });
-		expect(claims.observedClaim()).toEqual({ actor: "worker-1", beadIds: ["bd-claim"] });
-	});
-
-	test("enforces marker-only legacy workers without inventing helper identity", async () => {
+	test("checks marker-only legacy workers without inventing helper identity", async () => {
 		const expected = { provider: "test-provider", id: "smol-model" };
 		let current = expected;
 		const worker = harness(["bash", "yield"], false, {
@@ -1037,7 +1100,18 @@ describe("assignment enforcement", () => {
 		registerWatchers(worker.pi);
 		expect(await worker.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
 		current = { provider: "test-provider", id: "wrong" };
-		expect((await worker.fire("tool_call", { toolName: "bash", input: {} }))[0]).toMatchObject({ block: true });
+		expect(await worker.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(worker)[0]).toContain("marker-only (researcher)");
+
+		const helper = harness(["bash", "yield"], false, {
+			entries: [{ type: "session_init", task: "helper" }],
+			systemPrompt: "ORC-ROLE: helper",
+			resolve: () => expected,
+			current: () => ({ provider: "test-provider", id: "wrong" }),
+		});
+		registerWatchers(helper.pi);
+		expect(await helper.fire("tool_call", { toolName: "bash", input: {} })).toEqual([undefined]);
+		expect(assignmentNotices(helper)).toEqual([]);
 	});
 });
 
@@ -1158,6 +1232,7 @@ describe("registerWatchers", () => {
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {
+		process.env.BEADS_DIR = join(cwd, ".beads");
 		const rig = harness();
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
@@ -1170,18 +1245,34 @@ describe("registerWatchers", () => {
 		await rig.emit("task:subagent:event", bashEnd("kid-1", undefined, false, "call-2"));
 		await rig.emit("task:subagent:event", bashStart("kid-2", "cd /w && bd comment bd-8 hi"));
 		await rig.emit("task:subagent:event", bashEnd("kid-2", { details: {} }, true));
+		await rig.emit("task:subagent:event", {
+			id: "kid-3",
+			event: {
+				type: "tool_execution_start",
+				toolCallId: "call-1",
+				toolName: "bash",
+				args: { command: "bd create 'scratch' --type task", env: { BEADS_DIR: join(cwd, "sandbox", ".beads") } },
+			},
+		});
+		await rig.emit("task:subagent:event", bashEnd("kid-3"));
 
 		const kid1 = (await readFile(join(cwd, ".orchestration", "audit", "kid-1.bdlog"), "utf8")).trim().split("\n");
 		expect(kid1).toHaveLength(1);
-		expect(JSON.parse(kid1[0]!)).toMatchObject({
+		expect(JSON.parse(kid1[0]!)).toEqual({
+			ts: expect.any(String),
 			child: "kid-1",
 			argv: "bd update bd-7 --status open",
 			exitCode: 0,
+			store: join(cwd, ".beads"),
 		});
-		expect(typeof JSON.parse(kid1[0]!).ts).toBe("string");
 
 		const kid2 = JSON.parse((await readFile(join(cwd, ".orchestration", "audit", "kid-2.bdlog"), "utf8")).trim());
 		expect(kid2).toMatchObject({ child: "kid-2", exitCode: 1 });
+
+		// The sandbox write is kept as provenance and tagged, so a reader counting the
+		// run's mutations can skip it.
+		const kid3 = JSON.parse((await readFile(join(cwd, ".orchestration", "audit", "kid-3.bdlog"), "utf8")).trim());
+		expect(kid3).toMatchObject({ child: "kid-3", store: join(cwd, "sandbox", ".beads"), foreign_store: true });
 		expect(rig.failures).toEqual([]);
 	});
 

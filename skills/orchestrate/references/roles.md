@@ -52,8 +52,9 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 
 - **The scribe's ledger duty** is `orc_run_status` plus `/orchestrate-status`, and the
   provenance half is the extension's passive audit ledger
-  (`<artifacts_dir>/audit/<child-id>.bdlog`, one line per child `bd` mutation). There is no
-  ledger wisp to drain and no report agent to activate.
+  (`<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog`, one line per child `bd`
+  mutation, each naming the store it wrote to). There is no ledger wisp to drain and no
+  report agent to activate.
 - **Architects use the single native triage advisor.** The advisor is `@smol:low`,
   reports one actionable finding per update and loads one playbook on demand.
   Implementers, researchers, reviewers and shepherds remain advisor-free.

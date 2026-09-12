@@ -293,8 +293,9 @@ candidates, but there is no lease expiry and no daemon. Never steal a claim beca
 timestamp is old.
 
 1. Read the bead, its comments, the audit trail (`.beads/interactions.jsonl` plus
-   `<artifacts_dir>/audit/<child-id>.bdlog`), the actor handle, the branch or worktree, and
-   the last verification evidence.
+   `<spawning-session-cwd>/.orchestration/audit/<child-id>.bdlog`, skipping rows tagged
+   `foreign_store`), the actor handle, the branch or worktree, and the last verification
+   evidence.
 2. Establish holder death, then an exclusive recovery window: all claim, dispatch and
    branch writers must be stopped. A fresh read or human confirmation alone is not
    exclusion. Re-read owner, status and branch evidence inside that window.
