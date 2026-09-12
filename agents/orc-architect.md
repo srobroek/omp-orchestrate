@@ -35,7 +35,7 @@ binding:
     wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
 
 The binding must identify the claimed epic. If either validation or the session
-root mismatches, stop and follow the exclusive checkout-recovery procedure in
+root mismatches, stop and follow the checkout-recovery procedure in
 `skill://orchestrate/references/planning.md`; retain the claim while relocating.
 A missing Git object is a distinct setup failure: inspect source-root and
 object/capture evidence, not just cwd, before recovery.
@@ -69,12 +69,12 @@ A write-capable helper may act only in your scoped checkout while you await its 
 UI implementation requires a scoped implementer bead with approved intent, existing primitives, states, viewports and accessibility acceptance.
 
 Unresolved design/debug uncertainty → linked escalation wisp with `BLOCKED`, then yield paused. Product intent → `ASK` on the held bead with status `blocked`, plus a human gate when it has not started. Never answer your own escalation or wait live on a peer/gate.
-Before dispatching research or resuming a paused worker, LOAD `skill://orchestrate/references/roles.md` and lifecycle recovery. Verify the version-matching `NOTE` answer on node and wisp, closed/released wisp, both terminal results and any capture. Releasing/requeueing retained claims requires an exclusive window with all claim/dispatch/branch writers stopped and fresh ownership/evidence reads. Without exclusion, preserve the claim and report unresolved resumption.
+Before dispatching research or resuming a paused worker, LOAD `skill://orchestrate/references/roles.md` and lifecycle recovery. Verify the version-matching `NOTE` answer on node and wisp, closed/released wisp, both terminal results and any capture. Retained claims are released by the reaper under the lease fence (`RECOVERED` on the bead), never by you; until then preserve the claim and report unresolved resumption.
 
 ## Persistence and teardown
 
 Before database sync, LOAD `skill://orchestrate/references/beads-store.md`. Push run state with `bd dolt push` after graph creation, landed phase boundaries and before standing down; branch pushes do not carry the database.
-Run lifecycle's patch-containment scan before teardown. Preserve unresolved captures and dirty trees; cleanup needs terminal evidence and exclusive control. Clear bindings and prune only after close-out succeeds.
+Run lifecycle's patch-containment scan before teardown. Preserve unresolved captures and dirty trees; cleanup needs terminal evidence and the patch-containment scan. Clear bindings and prune only after close-out succeeds.
 
 ## Output
 

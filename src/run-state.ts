@@ -29,8 +29,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { locateBeadsDir } from "./beads-mode";
-import { type BdBead, bdListChecked, bdShow, resetReadBudget } from "./bd";
-import { ensurePatrolWisp, patrolState } from "./supervision";
+import { type BdBead, bdListChecked, bdRun, bdShow, resetReadBudget } from "./bd";
+import { type LeadLeaseRenewal, fenceRefused, leaseExpired, leaseState, leaseUntil } from "./lease";
 
 /**
  * The marker's on-disk shape.
@@ -247,9 +247,61 @@ export async function activateRun(cwd: string, sessionId?: string, beadsDir?: st
  });
 }
 
-/** How binding left the S2 patrol: armed, or why the architect must arm it by hand. */
+/** How binding left the lead lease: taken on the epic, or why the lead must look. */
 export interface BindResult {
- patrol: "armed" | { failed: string };
+ lease: "written" | { failed: string };
+}
+
+/**
+ * The lead's lease identity: the session driving the run. Read from the session, never
+ * from the marker's `session_id`, which a replacement lead's activation overwrites in
+ * the shared checkout; an old lead reading it there would renew the new lead's lease.
+ */
+export function leadActor(sessionId: string | undefined): string {
+ return sessionId === undefined ? "lead" : `lead:${sessionId}`;
+}
+
+/** Wall-clock ceiling for a lease write on the epic; a write, so the operation timeout. */
+const LEASE_WRITE_TIMEOUT_MS = 20_000;
+
+/** What one fenced write on the epic did. */
+type FencedWrite = "written" | "held-by-other" | { failed: string };
+
+/**
+ * One fenced write as `actor`: `bd update <epic> --actor <actor> --claim ...`. The lead
+ * lease is carried exactly like a worker's -- the epic's assignee is the lead and the
+ * `--claim` fence refuses any other actor -- so a zombie lead's renewal fails the moment
+ * a replacement holds the epic, and two leads cannot both believe they own the run.
+ */
+async function fencedEpicWrite(runId: string, actor: string, fields: string[], cwd: string, autoCommit: boolean): Promise<FencedWrite> {
+ const args = ["update", runId, "--actor", actor, "--claim", ...fields];
+ if (!autoCommit) args.push("--dolt-auto-commit", "off");
+ const written = await bdRun(args, LEASE_WRITE_TIMEOUT_MS, cwd);
+ if (written === null) return { failed: "bd did not answer" };
+ if (written.code === 0) return "written";
+ if (fenceRefused(written)) return "held-by-other";
+ return { failed: written.stderr.trim() || `bd exited ${written.code}` };
+}
+
+/** Take or extend `actor`'s lease on the epic: the fenced claim plus `lease_until`. */
+async function claimLeadLease(runId: string, actor: string, now: number, cwd: string, autoCommit: boolean): Promise<FencedWrite> {
+ return fencedEpicWrite(runId, actor, ["--set-metadata", `lease_until=${leaseUntil(now)}`], cwd, autoCommit);
+}
+
+/**
+ * Take over the epic from `holder`, whose lease has lapsed: release as the old lead
+ * (refused once anyone else holds it), then claim as the new. Either fence losing means
+ * another adopter won; nothing is retried.
+ */
+async function takeOverLeadLease(runId: string, holder: string, actor: string, now: number, cwd: string): Promise<FencedWrite> {
+ const released = await fencedEpicWrite(runId, holder, ["--assignee", "", "--status", "open"], cwd, true);
+ if (released !== "written") return released;
+ return claimLeadLease(runId, actor, now, cwd, true);
+}
+
+/** The lead the epic names, or `undefined` when nobody holds it. */
+function epicHolder(epic: BdBead): string | undefined {
+ return typeof epic.assignee === "string" && epic.assignee !== "" ? epic.assignee : undefined;
 }
 
 /**
@@ -264,37 +316,107 @@ export interface BindResult {
  * supervision -- only a positively observed status counts -- governs binding, so a
  * bind with `bd` unreachable is refused rather than trusted.
  *
- * Arming the patrol wisp belongs here rather than in the command handler: the
- * patrol is the durable consequence of a binding existing, so every caller must
- * get it. It is idempotent, and a beads failure must not fail the bind -- an
- * unarmed patrol costs a reconciliation sweep, an unbound marker costs the run --
- * but the failure is returned, not swallowed, so the caller can say so.
+ * The lead lease belongs here rather than in the command handler: it is the durable
+ * consequence of a binding existing, so every caller must get it. Binding claims the
+ * epic as the lead; another lead's live lease refuses the claim (the bind stands, the
+ * failure is returned), and another lead's lapsed lease is taken over, because binding
+ * is the explicit act. `sessionId` is the binding session's; it defaults to the marker's
+ * activating session, which is the same session in the ordinary run/bind sequence.
  */
-export async function bindRun(cwd: string, runId: string): Promise<BindResult> {
+export async function bindRun(cwd: string, runId: string, sessionId?: string): Promise<BindResult> {
  if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
  resetReadBudget();
- const liveness = runLiveness(await bdShow(runId, undefined, cwd));
- if (liveness.kind !== "active") {
+ const epic = await bdShow(runId, undefined, cwd, { fresh: true });
+ const liveness = runLiveness(epic);
+ if (liveness.kind !== "active" || epic === null) {
   throw new Error(liveness.kind === "unverified"
    ? `run epic ${runId} could not be read from Beads; binding refused`
    : `run epic ${runId} has status ${JSON.stringify(liveness.status)}, which cannot host a run; binding refused`);
  }
+ let bound: ActiveRun | undefined;
  await withMarkerLock(cwd, async () => {
   const existing = await readActiveRunStrict(cwd);
   if (existing === null) throw new Error("no active-run marker to bind; run /orchestrate-run first");
   if (existing.run_id !== PENDING && existing.run_id !== runId) {
    throw new Error(`active-run marker is already bound to ${existing.run_id}`);
   }
-  await writeMarker(markerPath(cwd), { ...existing, run_id: runId });
+  bound = { ...existing, run_id: runId };
+  await writeMarker(markerPath(cwd), bound);
  });
- // Binding owns its evidence budget; arming failure must not undo the marker.
- resetReadBudget();
- try {
-  await ensurePatrolWisp(runId, cwd);
-  return { patrol: "armed" };
- } catch (error) {
-  return { patrol: { failed: error instanceof Error ? error.message : String(error) } };
+ const now = Date.now();
+ const actor = leadActor(sessionId ?? bound?.session_id);
+ const holder = epicHolder(epic);
+ const lease = holder !== undefined && holder !== actor
+  ? (leaseExpired(epic, now) ? await takeOverLeadLease(runId, holder, actor, now, cwd) : "held-by-other")
+  : await claimLeadLease(runId, actor, now, cwd, true);
+ if (lease === "written") return { lease };
+ if (lease === "held-by-other") {
+  return { lease: { failed: `run epic ${runId} is leased to ${holder ?? "another lead"} (${leaseState(epic, now)}); bind again once it lapses, or stop the other lead` } };
  }
+ return { lease };
+}
+
+/**
+ * Renew this session's lead lease on the bound run epic, on activity: the same fenced
+ * renewal a worker gets, so no read precedes it. `held-by-other` means a replacement
+ * lead holds the epic and this session must stop dispatching. `no-run` is a repository
+ * without a bound run: nothing to renew.
+ */
+export async function renewLeadLease(cwd: string, sessionId: string, now = Date.now()): Promise<LeadLeaseRenewal> {
+ const actor = leadActor(sessionId);
+ const marker = await readActiveRun(cwd);
+ if (marker === null || marker.run_id === PENDING) return { outcome: "no-run", actor };
+ const run = marker.run_id;
+ const lease = await claimLeadLease(run, actor, now, cwd, false);
+ return { outcome: lease === "written" ? "renewed" : lease === "held-by-other" ? "held-by-other" : "failed", actor, run };
+}
+
+/** What taking over a run did. */
+export type AdoptOutcome =
+ | { kind: "adopted"; run: string; from: string | undefined }
+ | { kind: "already-lead"; run: string }
+ | { kind: "held-by-other"; run: string; reason: string }
+ | { kind: "refused"; run: string; reason: string }
+ | { kind: "no-run" };
+
+/**
+ * Take over a run whose lead lease has lapsed: the hook `/orchestrate-resume` (wave 3.3)
+ * calls before it sweeps the run's claims. Binding does the same for the lease alone.
+ *
+ * Three steps, each fenced: a fresh read of the epic; if the lease has lapsed, a release
+ * as the OLD lead (`--actor <old> --claim --assignee "" --status open`, refused once
+ * anyone else holds the epic); then a claim as the new lead (refused if another adopter
+ * got there first). Two adopters racing a lapsed lease therefore produce exactly one
+ * lead. Adoption is refused while the old lease is live, because a slow lead is not a
+ * dead one.
+ *
+ * The TTL-only rule. Everywhere else, a lapsed lease alone releases no claim: the
+ * spawner that holds the claimant in its `AgentRegistry` decides, and a holder absent
+ * from that registry is unknown, never dead. The adopting lead is the one exception,
+ * because the spawner chain that could have judged is gone with the old lead: after
+ * adoption, `/orchestrate-resume` may read each in-flight claim fresh and release those
+ * whose lease has lapsed, on the lease alone. The worst case is bounded and visible: a
+ * live worker released in error re-claims on its next renewal and leaves one stray
+ * `RECOVERED`, or loses to a new claimant and is stopped by G2's ownership check.
+ */
+export async function adoptRun(cwd: string, sessionId: string, now = Date.now()): Promise<AdoptOutcome> {
+ const actor = leadActor(sessionId);
+ const marker = await readActiveRun(cwd);
+ if (marker === null || marker.run_id === PENDING) return { kind: "no-run" };
+ const run = marker.run_id;
+ const epic = await bdShow(run, undefined, cwd, { fresh: true });
+ if (epic === null) return { kind: "refused", run, reason: `run epic ${run} could not be read` };
+ const holder = epicHolder(epic);
+ if (holder === actor) return { kind: "already-lead", run };
+ if (holder !== undefined && !leaseExpired(epic, now)) {
+  return { kind: "held-by-other", run, reason: `run epic ${run} is leased to ${holder}; ${leaseState(epic, now)}` };
+ }
+ const lease = holder === undefined
+  ? await claimLeadLease(run, actor, now, cwd, true)
+  : await takeOverLeadLease(run, holder, actor, now, cwd);
+ if (lease === "written") return { kind: "adopted", run, from: holder };
+ if (lease === "held-by-other") return { kind: "held-by-other", run, reason: `another lead adopted ${run} first` };
+ return { kind: "refused", run, reason: lease.failed };
 }
 
 /**
@@ -363,13 +485,13 @@ export async function closeRun(cwd: string, runId: string, options: { force?: bo
 	});
 }
 
-/** What `/orchestrate-status` prints. `healthy` is bound, epic active, patrol armed -- nothing less. */
+/** What `/orchestrate-status` prints. `healthy` is bound and the epic active -- nothing less. */
 export interface RunStatusReport {
  lines: string[];
  healthy: boolean;
 }
 
-/** The marker, the epic's liveness, the patrol. Reads only. */
+/** The marker, the epic's liveness, the lead lease. Reads only. */
 export async function runStatusReport(cwd: string): Promise<RunStatusReport> {
  const marker = markerPath(cwd);
  let run: ActiveRun | null;
@@ -385,18 +507,21 @@ export async function runStatusReport(cwd: string): Promise<RunStatusReport> {
  }
  const lines = [`run: bound to ${run.run_id} (marker ${marker}${session})`];
  resetReadBudget();
- const liveness = runLiveness(await bdShow(run.run_id, undefined, cwd));
+ const epic = await bdShow(run.run_id, undefined, cwd);
+ const liveness = runLiveness(epic);
  switch (liveness.kind) {
   case "active": lines.push(`epic ${run.run_id}: ${liveness.status}`); break;
   case "closed": lines.push(`epic ${run.run_id}: closed; supervision is off, and /orchestrate-close ${run.run_id} removes the marker`); break;
   case "unverified": lines.push(`epic ${run.run_id}: status could not be verified (bd unavailable or bead missing); child supervision is suspended until it can`); break;
   case "unknown": lines.push(`epic ${run.run_id}: status ${JSON.stringify(liveness.status)} is not a run status; child supervision is suspended`); break;
  }
- const patrol = await patrolState(run.run_id, cwd);
- lines.push(patrol === "armed" ? "patrol: armed"
-  : patrol === "absent" ? `patrol: absent; /orchestrate-bind ${run.run_id} arms it`
-   : "patrol: unknown (the linked-wisp lookup failed)");
- return { lines, healthy: liveness.kind === "active" && patrol === "armed" };
+ if (epic !== null) {
+  const lead = epicHolder(epic);
+  lines.push(lead === undefined
+   ? `lead: none recorded; /orchestrate-bind ${run.run_id} stamps this session's lease`
+   : `lead: ${lead}, ${leaseState(epic, Date.now())}`);
+ }
+ return { lines, healthy: liveness.kind === "active" };
 }
 
 /**
@@ -452,17 +577,17 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
  });
 
  pi.registerCommand("orchestrate-bind", {
-  description: "Bind the active orchestrate run to a run epic id and arm its patrol",
+  description: "Bind the active orchestrate run to a run epic id and stamp this session's lead lease on it",
   handler: async (args, ctx) => {
    const runId = args.trim();
    try {
-    const bound = await bindRun(ctx.sessionManager.getCwd(), runId);
-    if (bound.patrol === "armed") {
-     ctx.ui.notify(`orchestrate run bound to ${runId}; patrol armed`, "info");
+    const bound = await bindRun(ctx.sessionManager.getCwd(), runId, ctx.sessionManager.getSessionId());
+    if (bound.lease === "written") {
+     ctx.ui.notify(`orchestrate run bound to ${runId}; lead lease stamped`, "info");
     } else {
-     // The bind stands; the patrol does not. Said where the operator reads, because
-     // an unarmed patrol is the layer that covers process death.
-     ctx.ui.notify(`orchestrate run bound to ${runId}, but patrol arming needs architect attention: ${bound.patrol.failed}`, "warning");
+     // The bind stands; the lease does not. Said where the operator reads, because
+     // the lease is what a replacement lead adopts against.
+     ctx.ui.notify(`orchestrate run bound to ${runId}, but the lead lease was not stamped: ${bound.lease.failed}`, "warning");
     }
    } catch (error) {
     ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -471,7 +596,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
  });
 
  pi.registerCommand("orchestrate-status", {
-  description: "Active run: marker binding, run epic liveness, patrol",
+  description: "Active run: marker binding, run epic liveness, lead lease",
   handler: async (_args, ctx) => {
    const report = await runStatusReport(ctx.sessionManager.getCwd());
    ctx.ui.notify(report.lines.join("\n"), report.healthy ? "info" : "warning");

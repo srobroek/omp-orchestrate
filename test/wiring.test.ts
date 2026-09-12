@@ -80,7 +80,7 @@ async function dispatchAll(
 ): Promise<(ToolCallEventResult | undefined)[]> {
  if (handlers.length === 0) throw new Error("no tool_call handler was registered");
  const prompt = ctx.role === undefined ? [] : [`ORC-ROLE: ${ctx.role}`];
- const runtimeCtx = { cwd: ctx.cwd, getSystemPrompt: () => prompt } as unknown as ExtensionContext;
+ const runtimeCtx = { cwd: ctx.cwd, getSystemPrompt: () => prompt, sessionManager: { getSessionId: () => "wiring-session" } } as unknown as ExtensionContext;
  const results: (ToolCallEventResult | undefined)[] = [];
  for (const handler of handlers) results.push(await handler(event, runtimeCtx));
  return results;

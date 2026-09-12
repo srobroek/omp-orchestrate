@@ -226,13 +226,13 @@ Bootstrap a run in three steps, all in the lead session:
 
 1. `/orchestrate-run`. It pins the database and writes a `pending` marker.
 2. `bd create --type epic ...` with the run metadata that `beads-store.md` lists.
-3. `/orchestrate-bind <epic>`. It arms the patrol. After this step, dispatch.
+3. `/orchestrate-bind <epic>`. It stamps this session's lead lease on the epic. After this step, dispatch.
 
 | Command | Does |
 | --- | --- |
 | `/orchestrate-run` | activates run enforcement in this repository: records the run's `.beads` from `bd where` and writes the marker `.orchestration/.active-run`, `pending` until bound |
-| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp. When the patrol did not arm, it warns |
-| `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and whether the patrol armed |
+| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then stamps this session's lead lease (`lead_actor`, `lease_until`) on it. When the lease was not stamped, or another lead's lease is live, it warns |
+| `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and the lead lease |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
 | `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no bead beneath it, at any depth, is `in_progress`. `--force` skips that check. `/orchestrate-close pending` undoes an activation that never bound. `/orchestrate-stop` is the same command under a second name |
 

@@ -1,12 +1,27 @@
 /**
- * S1 observes terminal children and records recovery-needed evidence for the architect.
- * Beads has no conditional owner/version update: releasing or stamping from a snapshot
- * can overwrite a successor. This module therefore never changes ownership or metadata.
- * S2 creates a run-derived patrol id, relying on database id uniqueness.
+ * S1 reaps terminal children. On a child's terminal lifecycle frame it finds the beads the
+ * child holds, re-checks the exit contract, and either releases the dead holder's claim
+ * under the lease (`src/lease.ts`) or records why it did not.
+ *
+ * The release contract. A spawner releases only its OWN children -- the agents this
+ * process's `AgentRegistry` knows -- and on this evidence alone: the child's terminal frame
+ * reads `failed` or `aborted`, so this process observed the death; or the registry reports
+ * the child `aborted` and its lease has lapsed, read fresh rather than from the cache. A
+ * `completed` child whose contract is unmet is not dead: an `idle` or `parked` holder is
+ * revivable and keeps its claim. A holder absent from this registry is UNKNOWN, never dead,
+ * and gets one NOTE naming the lease state. The one path that releases on the lease alone is
+ * a new lead adopting a run whose spawner chain died (`adoptRun` in `src/run-state.ts`).
+ *
+ * The frame arrives after `finalizeSubagentLifecycle` has settled the registry
+ * (`task/executor.ts`: the settled frame is emitted by `finalizeRunResult`, which runs
+ * after the finally block that calls it), so the status read here is the child's final one:
+ * a hard kill leaves an `aborted` tombstone, a kept-alive finish leaves `idle`, an isolated
+ * finish `parked`, and a one-shot helper is already unregistered.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdFailureText, bdListChecked, bdRun, bdWispListChecked, lastBdFailure, readBudgetExhausted, resetReadBudget } from "./bd";
+import { type AgentRef, AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { type BdBead, bdFailureText, bdListChecked, bdRun, bdShow, lastBdFailure, readBudgetExhausted, resetReadBudget } from "./bd";
+import type { ClaimState } from "./claim-state";
 import architect from "./contracts/architect.json";
 import generic from "./contracts/generic.json";
 import implementer from "./contracts/implementer.json";
@@ -23,6 +38,8 @@ import {
  satisfies,
 } from "./gates/exit";
 import { beadRouting } from "./identity";
+import { leaseExpired, leaseState, releaseDeadClaim } from "./lease";
+import { leadActor } from "./run-state";
 
 /** The `task:subagent:lifecycle` fields this module reads. */
 export interface ChildLifecycle {
@@ -87,9 +104,10 @@ function lines(stdout: string): string[] {
 /**
  * Which row of the reclamation table one bead took. A child that did not complete is
  * `died`; what its branch shows is a separate observation ({@link BranchState}), because
- * the branch is all that is knowable about a failed child's work.
+ * the branch is all that is knowable about a failed child's work. `parked` is a completed
+ * child whose contract is unmet but whose holder the registry still reports revivable.
  */
-export type ReapCase = "clean" | "incomplete" | "died" | "unknown" | "paused";
+export type ReapCase = "clean" | "incomplete" | "died" | "unknown" | "paused" | "parked";
 
 /**
  * What the repository shows for `omp/task/<id>`. `stale` is a branch by that name whose
@@ -98,13 +116,33 @@ export type ReapCase = "clean" | "incomplete" | "died" | "unknown" | "paused";
  */
 export type BranchState = "found" | "absent" | "stale" | "unknown";
 
+/** A holder's liveness as this process's registry reports it. `absent` is unknown, never dead. */
+export type HolderState = AgentRef["status"] | "absent";
+
+/**
+ * What the reaper did about a bead's claim.
+ *
+ * - `released`: the fenced release landed and the `RECOVERED` comment with it.
+ * - `released-unrecorded`: the claim is released but the comment did not land.
+ * - `release-refused`: the fence refused; a successor holds the bead. Nothing written.
+ * - `release-failed`: the store did not answer the release. Nothing written.
+ * - `noted`: no release was warranted or possible; one NOTE names the lease state.
+ * - `note-failed`: that NOTE did not land.
+ * - `preserved`: the holder is revivable or paused; nothing written to the store.
+ * - `not-needed`: a clean exit.
+ */
+export type ReapRecovery =
+ | "released" | "released-unrecorded" | "release-refused" | "release-failed"
+ | "noted" | "note-failed" | "preserved" | "not-needed";
+
 /** One bead's disposition. `failures` names the contract checks it did not satisfy. */
 export interface ReapedBead {
  bead: string;
  case: ReapCase;
  failures: string[];
- /** Observation only: no claim has been recovered. */
- recovery: "not-needed" | "recorded" | "record-failed";
+ recovery: ReapRecovery;
+ /** The holder's registry state when the decision was taken. */
+ holder: HolderState;
 }
 
 /** What one terminal event did. `reaped` is empty when there was nothing to reap. */
@@ -117,6 +155,11 @@ export interface ReapOutcome {
  reaped: ReapedBead[];
 }
 
+/** The one registry question the reaper asks. `AgentRegistry.global()` answers it. */
+export interface HolderRegistry {
+ get(id: string): { status: AgentRef["status"] } | undefined;
+}
+
 export interface ReapOptions {
  /** The repository the captured branches live in — the spawning session's cwd. */
  cwd: string;
@@ -125,11 +168,17 @@ export interface ReapOptions {
   * subscription). A branch whose tip was committed before this is not the child's.
   */
  startedAtMs: number;
+ /** The identity releasing: the spawner's claim actor, or the lead's lease actor. */
+ recoveredBy: string;
  /** Subprocess seam; defaults to spawning `git`. */
  exec?: Exec;
+ /** This process's registry; defaults to the global one. */
+ registry?: HolderRegistry;
+ /** The clock the lease is judged against; defaults to now. */
+ now?: number;
 }
 
-/** Observe a terminal child's candidates without asserting authority over their current state. */
+/** Reap a terminal child's beads: release what the evidence allows, record the rest. */
 export async function reapChild(child: ChildLifecycle, options: ReapOptions): Promise<ReapOutcome> {
  const outcome: ReapOutcome = { child: child.id, reaped: [] };
  if (TERMINAL[child.status] !== true) return outcome;
@@ -148,28 +197,31 @@ export async function reapChild(child: ChildLifecycle, options: ReapOptions): Pr
  if (branch === "found") outcome.branch = `omp/task/${child.id}`;
 
  for (const bead of candidates) {
-  outcome.reaped.push(await reapBead(bead, child, branch));
+  outcome.reaped.push(await reapBead(bead, child, branch, options));
  }
  return outcome;
 }
 
-/** Ordinary lists exclude wisps; query both carriers and merge by id. */
+/**
+ * The beads a child holds, wisps included: `--include-infra --include-gates` lists a
+ * claimed wisp with its assignee (measured on bd 1.2.2). `bd mol wisp list --json` rows
+ * carry no assignee at all, so merging that listing here, as this once did, found nothing.
+ */
 async function candidateBeads(child: ChildLifecycle): Promise<{ beads: BdBead[]; unknown: boolean }> {
  const flags = ["--include-infra", "--include-gates", "--status", "open,in_progress,blocked,deferred", "--limit", "0", "--json"];
  const claimed = await bdListChecked(["list", "--assignee", child.id, ...flags]);
- const wisps = await bdWispListChecked();
  const stamped = child.status === "completed"
   ? await bdListChecked(["list", "--metadata-field", `actor=${child.id}`, ...flags])
   : [];
  const beads = new Map<string, BdBead>();
- for (const bead of [...(claimed ?? []), ...(wisps ?? []), ...(stamped ?? [])]) {
+ for (const bead of [...(claimed ?? []), ...(stamped ?? [])]) {
   if (!["open", "in_progress", "blocked", "deferred"].includes(bead.status ?? "")) continue;
   const assignee = typeof bead.assignee === "string" ? bead.assignee : "";
   if (assignee !== "" && assignee !== child.id) continue;
   if (assignee !== child.id && !(child.status === "completed" && bead.metadata?.actor === child.id)) continue;
   beads.set(bead.id, bead);
  }
- return { beads: [...beads.values()], unknown: claimed === null || wisps === null || stamped === null };
+ return { beads: [...beads.values()], unknown: claimed === null || stamped === null };
 }
 
 /** Hedged wording per branch state; the reaper never claims a branch proves or disproves work. */
@@ -180,37 +232,92 @@ const BRANCH_EVIDENCE: Record<BranchState, (name: string) => string> = {
  unknown: () => "captured branch unknown",
 };
 
-/** Append observations only; even a fresh read cannot authorize an unconditional update. */
-async function reapBead(bead: BdBead, child: ChildLifecycle, branch: BranchState): Promise<ReapedBead> {
+/** The registry state as a NOTE or RECOVERED comment states it. */
+const HOLDER_EVIDENCE: Record<HolderState, string> = {
+ aborted: "registry=aborted (this session's child, hard-killed)",
+ running: "registry=running (this session's child, live)",
+ idle: "registry=idle (this session's child, revivable)",
+ parked: "registry=parked (this session's child, revivable)",
+ absent: "registry=absent (not this session's child, or already unregistered; liveness unknown, not dead)",
+};
+
+/** Statuses the claim fence can pass: `bd update --claim` refuses `blocked` and `deferred`. */
+const FENCEABLE: Record<string, true> = { open: true, in_progress: true };
+
+/**
+ * Decide one bead. The frame is the death evidence for `failed`/`aborted`; a `completed`
+ * child with an unmet contract is released only when the registry says `aborted` and a
+ * fresh read says the lease has lapsed. Everything else preserves the claim and says why.
+ */
+async function reapBead(bead: BdBead, child: ChildLifecycle, branch: BranchState, options: ReapOptions): Promise<ReapedBead> {
  const failures = child.status === "completed" ? await contractFailures(bead) : [];
- const claimHeld = typeof bead.assignee === "string" && bead.assignee !== "";
+ const holder = typeof bead.assignee === "string" ? bead.assignee : "";
  const disposition: ReapCase = child.status !== "completed"
   ? "died"
-  : failures === "paused" ? "paused" : failures === null ? "unknown" : failures.length === 0 && !claimHeld ? "clean" : "incomplete";
+  : failures === "paused" ? "paused" : failures === null ? "unknown" : failures.length === 0 && holder === "" ? "clean" : "incomplete";
+ const reaped = (recovery: ReapRecovery, state: HolderState, kase: ReapCase = disposition): ReapedBead =>
+  ({ bead: bead.id, case: kase, failures: Array.isArray(failures) ? failures : [], recovery, holder: state });
+
+ const state: HolderState = (options.registry ?? AgentRegistry.global()).get(child.id)?.status ?? "absent";
  // A clean exit is the documented success outcome whether or not it captured a branch;
- // the branch is logged by the caller, not recorded as a recovery.
- if (disposition === "clean") {
-  return { bead: bead.id, case: disposition, failures: [], recovery: "not-needed" };
- }
+ // the branch is logged by the caller, not recorded as a recovery. A paused writer keeps
+ // its claim by contract: the linked escalation is the record, not a second comment.
+ if (disposition === "clean") return reaped("not-needed", state);
+ if (disposition === "paused") return reaped("preserved", state);
+
  const branchEvidence = BRANCH_EVIDENCE[branch](`omp/task/${child.id}`);
  // An unread contract names its cause: the reaper spent its own read cap, or bd
  // answered nothing and says why. The remedies differ -- re-check with fewer linked
  // beads against retry once the store answers -- so one word for both sent the
  // architect to the wrong one.
  const unreadCause = readBudgetExhausted() ? "the reaper's bd read budget is spent" : bdFailureText(lastBdFailure());
- const contractEvidence = failures === "paused" ? "paused on open escalation; preserve claim until architect resolves escalation"
-  : failures === null ? `contract evidence unread (${unreadCause}); the contract is unevaluated, not failed`
-   : failures.length > 0 ? `unsatisfied checks: ${failures.join(", ")}` : `contract disposition: ${disposition}`;
+ const contractEvidence = failures === null
+  ? `contract evidence unread (${unreadCause}); the contract is unevaluated, not failed`
+  : Array.isArray(failures) && failures.length > 0 ? `unsatisfied checks: ${failures.join(", ")}` : "claim still held after a completed exit";
  const routing = beadRouting(bead);
- const carrier = routing?.from === "legacy-label" ? `; contract from legacy ${routing.spelling}` : "";
- const result = await bdRun(["comment", bead.id,
-  `NOTE recovery needed: child ${child.id} exited (${child.status}); observed assignee=${bead.assignee ?? ""}, status=${bead.status ?? ""}; ${contractEvidence}; ${branchEvidence}${carrier}; architect must establish an exclusive recovery window excluding all claim/dispatch writers before re-checking ownership and making any recovery mutation; no owner, status, or metadata changed`]);
- return {
-  bead: bead.id,
-  case: disposition,
-  failures: Array.isArray(failures) ? failures : [],
-  recovery: result?.code === 0 ? "recorded" : "record-failed",
+ const carrier = routing?.from === "legacy-label" ? [`contract from legacy ${routing.spelling}`] : [];
+ const now = options.now ?? Date.now();
+
+ const note = async (why: string, lease: string, kase: ReapCase = disposition): Promise<ReapedBead> => {
+  const text = [`NOTE claim preserved: child ${child.id} exited (${child.status}); holder ${holder || "none"} ${HOLDER_EVIDENCE[state]}`,
+   lease, why, contractEvidence, branchEvidence, ...carrier, "no owner, status or metadata changed"].join("; ");
+  const result = await bdRun(["comment", bead.id, text, "--actor", options.recoveredBy], undefined, options.cwd);
+  return reaped(result?.code === 0 ? "noted" : "note-failed", state, kase);
  };
+
+ // A held claim is releasable only from a status the fence can pass, by a holder this
+ // process saw die. The frame is that proof for a died child; for a completed one the
+ // registry must say aborted and a fresh read must say the lease has lapsed.
+ if (holder === "") return note("no claim to release", leaseState(bead, now));
+ let cause: string;
+ if (disposition === "died") {
+  cause = `child exited (${child.status}); ${HOLDER_EVIDENCE[state]}`;
+ } else if (disposition === "unknown") {
+  return note("release needs a readable contract", leaseState(bead, now));
+ } else if (state === "running" || state === "idle" || state === "parked") {
+  return reaped("preserved", state, "parked");
+ } else if (state === "absent") {
+  return note("release needs this session's registry to report the holder aborted", leaseState(bead, now));
+ } else {
+  const fresh = await bdShow(bead.id, undefined, options.cwd, { fresh: true });
+  if (fresh === null) return note("release needs a fresh read of the lease, which bd did not answer", leaseState(bead, now));
+  if (typeof fresh.assignee !== "string" || fresh.assignee !== holder) return reaped("release-refused", state);
+  if (!leaseExpired(fresh, now)) return note("release waits for the lease to lapse", leaseState(fresh, now));
+  cause = `child completed with its contract unmet; ${HOLDER_EVIDENCE[state]}; ${leaseState(fresh, now)}`;
+ }
+ if (FENCEABLE[bead.status ?? ""] !== true) {
+  return note(`bd refuses --claim on a ${bead.status ?? "statusless"} bead, so the fenced release is unavailable; a human unblocks it`, leaseState(bead, now));
+ }
+ const released = await releaseDeadClaim(bead.id, holder, {
+  cause,
+  recoveredBy: options.recoveredBy,
+  branch: branch === "found" ? `omp/task/${child.id}` : undefined,
+  observations: [contractEvidence, branchEvidence, ...carrier],
+ }, options.cwd);
+ const recovery: ReapRecovery = released === "released" ? "released"
+  : released === "comment-failed" ? "released-unrecorded"
+   : released === "held-by-other" ? "release-refused" : "release-failed";
+ return reaped(recovery, state);
 }
 
 /**
@@ -314,70 +421,11 @@ async function contractFailures(bead: BdBead): Promise<string[] | "paused" | nul
 }
 
 /**
- * Whether a linked wisp is this epic's live patrol. Any live patrol wisp counts, but
- * the deterministic id has to name this epic: an id collision from another run is
- * not this run's patrol.
- */
-function livePatrol(epicId: string): (bead: BdBead) => boolean {
- const id = `${epicId}-patrol`;
- return bead => bead.wisp_type === "patrol" && bead.ephemeral === true
-  && ["open", "in_progress", "blocked", "deferred"].includes(bead.status ?? "")
-  && (bead.id !== id || bead.metadata?.patrol_epic === epicId);
-}
-
-/**
- * Read-only: is a live patrol linked to this epic? `unknown` when the lookup failed.
- * The query is the one `ensurePatrolWisp` arms against, so the two never disagree.
- */
-export async function patrolState(epicId: string, cwd?: string): Promise<"armed" | "absent" | "unknown"> {
- const linked = await bdListChecked(["dep", "list", epicId, "--direction=up", "--type", "relates-to", "--json"], undefined, cwd);
- if (linked === null) return "unknown";
- return linked.some(livePatrol(epicId)) ? "armed" : "absent";
-}
-
-/** Local calls share a lookup; database id uniqueness arbitrates cross-process creation. */
-const patrolChecks = new Map<string, Promise<void>>();
-
-export async function ensurePatrolWisp(epicId: string, cwd?: string): Promise<void> {
- const key = JSON.stringify([cwd ?? process.cwd(), epicId]);
- const existing = patrolChecks.get(key);
- if (existing !== undefined) return existing;
- const check = (async () => {
-  const query = ["dep", "list", epicId, "--direction=up", "--type", "relates-to", "--json"];
-  const linked = await bdListChecked(query, undefined, cwd);
-  if (linked === null) throw new Error(`Patrol ${epicId} lookup unknown; creation refused`);
-  const id = `${epicId}-patrol`;
-  const live = livePatrol(epicId);
-  if (linked.some(live)) return;
-  if (linked.some(bead => bead.id === id)) {
-   throw new Error(`Patrol ${id} is closed or invalid; architect must reconcile it before rearming`);
-  }
-  // No overwrite or generation rollover: a closed deterministic id remains a
-  // tombstone until the architect decides how to resume this run's patrol.
-  await bdRun(["create", `patrol: ${epicId} claim reconciliation`, "--id", id,
-   "--ephemeral", "--wisp-type", "patrol", "--metadata", JSON.stringify({ patrol_epic: epicId }),
-   "--deps", `relates-to:${epicId}`, "--silent"], undefined, cwd);
-  // Success and conflict both need positive durable evidence, including the
-  // relation to this epic. A failed/partial create is never called armed.
-  const confirmed = await bdListChecked(query, undefined, cwd);
-  if (!confirmed?.some(bead => bead.id === id && live(bead) && bead.metadata?.patrol_epic === epicId)) {
-   throw new Error(`Patrol ${id} not confirmed; architect must inspect/provision the patrol for ${epicId}`);
-  }
- })();
- patrolChecks.set(key, check);
- try {
-  await check;
- } finally {
-  patrolChecks.delete(key);
- }
-}
-
-/**
  * What one lifecycle subscription remembers about its children.
  *
  * A revived agent's every follow-up turn ends in the same terminal frame as a first run
  * (`runSubagentFollowUpTurn` -> `finalizeRunResult`), so without memory a parked
- * architect would be reaped -- NOTE and notice -- on every wake. Start times make the
+ * architect would be reaped -- notice and all -- on every wake. Start times make the
  * captured-branch check session-scoped.
  */
 interface ReaperMemory {
@@ -389,8 +437,14 @@ interface ReaperMemory {
 	subscribedAtMs: number;
 }
 
-/** Bind the reaper to the lifecycle bus for repositories with an active run. */
-export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) => Promise<boolean>): void {
+/**
+ * Bind the reaper to the lifecycle bus for repositories with an active run.
+ *
+ * `claims` names the identity a release is attributed to: an architect reaping its
+ * workers releases as its own claim actor; the lead, which claims nothing, releases as
+ * its lease actor (`leadActor`).
+ */
+export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) => Promise<boolean>, claims: ClaimState): void {
 	let context: ExtensionContext | undefined;
 	let unsubscribe: (() => void) | undefined;
 
@@ -402,8 +456,9 @@ export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) 
 			// The session manager owns cwd. `/move` mutates it without another
 			// `session_start`, while switch and branch events may supply a new context.
 			const currentCwd = context?.sessionManager.getCwd();
-			if (currentCwd === undefined) return;
-			return handleLifecycle(pi, data, currentCwd, isRunBound, memory);
+			if (currentCwd === undefined || context === undefined) return;
+			const recoveredBy = claims.observedClaim()?.actor ?? leadActor(context.sessionManager.getSessionId());
+			return handleLifecycle(pi, data, currentCwd, recoveredBy, isRunBound, memory);
 		});
 	};
 
@@ -417,11 +472,24 @@ export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) 
 	});
 }
 
+/** The notice each recovery outcome earns in the spawner's transcript. */
+const RECOVERY_NOTICE: Record<ReapRecovery, string> = {
+ "released": "claim released under the lease and RECOVERED recorded; the bead is open and unassigned, and the next pull re-offers it",
+ "released-unrecorded": "claim released under the lease, but the RECOVERED comment did not land; the bead is open and unassigned without its record",
+ "release-refused": "release refused by the claim fence: a successor already holds the bead; nothing changed",
+ "release-failed": "release not confirmed: bd did not answer; the claim stands, so inspect it once the store answers",
+ "noted": "claim preserved; a NOTE on the bead names the holder's registry state and lease",
+ "note-failed": "claim preserved; the NOTE naming the holder's registry state and lease did not land",
+ "preserved": "claim preserved; the holder is revivable or paused, so nothing was written",
+ "not-needed": "clean exit",
+};
+
 /** Reap one bus payload, reporting what it did and swallowing what it could not. */
 async function handleLifecycle(
 	pi: ExtensionAPI,
 	data: unknown,
 	cwd: string,
+	recoveredBy: string,
 	isRunBound: (cwd: string) => Promise<boolean>,
 	memory: ReaperMemory,
 ): Promise<void> {
@@ -443,23 +511,25 @@ async function handleLifecycle(
 		// The same outage as a failed reap, so it gets the same notice: a child that
 		// exits while the store is unreadable must not vanish into a log line.
 		const reason = error instanceof Error ? error.message : String(error);
-		pi.logger.error("orchestrate run liveness check unavailable; recovery skipped", { child: child.id, error: reason });
+		pi.logger.error("orchestrate run liveness check unavailable; reap skipped", { child: child.id, error: reason });
 		pi.sendMessage({
-			customType: "orchestrate-recovery-needed",
-			content: `Recovery observation for child ${child.id} was skipped: ${reason}. Architect must explicitly reconcile its claims and evidence once the run's status can be read; no automatic recovery is confirmed. Exclude all claim/dispatch writers before any recovery mutation.`,
+			customType: "orchestrate-recovery",
+			content: `Reap of child ${child.id} was skipped: ${reason}. Nothing was released. Its claims are reaped when the run's status can be read again and the child's terminal frame recurs; otherwise inspect them by hand once the store answers.`,
 			display: true,
 		}, { triggerTurn: false });
 		return;
 	}
 	try {
-		const outcome = await reapChild(child, { cwd, startedAtMs: memory.started.get(child.id) ?? memory.subscribedAtMs });
-		if (outcome.reaped.length > 0) memory.reaped.add(child.id);
+		const outcome = await reapChild(child, { cwd, recoveredBy, startedAtMs: memory.started.get(child.id) ?? memory.subscribedAtMs });
+		// A release the store never confirmed is not a reap: leave the child reapable.
+		if (outcome.reaped.some(reaped => reaped.recovery !== "release-failed")) memory.reaped.add(child.id);
 		if (outcome.discoveryUnknown) pi.logger.warn("orchestrate recovery candidate discovery incomplete", { child: child.id });
 		for (const reaped of outcome.reaped) {
 			pi.logger.info("orchestrate recovery observation", {
 				child: child.id,
 				bead: reaped.bead,
 				case: reaped.case,
+				holder: reaped.holder,
 				branch: outcome.branch,
 				failures: reaped.failures,
 				recovery: reaped.recovery,
@@ -467,16 +537,16 @@ async function handleLifecycle(
 			});
 			if (reaped.recovery !== "not-needed") {
 				pi.sendMessage({
-					customType: "orchestrate-recovery-needed",
-					content: `Recovery observation for ${reaped.bead}, child ${child.id}: ${reaped.case}; NOTE ${reaped.recovery}; branch: ${outcome.branchState ?? "unknown"}${outcome.branch === undefined ? "" : ` (${outcome.branch})`}. No claim or metadata changed. Architect: inspect current bead and branch evidence; establish an exclusive recovery window excluding all dispatch/claim writers before any recovery mutation. Paused work must wait for escalation resolution. Failed NOTE persistence requires explicit reconciliation; this is not a recovery success.`,
+					customType: "orchestrate-recovery",
+					content: `Reaped ${reaped.bead} on child ${child.id} (${child.status}): ${reaped.case}, holder ${reaped.holder} in this session's registry; ${RECOVERY_NOTICE[reaped.recovery]}. Branch: ${outcome.branchState ?? "unknown"}${outcome.branch === undefined ? "" : ` (${outcome.branch})`}; no branch or worktree was touched.`,
 					display: true,
 				}, { triggerTurn: false });
 			}
 		}
 		if (outcome.discoveryUnknown) {
 			pi.sendMessage({
-				customType: "orchestrate-recovery-needed",
-				content: `Recovery discovery for child ${child.id} is incomplete. Architect: explicitly reconcile ordinary and ephemeral claims after storage is readable; nothing was released. Establish an exclusive recovery window before any mutation.`,
+				customType: "orchestrate-recovery",
+				content: `Candidate discovery for child ${child.id} was incomplete: a bd list did not answer, so some of its claims may not have been reaped. Nothing beyond the listed outcomes was released; list its claims by hand once the store answers.`,
 				display: true,
 			}, { triggerTurn: false });
 		}
@@ -488,8 +558,8 @@ async function handleLifecycle(
 			error: error instanceof Error ? error.message : String(error),
 		});
 		pi.sendMessage({
-			customType: "orchestrate-recovery-needed",
-			content: `Recovery observation failed for child ${child.id}. Architect must explicitly reconcile its claims and evidence; no automatic recovery is confirmed. Exclude all claim/dispatch writers before any recovery mutation.`,
+			customType: "orchestrate-recovery",
+			content: `Reap of child ${child.id} failed before it finished. Nothing is confirmed released; inspect its claims by hand.`,
 			display: true,
 		}, { triggerTurn: false });
 	}

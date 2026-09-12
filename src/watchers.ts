@@ -163,7 +163,8 @@ interface ChildActivity {
  changedMs: number;
  /** Whether it has already been reported. Reported at most once. */
  flagged: boolean;
- report?: { bead: string; notice: string; commented: boolean };
+ /** The bead and notice, resolved once; kept across sweeps until the comment lands. */
+ report?: { bead: string; notice: string };
 }
 
 const activity = new Map<string, ChildActivity>();
@@ -217,9 +218,9 @@ export function sweepStalls(atMs: number, thresholdMs: number): StallFlag[] {
 }
 
 /**
- * Report one stalled child: a `STALL` comment on the bead it holds plus one error
- * wisp linked to that bead. No kill — the spawner decides, because a silent child
- * may be sitting in a long test run.
+ * Report one stalled child: a `STALL` comment on the bead it holds, the one carrier.
+ * No kill — the spawner decides, because a silent child may be sitting in a long test
+ * run. Liveness is the lease's business (`src/lease.ts`); this measures productivity.
  *
  * `claimedBead` is the assignee query, tie-broken on `updated_at` so a stale claim
  * cannot shadow a live one. A child holding no bead is left alone: there is
@@ -231,28 +232,9 @@ async function reportStall(flag: StallFlag): Promise<void> {
  if (state.report === undefined) {
   const bead = await claimedBead(flag.child);
   if (bead === null || activity.get(flag.child) !== state) return;
-  state.report = {
-   bead: bead.id,
-   notice: `STALL child ${flag.child} silent ${flag.silentMinutes}m on ${bead.id}`,
-   commented: false,
-  };
+  state.report = { bead: bead.id, notice: `STALL child ${flag.child} silent ${flag.silentMinutes}m on ${bead.id}` };
  }
- const report = state.report;
- if (!report.commented) {
-  const result = await bdRun(["comment", report.bead, report.notice]);
-  if (result?.code !== 0) return;
-  report.commented = true;
- }
- const result = await bdRun([
-  "create",
-  report.notice,
-  "--ephemeral",
-  "--wisp-type",
-  "error",
-  "--deps",
-  `relates-to:${report.bead}`,
-  "--silent",
- ]);
+ const result = await bdRun(["comment", state.report.bead, state.report.notice]);
  if (result?.code === 0) state.flagged = true;
 }
 

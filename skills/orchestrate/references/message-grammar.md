@@ -46,16 +46,14 @@ The same first-token rule applies to it: `NO WORK` is neither the token nor a ve
 | `BOUNCED` | The merge attempt is refused back to its origin as a fix bead: bot findings, scope drift, or a branch that no longer merges into its base. A `reason=` token says which. | `shepherd` |
 | `ESCALATED` | A repeated review issue exhausted its fix-attempt limit. The merge bead is held for a human: status `blocked`, and this comment carries the `ASK` fields. | `shepherd` |
 | `ASK` | A product-intent question only a human can settle. The hold is status `blocked` plus this comment; a bead not yet started also gets a human gate. | `*` -- every claiming role |
-| `NOTE` | A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's recovery evidence. | `*` -- every claiming role; the extension's reaper |
+| `NOTE` | A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's record of a claim it preserved and why. | `*` -- every claiming role; the extension's reaper |
+| `RECOVERED` | The extension released a dead holder's claim under the lease: the holder's terminal frame, or registry `aborted` plus a lapsed lease, fenced by `--claim`. The bead is open and unassigned again; requeue is implicit. | `extension` -- this plugin's own code |
 | `STALL` | A claimed child went silent past its threshold. No kill -- the spawner decides. | `extension` -- this plugin's own code |
 | `WARN` | A degraded preflight or a settings deviation the run should see but not stop for. | `extension` -- this plugin's own code |
 | `GOAL` | The run objective and its status, stamped on every epic each time it changes. | `extension` -- this plugin's own code |
 
-Reserved, not yet declared: `RECOVERED`, the extension's record of a dead claim it released
-under a lease; it enters `grammar.json` with the lease design and not before.
-
 The first nine are the agent-writable set, and the dispatch contract lists exactly those.
-The last three are the extension's voice: an agent never writes them, and a role contract
+The last four are the extension's voice: an agent never writes them, and a role contract
 never requires them.
 
 ## Adding a verb
