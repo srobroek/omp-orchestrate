@@ -23,14 +23,7 @@
 # No post-start hook. An earlier version refreshed a possibly-stale port file in the `.beads/`
 # a worktree inherited, and `.worktreeinclude` no longer copies `.beads/` at all: that copy
 # could not be narrowed below the whole directory, so it carried Dolt storage a worktree must
-# never serve from. `src/beads-mode.ts` joins the primary checkout's database through
-# `BEADS_DIR` instead, leaving a worktree nothing local to refresh.
 
-# Scope of the sync hooks below: they are effective in the primary checkout, which is where the
-# database lives. A worktree holds no `.beads/`, and these run in a plain shell rather than under
-# the extension, so `BEADS_DIR` is unset there and each one no-ops through its `|| true`. That is
-# the right outcome: a worktree and the primary reach one server, so there is nothing separate to
-# push from it.
 
 [post-commit]
 # Push the Dolt database to the `git+` remote already registered as `origin`, so a commit and

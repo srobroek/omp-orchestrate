@@ -99,12 +99,12 @@ values. OMP's defaults satisfy none of the six `task` and `bash` rows, so set ea
 | `task.maxRecursionDepth` | `3` or more | a worker's helper sits at depth 3, so at the default `2` no worker can spawn one |
 | `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
 | `modelRoles.reviewer` | a model selector | the independent review role falls back to the session model or fails selection |
-| `BEADS_DIR` | one absolute path to the run's `.beads` in every child | a worker's clone holds a private copy of `.beads/`, and its `bd` writes land there |
 
 Isolation clones the whole checkout, `.beads/` included. A worker that discovers a
 database by walking up from its cwd finds a private copy that no other agent reads.
-`/orchestrate-run` pins the database, and every child inherits the pin. The `apply: false`
-row keeps integration with the architect, who cherry-picks each captured branch.
+`/orchestrate-run` records the run's `.beads` in the marker, and each copy is redirected to
+it before its first turn (see Run database). The `apply: false` row keeps integration
+with the architect, who cherry-picks each captured branch.
 
 The extension reports deviations through `WARN settings` notices and a comment on
 the bound epic. Preflight never creates or rewrites project configuration.
@@ -138,14 +138,12 @@ the cause and lets the call run. A check refuses only what it read and can prove
 - a scope that overlaps a live node
 
 Every refusing check runs only under orchestration. A session is under orchestration when
-it declares an `ORC-ROLE`, or when its process carries an absolute `BEADS_DIR` pin and a
-valid active-run marker exists in the session checkout or beside that pin. A plain session
-in a repository that merely has this plugin installed sees no gate. A claim it makes by
-hand is never observed. G6 and the contract injection require the pinned run itself.
+it declares an `ORC-ROLE`, or when a valid active-run marker exists in its checkout. An
+isolated copy carries the primary's marker. A plain session in a repository that merely
+has this plugin installed sees no gate. A claim it makes by hand is never observed. G6 and
+the contract injection require the marked run itself.
 
-- **Runtime `BEADS_DIR` (`bash`):** refuses any command text that names `BEADS_DIR`, including inside quotes. The variable travels in the tool's `env` field, so a wrapper such as `env -S` cannot smuggle an override. A structured `env.BEADS_DIR` must identify the pinned database. The gate rewrites it to its canonical path.
-- **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` only when the top-level OMP process has a non-empty absolute `BEADS_DIR` pin from `ensureBeadsPath`. The session checkout or pinned repository must also have a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
-  G1 checks the session checkout first, then the pinned repository. This preserves linked-worktree runs whose shared `.beads` lives in the primary checkout.
+- **G1 (`bash`):** For a generic helper without an ORC contract, G1 sets `BD_READONLY=1` when the session checkout holds a valid active-run marker. A missing or invalid marker fails open. Contract-bound `orc-*` roles and unrelated processes remain writable.
 - **G2 (`bash`, `edit`, `write`):** refuses a mutation outside the worktree named by the claimed bead, or outside its `metadata.scope` globs. For `bash`, G2 compares the cwd only. G2 reads the claimed bead and nothing else. G5 judges scope overlap between claims, at claim. G2 refuses a mutation when the bead is readable and assigned to another actor, or closed. A released bead refuses nothing, so a worker bounced after its release can repair its evidence. When G2 cannot read the bead, it logs the cause and lets the call run. A bead you closed yourself ends the claim: the next product edit or comment passes and the gate disarms. To recover a closed bead, run `bd reopen <id>`. Then run `bd update <id> --claim --json`. To hand a reopened bead back, run `bd update <id> --assignee ""`.
 - **G3 (`bash`):** blocks mutating `git worktree` commands and `gh pr checkout` because they bypass Worktrunk.
   Inspection remains allowed.
@@ -160,11 +158,11 @@ hand is never observed. G6 and the contract injection require the pinned run its
   - a claim whose scope overlaps a held code-writing claim outside its own lineage
   - a claim while held code-writing claims reach the run epic's `metadata.max_inflight` (default 8). The refusal says `run at capacity (N/N); retry`
   - a claim that merges stderr into stdout, or redirects stdout away. The observer reads the claim report from stdout
-  - any claim from a role-less session under a pinned run: the lead dispatches and never claims
+  - any claim from a role-less session under a marked run: the lead dispatches and never claims
   - a routing re-point (`metadata.role`) by any role but the architect
   - an architect's `scope` that overlaps an open or in-progress node outside the bead's own lineage
   - review and reporting states authored by shepherds
-- **G6 (`bash`):** warns without blocking. Within a pinned run, it checks for:
+- **G6 (`bash`):** warns without blocking. Within a marked run, it checks for:
   - writes without actors: the identity is the assignee your claim report printed
   - comments without protocol verbs
   - bug beads unreachable from queues
@@ -189,10 +187,15 @@ rule, and continues. In both modes a rule fires one time per session (`repeatMod
 `bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
 harmless (an empty queue, a doomed process) and the reminder arrives with the result.
 
-The run pins one absolute `BEADS_DIR` to its embedded database. G1 uses that process-local
-pin and a valid marker in the session checkout or pinned repository before sandboxing a
-generic helper. Each copied checkout inherits the pin. Discovering a local database does
-not share state. G6 checks Beads discipline during a run.
+### Run database
+
+`/orchestrate-run` asks `bd where` once and records the run's `.beads` in the marker as
+`beads_dir`. At a worker's first `session_start`, an isolated copy holding its own
+`.beads/embeddeddolt` gets a `.beads/redirect` naming that directory, and its copied store
+is removed. Every `bd` call from the copy, `bd -C` included, then reaches the run's
+database; a copy whose target is missing fails closed and its `bd` calls are refused.
+Nothing is exported into the environment, so `bd` elsewhere touches only that directory's
+store. Diagnose a copy with `bd where --json`: `redirected_from` names the copy.
 
 The host has a separate regex engine. Python accepting a pattern does not prove the
 host accepts it. After editing a rule, run `sh scripts/validate-rules.sh`. It feeds
@@ -210,7 +213,7 @@ Bootstrap a run in three steps, all in the lead session:
 
 | Command | Does |
 | --- | --- |
-| `/orchestrate-run` | activates run enforcement in this repository: pins `BEADS_DIR` to the run's database and writes the marker `.orchestration/.active-run`, `pending` until bound |
+| `/orchestrate-run` | activates run enforcement in this repository: records the run's `.beads` from `bd where` and writes the marker `.orchestration/.active-run`, `pending` until bound |
 | `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp. When the patrol did not arm, it warns |
 | `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and whether the patrol armed |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
