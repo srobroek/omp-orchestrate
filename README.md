@@ -249,18 +249,24 @@ The plugin lands approved PRs; no agent merges. `/orchestrate-bind` runs one `gh
 graphql` read for `autoMergeAllowed`, `squashMergeAllowed`, branch protection, rulesets
 and the merge queue, and records the result on the run epic. Mode `auto` requires
 auto-merge and at least one required check; every other repository, this one included,
-is `direct`. Every 60 s the lead session reads the open, unblocked `pr:merge` beads and
-polls their PRs with one `gh pr list` per repository. A `CLEAN` PR at the reviewed
-`head_sha` is merged with `gh pr merge --squash --match-head-commit <head>` (`auto`:
-`--auto` is added and GitHub waits for the required checks). A `DIRTY` or `BEHIND` PR
-gets a `git merge-tree` precheck in a throwaway bare clone: a clean merge is committed
-and fast-forward pushed to the PR branch; conflicts become a fix bead under the origin
-feature (`role=implementer`, or `role=architect` when a conflicting path leaves the
-origin's scope) that blocks the merge bead. A failing check is rerun once per head with
-`gh run rerun --failed`, then becomes a fix bead. The sweep writes `LANDED <sha>` or
-`BOUNCED reason=<cause>` on the merge bead and its origin, never uses `--admin`, and
-never force-pushes. The shepherd agent keeps one duty: turning an actionable review-bot
-round into a fix bead under `orc_review_round_policy`.
+is `direct`.
+
+Every 60 s the lead session reads the open, unblocked `pr:merge` beads and polls their
+PRs with one `gh pr list` per repository:
+
+- A `CLEAN` PR at the reviewed `head_sha` is merged with `gh pr merge --squash
+  --match-head-commit <head>`. In `auto` mode `--auto` is added and GitHub waits for the
+  required checks.
+- A `DIRTY` or `BEHIND` PR gets a `git merge-tree` precheck in a throwaway bare clone. A
+  clean merge is committed and fast-forward pushed to the PR branch. Conflicts become a
+  fix bead under the origin feature (`role=implementer`, or `role=architect` when a
+  conflicting path leaves the origin's scope) that blocks the merge bead.
+- A failing check is rerun once per head with `gh run rerun --failed`, then becomes a
+  fix bead.
+
+The sweep writes `LANDED <sha>` or `BOUNCED reason=<cause>` on the merge bead and its
+origin, never uses `--admin`, and never force-pushes. The shepherd agent keeps one duty:
+turning an actionable review-bot round into a fix bead under `orc_review_round_policy`.
 
 ## Development
 
