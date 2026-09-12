@@ -253,11 +253,17 @@ export async function requestBotReview(
 
  const exec = options.exec ?? spawnExec;
  const timeoutMs = options.timeoutMs ?? ghTimeoutMs();
+ // The deadline bounds the whole request, and it must cover every `gh` call on the path
+ // at the per-call bound: the comment path is view, user, comments, POST comment; the
+ // reviewer path adds requested_reviewers, reviews and the reviewer POST before those.
+ // One read short, seven slow-but-answering calls left the reviewer POST sent and the
+ // marker POST refused, and the tool reported `unknown` for a request it had made.
+ const reads = provider.request.kind === "reviewer" ? 7 : 4;
  const run: ExecOptions = {
   cwd: options.cwd,
   timeoutMs,
   signal: options.signal,
-  deadline: Date.now() + 6 * timeoutMs,
+  deadline: Date.now() + reads * timeoutMs,
  };
  const view = await ghJson(["gh", "pr", "view", pr, "--repo", repo, "--json", "headRefOid"], exec, run);
  if (!view.ok) return result("unknown", provider, mode, expectedHead, undefined, view.error);

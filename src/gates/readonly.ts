@@ -37,31 +37,42 @@ import { readActiveRunStrict } from "../run-state";
 const BASH_PARAMS = ["command", "cwd", "env", "i", "pty", "timeout", "async"] as const;
 
 /**
- * Return the G1 environment addition for a generic helper in an active run.
+ * Whether an orchestrate run pins this session: an absolute process-local `BEADS_DIR`
+ * from `ensureBeadsPath`, and a valid active-run marker in the session checkout or in
+ * the repository beside that pin.
  *
- * `ensureBeadsPath` supplies a non-empty absolute process-local pin. The active
- * marker normally belongs to the session checkout, while a linked worktree may
- * share the primary checkout's `.beads`; check both roots without treating either
- * as mutation authority. `readActiveRunStrict` rejects malformed authority, so
- * every uncertain candidate fails open.
+ * Two roots, because the marker normally belongs to the session checkout while a
+ * linked worktree or an isolated copy shares the primary checkout's `.beads`; neither
+ * root is treated as mutation authority. `readActiveRunStrict` rejects malformed
+ * authority, so every uncertain candidate reads as no run.
+ *
+ * This is the run predicate every run-scoped check shares: G1 here, and in
+ * `src/index.ts` the runtime database check, G3, G6, the claim observer and G2. A
+ * helper in an unrelated OMP process, or one sharing the cwd without the process-local
+ * pin, is under no run.
  */
+export async function pinnedRunActive(cwd: string): Promise<boolean> {
+	const beadsDir = process.env.BEADS_DIR;
+	if (beadsDir === undefined || beadsDir.length === 0 || !path.isAbsolute(beadsDir)) return false;
+
+	const pinnedRoot = path.dirname(beadsDir);
+	for (const root of pinnedRoot === cwd ? [cwd] : [cwd, pinnedRoot]) {
+		try {
+			if ((await readActiveRunStrict(root)) !== null) return true;
+		} catch {
+			// An unreadable or malformed candidate is not positive run authority.
+		}
+	}
+	return false;
+}
+
+/** Return the G1 environment addition for a generic helper in an active run. */
 export async function beadWriteFreeEnv(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 ): Promise<Record<string, string> | undefined> {
 	if (!isBeadWriteFree(pi, ctx)) return undefined;
-
-	const beadsDir = process.env.BEADS_DIR;
-	if (beadsDir === undefined || beadsDir.length === 0 || !path.isAbsolute(beadsDir)) return undefined;
-
-	for (const root of new Set([ctx.cwd, path.dirname(beadsDir)])) {
-		try {
-			if ((await readActiveRunStrict(root)) !== null) return { BD_READONLY: "1" };
-		} catch {
-			// An unreadable or malformed candidate is not positive run authority.
-		}
-	}
-	return undefined;
+	return (await pinnedRunActive(ctx.cwd)) ? { BD_READONLY: "1" } : undefined;
 }
 
 /**

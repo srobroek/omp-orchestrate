@@ -65,7 +65,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 |---|---|
 | Whole run | none |
 | Every bead in an epic | `epic: <id>, full: true` |
-| Architect domain | `feature: <id>` |
+| Architect domain (an epic under the run) | `epic: <id>`; one feature beneath it: `feature: <id>` |
 | One actor's held work | `actor: <name>` |
 
 `/orchestrate-status` shows the marker binding, the run epic's liveness, and whether the
