@@ -16,6 +16,7 @@ import {
 	bindRun,
 	closeRun,
 	isBoundRunActive,
+	isLeadSession,
 	markerPath,
 	readActiveRun,
 	readActiveRunStrict,
@@ -252,6 +253,42 @@ describe("readActiveRunStrict", () => {
 			await expect(readActiveRunStrict(cwd)).rejects.toThrow("permission denied");
 		} finally {
 			read.mockRestore();
+		}
+	});
+});
+
+describe("isLeadSession", () => {
+	/** A gate's context: the seat and the session, nothing else. */
+	const seat = (at: string, session = SESSION) => ({ cwd: at, sessionManager: { getSessionId: () => session } }) as never;
+
+	test("false with no run, and for a session the marker does not name", async () => {
+		expect(await isLeadSession(seat(cwd))).toBe(false);
+		await seed(bound("orc-7", "session-other"));
+		expect(await isLeadSession(seat(cwd))).toBe(false);
+		await seed('{"schema_version":1,"run_id":"orc-7"}');
+		expect(await isLeadSession(seat(cwd))).toBe(false);
+	});
+
+	test("true for the session that started or last resumed the run", async () => {
+		await seed(bound("orc-7"));
+		expect(await isLeadSession(seat(cwd))).toBe(true);
+		expect(await isLeadSession(seat(cwd, "session-other"))).toBe(false);
+	});
+
+	test("a lead seated in a linked worktree is found through the primary's marker", async () => {
+		const linked = join(cwd, "..", `${cwd.split("/").pop()}-linked`);
+		const git = (args: string[]) => execFileAsync("git", ["-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, timeout: 5000 });
+		await git(["init", "-q", "-b", "main"]);
+		await writeFile(join(cwd, ".gitignore"), ".orchestration/\n");
+		await git(["add", ".gitignore"]);
+		await git(["commit", "-q", "-m", "init"]);
+		await git(["worktree", "add", "-q", "-b", "feature", linked]);
+		try {
+			await seed(bound("orc-7"));
+			expect(await isLeadSession(seat(linked))).toBe(true);
+			expect(await isLeadSession(seat(linked, "session-other"))).toBe(false);
+		} finally {
+			await rm(linked, { recursive: true, force: true });
 		}
 	});
 });
