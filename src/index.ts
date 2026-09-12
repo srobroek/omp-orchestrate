@@ -10,18 +10,19 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdListChecked, resetReadBudget } from "./bd";
 import { observeClaimResult } from "./claim-observer";
-import { createClaimState } from "./claim-state";
+import { createClaimInFlight, createClaimState } from "./claim-state";
 import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { createLeadExitWatch } from "./gates/lead-exit";
-import { gateOneClaim } from "./gates/one-claim";
 import { beadWriteFreeEnv, pinAddition, pinnedRunActive, rebuildBashInput, reviseBashEnv } from "./gates/readonly";
+import { gateImplementerIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope, normalizeRuntimeBeadsDir } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
 import { isBoundRunActive, registerRunCommands } from "./run-state";
+import { bdInvocations } from "./shell";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
@@ -31,7 +32,7 @@ import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 import { preflightSettings, registerWatchers } from "./watchers";
 
 /** Tools any gate inspects. Everything else returns before doing work. */
-const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true };
+const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true, task: true };
 
 /**
  * Whether this session is under orchestration: it declares an `ORC-ROLE`, or an
@@ -49,6 +50,7 @@ async function orchestrated(ctx: ExtensionContext): Promise<boolean> {
 
 export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claims = createClaimState();
+ const claimInFlight = createClaimInFlight();
  const gateExitContract = createExitGuard(claims);
  const leadExitWatch = createLeadExitWatch(claims, process.cwd(), pi.sendMessage.bind(pi));
  pi.setLabel("Orchestrate");
@@ -76,8 +78,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * Blocking gates run before G1's rewrite, because a handler returns a single
   * result: a refusal must win over a revision of an input that will not run.
   *
-  * The runtime database check, G3, G6 and G2 run only under orchestration. G5 and
-  * G7 scope themselves by the session's role, and G1 by its own pinned-run read.
+  * The runtime database check, G3, G6, G2, the spawn gate and the in-flight claim
+  * mark run only under orchestration. G5 scopes itself by the session's role, and G1
+  * by its own pinned-run read.
   *
   * The whole body is wrapped, because a throwing `tool_call` handler blocks the
   * tool it was inspecting (`extensibility/extensions/wrapper.ts:237`). A bug here
@@ -95,6 +98,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
    const scoped = await orchestrated(ctx);
 
+   if (event.toolName === "task") return scoped ? gateImplementerIsolation(input) : undefined;
+
+   // Whether this call claims a bead, whatever else it does. Read after G6, whose
+   // actor prefix moves no `--claim`.
+   let claiming = false;
+
    if (event.toolName === "bash" && scoped) {
     const runtimeDatabase = await normalizeRuntimeBeadsDir(ctx, input);
     if (!runtimeDatabase.ok) return runtimeDatabase.refusal;
@@ -105,24 +114,25 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     if (ownership) return ownership;
     // G6 before G5: it is a parse plus one marker read where G5 shells out to
     // `bd show` and `bd list`. It takes `pi` because its findings are notices
-    // rather than refusals, and a notice leaves through `sendMessage` rather than
-    // through the return value.
+    // rather than refusals: a notice leaves through `sendMessage`, and the return
+    // value carries only the actor-prefixed command.
     const discipline = await gateBdDiscipline(pi, ctx, input, event.toolCallId, claims);
-    if (discipline?.block === true) return discipline;
     if (discipline?.input !== undefined) {
      input = discipline.input as Record<string, unknown>;
      inputRevised = true;
-    } else if (discipline) {
-     return discipline;
+    }
+
+    const command = input.command;
+    claiming = typeof command === "string" && command.length > 0 &&
+     bdInvocations(command).some(invocation => invocation.hasClaim);
+    // Before G5's reads: the second of two claims batched in one turn is refused on
+    // the mark alone, without asking the store about beads it will never hold.
+    if (claiming && claimInFlight.active()) {
+     return { block: true, reason: "a claim is already in flight this turn; wait for its result before claiming again" };
     }
    }
 
    if (event.toolName === "bash") {
-    // Also before G5: a refused multi-bead claim must not be recorded, or G2
-    // would hold the session to two trees it was never allowed to claim.
-    const exclusivity = gateOneClaim(ctx, input);
-    if (exclusivity) return exclusivity;
-
     const eligibility = await gateClaimEligibility(claims, ctx, input);
     if (eligibility) return eligibility;
    }
@@ -139,6 +149,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    // missing or invalid marker fails open, while blocking gates above still win.
    if (event.toolName === "bash") {
     const revision = reviseBashEnv(input, { ...pinAddition(input), ...(await beadWriteFreeEnv(pi, ctx)) });
+    // Marked only now, once every refusal above has had its say: a refused claim runs
+    // nothing and would leave a mark no result ever lifts.
+    if (claiming) claimInFlight.begin(event.toolCallId);
     if (revision) return { input: rebuildBashInput(revision.input as Record<string, unknown>) };
     return inputRevised ? { input: rebuildBashInput(input) } : undefined;
    }
@@ -191,9 +204,14 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  // Awaited: the host holds the result until every handler settles, so a claim resolved
  // from the store is recorded before the next `tool_call` asks about it.
  pi.on("tool_result", async (event, ctx) => {
+  claimInFlight.settle(event.toolCallId);
   if (!(await orchestrated(ctx))) return;
   await observeClaimResult(pi, claims, event);
  });
+
+ // A claim call that was blocked downstream, or denied at approval, produces no result;
+ // the turn's end is the last moment its mark can be lifted.
+ pi.on("turn_end", () => claimInFlight.clear());
 
  pi.registerCommand("orchestrate-roster", {
   description: "Pull-queue depth for each role",
