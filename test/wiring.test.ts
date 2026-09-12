@@ -379,14 +379,14 @@ describe("gate dispatcher wiring", () => {
    await pinnedRun(dir, LEAD_MARKER);
    const { pi, handlers } = runtimeApi();
    ompOrchestrate(pi);
-   expect(await verdict(handlers, event, { cwd: dir })).toBeUndefined();
+   expect((await verdict(handlers, event, { cwd: dir }))?.block).toBeUndefined();
   });
 
   test("another session in the same checkout is not the lead: its merge passes G9", async () => {
    await pinnedRun(dir, JSON.stringify({ schema_version: 1, run_id: "run-lead", session_id: "someone-else" }));
    const { pi, handlers } = runtimeApi();
    ompOrchestrate(pi);
-   expect(await verdict(handlers, { toolName: "bash", input: { command: "gh pr merge 3" } }, { cwd: dir })).toBeUndefined();
+   expect((await verdict(handlers, { toolName: "bash", input: { command: "gh pr merge 3" } }, { cwd: dir }))?.block).toBeUndefined();
   });
 
   test("the lead contract reaches the lead's session_start, and nobody else's", async () => {
