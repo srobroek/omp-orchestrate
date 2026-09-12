@@ -31,7 +31,7 @@ Before the first run, put these on `PATH`:
 | --- | --- | --- |
 | `bd` (Beads) | 1.2.x | every claim, comment, and status read. `bd` embeds the database, so no server runs |
 | `wt` (Worktrunk) | current | architect feature worktrees. G3 refuses `git worktree` commands that bypass it |
-| `gh` | current | `orc_conflict_probe`, the review probes, and the shepherd's merge |
+| `gh` | 2.100 or later | `orc_conflict_probe`, the review probes, the landing capability probe, and the landing sweep's merges |
 | `git` | 2.x | every worktree, capture, and integration step |
 | `python3` | 3.x | `scripts/worktree-sweep.sh` |
 | `jq` | current | the close-out and stranded-bead queries in `beads-store.md` |
@@ -220,7 +220,7 @@ Bootstrap a run in three steps, all in the lead session:
 | Command | Does |
 | --- | --- |
 | `/orchestrate-run` | activates run enforcement in this repository: records the run's `.beads` from `bd where` and writes the marker `.orchestration/.active-run`, `pending` until bound |
-| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp. When the patrol did not arm, it warns |
+| `/orchestrate-bind <epic>` | binds the marker to the run epic once `bd show` confirms that it is open, then arms the patrol wisp and records the repository's landing capabilities on the epic as `metadata.landing`. When the patrol did not arm or the probe failed, it warns |
 | `/orchestrate-status` | shows the marker binding, the run epic's status or the reason its liveness check failed, and whether the patrol armed |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
 | `/orchestrate-close <epic> [--force]` | ends the run: removes the marker once it names `<epic>` and no bead beneath it, at any depth, is `in_progress`. `--force` skips that check. `/orchestrate-close pending` undoes an activation that never bound |
@@ -231,6 +231,25 @@ finds the marker re-pins at start and reports a pin it cannot establish. Re-issu
 injecting the protocol into every `orc-*` session in the repository. It also refuses
 the next bind until `/orchestrate-close` removes it, together with the lock file
 `.orchestration/.active-run.lock`.
+
+### Landing
+
+The plugin lands approved PRs; no agent merges. `/orchestrate-bind` runs one `gh api
+graphql` read for `autoMergeAllowed`, `squashMergeAllowed`, branch protection, rulesets
+and the merge queue, and records the result on the run epic. Mode `auto` requires
+auto-merge and at least one required check; every other repository, this one included,
+is `direct`. Every 60 s the lead session reads the open, unblocked `pr:merge` beads and
+polls their PRs with one `gh pr list` per repository. A `CLEAN` PR at the reviewed
+`head_sha` is merged with `gh pr merge --squash --match-head-commit <head>` (`auto`:
+`--auto` is added and GitHub waits for the required checks). A `DIRTY` or `BEHIND` PR
+gets a `git merge-tree` precheck in a throwaway bare clone: a clean merge is committed
+and fast-forward pushed to the PR branch; conflicts become a fix bead under the origin
+feature (`role=implementer`, or `role=architect` when a conflicting path leaves the
+origin's scope) that blocks the merge bead. A failing check is rerun once per head with
+`gh run rerun --failed`, then becomes a fix bead. The sweep writes `LANDED <sha>` or
+`BOUNCED reason=<cause>` on the merge bead and its origin, never uses `--admin`, and
+never force-pushes. The shepherd agent keeps one duty: turning an actionable review-bot
+round into a fix bead under `orc_review_round_policy`.
 
 ## Development
 

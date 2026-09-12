@@ -36,10 +36,10 @@ never stored as a bead state.
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with a `NOTE` on the node |
 
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
-| `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead; the shepherd claims it, proves CI and the bot round, serializes on the merge slot, merges, stamps, releases, closes |
+| `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead with `pr` and the reviewed `head_sha`; the plugin's landing sweep merges it at that head and writes `LANDED <sha>` |
 | `approved → dismissed` | non-git evidence only: the architect records the accepted evidence and closes with `--reason dismissed` |
 | `waiting_human` | an agent raised `ASK` on the bead and set its status `blocked`. The question is recorded in that comment. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
-| `waiting_gate` | only an external machine gate remains (CI, a release workflow, a bot round). A gate bead blocks the work bead, `BLOCKED` names it and how to resume, the claim is released, and nobody polls it |
+| `waiting_gate` | only an external machine gate remains (a release workflow, a bot round). A gate bead blocks the work bead, `BLOCKED` names it and how to resume, the claim is released, and nobody polls it. CI on a merge bead's PR is not a gate: the landing sweep observes it |
 | `failed` | unrecoverable: status `blocked` plus a `FAILED` comment, with the error recorded and surfaced |
 The lead has the same terminal duty as a claimed worker: it must finish or explicitly terminate every held bead before its session settles. Because the lead has no `yield` tool, G4 cannot intercept an incomplete final turn; the lead-exit watch checks the bound run and claim state after `agent_end`, then gives the lead up to three follow-ups when its final text has no terminal grammar verb. The lead must finish the held work and end with a terminal verb, or write `ESCALATED`/`BLOCKED` with the reason required by the grammar.
 
@@ -61,16 +61,17 @@ technical.
 
 | Evidence | Required completion proof | Terminal owner |
 |---|---|---|
-| `git` | captured branch, commit SHAs, scoped verification, independent review | shepherd closes as `merged` |
+| `git` | captured branch, commit SHAs, scoped verification, independent review | the landing sweep closes as `merged` |
 | `artifact` | absolute `output_ref`, method, verification, independent evidence review | architect closes as `dismissed` |
 | `comment` | bead comment or audit-event ref, verification, independent evidence review | architect closes as `dismissed` |
 | `external` | resource identity, read-back or before/after evidence, verification, independent evidence review | architect closes as `dismissed` |
 
 A same-PR merge fix stays nonterminal until actual landing. After verifying captured
 fix integration, independent approval and CI at the current exact PR head, the
-architect removes only the merge-to-fix `blocks` edge, preserving provenance.
-The shepherd can then land and close the fix with verified merge evidence. A
-separate prerequisite PR retains its normal close-before-ready dependency.
+architect removes only the merge-to-fix `blocks` edge and re-stamps the merge bead's
+`head_sha`, preserving provenance. The landing sweep then lands the PR and closes the
+fix with verified merge evidence. A separate prerequisite PR retains its normal
+close-before-ready dependency.
 
 Tracked documentation and configuration changes use `git`. Research, analysis, read-only
 review, and external operations may use non-git evidence, and follow the same claim, report,
@@ -110,17 +111,42 @@ claim. The node stays `in_progress` and out of `bd ready` until the explicit reo
 
 Create the merge bead with label `pr:merge`, metadata `role=shepherd`, and no parent.
 Do not use type `merge-request`: it is a ready-filter alias, not a creatable type.
-Stamp `repo`, `branch`, `base_sha`, `origin_bead`, `integration_owner=orchestrate`,
-`bot_same_issue_limit=3`, an empty `bot_issue_attempts` map, `bot_round_limit=6`,
-`bot_rounds_completed=0`, and a `bot_review_requests` provider-to-mode object. Keep
-the request object empty unless the originating work, repository policy, or a recorded
-material-risk decision requires a provider second opinion. When transferring ownership
-for the same repository/PR, `origin_bead` names the source node or its explicit parent;
+Stamp `repo` (`owner/name`), `pr`, `head_sha` (the reviewed head), `branch`, `base_sha`,
+`origin_bead`, `integration_owner=orchestrate`, `bot_same_issue_limit=3`, an empty
+`bot_issue_attempts` map, `bot_round_limit=6`, `bot_rounds_completed=0`, and a
+`bot_review_requests` provider-to-mode object. Keep the request object empty unless the
+originating work, repository policy, or a recorded material-risk decision requires a
+provider second opinion. `origin_bead` names the source node or its explicit parent;
 preserve that parent in ownership snapshots. Source approval does not transfer. While
 retaining sole PR-update ownership, the architect requests every configured provider at
-the exact head and records the request result before dispatching the shepherd. After the
-shepherd verifies the PR/head, stamp the merge's own `pr` and `head_sha`; its own approval,
-`in_progress` state and exact head govern dispatch.
+the exact head and records the request result before dispatching the shepherd.
+
+### Landing
+
+The plugin lands. `/orchestrate-bind` probes the repository once (`autoMergeAllowed`,
+`squashMergeAllowed`, branch protection and rulesets, merge queue) and records the
+result on the run epic as `metadata.landing`. Mode `auto` needs auto-merge allowed and at
+least one required check; every other repository is `direct`. Every 60 s the lead's
+landing sweep reads the open, unblocked merge beads, polls their PRs with one `gh pr
+list` per repository, and acts:
+
+| Observation | Action |
+|---|---|
+| `MERGED` | stamp `merge_sha`, write `LANDED <sha>` on merge and origin, close the merge bead. A head other than `head_sha` lands as `LANDED ... UNGUARDED` with a review note on the origin |
+| `CLOSED` unmerged | `BOUNCED reason=closed`, status `blocked` |
+| draft, `UNKNOWN`, checks running | wait, write nothing |
+| head is not `head_sha` | `BLOCKED` once; the architect re-reviews and re-stamps `head_sha` |
+| `CLEAN` at `head_sha`, checks green | `auto`: `gh pr merge --auto --squash --match-head-commit <head>`; `direct`: `gh pr merge --squash --match-head-commit <head>`, then read the merge back |
+| `DIRTY` or `BEHIND` | `git merge-tree` precheck in a throwaway bare clone. Clean: commit the merged tree, fast-forward push it to the PR branch, stamp the new `head_sha`, `NOTE landing refreshed`. Conflicts: an implementer fix bead under the origin's feature, `blocks` the merge bead, `discovered-from` the origin; `role=architect` when a conflicting path leaves the origin's scope. `BOUNCED reason=conflict` |
+| a required (or, with none required, any) check failing | `gh run rerun --failed` once per head, then an implementer fix bead with the check, run and `--log-failed` pointer. `BOUNCED reason=ci` |
+| `BLOCKED` by branch rules with checks green | `BLOCKED` once, naming the rule class |
+
+The sweep never merges with `--admin`, never force-pushes, and never arms `--auto` on a
+repository without a required check: there `gh` merges at once, `UNSTABLE` included. A
+fix bead's `blocks` edge keeps the sweep off the merge bead until the fix closes; the
+architect then re-stamps `head_sha` and the next sweep lands. Attention states write
+one `BLOCKED` per cause. Every terminal writes one verb: `LANDED <sha>` or `BOUNCED
+reason=<cause>`.
  
 ### Automated review loop
 
@@ -149,9 +175,9 @@ and only issues actionable in the current exact-head round. A `decision=escalate
 result produces ESCALATED instead of another fix. An invalid result is BLOCKED. The
 escalation record names the exhausted bound, completed rounds, issue identities,
 attempts, prior heads, fix beads, thread URLs, and the `ASK` fields: one human question,
-its impact and the resume transition. Set the merge bead's status to `blocked`, release
-the merge slot, preserve the PR and feature tree, and notify `Main` through `hub` with only
-the merge bead id. No unrelated queue waits.
+its impact and the resume transition. Set the merge bead's status to `blocked`, preserve
+the PR and feature tree, and notify `Main` through `hub` with only the merge bead id. No
+unrelated queue waits.
 
 When both limits permit a fix, the shepherd records BOUNCED, creates one unassigned fix
 bead for the aggregated round, and wakes the owning architect with the bead id. When two
@@ -163,7 +189,8 @@ addressed issue count once, replies where a rejection needs evidence, resolves a
 threads with GitHub's `resolveReviewThread` mutation, and reads back `isResolved=true`.
 Record the resolved thread ids and new head before removing the same-PR merge blocker.
 Before waking the shepherd, the architect requests configured manual providers for the
-new exact head. The next shepherd patrol verifies those markers and probes every bot.
+new exact head and re-stamps the merge bead's `head_sha`. The next shepherd pass verifies
+those markers and probes every bot; the landing sweep lands the PR.
 
 ## Persistence classes
 
@@ -171,7 +198,7 @@ new exact head. The next shepherd patrol verifies those markers and probes every
 |---|---|---|
 | Session | the lead | owns the run epics and the marker; restartable from bead state alone |
 | Domain | architect | one epic, one Worktrunk feature branch; replaceable mid-epic, because the tree and the beads carry the domain |
-| Landing | shepherd | one merge bead, two phases across the CI gate; the second phase is a fresh spawn, not a wait |
+| Landing | the plugin's landing sweep; the shepherd only for a bot round | one merge bead; the sweep is a 60 s timer in the lead session, the shepherd one ephemeral pass |
 | Task-scoped | implementer, reviewer, researcher | claim one bead or wisp, report there, release, exit. Respawn reads the bead, its comments, and its linked wisps |
 | Untracked | helper | runs inside its spawner's awaited job; architect outcomes are promoted to feature comments before trace compaction. A task receipt is not completion; the parent must collect the terminal result before mutating a shared checkout |
 
@@ -351,10 +378,8 @@ source of truth.
 
 - **Architect:** replace it between waves, never mid-integration. The feature branch and the
   bead state carry the domain.
-- **Shepherd:** it is already two ephemeral phases, but each phase claims only the ordinary
-  merge bead; gate creation/discovery and the merge slot are separate controls, not wisp
-  claims. Restart from the merge bead after the slot is released, never during a landing
-  transaction.
+- **Shepherd:** one ephemeral pass over the ordinary merge bead. Restart from the merge
+  bead; nothing else holds state for it.
 - **Workers:** replace only after explicit exclusive-window recovery releases their claim; a
   recovery-needed note alone never makes work claimable. Recovery inventories ordinary and
   ephemeral ownership separately and releases each through its own path.
@@ -414,9 +439,8 @@ have enforced:
   `orc_run_status` reports zero orphans from it.
 - **An external wait is a gate on the bead that waits.** CI, PR and human waits are
   `bd gate create --type=<kind> --blocks <work bead>`, created by the actor that discovered
-  the wait. `bd gate check --type=gh` runs at the top of each shepherd patrol until the
-  landing design removes the CI gate. Timer semantics live in the plugin sweep, never in a
-  timer gate.
+  the wait. A merge bead's PR is not gated: the landing sweep observes its checks and merge
+  state. Timer semantics live in the plugin sweep, never in a timer gate.
 
 ## Waiting on an external machine gate
 
@@ -424,9 +448,9 @@ The same rule applies when the wait is on a machine rather than a person: a CI r
 release workflow, a release PR's checks, a review bot's round, or a long-running reviewer.
 Nobody polls it and nobody holds a session open for it.
 
-Park the bead instead. Add `bd gate create --type=gh:run --blocks <bead> --await-id <run-id>`
-for a workflow run or `--type=gh:pr --await-id <pr#>` for a PR, comment `BLOCKED` naming the
-gate bead and how to resume, then release the phase-one claim with
+Park the bead instead. Add `bd gate create --type=gh:pr --blocks <bead> --await-id <pr#>` for
+a PR outside the run's landing, or `--type=human` for a person, comment `BLOCKED` naming the
+gate bead and how to resume, then release the claim with
 `bd update <bead> --status open --assignee ""`. The gate bead is the hold: `bd ready` hides
 the work bead until the gate resolves. Continue unrelated beads from `bd ready`. When
 nothing else is ready and only external waits remain, write the run report and exit; the
