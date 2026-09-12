@@ -11,7 +11,8 @@
  * on stdout for the observer, while the run has capacity for another code-writing claim,
  * and only where the candidate's scope is disjoint from every held code-writing claim
  * outside its own lineage. A session declaring no role under a pinned run is the lead,
- * or a helper, and claims nothing. v19's `orchestrator-claim-deny.py` compared actor
+ * or a helper, and claims nothing but the run epic, whose assignee carries the lead
+ * lease (`src/run-state.ts`). v19's `orchestrator-claim-deny.py` compared actor
  * names against a regex for "looks like a worker, not a lead", which a cooperative name
  * defeated; here the refusal keys on the absent `ORC-ROLE` marker and the run pin,
  * neither of which the agent writes.
@@ -555,6 +556,20 @@ async function boundEpic(cwd: string): Promise<string | undefined> {
  return undefined;
 }
 
+/**
+ * Whether every claim in the command names the run epic and nothing else. The epic's
+ * assignee carries the lead lease (`src/run-state.ts`), so `bd update <epic> --claim` is
+ * the lead's one claim; a queue pull or any other bead is still a work claim.
+ */
+async function leadLeaseClaim(claimInvocations: readonly BdInvocation[], cwd: string): Promise<boolean> {
+ const epic = await boundEpic(cwd);
+ if (epic === undefined) return false;
+ return claimInvocations.every(claim => {
+  const targets = claimTargets(claim);
+  return targets.length === 1 && targets[0] === epic;
+ });
+}
+
 /** Code-writing claims a run admits at once when its epic names no `max_inflight`. */
 const DEFAULT_MAX_INFLIGHT = 8;
 
@@ -732,7 +747,7 @@ export async function gateClaimEligibility(
 
  const claimInvocations = invocations.filter(invocation => invocation.hasClaim);
  if (claimInvocations.length === 0) return undefined;
- if (sessionRoleName === undefined && cwd !== undefined && (await pinnedRunActive(cwd))) {
+ if (sessionRoleName === undefined && cwd !== undefined && (await pinnedRunActive(cwd)) && !(await leadLeaseClaim(claimInvocations, cwd))) {
   return { block: true, reason: "the lead never claims work beads; dispatch a worker through its queue" };
  }
  if (input.async === true) {
