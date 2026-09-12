@@ -747,7 +747,7 @@ export async function preflightAgents(
  reportedAgentFindings?: Set<string>,
 ): Promise<AgentDiscoveryFinding[]> {
  if (ctx.models === undefined) return [];
- const settings = await readSettings(ctx.cwd);
+ const settings = (await readSettings(ctx.cwd)) ?? {};
  const rawOverrides = settings["task.agentModelOverrides"];
  const modelOverrides =
   rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
@@ -952,6 +952,7 @@ export function resetWatchers(): void {
  goalQueues.clear();
  configuredAuditDir = undefined;
  settingsChecked = false;
+ settingsSnapshots.clear();
 }
 
 // ============================================================================
@@ -1053,8 +1054,32 @@ export function settingsDeviations(observed: Readonly<Record<string, unknown>>):
  return found;
 }
 
-/** Read the supported effective-settings snapshot; unreadable values prove nothing. */
-async function readSettings(cwd: string): Promise<Record<string, unknown>> {
+/**
+ * One settings snapshot per cwd per session. `omp config list --json` costs about a
+ * second, and every `task` dispatch used to pay it to read a session-constant value;
+ * memoising the promise also coalesces the two `session_start` readers into one spawn.
+ * An unreadable answer is not kept, so the next caller asks again rather than
+ * inheriting a failure for the session.
+ */
+const settingsSnapshots = new Map<string, Promise<Record<string, unknown> | null>>();
+
+/**
+ * Read the supported effective-settings snapshot, or `null` when it could not be read.
+ * Unreadable values prove nothing, and a caller that treated `{}` as an answer would
+ * mark a check done that never ran.
+ */
+function readSettings(cwd: string): Promise<Record<string, unknown> | null> {
+ const cached = settingsSnapshots.get(cwd);
+ if (cached !== undefined) return cached;
+ const reading = spawnSettings(cwd).then(settings => {
+  if (settings === null) settingsSnapshots.delete(cwd);
+  return settings;
+ });
+ settingsSnapshots.set(cwd, reading);
+ return reading;
+}
+
+async function spawnSettings(cwd: string): Promise<Record<string, unknown> | null> {
  const bin = process.env.OMP_BIN ?? "omp";
  try {
   const proc = Bun.spawn([bin, "config", "list", "--json"], {
@@ -1065,9 +1090,9 @@ async function readSettings(cwd: string): Promise<Record<string, unknown>> {
   const timer = setTimeout(() => proc.kill(), 10_000);
   try {
    const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-   if (code !== 0) return {};
+   if (code !== 0) return null;
    const parsed: unknown = JSON.parse(stdout);
-   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
    const observed: Record<string, unknown> = {};
    for (const key of [...REQUIRED_SETTINGS.map(setting => setting.key), "modelRoles", "task.agentModelOverrides"]) {
     const entry: unknown = (parsed as Record<string, unknown>)[key];
@@ -1078,79 +1103,82 @@ async function readSettings(cwd: string): Promise<Record<string, unknown>> {
    clearTimeout(timer);
   }
  } catch {
-  return {};
+  return null;
  }
 }
 
+/** Set once the settings have actually been read; an unreadable host leaves the check pending. */
 let settingsChecked = false;
 
 /**
  * Report deviating settings once per session, on the notification surface and on
- * the run epic.
+ * the run epic, and put the run's database pin in place.
  *
  * The bead comment is the load-bearing half: a run driven with `--print` shows no
  * notifications, and the operator who has to change a setting is often reading the
  * epic afterwards rather than watching a terminal. Warn-only by construction -- the
  * settings belong to the operator, and refusing to run would strand a repository
  * whose owner cannot reach its configuration.
+ *
+ * "Once" means once the settings were actually read. A host where `omp` is missing
+ * or hangs leaves the check pending, says so, and runs it again on the next
+ * activation, instead of marking a check done that never happened.
  */
 export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<SettingDeviation[]> {
  resetReadBudget();
  if (settingsChecked) return [];
- settingsChecked = true;
  const observed = await readSettings(cwd);
- const deviations = settingsDeviations(observed);
- const lines = deviations.map(
-  deviation =>
-   `${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`,
- );
+ const lines: string[] = [];
+ let deviations: SettingDeviation[] = [];
+ if (observed === null) {
+  lines.push(
+   "the effective settings could not be read (`omp config list --json` failed or timed out), so the required task settings are unverified; the check runs again on the next /orchestrate-run",
+  );
+ } else {
+  settingsChecked = true;
+  deviations = settingsDeviations(observed);
+  for (const deviation of deviations) {
+   lines.push(`${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
+  }
 
- // The database check is independent of the settings: isolation working correctly
- // is exactly what splits the database, so a run with a perfect settings block can
- // still lose every claim.
- //
- // Only an observed true proves isolation is on; an unavailable setting
- // cannot establish that this repository risks a split database.
- const isolating = observed["task.isolation.enabled"] === true;
- // Probe through bd itself instead of looking only for cwd/.beads. Linked worktrees share the
- // primary checkout's database and intentionally have no local .beads directory.
- // Under an embedded database the precondition is a pinned path, not a server. A copied
+  // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
+  // may fall back to the session model or fail selection. Preflight checks that the
+  // selection exists, not whether author and reviewer use different model families.
+  //
+  // An UNREADABLE setting is skipped, matching this function's rule of warning only
+  // about what it can prove. An empty object is not unreadable: it proves the role is
+  // absent, which is exactly the case worth warning about.
+  const roles = observed.modelRoles;
+  if (typeof roles === "object" && roles !== null) {
+   for (const role of DECLARED_MODEL_ROLES) {
+    if (Object.hasOwn(roles, role)) continue;
+    lines.push(
+     `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
+    );
+   }
+  }
+ }
+
+ // The database pin is independent of the settings, and of whether they could be read.
+ // The pin lives in this process's environment, so it does not survive a restart: a
+ // lead that comes back to a marked repository has G1 inert and every isolated worker
+ // resolving its own database until something re-pins. This is that something. Probe
+ // through bd itself instead of looking only for cwd/.beads: linked worktrees share the
+ // primary checkout's database and intentionally have no local .beads directory, a copied
  // checkout can resolve a private or unrelated ancestor database because `.beads/` is
- // gitignored. A linked worktree resolves the primary checkout's database but still needs
- // the pin so every child inherits the same answer.
- //
- // The pin is applied here rather than demanded of the operator. `ensureBeadsPath` asks bd
- // for the active database, accepts the checkout or its Git-shared primary database, rejects
- // unrelated external databases, and exports the canonical path. Only refusal merits a line.
+ // gitignored. `ensureBeadsPath` asks bd for the active database, accepts the checkout or
+ // its Git-shared primary database, rejects unrelated external databases, validates an
+ // inherited pin, and exports the canonical path. Only refusal merits a line.
  //
  // An earlier version of this block demanded a per-project Dolt server instead. That server
  // cost a lifecycle nobody owned: bd decides whether one runs from `.beads/dolt-server.pid`
  // rather than from the port, so a removed pid file made every later call start a rival --
  // nine consecutive lock refusals in one log, and 28 orphaned servers on this machine.
- if (isolating && (process.env.BEADS_DIR ?? "") === "") {
-  const pinned = await ensureBeadsPath(cwd);
-  if (!pinned.ok) {
-   lines.push(
-    `isolation is on and BEADS_DIR could not be pinned, so an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
-   );
-  }
- }
-
- // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
- // may fall back to the session model or fail selection. Preflight checks that the
- // selection exists, not whether author and reviewer use different model families.
- //
- // An UNREADABLE setting is skipped, matching this function's rule of warning only
- // about what it can prove. An empty object is not unreadable: it proves the role is
- // absent, which is exactly the case worth warning about.
- const roles = observed.modelRoles;
- if (typeof roles === "object" && roles !== null) {
-  for (const role of DECLARED_MODEL_ROLES) {
-   if (Object.hasOwn(roles, role)) continue;
-   lines.push(
-    `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
-   );
-  }
+ const pinned = await ensureBeadsPath(cwd);
+ if (!pinned.ok) {
+  lines.push(
+   `BEADS_DIR could not be pinned, so generic helpers are not sandboxed and an isolated worker resolves its own beads database rather than this run's: ${pinned.reason}`,
+  );
  }
 
  if (lines.length === 0) return deviations;
@@ -1221,7 +1249,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   // orchestrated runs, and a repository that merely tracks work in beads has no
   // claims to split until one starts. `/orchestrate-run` runs the settings check
   // at activation, and the `task` handler below checks agents at spawn, so a
-  // session that never orchestrates hears nothing.
+  // session that never orchestrates hears nothing. The two preflights share one
+  // settings read through the per-cwd memo.
   if (sessionRole(pi) === "lead" && (await readActiveRun(cwd)) !== null) {
    preflightSettings(pi, cwd).catch(error => logFailure(pi, "settings preflight", error));
    runInDiscoveryScope(() => preflightAgents(pi, ctx, [], reportedAgentFindings)).catch(error =>
@@ -1254,6 +1283,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
   unsubscribers.push(pi.events.on(LSP_STARTUP_CHANNEL, noteLspStartup));
  });
  pi.on("session_shutdown", () => dispose());
+ // A switched session may sit in a different cwd with different effective settings.
+ pi.on("session_switch", () => settingsSnapshots.clear());
 
  /**
   * W3, second half: enforce core assignments before observing `task` spawns.

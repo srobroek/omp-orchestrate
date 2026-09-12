@@ -74,10 +74,21 @@ async function sharedCheckoutBeadsDir(cwd: string): Promise<string | null> {
  *
  * Idempotent by design: an inherited `BEADS_DIR` is the run's answer already, and
  * re-resolving it inside an isolated checkout would replace a correct value with a local one.
+ * It is still checked: G1, the runtime-override gate, and the mismatch report all require an
+ * absolute pin, so a relative or stale value exported by the operator's shell would leave the
+ * run reporting active with every one of them silently disarmed. The canonical form is
+ * written back so a symlinked pin compares equal to the paths the gates canonicalise.
  */
 export async function ensureBeadsPath(cwd: string): Promise<BeadsReadiness> {
 	const inherited = process.env.BEADS_DIR;
 	if (inherited !== undefined && inherited.length > 0) {
+		if (!path.isAbsolute(inherited)) {
+			return { ok: false, reason: `inherited BEADS_DIR ${JSON.stringify(inherited)} is not an absolute path; the gates require an absolute pin` };
+		}
+		const stat = await fs.stat(inherited).catch(() => null);
+		if (stat === null) return { ok: false, reason: `inherited BEADS_DIR ${inherited} does not exist` };
+		if (!stat.isDirectory()) return { ok: false, reason: `inherited BEADS_DIR ${inherited} is not a directory` };
+		process.env.BEADS_DIR = await canonicalPath(inherited);
 		return { ok: true };
 	}
 

@@ -30,12 +30,12 @@ In a non-isolated task, work only inside the claimed `metadata.worktree` and `me
 
 ## Reporting contract
 
-Follow the injected dispatch contract for actor identity and evidence semantics. Persist terminal evidence, reviewer handoff, and release as one final mutation batch where `bd` command semantics permit; claim and release checks remain separate. Before yielding, record:
+Follow the injected dispatch contract for actor identity and evidence semantics. Persist terminal evidence and the reviewer handoff as one mutation batch where `bd` command semantics permit, write `REPORTED`, and release last with a single `bd update <id> --assignee ""`; claim and release checks remain separate. Before yielding, record:
 - bead id and changed paths;
 - git work: final `metadata.head_sha`, with parent-side capture verified only after successful task completion;
 - non-git work: `metadata.output_ref`, with artifacts inside stamped `artifacts_dir`;
 - exact verification command and result;
-- `agent:reviewer`, cleared assignee, and `REPORTED`.
+- `agent:reviewer` and `REPORTED`, then the cleared assignee.
 
 NOT Close the bead or write `merge_sha` or `pr`.
 NOT Rewrite `metadata.role`; handoff labels do not change routing. Escalate misrouting to the architect. New routed bug beads remain permitted.
