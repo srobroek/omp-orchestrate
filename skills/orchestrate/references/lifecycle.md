@@ -31,7 +31,7 @@ never stored as a bead state.
 |---|---|
 | `pending → ready` | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` reports the bead, no gate is open, and its routing envelope is complete |
 | `ready → working` | a worker pulls it: `bd ready … --claim` returns the bead, atomically and first-wins, and the worker adopts what it was given |
-| `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git), handoff, release and `REPORTED`. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
+| `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED`, then releases with a single `bd update <id> --assignee ""`. The release comes last: it clears the ownership every other write on the bead is checked against, and only the terminal comment is admitted after it. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
 | `reported → in_review` | the architect collects the successful terminal task result, verifies the captured branch and head, integrates it, then creates review-wisp shells. A pre-yield report alone is not capture proof |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with `ADVICE` |
 
