@@ -23,19 +23,34 @@
 # No post-start hook. An earlier version refreshed a possibly-stale port file in the `.beads/`
 # a worktree inherited, and `.worktreeinclude` no longer copies `.beads/` at all: that copy
 # could not be narrowed below the whole directory, so it carried Dolt storage a worktree must
+# never serve from. A linked worktree resolves the primary checkout's database natively (bd
+# reads the common git dir), so there is nothing local to refresh.
 
+# Scope of the sync hooks below: they DO reach the primary checkout's database from a
+# worktree. `.worktreeinclude` excludes `.beads/`, so a worktree holds no store of its own, and
+# `bd` in a linked worktree resolves the primary's `.beads` through the common git dir. Each
+# hook therefore runs a Dolt engine against the one store every session shares -- and through
+# the `bd` router that engine runs inside the colima guest, whose `flock` the host never sees.
+# Seven `wt switch` pulls from fixer worktrees overlapping host claims is how the journal was
+# corrupted on 2026-09-12 (`scratch/audit/research/ResCorruption.md`). Hence:
+#
+# - no `post-switch` pull at all: a branch switch does not change which beads exist in a
+#   shared database, so the hook bought nothing and ran the most often;
+# - `post-commit` and `post-merge` sync only while no orchestrate run is active, read from the
+#   primary's `.orchestration/.active-run` (the marker `src/run-state.ts` writes). During a run
+#   the lead syncs once, at the barrier, after every agent has yielded; G6 refuses agent-side
+#   syncs and this guard keeps the hooks from being a second path around it.
+#
+# These remain human conveniences that usually run, never an invariant: a plain `git commit`
+# bypasses them, and `--no-hooks` skips them.
 
 [post-commit]
 # Push the Dolt database to the `git+` remote already registered as `origin`, so a commit and
 # the bead state it refers to travel together. Without this the database is local-only: no
 # dolt refs existed on the remote before this file.
-beads-push = "bd dolt push || true"
+beads-push = "test ! -f {{ primary_worktree_path }}/.orchestration/.active-run && bd dolt push || true"
 
 [post-merge]
 # Pull first, then repair. `bd recompute-blocked` exists for exactly this: beads documents it
 # as repairing stale is_blocked flags after a pull, and a stale flag hides ready work.
-beads-pull = "bd dolt pull && bd recompute-blocked || true"
-
-[post-switch]
-# A branch switch changes which beads are current, so the database follows the checkout.
-beads-pull = "bd dolt pull || true"
+beads-pull = "test ! -f {{ primary_worktree_path }}/.orchestration/.active-run && bd dolt pull && bd recompute-blocked || true"

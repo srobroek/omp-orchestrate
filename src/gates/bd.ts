@@ -1,5 +1,6 @@
 /**
- * G6 — bd call discipline: the identity, the comment verb, the bug route.
+ * G6 — bd call discipline: the identity, the comment verb, the bug route; and two
+ * refusals, the routed sync and a named database.
  *
  * TTSR rules, converted. Each was advisory because a regex over a command string cannot
  * see whether a run is active and cannot parse a shell line. The verb condition ran from
@@ -7,23 +8,30 @@
  * parser-backed check earns what a regex could not be trusted with, and reading the run
  * marker is what keeps it off every other session.
  *
- * None of the three notices blocks. A single unattributed mutation may instead return a rewritten
- * input when a run-scoped actor is known; otherwise the notice leaves through `pi.sendMessage`
- * and the command runs. `ToolCallEventResult` carries no advisory shape, but `pi` is in scope
- * inside the handler, so a notice needs no new return channel.
+ * The three notices never block. A single unattributed mutation may instead return a
+ * rewritten input when a run-scoped actor is known; otherwise the notice leaves through
+ * `pi.sendMessage` and the command runs. `ToolCallEventResult` carries no advisory shape,
+ * but `pi` is in scope inside the handler, so a notice needs no new return channel.
  *
- * A pin check (`-C <run repo>` required on every call) existed here and was removed:
- * the run pins BEADS_DIR instead, which every child inherits, so bd reads the run's
- * database without a per-call flag. The walk-up-from-cwd hazard the check guarded against
- * is closed at the environment rather than at each call site. It does not exist under a
- * server, so the block refused correct commands while citing a mechanism that did not
- * apply. `-C` remains legal and harmless; it is simply not demanded.
+ * The two refusals do block, and both guard the same invariant: one database per run,
+ * open for writing in one lock domain at a time. `bd dolt push|pull|fetch|clone|sync`
+ * from a spawned session is refused because the `bd` router runs those verbs in a
+ * container whose `flock` the host never sees, so a second engine writes the journal
+ * beside the host's writers; the lead syncs once at the barrier, after every agent has
+ * yielded (`scratch/audit/research/ResCorruption.md`). `--db <path>` and `BEADS_DB=` are
+ * refused in every role because they name a store other than the run's.
  *
- * Nothing here fires outside a pinned run: `pinnedRunActive` — the process pin plus a
- * valid marker in the session checkout or the pinned repository — is the whole
- * discriminator, and a plain session in this repository sees no gate at all. That is the
- * defect the conversion exists to fix — a rule condition matched every session that
- * mentioned `bd`.
+ * A pin check (`-C <run repo>` required on every call) existed here and was removed: the
+ * run's database is reached from a worker's clone through the `.beads/redirect` written
+ * at its first `session_start` (`src/clone-adopt.ts`), so bd resolves the run's store
+ * from any directory of the clone with no per-call flag and no environment variable. The
+ * walk-up-from-cwd hazard the check guarded against is closed at the store rather than at
+ * each call site. `-C` remains legal and harmless; the redirect makes it correct.
+ *
+ * Nothing here fires outside a pinned run: `pinnedRunActive` — a valid marker in the
+ * session checkout — is the whole discriminator, and a plain session in this repository
+ * sees no gate at all. That is the defect the conversion exists to fix — a rule condition
+ * matched every session that mentioned `bd`.
  *
  * Each check is pure and takes the parsed invocation, so the shell parsing stays at the
  * entry point and the predicates are testable without a tool event. A check that cannot
@@ -38,7 +46,7 @@ import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdShow, commentVerb, metadataRecord } from "../bd";
 import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
-import { legacyRoleFromLabel, ROUTING_KEY } from "../identity";
+import { legacyRoleFromLabel, ROUTING_KEY, sessionRole } from "../identity";
 import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, splitFlag } from "../shell";
 import { pinnedRunActive } from "./readonly";
 
@@ -629,7 +637,65 @@ export const bugRouteNotice: BdCheck = invocation => {
 const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice];
 
 /**
- * Warn about a `bd` call this run cannot attribute, cannot read, or cannot route.
+ * One refusal on one parsed invocation: the reason, or `undefined` to let it run.
+ *
+ * `lead` is the session's seat, not its declared role: a spawned helper with no
+ * `ORC-ROLE` is as much a second writer as an implementer is.
+ */
+export type BdRefusal = (invocation: BdInvocation, env: unknown, lead: boolean) => string | undefined;
+
+/**
+ * `bd dolt` actions that move the database through a second Dolt engine. bd 1.2.2 has
+ * `pull` and `push`; the rest are the verbs the router would forward if bd grew them,
+ * and refusing a verb that does not exist costs nothing.
+ */
+const DOLT_SYNC_ACTIONS: Record<string, true> = { clone: true, fetch: true, pull: true, push: true, sync: true };
+
+/**
+ * Refusal: a routed sync from a spawned session.
+ *
+ * The lead is exempt because the sync is its barrier step. A call that only asks for
+ * help runs no engine. The refusal names the step so a worker that wanted its commits to
+ * travel learns they will, once, after it yields.
+ */
+export const syncRefusal: BdRefusal = (invocation, _env, lead) => {
+	if (lead || invocation.subcommand !== "dolt") return undefined;
+	const action = invocation.positionals[0] ?? "";
+	if (DOLT_SYNC_ACTIONS[action] !== true) return undefined;
+	if (invocation.rest.some(token => token === "--help" || token === "-h")) return undefined;
+	return (
+		`sync is the lead's barrier step: 'bd dolt ${action}' from a worker runs a second Dolt engine ` +
+		`against the run's store while host writers hold it, which is how the journal was corrupted. ` +
+		`Commit and yield; the lead runs 'bd dolt commit' and 'bd dolt push' once after every agent has yielded.`
+	);
+};
+
+/** The database carrier bd reads from the environment. */
+const DATABASE_VAR = "BEADS_DB";
+
+/**
+ * Refusal: a database named on the call, in any role.
+ *
+ * `--db` as its own token or as `--db=<path>`, the variable as an inline assignment or
+ * through `env`, or the variable in the `bash` call's own `env` object: each points bd at
+ * a store the run does not read. `-C` is not one of them; the clone's redirect resolves it
+ * to the run's store.
+ */
+export const databaseRefusal: BdRefusal = (invocation, env) => {
+	let carrier: string | undefined;
+	if (invocation.rest.some(token => splitFlag(token).flag === "--db")) carrier = "--db";
+	else if (invocation.assignments.has(DATABASE_VAR)) carrier = `${DATABASE_VAR}=`;
+	else if (env !== null && typeof env === "object" && Object.hasOwn(env, DATABASE_VAR)) carrier = `env.${DATABASE_VAR}`;
+	if (carrier === undefined) return undefined;
+	return `the run's database is resolved by bd; '${carrier}' names another store`;
+};
+
+/** The refusals, in the order their reasons read best; the first that speaks wins. */
+const REFUSALS: readonly BdRefusal[] = [syncRefusal, databaseRefusal];
+
+/**
+ * Refuse a `bd` call that would open a second store or a second engine; otherwise warn
+ * about one this run cannot attribute, cannot read, or cannot route.
  */
 export async function gateBdDiscipline(
 	pi: ExtensionAPI,
@@ -645,6 +711,14 @@ export async function gateBdDiscipline(
 	if (invocations.length === 0) return undefined;
 
 	if (!(await pinnedRunActive(ctx.cwd))) return undefined;
+
+	const lead = sessionRole(pi) === "lead";
+	for (const invocation of invocations) {
+		for (const refusal of REFUSALS) {
+			const reason = refusal(invocation, input.env, lead);
+			if (reason !== undefined) return { block: true, reason };
+		}
+	}
 
 	const arbiter = actorNoticeArbiter();
 	if (invocations.length === 1 && isSingleBdCommand(command)) {

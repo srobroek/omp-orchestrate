@@ -90,9 +90,18 @@ dispatch; pending claims are invalid. Binding requires an active marker, permits
 same id and refuses a different run.
 
 
-With the repository's Dolt remote configured, run `bd dolt push` after graph creation,
-at landed phase boundaries and before standing down. A git branch push does not carry
-`refs/dolt/data`; `bd backup` is not remote sync. A Worktrunk commit hook is only a convenience.
+Sync discipline: the lead is the only session that runs `bd dolt push` or `bd dolt pull`
+while a run is active, and it does so once, at the barrier, after every agent has yielded:
+`bd dolt commit`, then `bd dolt push`. The routed `bd dolt` sync runs a second Dolt engine
+against the same journal from a lock domain host writers cannot see, which is how one run
+corrupted the store; G6 refuses `bd dolt push|pull|fetch|clone|sync` from every spawned
+session, and the Worktrunk `post-commit`/`post-merge` hooks skip their sync while
+`.orchestration/.active-run` exists. Also push after graph creation and before standing
+down. A git branch push does not carry `refs/dolt/data`; `bd backup` is not remote sync.
+`src/store-probe.ts` answers `free`, `locked` (naming the holder), `corrupted` (quoting the
+journal error) or `slow` for a store; a `locked` or `corrupted` store is never synced, and
+the plugin repairs neither: it starts, stops, and kills no Dolt server and never touches
+`noms/LOCK`. `dolt fsck` in the store directory is the operator's diagnosis.
 
 ## Bead type vocabulary
 
