@@ -166,9 +166,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
  // A queue claim names no bead, so its id exists only in the result. Without this the
  // exit contract took its no-bead branch for every session that pulled work normally,
- // and every check that hangs off the claimed bead went unevaluated.
- pi.on("tool_result", event => {
-  observeClaimResult(claims, event);
+ // and every check that hangs off the claimed bead went unevaluated. Awaited: the host
+ // holds the result until every handler settles, so a claim resolved from the store is
+ // recorded before the next `tool_call` asks about it.
+ pi.on("tool_result", async event => {
+  await observeClaimResult(pi, claims, event);
  });
 
  pi.registerCommand("orchestrate-status", {
