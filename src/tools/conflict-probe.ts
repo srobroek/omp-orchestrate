@@ -1,14 +1,15 @@
 /**
  * `orc_conflict_probe` — deterministic merge-conflict and CI probe for the Shepherd.
  *
- * A native port of `orchestrate/scripts/conflict-probe.sh`. It predicts whether a
- * branch merges into a base WITHOUT mutating any tree (`git merge-tree`), whether
- * two branches touch overlapping files, and what CI says about a PR.
+ * Originally a shell script in the orchestrate skill. It predicts whether a branch
+ * merges into a base WITHOUT mutating any tree (`git merge-tree`), whether two
+ * branches touch overlapping files, and what CI says about a PR.
  *
  * Every answer is a tool result, never an exception: a missing `git`/`gh`, a bad
- * ref, or a merge-tree the caller's git cannot classify all return text plus
- * structured `details`, so a probe failure degrades to "unknown" instead of
- * bricking the tool call that asked.
+ * ref, a merge-tree the caller's git cannot classify, or a `gh` that failed before
+ * reading any check all return text plus structured `details` with `isError` set, so
+ * a probe failure degrades to "unknown" instead of bricking the tool call that asked
+ * -- and instead of posing as an answer.
  */
 
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -26,9 +27,15 @@ export interface ConflictProbeDetails {
  paths?: string[];
  /** Paths both branches touch (`pairwise`). */
  overlap?: string[];
- /** `gh pr checks` exit status (`ci`), which the caller interprets as gh does. */
+ /**
+  * `gh pr checks` exit status (`ci`): 0 every check passed, 8 checks still pending,
+  * 1 with output at least one check failed. Also carried beside `error` when `gh`
+  * itself failed (1 without output, 2, 4), so the caller can tell auth from CI.
+  */
  exitCode?: number;
  error?: string;
+ /** What the failing subprocess said, when it said anything. */
+ stderr?: string;
 }
 
 type Run = (argv: string[]) => Promise<ExecResult | null>;
@@ -125,17 +132,24 @@ function missing(argv: string[], mode: ProbeMode): AgentToolResult<ConflictProbe
  });
 }
 
+/** A subprocess answered with a failure; its stderr is the only reason the operator gets. */
+function failed(text: string, details: ConflictProbeDetails, result: ExecResult): AgentToolResult<ConflictProbeDetails> {
+ const stderr = result.stderr.trim();
+ if (stderr === "") return fail(text, details);
+ return fail(`${text}: ${stderr}`, { ...details, stderr });
+}
+
 async function probeConflicts(base: string, branch: string, run: Run): Promise<AgentToolResult<ConflictProbeDetails>> {
  const mode: ProbeMode = "conflicts";
  const baseArgv = revParseArgv(base);
  const baseRev = await run(baseArgv);
  if (!baseRev) return missing(baseArgv, mode);
- if (baseRev.code !== 0) return fail(`bad base ${base}`, { mode, error: "bad ref" });
+ if (baseRev.code !== 0) return failed(`bad base ${base}`, { mode, error: "bad ref" }, baseRev);
 
  const branchArgv = revParseArgv(branch);
  const branchRev = await run(branchArgv);
  if (!branchRev) return missing(branchArgv, mode);
- if (branchRev.code !== 0) return fail(`bad branch ${branch}`, { mode, error: "bad ref" });
+ if (branchRev.code !== 0) return failed(`bad branch ${branch}`, { mode, error: "bad ref" }, branchRev);
 
  const baseSha = baseRev.stdout.trim();
  const branchSha = branchRev.stdout.trim();
@@ -145,12 +159,14 @@ async function probeConflicts(base: string, branch: string, run: Run): Promise<A
 
  // Exit 0 is the only clean answer. A non-zero exit with conflicting paths is a
  // real conflict; a non-zero exit without them is unknown and must never be
- // reported clean, since the Shepherd would merge on that answer.
+ // reported clean, since the Shepherd would merge on that answer. git's stderr
+ // ("unknown option" on a git too old for --write-tree, "refusing to merge unrelated
+ // histories") is the one clue to why, so it travels with the refusal.
  if (merge.code === 0) return ok("clean", { mode, clean: true, paths: [] });
 
  const { paths } = parseMergeTreeOutput(merge.stdout);
  if (paths.length === 0) {
-  return fail(`merge-tree could not classify ${base} and ${branch}`, { mode, error: "unclassified" });
+  return failed(`merge-tree could not classify ${base} and ${branch}`, { mode, error: "unclassified" }, merge);
  }
  return ok(paths.join("\n"), { mode, clean: false, paths });
 }
@@ -167,12 +183,14 @@ async function probePairwise(
   const mergeBaseArgs = mergeBaseArgv(base, side);
   const mergeBase = await run(mergeBaseArgs);
   if (!mergeBase) return missing(mergeBaseArgs, mode);
-  if (mergeBase.code !== 0) return fail(`cannot find merge base for ${base} and ${side}`, { mode, error: "no merge base" });
+  if (mergeBase.code !== 0) {
+   return failed(`cannot find merge base for ${base} and ${side}`, { mode, error: "no merge base" }, mergeBase);
+  }
 
   const diffArgs = diffNamesArgv(mergeBase.stdout.trim(), side);
   const diff = await run(diffArgs);
   if (!diff) return missing(diffArgs, mode);
-  if (diff.code !== 0) return fail(`cannot diff ${side}`, { mode, error: "diff failed" });
+  if (diff.code !== 0) return failed(`cannot diff ${side}`, { mode, error: "diff failed" }, diff);
   sides.push(diff.stdout);
  }
 
@@ -187,10 +205,18 @@ async function probeCi(pr: string, run: Run): Promise<AgentToolResult<ConflictPr
  const checks = await run(argv);
  if (!checks) return missing(argv, mode);
 
- // `gh pr checks` exits non-zero for pending or failing checks. That is an
- // answer, not a tool failure, so the exit code is passed through in `details`
- // and the result is not marked as an error.
- const text = checks.stdout.trim() !== "" ? checks.stdout : checks.stderr;
+ // `gh pr checks` exits 8 for pending and 1 for failing checks, printing the check
+ // table either way. Those are answers, not tool failures, so the exit code is passed
+ // through in `details` and the result is not marked as an error. But gh also exits 1
+ // for its own failures (no GitHub remote, PR not found) -- with nothing on stdout --
+ // and 2 (cancelled) or 4 (not authenticated) regardless of output. Returning those as
+ // a normal result put an auth prompt where the CI verdict goes, and a caller keyed on
+ // a non-zero exit read failing CI where there was no evidence at all.
+ const stdout = checks.stdout.trim();
+ if (checks.code === 4 || checks.code === 2 || (checks.code === 1 && stdout === "")) {
+  return failed(`gh pr checks ${pr} failed (exit ${checks.code})`, { mode, exitCode: checks.code, error: "gh failed" }, checks);
+ }
+ const text = stdout !== "" ? checks.stdout : checks.stderr;
  return ok(text.trim() === "" ? `gh pr checks exited ${checks.code} with no output` : text, {
   mode,
   exitCode: checks.code,
@@ -208,7 +234,9 @@ export function registerConflictProbe(pi: ExtensionAPI, exec: Exec = spawnExec):
    "Predict merge conflicts and read CI without touching any tree. " +
    "`conflicts`: does <branch> merge cleanly into <base>? " +
    "`pairwise`: do <branch> and <branchB> touch the same files since <base>? " +
-   "`ci`: what does `gh pr checks <pr>` say?",
+   "`ci`: what does `gh pr checks <pr>` say? Its `exitCode` is gh's: 0 all checks passed, " +
+   "8 checks still pending, 1 at least one check failed. A gh failure (not authenticated, no PR, " +
+   "cancelled) is an error result with `error: \"gh failed\"`, never a CI verdict.",
   approval: "read",
   parameters: z.object({
    mode: z
