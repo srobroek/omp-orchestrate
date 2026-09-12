@@ -627,11 +627,14 @@ describe("G6 inside a run", () => {
 		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
 
-	test("an env flag taking an operand remains outside parser coverage", async () => {
-		// The parser does not know env flag arities and treats FOO as the executable.
-		expect(await gate("env -u FOO bd update orc-1 --claim")).toEqual(SILENT);
+	test.each([
+		["env -u", "env -u FOO bd update orc-1 --claim"],
+		["env -C", "env -C /tmp bd update orc-1 --claim"],
+		["env -S", "env -S 'bd update orc-1 --claim'"],
+	])("sees an unattributed mutation behind %s", async (_label, command) => {
+		// The env walk used to read the flag's operand as the executable and see no bd at all.
+		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
-
 
 	test("says one thing once when a chain repeats the same defect", async () => {
 		const outcome = await gate(
