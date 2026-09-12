@@ -45,7 +45,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - MUST Preserve required CI at the exact head. A closed gate does not prove success.
 - MUST Record external waits on the bead with the awaited id and resume steps. Take ready work or yield instead of polling a gate.
 - MUST Preserve held claims and captures after an incomplete exit. Neither a completed task nor an unevaluated exit proves acceptance.
-- MUST Establish holder evidence before recovery. Hold an exclusive recovery window with every competing writer stopped, including claim, dispatch and branch writers.
+- MUST Leave dead-claim release to the reaper. It releases under the claim fence on the holder's terminal frame, or on registry `aborted` plus a lapsed lease read fresh; a lapsed lease alone proves nothing.
 - NOT Infer authority from age or a fresh read. Unknown ownership or evidence permits neither claim release nor cleanup.
 - NOT Treat gates as isolation or atomic authorization.
 - NOT Let the lead claim beads. Workers cannot rewrite existing routing; only shepherds merge.
@@ -71,8 +71,8 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 Slash commands, typed by the lead:
 
 - `/orchestrate-run` pins the database and writes the `pending` marker. Run it first.
-- `/orchestrate-bind <epic>` binds the marker to the run epic and arms the patrol. After it, dispatch.
-- `/orchestrate-status` shows the marker binding, the run epic's liveness, and whether the patrol armed.
+- `/orchestrate-bind <epic>` binds the marker to the run epic and stamps this session's lead lease on it. After it, dispatch.
+- `/orchestrate-status` shows the marker binding, the run epic's liveness, and the lead lease.
 - `/orchestrate-roster` shows ready-queue depth per role, wisps included.
 - `/orchestrate-close <epic>` ends a run by removing the marker. With any bead beneath the epic still `in_progress`, it refuses. `--force` skips that check.
 

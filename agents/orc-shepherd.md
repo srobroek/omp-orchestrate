@@ -28,7 +28,7 @@ This ordinary pull claims only the unparented merge bead. Shepherds omit
 acquire a wisp or lease, so there is no separate ephemeral claim to release.
 Do not treat an empty ordinary assignee as proof about an unrelated wisp; if
 durable evidence names one, reconcile that wisp through its own close/release
-path under the exclusive recovery procedure.
+path; a dead holder's claim on it is the reaper's to release.
 
 ## Five duties
 
