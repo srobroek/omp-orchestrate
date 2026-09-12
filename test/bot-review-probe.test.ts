@@ -1,14 +1,13 @@
 /**
- * Conformance tests for the native `bot-review-probe` port.
+ * Conformance tests for `bot-review-probe`.
  *
- * Every case in `skills/orchestrate/scripts/_test_bot_review_probe.py` appears here,
- * fixture for fixture: the pytest suite is the contract, and the classification half is
- * pure, so none of these tests runs a subprocess. The five `gh` reads are answered from a
- * transcript through the exported {@link Exec} seam.
+ * The classification half is pure, so none of these tests runs a subprocess. The five `gh`
+ * reads are answered from a transcript through the exported {@link Exec} seam.
  *
- * Where the script's CLI was the observable surface (exit code, rendered stdout, the `bots`
- * subcommand, `$PR_REVIEW_BOTS`), the test asserts on the function that now carries it:
- * `code` for the exit status, `renderBotReview` for stdout, `adapterNote` for the roster.
+ * Where the original script's CLI was the observable surface (exit code, rendered stdout,
+ * the `bots` subcommand, `$PR_REVIEW_BOTS`), the test asserts on the function that now
+ * carries it: `code` for the exit status, `renderBotReview` for stdout, `adapterNote` for
+ * the roster.
  */
 
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -291,6 +290,76 @@ describe("verdicts", () => {
  });
 });
 
+describe("thread resolution", () => {
+ // The summary count is the bot's verdict when it posted; its threads carry the live state.
+ test("a positive count with every thread at head resolved is clean, naming the threads", () => {
+  // Payload E: the rejection-only round -- every finding answered with evidence and its
+  // thread resolved, nothing pushed, so the count never changes.
+  const data = payload({
+   checks: [{ name: "CodeRabbit", status: "COMPLETED" }],
+   reviews: [review({ body: "Actionable comments posted: 2" })],
+   comments: [comment({ threadId: "PRRT_2", resolved: true }), comment({ threadId: "PRRT_1", resolved: true })],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("clean");
+  expect(result.code).toBe(0);
+  expect(result.findings.actionable).toBe(0);
+  expect(result.findings.files).toEqual([]);
+  expect(result.findings.detail).toBe("2 actionable comment(s), every thread at head resolved: PRRT_1, PRRT_2");
+ });
+
+ test("a positive count with no threads at all stands", () => {
+  const data = payload({ reviews: [review({ body: "Actionable comments posted: 2" })] });
+  const result = classify(data);
+  expect(result.verdict).toBe("actionable");
+  expect(result.findings.actionable).toBe(2);
+ });
+
+ test("resolved threads at an older head do not clear a count at this one", () => {
+  const data = payload({
+   reviews: [review({ body: "Actionable comments posted: 1" })],
+   comments: [comment({ commit: OLD_HEAD, resolved: true })],
+  });
+  expect(classify(data).verdict).toBe("actionable");
+ });
+
+ test("open threads at head are a floor under a positive count", () => {
+  const data = payload({
+   reviews: [review({ body: "Actionable comments posted: 1" })],
+   comments: [
+    comment({ threadId: "PRRT_1", url: "c1" }),
+    comment({ threadId: "PRRT_2", url: "c2" }),
+    comment({ threadId: "PRRT_3", url: "c3", resolved: true }),
+   ],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("actionable");
+  expect(result.findings.actionable).toBe(2);
+  expect(result.findings.files).toHaveLength(2);
+ });
+
+ test("a zero count with open threads is the nitpick-only round and merges", () => {
+  // Payload D: CodeRabbit's "Actionable comments posted: 0" deliberately excludes the
+  // nitpick threads it also posts; a thread floor here would block every such round.
+  const data = payload({
+   reviews: [review({ body: "Actionable comments posted: 0" })],
+   comments: [comment({ threadId: "PRRT_1" }), comment({ threadId: "PRRT_2" })],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("clean");
+  expect(result.findings.actionable).toBe(0);
+  expect(result.findings.files).toHaveLength(2);
+ });
+
+ test("changes requested is not cleared by resolved threads", () => {
+  const data = payload({
+   reviews: [review({ state: "CHANGES_REQUESTED", body: "Actionable comments posted: 1" })],
+   comments: [comment({ resolved: true })],
+  });
+  expect(classify(data).verdict).toBe("actionable");
+ });
+});
+
 describe("slug matching", () => {
  test("a short slug does not match unrelated checks", () => {
   const data = payload({ checks: [{ name: "test", status: "IN_PROGRESS" }] });
@@ -417,6 +486,69 @@ describe("declines", () => {
   expect(classify(data).verdict).toBe("declined");
  });
 
+ test("a counted review body that quotes rate-limit code is the round, not a refusal", () => {
+  // Payload A: CodeRabbit's finding prose on a PR touching retry code. Dropping it as a
+  // refusal left nothing at head, and the round read as declined (or stale, or an older
+  // round's clean).
+  const data = payload({
+   checks: [{ name: "CodeRabbit", status: "COMPLETED" }],
+   reviews: [
+    review({
+     body: "**Actionable comments posted: 3**\n\nThe retry helper ignores the API rate limit header.",
+     at: "2026-07-30T11:50:00Z",
+    }),
+   ],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("actionable");
+  expect(result.code).toBe(EXIT_ACTIONABLE);
+  expect(result.findings.actionable).toBe(3);
+ });
+
+ test("a later counted round quoting quota code is not superseded by an earlier clean one", () => {
+  // Payload B: the two-rounds-at-one-head shape `orc_bot_review_request mode=full` produces.
+  const data = payload({
+   checks: [{ name: "CodeRabbit", status: "COMPLETED" }],
+   reviews: [
+    review({ body: "**Actionable comments posted: 0**", url: "r1", at: "2026-07-30T11:00:00Z" }),
+    review({
+     body: "**Actionable comments posted: 2**\n\nConsider documenting the quota window.",
+     url: "r2",
+     at: "2026-07-30T11:50:00Z",
+    }),
+   ],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("actionable");
+  expect(result.findings.actionable).toBe(2);
+  expect(result.findings.summary).toBe("r2");
+ });
+
+ test("a changes-requested review is a round whatever its body says", () => {
+  const data = payload({
+   reviews: [review({ state: "CHANGES_REQUESTED", body: "Please respect the rate limit here." })],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("actionable");
+  expect(result.findings.changesRequested).toBe(1);
+ });
+
+ test("the walkthrough summary comment is not a refusal notice", () => {
+  // Payload S: CodeRabbit's auto-generated PR summary paraphrases the diff. On a PR about
+  // rate limiting it matched the indicator and, with no review yet, read as declined.
+  const walkthrough =
+   "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n\n" +
+   "## Walkthrough\n\nAdds a rate-limit retry around the credits check.";
+  const data = payload({
+   checks: [{ name: "CodeRabbit", status: "COMPLETED" }],
+   notices: [notice({ body: walkthrough, at: "2026-07-30T11:40:00Z" })],
+  });
+  const result = classify(data);
+  expect(result.verdict).toBe("pending");
+  expect(result.code).toBe(EXIT_WAITING);
+  expect(result.findings.detail).toContain("no review posted yet");
+ });
+
  test("an unconfigured bot's notice is invisible", () => {
   expect(classify(payload({ notices: [notice({ login: "greptile-apps[bot]" })] })).verdict).toBe("absent");
  });
@@ -438,6 +570,49 @@ describe("declines", () => {
   expect(result.findings.wait).toBe("15m");
   expect(result.findings.detail).toContain("re-check");
   expect(result.findings.detail).not.toContain("reopened");
+ });
+});
+
+describe("skip notices", () => {
+ // CodeRabbit's "Review skipped" comment: the PR is a draft, or auto-review is off. The
+ // product opens every PR as a draft and requests reviews by comment, so this is the
+ // normal state between "PR opened" and "review landed" -- a wait, never a refusal.
+ const SKIP_BODY =
+  "> [!NOTE]\n> ## Review skipped\n> Draft detected.\n> " +
+  "Please check the settings in the CodeRabbit UI or the `.coderabbit.yaml` file in this repository. " +
+  "To trigger a single review, invoke the `@coderabbitai review` command.";
+
+ test("a skip notice with no review is pending, with or without a bot check", () => {
+  // Payload C.
+  for (const checks of [[{ name: "CodeRabbit", status: "COMPLETED" }], []]) {
+   const result = classify(payload({ checks, notices: [notice({ body: SKIP_BODY, at: "2026-07-30T10:00:00Z" })] }));
+   expect(result.verdict).toBe("pending");
+   expect(result.code).toBe(EXIT_WAITING);
+   expect(result.findings.detail).toContain("review skipped");
+  }
+ });
+
+ test("a skip notice never clears the gate as absent", () => {
+  const result = classify(payload({ notices: [notice({ body: SKIP_BODY })] }));
+  expect(result.verdict).not.toBe("absent");
+  expect(result.code).not.toBe(0);
+ });
+
+ test("a skip notice does not outrank a review at an older head", () => {
+  const data = payload({
+   reviews: [review({ body: "Actionable comments posted: 1", commit: OLD_HEAD })],
+   notices: [notice({ body: SKIP_BODY })],
+  });
+  expect(classify(data).verdict).toBe("stale");
+ });
+
+ test("a limit notice beside a skip notice is still declined", () => {
+  const data = payload({ notices: [notice({ body: SKIP_BODY, at: "2026-07-30T10:00:00Z" }), notice()] });
+  expect(classify(data).verdict).toBe("declined");
+ });
+
+ test("an unconfigured bot's skip notice is invisible", () => {
+  expect(classify(payload({ notices: [notice({ login: "greptile-apps[bot]", body: SKIP_BODY })] })).verdict).toBe("absent");
  });
 });
 
