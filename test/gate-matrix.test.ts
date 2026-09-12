@@ -374,7 +374,7 @@ describe("G5 multi-bead claims", () => {
  ])("refuses a multi-bead claim smuggling another role's bead, with %s", async (_label, command) => {
   releaseBead(BEAD);
   releaseBead(FOREIGN_BEAD);
-  // G5 also enforces one acquisition target when invoked without G7.
+  // G5 refuses a claim naming more than one bead before any bead is looked up.
   const result = await gateClaimEligibility(claims, ctxAt(owned), { command });
 
   expect(result?.block).toBe(true);
