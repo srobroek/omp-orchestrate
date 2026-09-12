@@ -56,11 +56,11 @@ exit 1`);
 	});
 
 	test.each([
-		["a relative path", `echo '{"path":".beads"}'; exit 0`, "not an absolute path"],
-		["a missing directory", `echo '{"path":"${path.join(dir, "gone", ".beads")}"}'; exit 0`, "does not exist"],
-		["bd's unexpected failure", `echo "permission denied" >&2; exit 1`, "permission denied"],
+		["a relative path", () => `echo '{"path":".beads"}'; exit 0`, "not an absolute path"],
+		["a missing directory", () => `echo '{"path":"${path.join(dir, "gone", ".beads")}"}'; exit 0`, "does not exist"],
+		["bd's unexpected failure", () => `echo "permission denied" >&2; exit 1`, "permission denied"],
 	])("%s is refused rather than recorded", async (_label, script, reason) => {
-		await stub(script);
+		await stub(script());
 
 		const result = await locateBeadsDir(dir);
 		expect(result.ok).toBe(false);
