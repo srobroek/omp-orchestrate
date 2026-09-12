@@ -188,9 +188,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  // exit contract took its no-bead branch for every session that pulled work normally,
  // and every check that hangs off the claimed bead went unevaluated. Armed only under
  // orchestration: a plain session that claims by hand is not held to G2, G4 or G5.
+ // Awaited: the host holds the result until every handler settles, so a claim resolved
+ // from the store is recorded before the next `tool_call` asks about it.
  pi.on("tool_result", async (event, ctx) => {
   if (!(await orchestrated(ctx))) return;
-  observeClaimResult(claims, event);
+  await observeClaimResult(pi, claims, event);
  });
 
  pi.registerCommand("orchestrate-status", {
