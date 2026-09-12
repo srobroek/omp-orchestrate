@@ -43,6 +43,7 @@ import { createClaimState, type ClaimState } from "./claim-state";
 import { createAssignmentNotice } from "./gates/assignment";
 import { writesBeads } from "./gates/bd";
 import { type BdInvocation, bdInvocations } from "./shell";
+import { landingSweep, runScope } from "./landing";
 type AgentPreflightContext = Pick<ExtensionContext, "cwd" | "setTimeout" | "clearTimer"> &
  Partial<Pick<ExtensionContext, "models">>;
 
@@ -106,6 +107,9 @@ async function boundEpic(cwd: string): Promise<string | undefined> {
 
 /** How often the sweep runs. Coarse deliberately: the threshold is in minutes. */
 const SWEEP_MS = 60_000;
+
+/** How often the landing sweep polls GitHub: one `gh pr list` per repository with open merge beads. */
+const LANDING_SWEEP_MS = 60_000;
 
 const DEFAULT_STALL_MINUTES = 10;
 
@@ -1070,6 +1074,17 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
    }
   }, SWEEP_MS);
   unsubscribers.push(() => ctx.clearTimer(timer));
+  // Landing (`landing.ts`): the lead polls every open merge bead's PR once a minute
+  // and lands, refreshes, reruns or bounces it. Lead only, under a bound run: a worker
+  // copy or a plain session must never merge. The sweep reads its own budget and
+  // never throws; a failure is logged and the next tick tries again.
+  const landing = ctx.setInterval(async () => {
+   if (sessionRole(pi) !== "lead") return;
+   const scope = await runScope(ctx);
+   if (scope === null) return;
+   await landingSweep({ cwd: scope.root, runId: scope.runId }).catch(error => logFailure(pi, "landing sweep", error));
+  }, LANDING_SWEEP_MS);
+  unsubscribers.push(() => ctx.clearTimer(landing));
 
   // W5. The isolation contract is a session setting, so it is checked once, in
   // the session that spawns. A worker inherits whatever the lead was given and

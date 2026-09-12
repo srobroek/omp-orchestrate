@@ -30,6 +30,7 @@ import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { locateBeadsDir } from "./beads-mode";
 import { type BdBead, bdListChecked, bdShow, resetReadBudget } from "./bd";
+import { recordLandingCapabilities } from "./landing";
 import { ensurePatrolWisp, patrolState } from "./supervision";
 
 /**
@@ -461,6 +462,12 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
      // an unarmed patrol is the layer that covers process death.
      ctx.ui.notify(`orchestrate run bound to ${runId}, but patrol arming needs architect attention: ${bound.patrol.failed}`, "warning");
     }
+    // Landing capabilities are the durable consequence of a run having an epic to carry
+    // them: probed once here, read by every sweep. A failed probe leaves the bind
+    // standing and the sweep in `direct` mode, said where the operator reads.
+    const landing = await recordLandingCapabilities(ctx.sessionManager.getCwd(), runId);
+    if (landing.ok) ctx.ui.notify(landing.notice, landing.level);
+    else ctx.ui.notify(`landing capabilities not recorded on ${runId}: ${landing.error}; the sweep lands directly on CLEAN`, "warning");
    } catch (error) {
     ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
    }
