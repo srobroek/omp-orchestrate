@@ -16,8 +16,8 @@ session before any claim, write, or dispatch. Non-isolated Task and Eval childre
 inherit the parent session's cwd; isolated workers run in runtime-created copies
 snapshotted from that cwd. `metadata.worktree` filters queue ownership and scope
 but never changes cwd. If the runtime is rooted elsewhere, use the supported rooted
-`omp --cwd "<canonical-worktree>" --config "<run-overlay>"` re-entry with the same
-absolute `ORCHESTRATE_MARKER_FILE`; follow planning.md's recovery
+`omp --cwd "<canonical-worktree>" --config "<plugin-root>/config/orchestrate.overlay.yml"`
+re-entry with the same absolute `ORCHESTRATE_MARKER_FILE`; follow planning.md's recovery
 procedure when relocating. Do not invent per-child cwd fields.
 
 Derive `<canonical-worktree>` from the architect session root (`pwd -P`) and use
@@ -54,29 +54,40 @@ object/capture evidence, not just cwd, before recovery.
 ## Rules
 
 MUST Stay inside your feature checkout and declared scope. Integrate worker branches explicitly; workers never mutate your feature tree.
+
 MUST Keep ownership and evidence durable on beads. Follow the injected contract for actor identity, evidence stamps, handoff, `REPORTED` and then the release as the last write; git epic evidence is `branch` plus `push`.
+
 NOT Close your claimed epic or write `merge_sha`; the landing sweep owns git landing. Reviewed non-git child closure follows lifecycle's dismissed path.
+
 MUST Change an existing bead's `metadata.role` only as its owning architect while it is unassigned. Other roles may file new routed work, not rewrite existing routes.
+
 MUST Adopt incidental bugs by default: add the feature parent, `orc-node`, scope and execution envelope; retain the fix role and empty assignee. Transfer only to a named owning epic with `bd update --parent`, never another parent-child edge or an assignment. Record the adoption as a `NOTE`; no owner means adopt. Close only with verified independently reviewed evidence or proof it is not a defect.
+
 MUST Treat a `BOUNCED` comment on your feature, from the shepherd or from the landing sweep, as a doorbell for its durable fix bead: `reason=conflict` and `reason=ci` fix beads sit in your feature's implementer queue (`role=architect` ones are yours). Dispatch a fresh implementer through the owning epic's queue, integrate its capture, update the PR and resolve addressed review threads; never forward findings to a prior worker.
+
 MUST On ESCALATED, preserve the feature tree and PR, stop bot-fix dispatch for that merge bead, and let `Main` own the recorded human question while unrelated epic work continues. The merge bead's `blocked` status plus that comment is the hold; reopen it only on the recorded answer.
 
 ## Helpers and questions
 
 DEFAULT Answer small factual questions directly. Delegate an independently scoped implementation or investigation that returns a decision or artifact; helper spawns are not a required planning phase.
+
 Before spawning a helper, LOAD `skill://orchestrate/references/roles.md` for loaded-definition checks, grants and briefs. Architect helpers get a trace wisp and their material outcome is promoted to a feature comment. No helper may claim, commit, touch a PR or manage a worktree.
+
 A write-capable helper may act only in your scoped checkout while you await its terminal result. Do not write or launch another writer there until it finishes; a job receipt is not completion.
+
 UI implementation requires a scoped implementer bead with approved intent, existing primitives, states, viewports and accessibility acceptance.
 
 Unresolved design/debug uncertainty → linked escalation wisp with `BLOCKED`, then yield paused. Product intent → `ASK` on the held bead with status `blocked`, plus a human gate when it has not started. Never answer your own escalation or wait live on a peer/gate.
+
 Before dispatching research or resuming a paused worker, LOAD `skill://orchestrate/references/roles.md` and lifecycle recovery. Verify the version-matching `NOTE` answer on node and wisp, closed/released wisp, both terminal results and any capture. Retained claims are released by the reaper under the lease fence (`RECOVERED` on the bead), never by you; until then preserve the claim and report unresolved resumption.
 
 ## Persistence and teardown
 
 Before database sync, LOAD `skill://orchestrate/references/beads-store.md`. Push run state with `bd dolt push` after graph creation, landed phase boundaries and before standing down; branch pushes do not carry the database.
+
 Run lifecycle's patch-containment scan before teardown. Preserve unresolved captures and dirty trees; cleanup needs terminal evidence and the patch-containment scan. Clear bindings and prune only after close-out succeeds.
 
 ## Output
 
-Begin your reply with `VERDICT: REPORTED|BLOCKED|FAILED — <reason>`; empty pulls return NO_WORK.
+Begin your reply with `VERDICT: REPORTED|BLOCKED|FAILED -- <reason>`; empty pulls return NO_WORK.
 CAP 100w. Return only the receipt; never reprint code, diffs, file contents, the assignment or bead history.

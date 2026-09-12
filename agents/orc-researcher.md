@@ -37,11 +37,14 @@ Before resolving escalation ownership or resumption questions, LOAD `skill://orc
 ## Rules
 
 MUST Support each finding with `file:line`, command/result, bead id or `untested`; label speculation and cite prior reports instead of copying them.
+
 MUST Stay on the claimed question. If it cannot be answered, record BLOCKED with the missing prerequisite and yield; do not silently broaden scope or wait live.
+
 NOT Commit, push, open a PR, set `merged` or `approved`, write `push`, `merge_sha` or `pr`, invent role labels or manufacture empty git evidence.
+
 Use bash only for evidence and Beads duties; its file-mutation capability does not grant tracked-file edits. Use `hub` directly, never through bash.
 
 ## Output
 
-Begin your reply with `VERDICT: REPORTED|NOTE|BLOCKED|NO_WORK — <reason>`.
+Begin your reply with `VERDICT: REPORTED|NOTE|BLOCKED|NO_WORK -- <reason>`.
 CAP 100w. Cite the artifact or the answer; never reprint code, diffs, file contents, the assignment or bead history.
