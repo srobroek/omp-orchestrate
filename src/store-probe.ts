@@ -55,11 +55,14 @@ const TOOL_TIMEOUT_MS = 5_000;
 const FLOCK_PROBE = 'open(my $fh, "<", $ARGV[0]) or exit 3; exit(flock($fh, LOCK_EX|LOCK_NB) ? 0 : 1)';
 
 /**
- * The signature every open of a journal with a reachable corrupt record prints. The last
- * matching line is quoted: bd logs the CRC mismatch first and then the error that names
- * the journal file and offset, and the second is the one an operator acts on.
+ * The signatures every open of a damaged store prints. A journal with a reachable corrupt
+ * record logs the CRC mismatch and then `possible data loss detected in journal file ...
+ * corrupted journal`; a damaged `journal.idx` beside it fails earlier with `error
+ * bootstrapping chunk journal: journal index is malformed` (measured by overwriting bytes
+ * at offset 8 of the index on a sandbox copy, bd 1.2.2). The last matching line is quoted:
+ * for the journal that is the line naming the file and offset, the one an operator acts on.
  */
-const CORRUPTION = /corrupted journal|invalid journal record|data loss detected in journal/;
+const CORRUPTION = /corrupted journal|invalid journal record|data loss detected in journal|journal index is malformed/;
 
 interface Spawned {
 	code: number;

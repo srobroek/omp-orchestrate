@@ -23,7 +23,7 @@ const COMPLIANT: Partial<Record<SettingPath, unknown>> = {
 	"task.enableEffort": true,
 	"task.maxRecursionDepth": 3,
 	"bash.autoBackground.enabled": false,
-	modelRoles: { reviewer: "x/y" },
+	modelRoles: { plan: "p/plan", task: "p/task", smol: "p/smol", reviewer: "x/y" },
 };
 
 function out(stdout: string, code = 0, stderr = ""): ExecResult {
@@ -215,15 +215,36 @@ describe("runDoctor", () => {
 		expect(report.ok).toBe(false);
 	});
 
-	test("an absent reviewer role warns; unreadable settings warn rather than fail", async () => {
-		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: {} });
-		expect(row(await doctor(), "modelRoles.reviewer").status).toBe("warn");
+	test("one row per model role: reviewer warns when unset, plan/task/smol fail; unreadable settings warn rather than fail", async () => {
+		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: { plan: "p/plan", task: "p/task", smol: "p/smol" } });
+		const reviewerless = await doctor();
+		expect(reviewerless.checks.filter(check => check.name.startsWith("modelRoles.")).map(check => check.name)).toEqual(["modelRoles.plan", "modelRoles.task", "modelRoles.smol", "modelRoles.reviewer"]);
+		expectRow(reviewerless, "modelRoles.reviewer", "warn", "orc-reviewer falls back to the session model");
+		expect(row(reviewerless, "core agents").status).toBe("pass");
+		expect(reviewerless.ok).toBe(true);
+
+		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: { reviewer: "x/y" } });
+		const planless = await doctor();
+		expectRow(planless, "modelRoles.plan", "fail", "orc-architect cannot be spawned");
+		expectRow(planless, "modelRoles.task", "fail", "orc-implementer, orc-shepherd cannot be spawned");
+		expectRow(planless, "modelRoles.smol", "fail", "orc-researcher cannot be spawned");
+		expect(planless.ok).toBe(false);
 
 		stubbed = undefined;
 		const unread = await doctor();
 		expectRow(unread, "settings", "warn", "could not be read");
-		expect(unread.checks.some(check => check.name === "modelRoles.reviewer")).toBe(false);
-		expect(unread.ok).toBe(true);
+		expectRow(unread, "modelRoles.reviewer", "warn", "no model registry is live");
+		expect(unread.ok).toBe(false);
+	});
+
+	test("with a live model registry, resolution decides each role row and the core agents row ignores the alias", async () => {
+		const resolve = (spec: string) => (spec === "@reviewer" ? undefined : { id: `model-for-${spec.slice(1)}` });
+		discoverSpy.mockImplementation(async () => [{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md" }]);
+		const report = await runDoctor({ cwd, models: { resolve } as never }, transcript(healthy()).exec);
+		expectRow(report, "modelRoles.plan", "pass", "@plan resolves to model-for-plan");
+		expectRow(report, "modelRoles.reviewer", "warn", "@reviewer does not resolve");
+		expect(row(report, "core agents").status).toBe("pass");
+		expect(report.ok).toBe(true);
 	});
 
 	test("a borrowed helper missing warns its package alone; a core agent finding fails", async () => {
@@ -235,11 +256,11 @@ describe("runDoctor", () => {
 		expect(report.ok).toBe(true);
 
 		discoverSpy.mockImplementation(async () => [
-			{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md" },
+			{ agent: "orc-reviewer", message: "resolved override declares ORC-ROLE missing; expected reviewer", path: "/p/orc-reviewer.md" },
 		]);
 		const core = row(await doctor(), "core agents");
 		expect(core.status).toBe("fail");
-		expect(core.detail).toBe('orc-reviewer: model alias "@reviewer" does not resolve (/p/orc-reviewer.md)');
+		expect(core.detail).toBe("orc-reviewer: resolved override declares ORC-ROLE missing; expected reviewer (/p/orc-reviewer.md)");
 	});
 
 	test("the doctor asks discovery for exactly the borrowed names", async () => {

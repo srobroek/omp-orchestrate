@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BdBead } from "../src/bd";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { AgentRegistry, type AgentSession, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import * as actualBd from "../src/bd";
 import ompOrchestrate from "../src/index";
 
@@ -140,7 +140,7 @@ describe("extension factory", () => {
 
 			await parentResult(claimReport("orc-parent-1", "parent"), parentCtx);
 			expect(await childToolCall(
-				{ toolName: "bash", input: { command: "bd ready --metadata-field role=implementer --claim --json" } },
+				{ toolName: "bash", input: { command: "bd ready --metadata-field role=implementer --claim --json", env: { BEADS_ACTOR: "child" } } },
 				childCtx,
 			)).toBeUndefined();
 			expect(await parentToolCall(
@@ -267,7 +267,7 @@ describe("orchestrate-roster", () => {
 	});
 });
 
-describe("actor rewrite keeps claim gates active", () => {
+describe("the injected identity keeps claim gates active", () => {
 	async function activeRun(): Promise<{ root: string; prior: string | undefined }> {
 		const root = await mkdtemp(join(tmpdir(), "orc-index-actor-"));
 		await mkdir(join(root, ".orchestration"), { recursive: true });
@@ -283,47 +283,68 @@ describe("actor rewrite keeps claim gates active", () => {
 		else process.env.ORCHESTRATE_MARKER_FILE = prior;
 	}
 
-	test("still blocks a rewritten claim rejected by routing", async () => {
+	/** This session, registered as the spawned agent `worker-1`, the way the executor registers a child. */
+	const ctxFor = (root: string): ExtensionContext =>
+		({ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"], sessionManager: { getSessionId: () => "index-worker-session" } }) as unknown as ExtensionContext;
+	const registered = () => AgentRegistry.global().register({
+		id: "worker-1", displayName: "worker-1", kind: "sub",
+		session: { sessionManager: { getSessionId: () => "index-worker-session" } } as unknown as AgentSession,
+	});
+
+	test("still blocks an identified claim rejected by routing", async () => {
 		const { root, prior } = await activeRun();
-		const show = spyOn(actualBd, "bdShow").mockResolvedValue({
-			id: "orc-claim",
-			labels: ["agent:reviewer"],
-			metadata: { actor: "worker-1" },
-		});
+		registered();
+		const show = spyOn(actualBd, "bdShow").mockResolvedValue({ id: "orc-claim", labels: ["agent:reviewer"] });
 		try {
 			const { pi, seen } = recordingApi("worker");
 			ompOrchestrate(pi);
 			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
 			const result = await toolCall(
 				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-route" },
-				{ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext,
+				ctxFor(root),
 			);
 			expect(result).toMatchObject({ block: true, reason: expect.stringContaining("reviewer") });
 		} finally {
 			show.mockRestore();
+			AgentRegistry.global().unregister("worker-1");
 			restoreMarker(prior);
 			await rm(root, { recursive: true, force: true });
 		}
 	});
 
-	test("returns the prefixed command after an eligible rewritten claim", async () => {
+	test("returns the call with this agent's identity in env after an eligible claim", async () => {
 		const { root, prior } = await activeRun();
-		const show = spyOn(actualBd, "bdShow").mockResolvedValue({
-			id: "orc-claim",
-			labels: ["agent:implementer"],
-			metadata: { actor: "worker-1" },
-		});
+		registered();
+		const show = spyOn(actualBd, "bdShow").mockResolvedValue({ id: "orc-claim", labels: ["agent:implementer"] });
 		try {
 			const { pi, seen } = recordingApi("worker");
 			ompOrchestrate(pi);
 			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
 			const result = await toolCall(
 				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-pass" },
-				{ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext,
+				ctxFor(root),
 			);
-			expect(result).toMatchObject({ input: { command: "BEADS_ACTOR=worker-1 BD_ACTOR=worker-1 bd update orc-claim --claim" } });
+			expect(result).toEqual({ input: { command: "bd update orc-claim --claim", env: { BEADS_ACTOR: "worker-1", BD_ACTOR: "worker-1" } } });
 		} finally {
 			show.mockRestore();
+			AgentRegistry.global().unregister("worker-1");
+			restoreMarker(prior);
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("refuses a claim by a session the registry does not know", async () => {
+		const { root, prior } = await activeRun();
+		try {
+			const { pi, seen } = recordingApi("worker");
+			ompOrchestrate(pi);
+			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
+			const result = await toolCall(
+				{ toolName: "bash", input: { command: "bd ready --claim --json" }, toolCallId: "claim-nobody" },
+				{ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"], sessionManager: { getSessionId: () => "unregistered" } } as unknown as ExtensionContext,
+			);
+			expect(result).toMatchObject({ block: true, reason: expect.stringContaining("no identity") });
+		} finally {
 			restoreMarker(prior);
 			await rm(root, { recursive: true, force: true });
 		}

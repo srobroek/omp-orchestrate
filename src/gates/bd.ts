@@ -43,20 +43,76 @@
  * is the only safe answer to a shape this gate does not understand.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { bdShow, commentVerb, metadataRecord } from "../bd";
+import { commentVerb } from "../bd";
+import { STORE_SELECTOR_VARS } from "../beads-mode";
 import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
-import { legacyRoleFromLabel, ROUTING_KEY, sessionRole } from "../identity";
+import { legacyRoleFromLabel, type OrcRole, orcRole, ROUTING_KEY, sessionRole } from "../identity";
+import { leadActor } from "../run-state";
 import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, effectiveSegments, splitFlag } from "../shell";
 import { runScope } from "../run-scope";
+import { reviseBashEnv } from "./readonly";
 
-/** Shell metacharacters that make a command unsafe to rewrite as one invocation. */
-const REWRITE_METACHARACTERS = /[;&|`\n]/;
+/** The contract-bound roles, as the grammar's writer lists spell them. */
+const ORC_ROLE_NAMES: Record<string, true> = { architect: true, implementer: true, reviewer: true, researcher: true, shepherd: true };
 
-/** Optional plain shell assignments followed directly by the `bd` executable. */
-const SINGLE_BD_COMMAND = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s;&|`]*)\s+)*bd(?:\s|$)/;
+/**
+ * The registry rows {@link childActor} reads: who is registered, of what kind, and the
+ * session each live row drives. `AgentRegistry.global()` answers it; tests hand in a list.
+ */
+export interface ActorRegistry {
+	list(): ReadonlyArray<{ id: string; kind: string; session: { sessionManager: { getSessionId(): string } } | null }>;
+}
+
+/**
+ * The identity this session's bead writes carry.
+ *
+ * A spawned agent writes as its registry id -- the name `hub` addresses it by, the name
+ * the reaper lists claims under (`bd list --assignee <child.id>`, `src/supervision.ts`),
+ * the name `/orchestrate-answer` wakes, and the suffix of its `omp/task/<id>` capture. A
+ * prefixed form such as `omp/<role>/<id>` was considered and rejected: every one of those
+ * consumers keys on the bare id. The lead writes as its lease actor (`lead:<session id>`,
+ * `src/run-state.ts`). `undefined` when the registry does not know this session, which the
+ * caller treats as no identity rather than inventing one.
+ *
+ * Resolved by session id rather than by `pi`: every in-process session shares the process
+ * environment, so the environment can name nobody, and the registry is the one place that
+ * ties a session to the id its spawner and its peers use.
+ */
+export function childActor(ctx: Partial<Pick<ExtensionContext, "sessionManager">>, registry: ActorRegistry = AgentRegistry.global()): string | undefined {
+	const sessionId = ctx.sessionManager?.getSessionId();
+	if (sessionId === undefined) return undefined;
+	for (const ref of registry.list()) {
+		if (ref.session === null || ref.session.sessionManager.getSessionId() !== sessionId) continue;
+		return ref.kind === "main" ? leadActor(sessionId) : ref.id;
+	}
+	return undefined;
+}
+
+const execFileAsync = promisify(execFile);
+
+/** `git config user.name` per checkout, asked once: the identity bd falls back to when no actor is set. */
+const gitIdentities = new Map<string, Promise<string | undefined>>();
+
+/**
+ * The name bd would attribute an actorless write to at `cwd`: `git user.name`, else `$USER`
+ * (`bd --help`: "default: $BEADS_ACTOR, git user.name, $USER"). A claim under it is a
+ * claim by nobody in particular, which is what the campaign observed on every bead.
+ */
+export function fallbackIdentity(cwd: string): Promise<string | undefined> {
+	let pending = gitIdentities.get(cwd);
+	if (pending === undefined) {
+		pending = execFileAsync("git", ["-C", cwd, "config", "user.name"], { timeout: 1500, maxBuffer: 4096 })
+			.then(({ stdout }) => stdout.trim() || undefined, () => undefined)
+			.then(name => name ?? (process.env.USER || undefined));
+		gitIdentities.set(cwd, pending);
+	}
+	return pending;
+}
 
 /**
  * Process-wide seam owned by the beads actor gate. G6 claims a tool-call id only after
@@ -405,33 +461,17 @@ function envCarriesActor(env: unknown): boolean {
  * An assignment with an empty value is no identity. The regex silently agreed by
  * accident -- it required `\w+=\S+` and so never matched `BEADS_ACTOR= bd ...` at all.
  */
-/** Whether this raw command is safe to rewrite as one direct `bd` invocation. */
-function isSingleBdCommand(command: string): boolean {
- return !REWRITE_METACHARACTERS.test(command) && SINGLE_BD_COMMAND.test(command);
-}
 
-/** Quote an actor only when shell syntax requires it. */
-function shellActor(actor: string): string {
- if (/^[A-Za-z0-9_./:@-]+$/.test(actor)) return actor;
- return `'${actor.replaceAll("'", "'\\''")}'`;
-}
-
-/** Resolve the best actor available before falling back to the existing warning. */
-async function resolvedActor(
- invocation: BdInvocation,
- input: Record<string, unknown>,
- claims: ClaimState | undefined,
-): Promise<string | undefined> {
- if (invocationCarriesActor(invocation, input.env)) return undefined;
- const observed = claims?.observedClaim()?.actor;
- if (typeof observed === "string" && observed.length > 0) return observed;
- if (!invocation.hasClaim || invocation.subcommand === "ready") return undefined;
- const target = invocation.positionals[0];
- if (target === undefined || !BEAD_ID.test(target)) return undefined;
- const bead = await bdShow(target);
- const metadata = metadataRecord(bead?.metadata);
- const actor = metadata?.actor;
- return typeof actor === "string" && actor.length > 0 ? actor : undefined;
+/**
+ * The identity this call's bd writes will carry once the gate has had its say: the
+ * actor the store already recorded for this session's claim, else this session's own
+ * name. The recorded actor wins because it is what the claimed bead's fence checks: a
+ * session that pulled under one name must keep writing under it.
+ */
+function sessionActor(ctx: ExtensionContext, claims: ClaimState | undefined): string | undefined {
+	const observed = claims?.observedClaim()?.actor;
+	if (typeof observed === "string" && observed.length > 0) return observed;
+	return childActor(ctx);
 }
 
 function invocationCarriesActor(
@@ -442,6 +482,24 @@ function invocationCarriesActor(
 		return true;
 	}
 	return envCarriesActor(env);
+}
+
+/**
+ * The actor bd itself will record for `invocation`, in bd's own precedence: the `--actor`
+ * flag, then `BEADS_ACTOR` inline, then the call's `env`, then the plugin's `BD_ACTOR`
+ * carrier in the same two places. `undefined` when nothing names one.
+ */
+function effectiveActor(invocation: BdInvocation, env: unknown): string | undefined {
+	const flagged = flagOperands(invocation.rest, { "--actor": true }).at(-1)?.value;
+	if (flagged !== undefined) return flagged;
+	const exported = env !== null && typeof env === "object" ? env as Record<string, unknown> : undefined;
+	for (const variable of ACTOR_VARS) {
+		const inline = invocation.assignments.get(variable);
+		if (inline !== undefined && inline.length > 0) return inline;
+		const value = exported?.[variable];
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return undefined;
 }
 
 export const actorNotice: BdCheck = (invocation, env) => {
@@ -678,13 +736,19 @@ export function nestedOmpNotice(command: string): string | undefined {
 	return undefined;
 }
 
+/** The seat a refusal judges: the lead's, or a spawned session's with its declared role, if any. */
+export interface Seat {
+	lead: boolean;
+	role: OrcRole | undefined;
+}
+
 /**
  * One refusal on one parsed invocation: the reason, or `undefined` to let it run.
  *
- * `lead` is the session's seat, not its declared role: a spawned helper with no
+ * `seat.lead` is the session's seat, not its declared role: a spawned helper with no
  * `ORC-ROLE` is as much a second writer as an implementer is.
  */
-export type BdRefusal = (invocation: BdInvocation, env: unknown, lead: boolean) => string | undefined;
+export type BdRefusal = (invocation: BdInvocation, env: unknown, seat: Seat) => string | undefined;
 
 /**
  * `bd dolt` actions that move the database through a second Dolt engine. bd 1.2.2 has
@@ -700,7 +764,7 @@ const DOLT_SYNC_ACTIONS: Record<string, true> = { clone: true, fetch: true, pull
  * help runs no engine. The refusal names the step so a worker that wanted its commits to
  * travel learns they will, once, after it yields.
  */
-export const syncRefusal: BdRefusal = (invocation, _env, lead) => {
+export const syncRefusal: BdRefusal = (invocation, _env, { lead }) => {
 	if (lead || invocation.subcommand !== "dolt") return undefined;
 	const action = invocation.positionals[0] ?? "";
 	if (DOLT_SYNC_ACTIONS[action] !== true) return undefined;
@@ -712,33 +776,66 @@ export const syncRefusal: BdRefusal = (invocation, _env, lead) => {
 	);
 };
 
-/** The database carrier bd reads from the environment. */
-const DATABASE_VAR = "BEADS_DB";
-
 /**
- * Refusal: a database named on the call, in any role.
+ * Refusal: a store named on the call, in any role.
  *
- * `--db` as its own token or as `--db=<path>`, the variable as an inline assignment or
- * through `env`, or the variable in the `bash` call's own `env` object: each points bd at
- * a store the run does not read. `-C` is not one of them; the clone's redirect resolves it
- * to the run's store.
+ * `--db` as its own token or as `--db=<path>`, or a store selector bd reads from the
+ * environment ({@link STORE_SELECTOR_VARS}) as an inline assignment or in the `bash`
+ * call's own `env` object: each points bd at a store the run does not read. `-C` is not
+ * one of them; the clone's redirect resolves it to the run's store.
  */
 export const databaseRefusal: BdRefusal = (invocation, env) => {
 	let carrier: string | undefined;
 	if (invocation.rest.some(token => splitFlag(token).flag === "--db")) carrier = "--db";
-	else if (invocation.assignments.has(DATABASE_VAR)) carrier = `${DATABASE_VAR}=`;
-	else if (env !== null && typeof env === "object" && Object.hasOwn(env, DATABASE_VAR)) carrier = `env.${DATABASE_VAR}`;
+	else {
+		const exported = env !== null && typeof env === "object" ? env : undefined;
+		for (const variable of STORE_SELECTOR_VARS) {
+			if (invocation.assignments.has(variable)) carrier = `${variable}=`;
+			else if (exported !== undefined && Object.hasOwn(exported, variable)) carrier = `env.${variable}`;
+			if (carrier !== undefined) break;
+		}
+	}
 	if (carrier === undefined) return undefined;
 	return `the run's database is resolved by bd; '${carrier}' names another store`;
 };
 
-/** The refusals, in the order their reasons read best; the first that speaks wins. */
-const REFUSALS: readonly BdRefusal[] = [syncRefusal, databaseRefusal];
+/**
+ * Comment verbs only one role may write, from the grammar: a verb whose writer list names
+ * exactly one role. `LANDED` is the one that matters today: G5's close check reads it as
+ * merge evidence, so a LANDED written by anyone but the shepherd forges a landing.
+ */
+const SOLE_WRITER: Record<string, OrcRole> = Object.fromEntries(
+	grammar.verbs.flatMap(entry =>
+		entry.writers.length === 1 && ORC_ROLE_NAMES[entry.writers[0] as string] === true ? [[entry.verb, entry.writers[0] as OrcRole]] : []),
+);
 
 /**
- * Refuse a `bd` call that would open a second store or a second engine; otherwise warn
- * about one this run cannot attribute, cannot read, or cannot route, and about a role
- * started as a nested `omp` process.
+ * Refusal: a comment verb reserved to another role. Advisory would not do here, because
+ * the verb is evidence a gate acts on; the lead is refused as well, since the lead writes
+ * merge evidence through the landing sweep and never by hand.
+ */
+export const soleWriterRefusal: BdRefusal = (invocation, _env, seat) => {
+	const body = commentBody(invocation);
+	if (body === undefined) return undefined;
+	const verb = commentVerb(body.text);
+	const owner = SOLE_WRITER[verb];
+	if (owner === undefined || (!seat.lead && seat.role === owner)) return undefined;
+	return `'${verb}' on ${body.id} is the ${owner}'s comment verb: it is merge evidence the close check reads, and ${seat.lead ? "the lead" : seat.role === undefined ? "a helper" : `an ${seat.role}`} may not write it`;
+};
+
+/** The refusals, in the order their reasons read best; the first that speaks wins. */
+const REFUSALS: readonly BdRefusal[] = [syncRefusal, databaseRefusal, soleWriterRefusal];
+
+/**
+ * Refuse a `bd` call that would open a second store or a second engine, forge another
+ * role's verb, or claim under no identity; otherwise hand every `bash` call this session's
+ * identity through the tool's `env`, and warn about a write this run cannot attribute,
+ * cannot read, or cannot route, and about a role started as a nested `omp` process.
+ *
+ * The identity rides on `env` rather than on a command prefix because `env` reaches every
+ * process the call starts: a `cd x && bd ...` chain, a helper script that runs bd inside,
+ * a nested tree. The campaign found the prefix covered only a lone `bd` and every other
+ * shape wrote as the git user. A call whose `env` already names an actor is left alone.
  */
 export async function gateBdDiscipline(
 	pi: ExtensionAPI,
@@ -749,49 +846,52 @@ export async function gateBdDiscipline(
 ): Promise<ToolCallEventResult | undefined> {
 	const command = input.command;
 	if (typeof command !== "string" || command.length === 0) return undefined;
+	if ((await runScope(ctx)) === null) return undefined;
 
 	const invocations = bdInvocations(command);
 	const nestedOmp = nestedOmpNotice(command);
-	if (invocations.length === 0 && nestedOmp === undefined) return undefined;
-
-	if ((await runScope(ctx)) === null) return undefined;
-
-	const lead = sessionRole(pi) === "lead";
+	const seat: Seat = { lead: sessionRole(pi) === "lead", role: orcRole(ctx) };
 	for (const invocation of invocations) {
 		for (const refusal of REFUSALS) {
-			const reason = refusal(invocation, input.env, lead);
+			const reason = refusal(invocation, input.env, seat);
 			if (reason !== undefined) return { block: true, reason };
 		}
 	}
 
-	const arbiter = actorNoticeArbiter();
-	if (invocations.length === 1 && isSingleBdCommand(command)) {
-		const invocation = invocations[0] as BdInvocation;
-		if (writesBeads(invocation) && !invocationCarriesActor(invocation, input.env)) {
-			const actor = await resolvedActor(invocation, input, claims);
-			if (actor !== undefined && !invocation.assignments.has("BEADS_ACTOR") && !invocation.assignments.has("BD_ACTOR")) {
-				arbiter?.handledToolCalls.add(toolCallId);
-				return {
-					input: {
-						...input,
-						command: `BEADS_ACTOR=${shellActor(actor)} BD_ACTOR=${shellActor(actor)} ${command}`,
-					},
-				};
+	// The identity every command in this call will carry: what the call names, else what
+	// this session is. Computed before the claim check, which judges the result.
+	const injected = envCarriesActor(input.env) ? undefined : sessionActor(ctx, claims);
+	const env = injected === undefined ? input.env : { ...(input.env !== null && typeof input.env === "object" ? input.env : {}), BEADS_ACTOR: injected, BD_ACTOR: injected };
+
+	// A claim is the write that creates an identity: refused when the actor it would
+	// record is nobody, or the name bd falls back to for nobody, since either leaves the
+	// fence unable to tell this session from the next.
+	const claiming = invocations.filter(invocation => invocation.hasClaim || invocation.subcommand === "claim");
+	if (claiming.length > 0) {
+		const fallback = await fallbackIdentity(ctx.cwd);
+		for (const invocation of claiming) {
+			const actor = effectiveActor(invocation, env);
+			if (actor === undefined) {
+				return { block: true, reason: "a claim under no identity: this session is not a registered agent and the call names no BEADS_ACTOR, so the assignee would be the git user and the claim fence could not tell this session apart" };
+			}
+			if (fallback !== undefined && actor === fallback) {
+				return { block: true, reason: `a claim as '${actor}' is a claim as the git identity every unattributed write falls back to; claim as this session's own actor${injected === undefined ? "" : ` (${injected})`}` };
 			}
 		}
 	}
 
+	const arbiter = actorNoticeArbiter();
 	const beadsWillBlockClaim = arbiter !== undefined && invocations.some(
 		invocation =>
 			(invocation.subcommand === "claim" || invocation.hasClaim) &&
-			!invocationCarriesActor(invocation, input.env),
+			!invocationCarriesActor(invocation, env),
 	);
 	const notices: string[] = nestedOmp === undefined ? [] : [nestedOmp];
 	let deliveredActorNotice = false;
 	for (const invocation of invocations) {
 		for (const notice of NOTICES) {
 			if (notice === actorNotice && beadsWillBlockClaim) continue;
-			const text = notice(invocation, input.env);
+			const text = notice(invocation, env);
 			if (text === undefined || notices.includes(text)) continue;
 			notices.push(text);
 			if (notice === actorNotice) deliveredActorNotice = true;
@@ -809,5 +909,7 @@ export async function gateBdDiscipline(
 		);
 		if (deliveredActorNotice) arbiter?.handledToolCalls.add(toolCallId);
 	}
-	return undefined;
+	if (injected === undefined) return undefined;
+	if (invocations.some(writesBeads)) arbiter?.handledToolCalls.add(toolCallId);
+	return reviseBashEnv(input, { BEADS_ACTOR: injected, BD_ACTOR: injected });
 }

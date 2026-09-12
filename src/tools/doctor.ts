@@ -122,31 +122,55 @@ async function checkGh(exec: Exec, cwd: string): Promise<DoctorCheck> {
 }
 
 /** Where the effective settings deviate from the overlay, one row; the repair is one command. */
-function checkSettings(): DoctorCheck[] {
-	const observed = readSettings();
+function checkSettings(observed: Record<string, unknown> | null): DoctorCheck {
 	const apply = `apply the shipped overlay: omp --config ${OVERLAY_FILE}`;
 	if (observed === null) {
-		return [{ name: "settings", status: "warn", detail: `the effective settings could not be read (no settings instance is live); ${apply}` }];
+		return { name: "settings", status: "warn", detail: `the effective settings could not be read (no settings instance is live); ${apply}` };
 	}
 	const deviations = settingsDeviations(observed);
-	const settings: DoctorCheck = deviations.length === 0
+	return deviations.length === 0
 		? { name: "settings", status: "pass", detail: "every required task and bash setting matches the overlay" }
 		: {
 			name: "settings",
 			status: "fail",
 			detail: `${deviations.map(item => `${item.key} is ${JSON.stringify(item.observed)}, needs ${item.want} (${item.consequence})`).join("; ")}; ${apply}`,
 		};
-	const roles = observed.modelRoles;
-	const rows = [settings];
-	for (const role of DECLARED_MODEL_ROLES) {
-		const configured = typeof roles === "object" && roles !== null && Object.hasOwn(roles, role) ? (roles as Record<string, unknown>)[role] : undefined;
-		rows.push(
-			configured === undefined
-				? { name: `modelRoles.${role}`, status: "warn", detail: `not configured; orc-${role} may fall back to the session model or fail selection. Set it in the overlay or your config` }
-				: { name: `modelRoles.${role}`, status: "pass", detail: typeof configured === "string" ? configured : JSON.stringify(configured) },
-		);
+}
+
+/**
+ * One row per model role the core agents name, in the order the agents declare them:
+ * `plan` (architect), `task` (implementer, shepherd), `smol` (researcher), `reviewer`.
+ *
+ * A role that does not resolve fails the row, because the agent behind it cannot be
+ * spawned; the roles in `DECLARED_MODEL_ROLES` are the documented optional ones, and warn
+ * instead: the reviewer falls back to the session model. Resolution is asked of the live
+ * model registry when the host hands one over; without it, the effective settings decide.
+ * The campaign measured the old shape (`scratch/audit/e2e/normal-ts.ledger.md`, D-01/02):
+ * a warn row for `reviewer` beside a `FAIL core agents` naming the same alias, and
+ * `plan`/`task`/`smol` failing that row with no row of their own.
+ */
+function checkModelRoles(ctx: DoctorContext, observed: Record<string, unknown> | null): DoctorCheck[] {
+	const agentsByRole: Record<string, string[]> = {};
+	for (const [name, contract] of Object.entries(CORE_AGENT_CONTRACTS)) {
+		const role = contract.modelAlias.slice(1);
+		(agentsByRole[role] ??= []).push(name);
 	}
-	return rows;
+	const settings = observed?.modelRoles;
+	const resolve = typeof ctx.models?.resolve === "function" ? (spec: string) => ctx.models!.resolve(spec) : undefined;
+	return Object.entries(agentsByRole).map(([role, agents]) => {
+		const name = `modelRoles.${role}`;
+		const unresolved: CheckStatus = DECLARED_MODEL_ROLES.includes(role) ? "warn" : "fail";
+		const consequence = unresolved === "fail" ? `${agents.join(", ")} cannot be spawned` : `${agents.join(", ")} falls back to the session model`;
+		const configured = typeof settings === "object" && settings !== null && Object.hasOwn(settings, role) ? (settings as Record<string, unknown>)[role] : undefined;
+		if (resolve !== undefined) {
+			const model = resolve(`@${role}`);
+			if (model === undefined) return { name, status: unresolved, detail: `@${role} does not resolve; ${consequence}; set modelRoles.${role} in the overlay or your config` };
+			const id = typeof model === "object" && model !== null && "id" in model && typeof model.id === "string" ? model.id : JSON.stringify(model);
+			return { name, status: "pass", detail: `@${role} resolves to ${id}` };
+		}
+		if (configured === undefined) return { name, status: unresolved, detail: `not configured, and no model registry is live to resolve @${role}; ${consequence}; set modelRoles.${role} in the overlay or your config` };
+		return { name, status: "pass", detail: typeof configured === "string" ? configured : JSON.stringify(configured) };
+	});
 }
 
 async function checkOverlay(): Promise<DoctorCheck> {
@@ -158,7 +182,11 @@ async function checkOverlay(): Promise<DoctorCheck> {
 	}
 }
 
-/** Core agents fail the row; each borrowed package is its own warn row. */
+/**
+ * Core agents fail the row; each borrowed package is its own warn row. A core agent's
+ * model alias not resolving is the alias's row (`checkModelRoles`), not this one, so an
+ * optional role stays the warning the README promises.
+ */
 async function checkAgents(ctx: DoctorContext): Promise<DoctorCheck[]> {
 	const borrowed = Object.values(PLUGIN_AGENTS_BY_PACKAGE).flat();
 	let findings: AgentDiscoveryFinding[];
@@ -169,6 +197,7 @@ async function checkAgents(ctx: DoctorContext): Promise<DoctorCheck[]> {
 	}
 	const byAgent = new Map<string, string[]>();
 	for (const finding of findings) {
+		if (Object.hasOwn(CORE_AGENT_CONTRACTS, finding.agent) && /^model alias "@[^"]+" does not resolve$/.test(finding.message)) continue;
 		const list = byAgent.get(finding.agent) ?? [];
 		list.push(finding.path === undefined ? finding.message : `${finding.message} (${finding.path})`);
 		byAgent.set(finding.agent, list);
@@ -251,7 +280,8 @@ export async function runDoctor(ctx: DoctorContext, exec: Exec = spawnExec): Pro
 		checkStore(cwd),
 		checkLanding(exec, cwd),
 	]);
-	const checks = [bd, wt, git, gh, bun, overlay, ...checkSettings(), ...agents, store, landing];
+	const observed = readSettings();
+	const checks = [bd, wt, git, gh, bun, overlay, checkSettings(observed), ...checkModelRoles(ctx, observed), ...agents, store, landing];
 	return { ok: checks.every(check => check.status !== "fail"), checks };
 }
 
@@ -268,7 +298,7 @@ export function renderDoctor(report: DoctorReport): string {
 const DESCRIPTION = [
 	"Report the run prerequisites with pass/warn/fail rows: bd (1.2 or newer), wt, git, gh and its",
 	"authentication, bun for the worktree sweep, the shipped settings overlay, the required task and",
-	"bash settings and the reviewer model role, the core and borrowed agents, the beads store probe,",
+	"bash settings, one row per model role (plan, task, smol must resolve; reviewer warns), the core and borrowed agents, the beads store probe,",
 	"and the repository's landing capabilities. Reads only; never writes a file, a bead, or a",
 	"setting. Call it before /orchestrate-start, or when a run misbehaves.",
 ].join(" ");
