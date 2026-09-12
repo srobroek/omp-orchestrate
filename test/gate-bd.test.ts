@@ -587,9 +587,10 @@ describe("G6 inside a run", () => {
 	test.each([
 		["an unspaced subshell", "(bd update orc-1 --claim)"],
 		["a nested unspaced subshell", "((bd update orc-1 --claim))"],
-		["an unspaced brace group", "{bd update orc-1 --claim;}"],
+		["an unspaced subshell around an assignment", "(FOO=1 bd update orc-1 --claim)"],
 	])("sees an unattributed mutation inside %s", async (_label, command) => {
-		// Glued grouping punctuation must not hide the executable or its flags.
+		// A glued `(` must not hide the executable or its flags. A glued `{` is not a
+		// group but a syntax error, so it has no row.
 		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
 
