@@ -14,7 +14,7 @@
  */
 
 import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdListChecked, bdRun, metadataString, resetReadBudget } from "../bd";
+import { type BdBead, bdBlockedChecked, bdListChecked, metadataString, resetReadBudget } from "../bd";
 
 /**
  * A bead's derived lifecycle state.
@@ -490,38 +490,6 @@ export function renderStatus(tree: StatusTree, opts: RenderOptions = {}): string
  return lines.join("\n");
 }
 
-/**
- * Blocked bead ids out of `bd blocked --json`.
- *
- * `bd` may print a warning banner before the payload, so the scan starts at the
- * first brace or bracket rather than trusting byte 0, and the
- * `{ schema_version, data }` envelope is unwrapped when present.
- */
-export function parseBlockedIds(stdout: string): string[] | null {
- const brace = stdout.indexOf("{");
- const bracket = stdout.indexOf("[");
- const candidates = [brace, bracket].filter(index => index !== -1);
- if (candidates.length === 0) return null;
- let payload: unknown;
- try {
-  payload = JSON.parse(stdout.slice(Math.min(...candidates)));
- } catch {
-  return null;
- }
- if (payload !== null && typeof payload === "object" && !Array.isArray(payload) && "data" in payload) {
-  payload = payload.data;
- }
- const entries = Array.isArray(payload) ? payload : [payload];
- const ids: string[] = [];
- for (const entry of entries) {
-  if (entry === null || typeof entry !== "object") return null;
-  const id = (entry as Record<string, unknown>).id;
-  if (typeof id !== "string" || id.length === 0) return null;
-  ids.push(id);
- }
- return ids;
-}
-
 const DESCRIPTION = [
  "Standardised beads run status: rolls a run epic up through its architect-domain epics and",
  "their features to the tasks, deriving per-bead state from status, `state:` labels, and",
@@ -548,15 +516,13 @@ export function registerRunStatus(pi: ExtensionAPI): void {
   async execute(_toolCallId, params: StatusFilter & { full?: boolean }): Promise<AgentToolResult<RunStatusDetails>> {
    try {
     resetReadBudget();
-    const [beads, blockedResult] = await Promise.all([
+    const [beads, blockedIds] = await Promise.all([
      // Events are `bd set-state`'s audit trail, one closed child per transition; the
      // tree drops them too, so `bd blocked` ids keep lining up with what is shown.
      bdListChecked(["list", "--status", "all", "--exclude-type", "event", "--limit", "0", "--json"]),
-     bdRun(["blocked", "--json"]),
+     bdBlockedChecked(),
     ]);
 
-    const blockedIds =
-     blockedResult !== null && blockedResult.code === 0 ? parseBlockedIds(blockedResult.stdout) : null;
     if (beads === null || blockedIds === null) {
      return {
       content: [{

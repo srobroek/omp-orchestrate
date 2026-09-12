@@ -5,7 +5,6 @@ import {
 	buildStatusTree,
 	deriveState,
 	filterTree,
-	parseBlockedIds,
 	registerRunStatus,
 	renderStatus,
 	statusSummaryLine,
@@ -368,32 +367,6 @@ describe("renderStatus", () => {
 		const text = renderStatus(buildStatusTree([bead("bd-60")], []), { full: true });
 		expect(text).toContain("UNPARENTED (1)");
 		expect(text).toContain("bd-60");
-	});
-});
-
-describe("parseBlockedIds", () => {
-	test("reads a bare list", () => {
-		expect(parseBlockedIds('[{"id":"bd-5","blocked_by":["bd-4"]},{"id":"bd-7"}]')).toEqual(["bd-5", "bd-7"]);
-	});
-
-	test("unwraps the json envelope", () => {
-		expect(parseBlockedIds('{"schema_version":1,"data":[{"id":"bd-5"}]}')).toEqual(["bd-5"]);
-	});
-
-	test("skips a warning banner printed before the payload", () => {
-		expect(parseBlockedIds('warning: dolt server is cold\n[{"id":"bd-5"}]')).toEqual(["bd-5"]);
-	});
-
-	test("accepts a single object", () => {
-		expect(parseBlockedIds('{"id":"bd-5"}')).toEqual(["bd-5"]);
-	});
-
-	test("distinguishes known empty from unreadable blocker sets", () => {
-		expect(parseBlockedIds("[]")).toEqual([]);
-		expect(parseBlockedIds("")).toBeNull();
-		expect(parseBlockedIds("bd: not a beads workspace")).toBeNull();
-		expect(parseBlockedIds("[{oops")).toBeNull();
-		expect(parseBlockedIds('[{"id":"bd-1"},{"blocked_by":["bd-4"]},null,7]')).toBeNull();
 	});
 });
 

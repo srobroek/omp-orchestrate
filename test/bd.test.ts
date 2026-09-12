@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import os from "node:os";
-import { realpath } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import {
+	bdBlockedChecked,
 	bdLinkedChecked,
 	bdListChecked,
 	bdRun,
@@ -15,6 +17,7 @@ import {
 	metadataString,
 	readBudgetExhausted,
 	resetReadBudget,
+	storeToken,
 } from "../src/bd";
 import { createClaimState } from "../src/claim-state";
 import { createExitGuard } from "../src/gates/exit";
@@ -181,6 +184,66 @@ function fakeBd(store: {
 	return { spawned, restore: () => spawn.mockRestore() };
 }
 
+/** The two files the store token reads, as a version-5 manifest names them. */
+const JOURNAL = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
+function manifestText(lock: string, root: string): string {
+	return `5:__DOLT__:${lock}:${root}:00000000000000000000000000000000:${JOURNAL}:1`;
+}
+
+interface FakeStore {
+	beadsDir: string;
+	/** What a `bd` mutation does to the two files: append a journal record, move the manifest root. */
+	write: () => Promise<void>;
+	setManifest: (lock: string, root: string) => Promise<void>;
+	/** A new inode holding fewer bytes, as a journal repair or conjoin leaves. */
+	replaceJournal: () => Promise<void>;
+	/** Unhooks the marker and removes the store. */
+	restore: () => Promise<void>;
+}
+
+/**
+ * An embedded store on disk as {@link storeToken} reads it, and the active-run marker
+ * that names it, so reads in this process cache against it.
+ */
+async function fakeStore(options: { mode?: string; journal?: boolean; marker?: boolean } = {}): Promise<FakeStore> {
+	const root = await mkdtemp(join(os.tmpdir(), "orc-bd-store-"));
+	const beadsDir = join(root, ".beads");
+	const noms = join(beadsDir, "embeddeddolt", "sbx", ".dolt", "noms");
+	await mkdir(noms, { recursive: true });
+	await writeFile(join(beadsDir, "metadata.json"), JSON.stringify({ dolt_mode: options.mode ?? "embedded", dolt_database: "sbx" }));
+	const journal = join(noms, JOURNAL);
+	const manifest = join(noms, "manifest");
+	if (options.journal !== false) await writeFile(journal, "root-record-0\n");
+	await writeFile(manifest, manifestText("lock0", "root0"));
+	const marker = join(root, ".active-run");
+	if (options.marker !== false) {
+		await writeFile(marker, JSON.stringify({ schema_version: 1, run_id: "orc-run", beads_dir: beadsDir }));
+	}
+	const priorMarker = process.env.ORCHESTRATE_MARKER_FILE;
+	process.env.ORCHESTRATE_MARKER_FILE = marker;
+	let writes = 0;
+	return {
+		beadsDir,
+		async write() {
+			writes += 1;
+			await appendFile(journal, `root-record-${writes}\n`);
+			await writeFile(manifest, manifestText(`lock${writes}`, `root${writes}`));
+		},
+		async setManifest(lock, root) {
+			await writeFile(manifest, manifestText(lock, root));
+		},
+		async replaceJournal() {
+			await rm(journal);
+			await writeFile(journal, "r\n");
+		},
+		async restore() {
+			if (priorMarker === undefined) delete process.env.ORCHESTRATE_MARKER_FILE;
+			else process.env.ORCHESTRATE_MARKER_FILE = priorMarker;
+			await rm(root, { recursive: true, force: true });
+		},
+	};
+}
+
 describe("failure kinds", () => {
 	afterEach(() => resetReadBudget());
 
@@ -259,40 +322,84 @@ describe("failure kinds", () => {
 	});
 });
 
-describe("the dispatch show memo", () => {
+describe("the store token", () => {
+	test("is the journal's inode and size with the manifest's lock and root", async () => {
+		const store = await fakeStore();
+		try {
+			expect(storeToken(store.beadsDir)).toMatch(/^\d+:14\|lock0:root0$/);
+		} finally {
+			await store.restore();
+		}
+	});
+
+	test.each([
+		["a non-embedded store", { mode: "server" }],
+		["a store without a journal", { journal: false }],
+	])("is undefined for %s", async (_label, options) => {
+		const store = await fakeStore(options);
+		try {
+			expect(storeToken(store.beadsDir)).toBeUndefined();
+		} finally {
+			await store.restore();
+		}
+	});
+
+	test("is undefined where there is no store", async () => {
+		expect(storeToken(join(os.tmpdir(), "orc-no-such-store"))).toBeUndefined();
+	});
+});
+
+/**
+ * The cache in `readJson`, driven through the public readers with the subprocess replaced
+ * and a store on disk whose token the tests move by hand. Every row here is one of the
+ * invariants I1-I7 in `src/bd.ts`'s header.
+ */
+describe("the read cache", () => {
 	afterEach(() => resetReadBudget());
-	const beads = { "orc-1": { id: "orc-1", status: "open" }, "orc-2": { id: "orc-2", status: "open" }, "orc-w1": { id: "orc-w1", ephemeral: true } };
+	const beads: Record<string, BdBead> = { "orc-1": { id: "orc-1", status: "open" }, "orc-2": { id: "orc-2", status: "open" }, "orc-w1": { id: "orc-w1", ephemeral: true } };
 
-	test("a bead read twice in one dispatch is spawned once, and never across dispatches", async () => {
-		const bd = fakeBd({ beads });
+	test("a read is spawned once per store token, across dispatches", async () => {
+		const store = await fakeStore();
+		const bd = fakeBd({ beads, inFlight: [beads["orc-2"]] });
 		try {
 			resetReadBudget();
 			expect(await bdShow("orc-1")).toEqual(beads["orc-1"]);
-			expect(await bdShow("orc-1")).toEqual(beads["orc-1"]);
-			expect(bd.spawned).toEqual(["show orc-1"]);
+			expect(await bdListChecked(["list", "--label", "orc-node", "--json"])).toEqual([beads["orc-2"]]);
 			resetReadBudget();
+			expect(await bdShow("orc-1")).toEqual(beads["orc-1"]);
+			expect(await bdListChecked(["list", "--label", "orc-node", "--json"])).toEqual([beads["orc-2"]]);
+			// A different argv is a different answer.
+			await bdListChecked(["list", "--label", "orc-node", "--status", "open", "--json"]);
+			expect(bd.spawned).toEqual(["show orc-1", "list --label", "list --label"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
+	test("a hit spends no read and clears the failure a refused read left", async () => {
+		const store = await fakeStore();
+		const bd = fakeBd({ beads });
+		try {
+			resetReadBudget(1);
 			await bdShow("orc-1");
-			expect(bd.spawned).toEqual(["show orc-1", "show orc-1"]);
-		} finally {
-			bd.restore();
-		}
-	});
-
-	test("a memo hit spends no read", async () => {
-		const bd = fakeBd({ beads });
-		try {
-			resetReadBudget();
-			for (let read = 0; read < 40; read += 1) expect(await bdShow("orc-1")).not.toBeNull();
+			for (let hit = 0; hit < 5; hit += 1) expect(await bdShow("orc-1")).not.toBeNull();
 			expect(readBudgetExhausted()).toBe(false);
-			expect(bd.spawned).toHaveLength(1);
+			expect(await bdShow("orc-2")).toBeNull();
+			expect(lastBdFailure()).toBe("budget");
+			expect(await bdShow("orc-1")).not.toBeNull();
+			expect(lastBdFailure()).toBeUndefined();
+			expect(bd.spawned).toEqual(["show orc-1"]);
 		} finally {
 			bd.restore();
+			await store.restore();
 		}
 	});
 
-	test("any write through bdRun drops the memo", async () => {
-		// Within one dispatch a bead cannot change under the reader, except by the
-		// reader's own write: the reaper comments on a bead it has just read.
+	test("this process's own write drops the cache at once, before the store moves", async () => {
+		// The fake `bd` writes nothing to the store, so only the drop in `bdRun` can explain
+		// the second show (I4).
+		const store = await fakeStore();
 		const bd = fakeBd({ beads });
 		try {
 			resetReadBudget();
@@ -302,10 +409,50 @@ describe("the dispatch show memo", () => {
 			expect(bd.spawned).toEqual(["show orc-1", "comment orc-1", "show orc-1"]);
 		} finally {
 			bd.restore();
+			await store.restore();
 		}
 	});
 
-	test("an unreadable bead is not memoised", async () => {
+	test("identical reads around a create are two reads", async () => {
+		// `ensurePatrolWisp` lists dependents, creates the wisp, and lists again to confirm
+		// it; an argv-keyed cache that survived the create would confirm nothing.
+		const store = await fakeStore();
+		const bd = fakeBd({ beads, linked: { "orc-1": ["orc-w1"] } });
+		try {
+			resetReadBudget();
+			expect(await bdLinkedChecked("orc-1", "relates-to")).toEqual(["orc-w1"]);
+			await bdRun(["create", "patrol", "--ephemeral"]);
+			expect(await bdLinkedChecked("orc-1", "relates-to")).toEqual(["orc-w1"]);
+			expect(bd.spawned).toEqual(["dep list", "create patrol", "dep list"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
+	test.each([
+		["a write by another process", (store: FakeStore) => store.write()],
+		["a moved manifest root alone", (store: FakeStore) => store.setManifest("lock0", "root-elsewhere")],
+		["a replaced, smaller journal", (store: FakeStore) => store.replaceJournal()],
+	])("%s invalidates a hot entry", async (_label, move) => {
+		const store = await fakeStore();
+		const bd = fakeBd({ beads });
+		try {
+			resetReadBudget();
+			await bdShow("orc-1");
+			await bdShow("orc-1");
+			await move(store);
+			resetReadBudget();
+			await bdShow("orc-1");
+			expect(bd.spawned).toEqual(["show orc-1", "show orc-1"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
+	test("a bead that does not answer is not cached", async () => {
+		const store = await fakeStore();
 		const bd = fakeBd({ beads });
 		try {
 			resetReadBudget();
@@ -314,23 +461,81 @@ describe("the dispatch show memo", () => {
 			expect(bd.spawned).toEqual(["show ghost", "show ghost"]);
 		} finally {
 			bd.restore();
+			await store.restore();
 		}
 	});
 
-	test("bdShowMany hydrates every unread id in one list and feeds the memo", async () => {
+	test("a zero exit that says null is missing, and not cached", async () => {
+		const store = await fakeStore();
+		const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+			stdout: new Response("null").body,
+			stderr: new Response("").body,
+			exited: Promise.resolve(0),
+			kill: () => {},
+		}) as unknown as Bun.Subprocess) as unknown as typeof Bun.spawn);
+		try {
+			resetReadBudget();
+			expect(await bdShow("orc-1")).toBeNull();
+			expect(lastBdFailure()).toBe("missing");
+			expect(await bdShow("orc-1")).toBeNull();
+			expect(spawn).toHaveBeenCalledTimes(2);
+		} finally {
+			spawn.mockRestore();
+			await store.restore();
+		}
+	});
+
+	test.each([
+		["no marker names the store", { marker: false }],
+		["the marker names a non-embedded store", { mode: "server" }],
+		["the store has no journal", { journal: false }],
+	])("nothing is cached while %s", async (_label, options) => {
+		const store = await fakeStore(options);
 		const bd = fakeBd({ beads });
 		try {
 			resetReadBudget();
 			await bdShow("orc-1");
+			await bdShow("orc-1");
+			expect(bd.spawned).toEqual(["show orc-1", "show orc-1"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
+	test("a marker without the store field caches nothing", async () => {
+		const store = await fakeStore({ marker: false });
+		const bd = fakeBd({ beads });
+		try {
+			await writeFile(process.env.ORCHESTRATE_MARKER_FILE!, JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
+			resetReadBudget();
+			await bdShow("orc-1");
+			await bdShow("orc-1");
+			expect(bd.spawned).toEqual(["show orc-1", "show orc-1"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
+	test("bdShowMany reads only the ids no read has carried, and feeds later shows", async () => {
+		const store = await fakeStore();
+		const bd = fakeBd({ beads });
+		try {
+			resetReadBudget();
+			await bdShow("orc-1");
+			resetReadBudget();
 			const many = await bdShowMany(["orc-1", "orc-2", "orc-w1", "orc-2"]);
 			expect([...many!.keys()].sort()).toEqual(["orc-1", "orc-2", "orc-w1"]);
 			expect(bd.spawned).toEqual(["show orc-1", "list --id"]);
-			// The list carried the flags plain `bd list` needs to show wisps and closed beads.
-			await bdShow("orc-w1");
-			await bdShow("orc-2");
+			resetReadBudget();
+			expect(await bdShow("orc-w1")).toEqual(beads["orc-w1"]);
+			expect(await bdShow("orc-2")).toEqual(beads["orc-2"]);
+			expect(await bdShowMany(["orc-1", "orc-w1"])).toEqual(new Map([["orc-1", beads["orc-1"]], ["orc-w1", beads["orc-w1"]]]));
 			expect(bd.spawned).toHaveLength(2);
 		} finally {
 			bd.restore();
+			await store.restore();
 		}
 	});
 
@@ -372,7 +577,7 @@ describe("the dispatch show memo", () => {
 /**
  * What one gated call costs, through the real gates and the real `bd.ts`, with only the
  * subprocess replaced. These pin the read counts the audit measured, so a regression in
- * the memo, the lineage short-circuit, or the linked-wisp batching shows up as spawns.
+ * the cache, the lineage short-circuit, or the linked-wisp batching shows up as spawns.
  */
 describe("dispatch read cost", () => {
 	afterEach(() => resetReadBudget());
@@ -398,13 +603,39 @@ describe("dispatch read cost", () => {
 		return { cwd: await realpath(os.tmpdir()), getSystemPrompt: () => [`ORC-ROLE: ${role}`] } as unknown as ExtensionContext;
 	}
 
+	test.each([1, 5, 20])("with %d in-flight peers, a claimed implementer's writes cost one show after a store write and none otherwise", async peers => {
+		// Measured before the memo and the lineage short-circuit: 10 spawns at N=3, 12 at
+		// N=5 (the cap). Scope friction has since moved to claim time, so a write reads the
+		// claimed bead alone, and the store token serves that read until anyone writes.
+		const beads = run(peers, index => [`src/other${index}/**`]);
+		const store = await fakeStore();
+		const bd = fakeBd({ beads, inFlight: Object.values(beads) });
+		try {
+			const claims = createClaimState();
+			claims.recordClaim({ actor: "orc-impl-1", beadIds: ["orc-task-1"] });
+			const ctx = await ctxFor("implementer");
+			const write = async () => {
+				resetReadBudget();
+				return await gateWorktreeScope(claims, ctx, "write", { path: `${ctx.cwd}/src/mod1/x.ts`, content: "x" });
+			};
+			expect(await write()).toBeUndefined();
+			expect(bd.spawned).toEqual(["show orc-task-1"]);
+			expect(await write()).toBeUndefined();
+			expect(await write()).toBeUndefined();
+			expect(bd.spawned).toHaveLength(1);
+			await store.write();
+			expect(await write()).toBeUndefined();
+			expect(bd.spawned).toEqual(["show orc-task-1", "show orc-task-1"]);
+		} finally {
+			bd.restore();
+			await store.restore();
+		}
+	});
+
 	test.each([
 		["scope-less", () => undefined],
 		["disjoint scopes", (index: number) => [`src/other${index}/**`]],
-	])("a write from a claimed implementer with three in-flight peers (%s) costs exactly the freshness show", async (_label, siblingScope) => {
-		// Measured before the memo and the lineage short-circuit: 10 spawns at N=3, 12 at
-		// N=5 (the cap), the same for scope-less and scoped peers. Scope friction has since
-		// moved to claim time, so a write no longer lists peers at all.
+	])("without a store token a write from a claimed implementer with three in-flight peers (%s) costs exactly the freshness show", async (_label, siblingScope) => {
 		const beads = run(3, siblingScope);
 		const bd = fakeBd({ beads, inFlight: Object.values(beads) });
 		try {
@@ -413,7 +644,6 @@ describe("dispatch read cost", () => {
 			resetReadBudget();
 			const ctx = await ctxFor("implementer");
 			expect(await gateWorktreeScope(claims, ctx, "write", { path: `${ctx.cwd}/src/mod1/x.ts`, content: "x" })).toBeUndefined();
-			expect(bd.spawned.length).toBeLessThanOrEqual(1);
 			expect(bd.spawned).toEqual(["show orc-task-1"]);
 		} finally {
 			bd.restore();
@@ -438,7 +668,7 @@ describe("dispatch read cost", () => {
 		}
 	});
 
-	test("an implementer yield with five linked wisps is evaluated in five spawns", async () => {
+	test("an implementer yield with five linked wisps is evaluated in five spawns, the claimed bead hydrated by list", async () => {
 		// Measured before: 4 + 2L reads, so the fifth linked wisp spent the twelfth read and
 		// the exit was accepted with its contract unevaluated.
 		const linked = ["w1", "w2", "w3", "w4", "w5"];
@@ -452,7 +682,7 @@ describe("dispatch read cost", () => {
 			claims.recordClaim({ actor: "A", beadIds: ["orc-1"] });
 			const verdict = await createExitGuard(claims)(await ctxFor("implementer"));
 			expect(verdict?.block).toBe(true);
-			expect(bd.spawned).toEqual(["show orc-1", "comments orc-1", "dep list", "dep list", "list --id"]);
+			expect(bd.spawned).toEqual(["list --id", "comments orc-1", "dep list", "dep list", "list --id"]);
 		} finally {
 			bd.restore();
 		}
@@ -541,6 +771,46 @@ describe("checked wisp listing", () => {
    spawn.mockRestore();
   }
  });
+});
+
+describe("checked blocked ids", () => {
+	async function blockedFrom(stdout: string, code = 0): Promise<string[] | null> {
+		const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+			stdout: new Response(stdout).body,
+			stderr: new Response("").body,
+			exited: Promise.resolve(code),
+			kill: () => {},
+		}) as unknown as Bun.Subprocess) as unknown as typeof Bun.spawn);
+		try {
+			resetReadBudget();
+			return await bdBlockedChecked();
+		} finally {
+			spawn.mockRestore();
+		}
+	}
+
+	test.each([
+		["a bare list", '[{"id":"bd-5","blocked_by":["bd-4"]},{"id":"bd-7"}]', ["bd-5", "bd-7"]],
+		["the json envelope", '{"schema_version":1,"data":[{"id":"bd-5"}]}', ["bd-5"]],
+		["a warning banner before the payload", 'warning: dolt server is cold\n[{"id":"bd-5"}]', ["bd-5"]],
+		["a single object", '{"id":"bd-5"}', ["bd-5"]],
+		["a known empty set", "[]", []],
+	])("reads %s", async (_label, stdout, expected) => {
+		expect(await blockedFrom(stdout)).toEqual(expected);
+	});
+
+	test.each([
+		["nothing", ""],
+		["prose", "bd: not a beads workspace"],
+		["truncated json", "[{oops"],
+		["an entry without an id", '[{"id":"bd-1"},{"blocked_by":["bd-4"]},null,7]'],
+	])("keeps %s unknown rather than empty", async (_label, stdout) => {
+		expect(await blockedFrom(stdout)).toBeNull();
+	});
+
+	test("keeps a failed read unknown", async () => {
+		expect(await blockedFrom("[]", 1)).toBeNull();
+	});
 });
 
 describe("checked linked evidence", () => {

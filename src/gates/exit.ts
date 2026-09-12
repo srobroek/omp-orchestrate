@@ -19,7 +19,6 @@ import {
  type BdBead,
  bdCommentsChecked,
  bdLinkedChecked,
- bdShow,
  bdShowMany,
  commentVerb,
  lastBdFailure,
@@ -330,15 +329,29 @@ interface ExitGuardState {
  */
 const EXIT_READ_BUDGET = 24;
 
-/** Create an exit guard with reminder and refusal budgets private to one factory invocation. */
+/**
+ * Create an exit guard with reminder and refusal budgets private to one factory invocation.
+ *
+ * Every claimed bead is hydrated in one `bd list --id` before any is judged; a bead the
+ * list does not carry is logged and left unjudged, as an unreadable bead always was.
+ */
 export function createExitGuard(claims: ClaimState): (ctx: ExtensionContext, input?: Record<string, unknown>) => Promise<ToolCallEventResult | undefined> {
  const state: ExitGuardState = { unclaimedReminded: false, refusalClaim: undefined, refusalCount: 0 };
  return async (ctx, input) => {
   resetReadBudget(EXIT_READ_BUDGET);
   const claim = claims.observedClaim();
   if (claim === undefined || claim.beadIds.length === 0) return await gateUnclaimedExit(state, ctx, input);
+  const beads = await bdShowMany(claim.beadIds);
   for (const beadId of claim.beadIds) {
-   const result = await gateClaimedExit(state, ctx, claim, beadId);
+   const bead = beads?.get(beadId);
+   if (bead === undefined) {
+    logger.warn("orchestrate exit contract unevaluated: claimed bead unreadable", {
+     bead: beadId,
+     cause: beads === null ? lastBdFailure() : "missing",
+    });
+    continue;
+   }
+   const result = await gateClaimedExit(state, ctx, claim, bead);
    if (result !== undefined) return result;
   }
   return undefined;
@@ -402,14 +415,9 @@ async function gateClaimedExit(
  state: ExitGuardState,
  ctx: ExtensionContext,
  claim: ClaimObservation,
- beadId: string,
+ bead: BdBead,
 ): Promise<ToolCallEventResult | undefined> {
-
- const bead = await bdShow(beadId);
- if (bead === null) {
-  logger.warn("orchestrate exit contract unevaluated: claimed bead unreadable", { bead: beadId, cause: lastBdFailure() });
-  return undefined;
- }
+ const beadId = bead.id;
  if (bead.assignee && bead.assignee !== claim?.actor) return undefined;
 
  const routing = beadRouting(bead);
