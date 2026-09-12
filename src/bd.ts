@@ -529,6 +529,33 @@ export async function bdBlockedChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: str
  return ids;
 }
 
+/**
+ * The cycles `bd dep cycles --json` reports, each as the ids it visits in edge order, or
+ * `null` when the read failed or the payload was malformed. An empty list is a real
+ * answer: the blocking graph is acyclic. bd 1.2 prints each cycle as an array of the
+ * beads on it; later builds print `{ members: [{ id, issue? }], partial }` so a member
+ * with no row keeps its place. Both shapes are read.
+ */
+export async function bdCyclesChecked(timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<string[][] | null> {
+ const payload = await readJson(["dep", "cycles", "--json"], timeoutMs, cwd, generationFor(cwd));
+ if (payload === undefined) return null;
+ if (!Array.isArray(payload)) return fail("missing", null);
+ const cycles: string[][] = [];
+ for (const cycle of payload) {
+  const members: unknown = Array.isArray(cycle) ? cycle : cycle !== null && typeof cycle === "object" && "members" in cycle ? cycle.members : undefined;
+  if (!Array.isArray(members)) return fail("missing", null);
+  const ids: string[] = [];
+  for (const member of members) {
+   if (member === null || typeof member !== "object" || !("id" in member) || typeof member.id !== "string" || member.id.length === 0) {
+    return fail("missing", null);
+   }
+   ids.push(member.id);
+  }
+  cycles.push(ids);
+ }
+ return cycles;
+}
+
 /** Comments on a bead, oldest first as `bd` returns them. */
 export async function bdComments(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[]> {
  return (await bdCommentsChecked(id, timeoutMs)) ?? [];

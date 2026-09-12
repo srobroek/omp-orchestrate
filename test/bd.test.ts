@@ -6,6 +6,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead } from "../src/bd";
 import {
 	bdBlockedChecked,
+	bdCyclesChecked,
 	bdLinkedChecked,
 	bdListChecked,
 	bdRun,
@@ -783,6 +784,44 @@ describe("checked blocked ids", () => {
 
 	test("keeps a failed read unknown", async () => {
 		expect(await blockedFrom("[]", 1)).toBeNull();
+	});
+});
+
+describe("checked dependency cycles", () => {
+	async function cyclesFrom(stdout: string, code = 0): Promise<string[][] | null> {
+		const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+			stdout: new Response(stdout).body,
+			stderr: new Response("").body,
+			exited: Promise.resolve(code),
+			kill: () => {},
+		}) as unknown as Bun.Subprocess) as unknown as typeof Bun.spawn);
+		try {
+			resetReadBudget();
+			return await bdCyclesChecked();
+		} finally {
+			spawn.mockRestore();
+		}
+	}
+
+	test.each([
+		["bd 1.2's issue arrays", '[[{"id":"bd-1","title":"a"},{"id":"bd-2"}]]', [["bd-1", "bd-2"]]],
+		["the member envelope of later builds", '{"schema_version":1,"data":[{"members":[{"id":"bd-1","issue":{"id":"bd-1"}},{"id":"bd-2"}],"partial":true}]}', [["bd-1", "bd-2"]]],
+		["an acyclic graph", '{"schema_version":1,"data":[]}', []],
+	])("reads %s", async (_label, stdout, expected) => {
+		expect(await cyclesFrom(stdout)).toEqual(expected);
+	});
+
+	test.each([
+		["nothing", ""],
+		["a lone object", '{"id":"bd-1"}'],
+		["a cycle with no members", '[{"partial":false}]'],
+		["a member without an id", '[[{"id":"bd-1"},{"title":"x"}]]'],
+	])("keeps %s unknown rather than acyclic", async (_label, stdout) => {
+		expect(await cyclesFrom(stdout)).toBeNull();
+	});
+
+	test("keeps a failed read unknown", async () => {
+		expect(await cyclesFrom("[]", 1)).toBeNull();
 	});
 });
 
