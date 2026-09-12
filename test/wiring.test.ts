@@ -322,6 +322,76 @@ describe("gate dispatcher wiring", () => {
    await fs.rm(isolated, { recursive: true, force: true });
   }
  });
+
+ /**
+  * G9 through the real handler: the seat whose session the marker names is the lead. The
+  * fixture is a git checkout, because a product file is one inside a working tree, and the
+  * default `dispatchAll` session, `wiring-session`, is the one the marker names here.
+  */
+ describe("the lead of an active run plans and never edits or merges", () => {
+  const LEAD_MARKER = JSON.stringify({ schema_version: 1, run_id: "run-lead", session_id: "wiring-session" });
+  const REASON = /refused for the lead of run run-lead: the lead plans and never edits or merges; spawn orc-architect/;
+
+  beforeEach(async () => {
+   await fs.mkdir(path.join(dir, ".git"));
+   await fs.mkdir(path.join(dir, "src"));
+  });
+
+  test.each([
+   ["gh pr merge", { toolName: "bash", input: { command: "gh pr merge 3 --squash --match-head-commit abc" } }],
+   ["gh pr ready", { toolName: "bash", input: { command: "gh -R o/r pr ready 3" } }],
+   ["git commit", { toolName: "bash", input: { command: "git -C /tmp/x commit -m 'feat: y'" } }],
+   ["git push", { toolName: "bash", input: { command: "bun test && git push -u origin fix/y" } }],
+   ["an edit of a product file", { toolName: "edit", input: { input: "[src/x.ts#1A2B]\nPUT 1.=1:\n+x" } }],
+   ["a write of a product file", { toolName: "write", input: { path: "src/x.ts", content: "x" } }],
+  ])("%s is refused for the lead in a run, and allowed with no run", async (_label, event) => {
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+   expect(await verdict(handlers, event, { cwd: dir })).toBeUndefined();
+   await pinnedRun(dir, LEAD_MARKER);
+   const refused = await verdict(handlers, event, { cwd: dir });
+   expect(refused?.block).toBe(true);
+   expect(refused?.reason).toMatch(REASON);
+   expect(errors).toEqual([]);
+  });
+
+  test.each([
+   ["a .orchestration write", { toolName: "write", input: { path: ".orchestration/run-lead/plan.md", content: "plan" } }],
+   ["a write outside every checkout", { toolName: "write", input: { path: path.join(os.tmpdir(), "orc-lead-scratch.md"), content: "notes" } }],
+   ["a tool-device write", { toolName: "write", input: { path: "xd://report_issue", content: "x" } }],
+   ["a bd read", { toolName: "bash", input: { command: "bd show run-lead --json" } }],
+   ["a git read naming a refused word", { toolName: "bash", input: { command: "git log --oneline -3 --grep push" } }],
+  ])("%s passes for the lead", async (_label, event) => {
+   await pinnedRun(dir, LEAD_MARKER);
+   const { pi, handlers } = runtimeApi();
+   ompOrchestrate(pi);
+   expect(await verdict(handlers, event, { cwd: dir })).toBeUndefined();
+  });
+
+  test("another session in the same checkout is not the lead: its merge passes G9", async () => {
+   await pinnedRun(dir, JSON.stringify({ schema_version: 1, run_id: "run-lead", session_id: "someone-else" }));
+   const { pi, handlers } = runtimeApi();
+   ompOrchestrate(pi);
+   expect(await verdict(handlers, { toolName: "bash", input: { command: "gh pr merge 3" } }, { cwd: dir })).toBeUndefined();
+  });
+
+  test("the lead contract reaches the lead's session_start, and nobody else's", async () => {
+   await pinnedRun(dir, LEAD_MARKER);
+   for (const [session, worker, expected] of [
+    ["wiring-session", false, true],
+    ["someone-else", false, false],
+    ["wiring-session", true, false],
+   ] as const) {
+    const { pi, starts, sent } = worker ? workerApi() : runtimeApi();
+    ompOrchestrate(pi);
+    const ctx = { cwd: dir, getSystemPrompt: () => [], sessionManager: { getSessionId: () => session } } as unknown as ExtensionContext;
+    await starts.at(-1)?.({}, ctx);
+    const lead = sent.filter(message => message.customType === "com.srobroek.omp-orchestrate.lead-contract");
+    expect(lead.length === 1).toBe(expected);
+    if (expected) expect(lead[0]?.content).toContain("run run-lead");
+   }
+  });
+ });
 });
 
 /**

@@ -9,7 +9,7 @@ TRIGGER
 + Coordinate substantial independent work across agents, or resume a durable run.
 - Unless the user explicitly requires orchestration, use direct execution for one bounded task.
 
-You are the lead. Define the run's shape and completion criteria. Architects own their epics and dispatch workers. Workers pull their queues.
+You are the lead. Define the run's shape and completion criteria, then spawn `orc-architect` with the run id. Architects own their epics and dispatch workers. Workers pull their queues. While the run is active the plugin refuses the lead's `git commit`, `git push`, `gh pr merge`, `gh pr ready`, and any edit or write of a product file outside `.orchestration/`; the lead contract it sends on start says the same.
 
 Before bootstrap, confirm that parallel work or durable resumption justifies the run. Once the run is started, every role follows its claim contract. This check never permits a bypass.
 
@@ -70,11 +70,13 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 
 Slash commands, typed by the operator in the lead session:
 
-- `/orchestrate-start --new "<title>"` or `/orchestrate-start <epic-id>` creates or adopts the run epic, writes the marker with the run's database, stamps this session's lead lease, and records landing capabilities. Dispatch after it reports the run.
-- `/orchestrate-status` shows the run epic, its liveness, the lead lease, and an Attention section: open `ASK` comments, lapsed leases, `BOUNCED` landings, refused adoptions, a store probe that is not `free`.
+- `/orchestrate-start --new "<title>"` or `/orchestrate-start <epic-id>` creates or adopts the run epic, writes the marker with the run's database and how it was found, stamps this session's lead lease, records landing capabilities, and sends the lead contract. `--store <path>` binds a database that is not the checkout's own. Without it, the command refuses a store that the process environment named. After it reports the run, dispatch.
+- `/orchestrate-status` shows the run epic, its liveness, the lead lease, and the store the marker names. Its Attention section lists open `ASK` comments, lapsed leases, `BOUNCED` landings, refused adoptions, a store probe that is not `free`, and a marker with no `beads_dir`.
 - `/orchestrate-roster` shows ready-queue depth per role, wisps included.
-- `/orchestrate-answer <bead> <text>` writes an `ANSWER` note; it requeues a `FAILED`+`ASK` implementer bead and wakes a parked architect that holds the bead.
+- `/orchestrate-answer <bead> <text>` writes an `ANSWER` note on a bead beneath the run epic. It requeues a `FAILED`+`ASK` implementer bead and wakes a parked architect that holds the bead. The command refuses a bead outside the run.
 - `/orchestrate-resume` takes over a run whose lead lease lapsed and releases in-flight claims whose lease lapsed.
 - `/orchestrate-stop [--force]` ends the run: releases the lead lease and removes the marker. With any bead beneath the epic still `in_progress`, it refuses; `--force` skips that check.
+
+Every command finds the run through the marker at the checkout, or at the primary checkout of a linked worktree.
 
 Final assistant verdicts and durable comment verbs are separate channels.

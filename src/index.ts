@@ -20,6 +20,7 @@ import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
 import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
+import { gateLeadContract } from "./gates/lead";
 import { createLeadExitWatch } from "./gates/lead-exit";
 import { gateBeadWriteFree, rebuildBashInput } from "./gates/readonly";
 import { gateImplementerIsolation } from "./gates/spawn";
@@ -28,7 +29,7 @@ import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
 import { createLeaseRenewer } from "./lease";
 import { runScope } from "./run-scope";
-import { isBoundRunActive, registerRunCommands, renewLeadLease } from "./run-state";
+import { injectLeadContract, isBoundRunActive, isLeadSession, registerRunCommands, renewLeadLease } from "./run-state";
 import { bdInvocations } from "./shell";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
@@ -91,6 +92,11 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    resetReadBudget();
    let input = event.input as Record<string, unknown>;
    let inputRevised = false;
+
+   // G9 first: the lead's refusals are on the act itself, and must win over every rewrite
+   // below of an input that will not run. Every other seat passes through untouched.
+   const lead = await gateLeadContract(ctx, event.toolName, input);
+   if (lead) return lead;
 
    if (event.toolName === "yield") return await gateExitContract(ctx, input);
    if (event.toolName === "task") return gateImplementerIsolation(input);
@@ -184,10 +190,19 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   * pulled an empty queue for a role that does not exist, and yielded NO_WORK -- the
   * injected text outranked the task it was actually given. The copy's redirect makes
   * every `bd` call reach the run's database, so a worker needs no path per call.
+  *
+  * The lead hears its own, shorter contract, and only when the marker names this session:
+  * a lead session resumed in a checkout it leads. A fresh session in a marked checkout is
+  * an operator who has started or adopted nothing yet, and hears it from
+  * `/orchestrate-start` or `/orchestrate-resume` when they succeed.
   */
  pi.on("session_start", async (_event, ctx) => {
-  if (sessionRole(pi) === "lead") return;
-  if ((await runScope(ctx)) === null) return;
+  const scope = await runScope(ctx);
+  if (scope === null) return;
+  if (sessionRole(pi) === "lead") {
+   if (await isLeadSession(ctx)) injectLeadContract(pi, scope.runId);
+   return;
+  }
   const adoption = await adoptAtCwd(pi, ctx.cwd);
   if (adoption?.kind === "refused") {
    pi.sendMessage(

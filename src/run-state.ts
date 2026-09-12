@@ -28,13 +28,15 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { locateBeadsDir } from "./beads-mode";
+import { type StoreOrigin, storeOrigin } from "./beads-mode";
 import { type BdBead, type BdComment, bdCommentsChecked, bdListChecked, bdRun, bdShow, commentVerb, metadataString, resetReadBudget } from "./bd";
+import { leadContract, leadSummary } from "./contract";
 import { type LandingRecord, recordLandingCapabilities } from "./landing";
 import { type LeadLeaseRenewal, fenceRefused, leaseExpired, leaseState, leaseUntil, releaseDeadClaim } from "./lease";
+import { runScope } from "./run-scope";
 import { probeStore, type StoreProbe } from "./store-probe";
 
 /** The marker shape this plugin writes; a marker stamped with a higher number is refused. */
@@ -48,6 +50,9 @@ export const MARKER_SCHEMA = 1;
  * (`src/clone-adopt.ts`): the copy carries this marker, so the run's database travels
  * with it and nothing has to be re-established when a lead restarts. A marker written
  * before the field existed reads without it, and W5 asks for a restart to record it.
+ * `store_origin` says how that path was found -- in the checkout, through git's common
+ * directory, through a copy's redirect, or named by the operator with `--store` -- so a
+ * reader can tell a run bound to its own store from one the operator pointed elsewhere.
  *
  * `session_id` is the session that started or last resumed the run: what `/orchestrate-start`
  * checks before refusing a second operator, and what `/orchestrate-status` names. The lead
@@ -61,6 +66,14 @@ export interface ActiveRun {
 	run_id: string;
 	session_id?: string;
 	beads_dir?: string;
+	store_origin?: StoreOrigin;
+}
+
+const STORE_ORIGINS: Record<string, true> = { checkout: true, "common-dir": true, redirect: true, env: true, explicit: true };
+
+/** `value` as a store origin, or `undefined` for anything else. */
+function asStoreOrigin(value: unknown): StoreOrigin | undefined {
+	return typeof value === "string" && STORE_ORIGINS[value] === true ? (value as StoreOrigin) : undefined;
 }
 
 /** Run id an older plugin release wrote before the run epic existed. Bindable; never treated as bound. */
@@ -89,9 +102,14 @@ export function markerPath(cwd: string): string {
  * run's binding.
  */
 export async function readActiveRun(cwd: string): Promise<ActiveRun | null> {
+	return readActiveRunAt(markerPath(cwd));
+}
+
+/** `readActiveRun` for a marker file already named, as a run scope names it. */
+async function readActiveRunAt(file: string): Promise<ActiveRun | null> {
 	let raw: string;
 	try {
-		raw = (await fs.readFile(markerPath(cwd), "utf8")).trim();
+		raw = (await fs.readFile(file, "utf8")).trim();
 	} catch {
 		return null;
 	}
@@ -118,10 +136,12 @@ function asActiveRun(value: unknown): ActiveRun | null {
 	const runId = typeof record.run_id === "string" && record.run_id.length > 0 ? record.run_id : PENDING;
 	const sessionId = typeof record.session_id === "string" && record.session_id.length > 0 ? record.session_id : undefined;
 	const beadsDir = typeof record.beads_dir === "string" && path.isAbsolute(record.beads_dir) ? record.beads_dir : undefined;
+	const origin = asStoreOrigin(record.store_origin);
 	// An unknown key is dropped rather than carried: see the note on ActiveRun.
 	const state: ActiveRun = { schema_version: MARKER_SCHEMA, run_id: runId };
 	if (sessionId !== undefined) state.session_id = sessionId;
 	if (beadsDir !== undefined) state.beads_dir = beadsDir;
+	if (origin !== undefined) state.store_origin = origin;
 	return state;
 }
 
@@ -137,7 +157,8 @@ interface MarkerRead {
  * Authority reads distinguish absence from unreadable or malformed markers, and a marker
  * a newer plugin wrote from one this version can carry: a higher `schema_version` is
  * refused by name, because reading it as this shape could drop a field the newer run
- * depends on.
+ * depends on. A lower one, like none at all, is an older marker: read, and rewritten in
+ * this shape when the run is resumed.
  */
 async function readMarker(cwd: string): Promise<MarkerRead | null> {
 	let raw: string;
@@ -160,19 +181,26 @@ async function readMarker(cwd: string): Promise<MarkerRead | null> {
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(MALFORMED);
 	const record = parsed as Record<string, unknown>;
 	const schema = record.schema_version;
-	if (typeof schema === "number" && Number.isInteger(schema) && schema > MARKER_SCHEMA) {
-		throw new Error(`Active-run marker schema ${schema} is newer than this plugin's ${MARKER_SCHEMA}; upgrade the plugin before resuming`);
+	let legacy = true;
+	if (schema !== undefined) {
+		if (typeof schema !== "number" || !Number.isInteger(schema) || schema < 0) throw new Error(MALFORMED);
+		if (schema > MARKER_SCHEMA) {
+			throw new Error(`Active-run marker schema ${schema} is newer than this plugin's ${MARKER_SCHEMA}; upgrade the plugin before resuming`);
+		}
+		legacy = schema < MARKER_SCHEMA;
 	}
+	const origin = asStoreOrigin(record.store_origin);
 	if (typeof record.run_id !== "string" || !RUN_ID_RE.test(record.run_id)
-		|| (schema !== undefined && schema !== MARKER_SCHEMA)
 		|| (record.session_id !== undefined && (typeof record.session_id !== "string" || record.session_id.length === 0))
-		|| (record.beads_dir !== undefined && (typeof record.beads_dir !== "string" || !path.isAbsolute(record.beads_dir)))) {
+		|| (record.beads_dir !== undefined && (typeof record.beads_dir !== "string" || !path.isAbsolute(record.beads_dir)))
+		|| (record.store_origin !== undefined && origin === undefined)) {
 		throw new Error(MALFORMED);
 	}
 	const state: ActiveRun = { schema_version: MARKER_SCHEMA, run_id: record.run_id };
 	if (typeof record.session_id === "string") state.session_id = record.session_id;
 	if (typeof record.beads_dir === "string") state.beads_dir = record.beads_dir;
-	return { run: state, legacy: schema === undefined };
+	if (origin !== undefined) state.store_origin = origin;
+	return { run: state, legacy };
 }
 
 /** Authority reads distinguish absence from unreadable or malformed markers. */
@@ -275,6 +303,37 @@ export function leadActor(sessionId: string | undefined): string {
 	return sessionId === undefined ? "lead" : `lead:${sessionId}`;
 }
 
+/**
+ * Whether this session leads the run it is inside.
+ *
+ * The lead is the session the marker's `session_id` names: `/orchestrate-start` records
+ * it and `/orchestrate-resume` rewrites it, both under the marker lock, so it tracks the
+ * current lead. The epic's lease is not consulted: this answers on every gated call,
+ * where a `bd` spawn is not affordable, and the marker is proof enough. A displaced lead
+ * (its marker rewritten by an adopter) and a restarted one that has not yet resumed both
+ * read `false`, which is the fail-open side: neither holds the run. Outside a run scope,
+ * `false`. The run is resolved through `runScope`, so a lead in a linked worktree is
+ * found at the primary its `.git` belongs to.
+ */
+export async function isLeadSession(ctx: Pick<ExtensionContext, "cwd" | "sessionManager">): Promise<boolean> {
+	const scope = await runScope(ctx);
+	if (scope === null) return false;
+	const marker = await readActiveRunAt(scope.markerPath);
+	return marker !== null && marker.session_id !== undefined && marker.session_id === ctx.sessionManager.getSessionId();
+}
+
+/** Custom-message type of the lead's contract, namespaced as the plugin's others are. */
+export const LEAD_CONTRACT_MESSAGE = "com.srobroek.omp-orchestrate.lead-contract";
+
+/**
+ * Tell the lead model what leading `runId` means. `attribution: "user"` so it reads as
+ * authority rather than as something the model said to itself; `triggerTurn: false` so it
+ * waits for the operator's next prompt, which is the goal it will be asked to plan.
+ */
+export function injectLeadContract(pi: ExtensionAPI, runId: string): void {
+	pi.sendMessage({ customType: LEAD_CONTRACT_MESSAGE, content: leadContract(runId), display: false, attribution: "user" }, { triggerTurn: false });
+}
+
 /** Wall-clock ceiling for a write on the epic; a write, so the operation timeout. */
 const EPIC_WRITE_TIMEOUT_MS = 20_000;
 
@@ -330,14 +389,14 @@ function epicHolder(epic: BdBead): string | undefined {
  * unreachable is refused rather than trusted.
  *
  * A missing marker is created bound; a `pending` one, or one already naming `runId`, is
- * rewritten in place, keeping the session and database it recorded unless the caller
- * names new ones. The lead lease belongs here rather than in the command handler: it is
- * the durable consequence of a binding existing, so every caller must get it. Binding
- * claims the epic as the lead; another lead's live lease refuses the claim (the bind
- * stands, the failure is returned), and another lead's lapsed lease is taken over,
- * because binding is the explicit act.
+ * rewritten in place, keeping the session, database and store origin it recorded unless
+ * the caller names new ones. The lead lease belongs here rather than in the command
+ * handler: it is the durable consequence of a binding existing, so every caller must get
+ * it. Binding claims the epic as the lead; another lead's live lease refuses the claim
+ * (the bind stands, the failure is returned), and another lead's lapsed lease is taken
+ * over, because binding is the explicit act.
  */
-export async function bindRun(cwd: string, runId: string, sessionId?: string, beadsDir?: string): Promise<BindResult> {
+export async function bindRun(cwd: string, runId: string, sessionId?: string, beadsDir?: string, origin?: StoreOrigin): Promise<BindResult> {
 	if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
 	resetReadBudget();
 	const epic = await bdShow(runId, undefined, cwd, { fresh: true });
@@ -355,8 +414,10 @@ export async function bindRun(cwd: string, runId: string, sessionId?: string, be
 		const state: ActiveRun = { schema_version: MARKER_SCHEMA, run_id: runId };
 		const session = sessionId ?? existing?.session_id;
 		const beads = beadsDir ?? existing?.beads_dir;
+		const from = beadsDir === undefined ? existing?.store_origin : origin;
 		if (session !== undefined) state.session_id = session;
 		if (beads !== undefined) state.beads_dir = beads;
+		if (from !== undefined) state.store_origin = from;
 		await writeMarker(markerPath(cwd), state);
 		return state;
 	});
@@ -517,6 +578,8 @@ export interface StartResult {
 	run: string;
 	/** The epic was created here from a `--new` title. */
 	created: boolean;
+	/** The store the marker now names, and how it was found. */
+	store: { path: string; origin: StoreOrigin };
 	probe: StoreProbe;
 	lease: BindResult["lease"];
 	/** The run epic's `schema` stamp, and `run_id`/`artifacts` for a created epic. */
@@ -577,6 +640,17 @@ async function stampEpic(runId: string, fields: Record<string, unknown>, cwd: st
 	return written.code === 0 ? "written" : { failed: written.stderr.trim() || `bd exited ${written.code}` };
 }
 
+/** What `/orchestrate-start` may add to its target. */
+export interface StartOptions {
+	/**
+	 * `--store <path>`: the store the run binds, wherever it is. Without it, a store that
+	 * bd reached through a selector in the process environment is refused, because the
+	 * campaign measured a scratch run's epic land in another checkout's database that way
+	 * (`scratch/audit/e2e/operator-fuzz.ledger.md`, row 0).
+	 */
+	store?: string;
+}
+
 /**
  * Start a run: locate and probe the store, create or verify the epic, write the marker
  * bound, take the lead lease, stamp the epic, record the landing capabilities. Throws on
@@ -584,11 +658,12 @@ async function stampEpic(runId: string, fields: Record<string, unknown>, cwd: st
  * result, because the run is active by then and a partial stamp is not a failed start.
  *
  * Refused: a marker another session wrote (that run is resumed or stopped, never
- * overwritten), a database `bd where` cannot name, a store that is locked or corrupted
+ * overwritten), a database `bd where` cannot name, a database reached only through the
+ * process environment and not named with `--store`, a store that is locked or corrupted
  * (`slow` starts, and says so), a second epic for a run this session already has. The
  * session's own run restarts idempotently: the same id re-leases and re-records.
  */
-export async function startRun(cwd: string, sessionId: string, target: StartTarget | undefined): Promise<StartResult> {
+export async function startRun(cwd: string, sessionId: string, target: StartTarget | undefined, options: StartOptions = {}): Promise<StartResult> {
 	const existing = await readActiveRunStrict(cwd);
 	let runId: string | undefined;
 	if (existing !== null && existing.run_id !== PENDING) {
@@ -613,20 +688,24 @@ export async function startRun(cwd: string, sessionId: string, target: StartTarg
 	// Refusing here is the point. Starting arms enforcement for every agent the run
 	// spawns, and the database recorded here is what every isolated copy redirects its
 	// own `.beads` to; a run started without one would leave each copy writing to a
-	// store nobody else reads.
-	const beads = await locateBeadsDir(cwd);
-	if (!beads.ok) throw new Error(`run not started: ${beads.reason}`);
+	// store nobody else reads, and a run started on a store the environment happened to
+	// name would write another checkout's database.
+	const store = await storeOrigin(cwd, options.store);
+	if (!store.ok) throw new Error(`run not started: ${store.reason}`);
+	if (store.origin === "env") {
+		throw new Error(`run not started: bd resolved its database to ${store.path} through a store selector in this process's environment, not from this checkout; pass --store ${store.path} to bind it on purpose, or unset the selector`);
+	}
 	let probe: StoreProbe;
 	try {
-		probe = await probeStore(beads.beadsDir);
+		probe = await probeStore(store.path);
 	} catch (error) {
-		throw new Error(`run not started: the store at ${beads.beadsDir} could not be probed: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`run not started: the store at ${store.path} could not be probed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	if (probe.state === "locked") {
-		throw new Error(`run not started: the store at ${beads.beadsDir} is locked by ${probe.holder}; stop that writer first`);
+		throw new Error(`run not started: the store at ${store.path} is locked by ${probe.holder}; stop that writer first`);
 	}
 	if (probe.state === "corrupted") {
-		throw new Error(`run not started: the store at ${beads.beadsDir} is corrupted (${probe.detail}); recover it first`);
+		throw new Error(`run not started: the store at ${store.path} is corrupted (${probe.detail}); recover it first`);
 	}
 
 	const actor = leadActor(sessionId);
@@ -634,7 +713,7 @@ export async function startRun(cwd: string, sessionId: string, target: StartTarg
 	if (runId === undefined) runId = await createRunEpic(cwd, (target as { title: string }).title, actor);
 	let lease: BindResult["lease"];
 	try {
-		lease = (await bindRun(cwd, runId, sessionId, beads.beadsDir)).lease;
+		lease = (await bindRun(cwd, runId, sessionId, store.path, store.origin)).lease;
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		throw new Error(created ? `run epic ${runId} was created but the run did not start: ${reason}; /orchestrate-start ${runId} retries` : reason);
@@ -654,7 +733,7 @@ export async function startRun(cwd: string, sessionId: string, target: StartTarg
 	// them: probed once here, read by every sweep. A failed probe leaves the start
 	// standing and the sweep in `direct` mode, said where the operator reads.
 	const landing = await recordLandingCapabilities(cwd, runId);
-	return { run: runId, created, probe, lease, stamp, landing };
+	return { run: runId, created, store: { path: store.path, origin: store.origin }, probe, lease, stamp, landing };
 }
 
 // ============================================================================
@@ -683,7 +762,7 @@ export type ResumeOutcome =
  * fresh before the decision, so a renewal that landed since the list was taken keeps its
  * claim.
  */
-async function sweepLapsedClaims(cwd: string, run: string, actor: string, now: number): Promise<ClaimSweep | "unread"> {
+export async function sweepLapsedClaims(cwd: string, run: string, actor: string, now: number): Promise<ClaimSweep | "unread"> {
 	const beads = await bdListChecked(STORE_LIST, undefined, cwd);
 	if (beads === null) return "unread";
 	const sweep: ClaimSweep = { released: [], kept: [], failed: [] };
@@ -699,7 +778,7 @@ async function sweepLapsedClaims(cwd: string, run: string, actor: string, now: n
 			continue;
 		}
 		const released = await releaseDeadClaim(bead.id, holder, {
-			cause: `${leaseState(bead, now)}; released on adoption by ${actor}`,
+			cause: `${leaseState(bead, now)}; no live session renewed it; released by ${actor}`,
 			recoveredBy: actor,
 		}, cwd);
 		if (released === "released" || released === "comment-failed") sweep.released.push(bead.id);
@@ -746,6 +825,7 @@ export async function resumeRun(cwd: string, sessionId: string, now = Date.now()
 			await withMarkerLock(cwd, async () => {
 				const state: ActiveRun = { schema_version: MARKER_SCHEMA, run_id: run, session_id: sessionId };
 				if (marker.run.beads_dir !== undefined) state.beads_dir = marker.run.beads_dir;
+				if (marker.run.store_origin !== undefined) state.store_origin = marker.run.store_origin;
 				await writeMarker(markerPath(cwd), state);
 			});
 		} catch (error) {
@@ -868,7 +948,32 @@ export interface AnswerDeps {
 }
 
 /**
+ * Whether `bead` sits beneath `runId`, walking its parent chain one `bd show` per level.
+ * `undefined` when an ancestor could not be read, so the caller can say the membership is
+ * unknown rather than false. A parent cycle ends the walk as outside the run.
+ */
+async function underRun(bead: BdBead, runId: string, cwd: string): Promise<boolean | undefined> {
+	const seen = new Set<string>([bead.id]);
+	let parent = bead.parent;
+	while (typeof parent === "string" && parent.length > 0) {
+		if (parent === runId) return true;
+		if (seen.has(parent)) return false;
+		seen.add(parent);
+		const ancestor = await bdShow(parent, undefined, cwd);
+		if (ancestor === null) return undefined;
+		parent = ancestor.parent;
+	}
+	return false;
+}
+
+/**
  * Answer a bead's question: one `NOTE ANSWER` comment, then whatever moves the hold.
+ *
+ * The bead must sit beneath the run epic the marker at `cwd` names, at any depth. The
+ * command runs in the lead's seat against the run's store, and the campaign measured it
+ * annotating a bead of an unrelated epic that happened to share the store
+ * (`scratch/audit/e2e/operator-fuzz.ledger.md`, row 2.10); a bead outside the run, or one
+ * whose ancestry cannot be read, is refused before anything is written.
  *
  * A holder this process knows as a live or parked agent is woken through the IRC bus
  * -- an architect parked on its epic revives and reads the answer off the bead. A
@@ -883,10 +988,15 @@ export interface AnswerDeps {
  */
 export async function answerBead(cwd: string, sessionId: string, beadId: string, text: string, deps: AnswerDeps): Promise<AnswerHold> {
 	if (!RUN_ID_RE.test(beadId)) throw new Error(`bead id must be a Beads identifier, got ${JSON.stringify(beadId)}`);
+	const marker = await readActiveRunStrict(cwd);
+	if (marker === null || marker.run_id === PENDING) throw new Error(`no active run at ${cwd}; nothing recorded`);
 	const actor = leadActor(sessionId);
 	resetReadBudget();
 	const bead = await bdShow(beadId, undefined, cwd, { fresh: true });
 	if (bead === null) throw new Error(`bead ${beadId} could not be read; nothing recorded`);
+	const member = beadId === marker.run_id ? true : await underRun(bead, marker.run_id, cwd);
+	if (member === undefined) throw new Error(`${beadId}'s ancestry could not be read, so whether it belongs to run ${marker.run_id} is unknown; nothing recorded`);
+	if (!member) throw new Error(`${beadId} is not under run ${marker.run_id}; /orchestrate-answer writes only to the run's beads, and nothing was recorded`);
 	const comments = await bdCommentsChecked(beadId);
 	const noted = await bdRun(["comment", beadId, `NOTE ANSWER ${beadId}: ${text}`, "--actor", actor], EPIC_WRITE_TIMEOUT_MS, cwd);
 	if (noted === null || noted.code !== 0) {
@@ -981,10 +1091,12 @@ async function epicAttention(run: string): Promise<string[]> {
 }
 
 /**
- * The marker, the epic's liveness, the lead lease, then an Attention section: everything
- * a human is needed for or should know -- lapsed leases with their holder, landings the
- * sweep bounced or blocked, open `ASK`/`ESCALATED` questions, an adoption this run
- * refused, the last `WARN`, and a store the probe does not report `free`. Reads only.
+ * The marker, the epic's liveness, the lead lease, the store, then an Attention section:
+ * everything a human is needed for or should know -- lapsed leases with their holder,
+ * landings the sweep bounced or blocked, open `ASK`/`ESCALATED` questions, an adoption
+ * this run refused, the last `WARN`, a store the probe does not report `free`, and a
+ * marker that names no store at all, which every isolated copy would fail to redirect
+ * from. Reads only.
  */
 export async function runStatusReport(cwd: string, now = Date.now()): Promise<RunStatusReport> {
 	const marker = markerPath(cwd);
@@ -1017,7 +1129,11 @@ export async function runStatusReport(cwd: string, now = Date.now()): Promise<Ru
 			: `lead: ${lead}, ${leaseState(epic, now)}`);
 		if (lead !== undefined && leaseExpired(epic, now)) attention.push(`- lead lease lapsed: ${lead}; /orchestrate-resume adopts the run`);
 	}
-	if (run.beads_dir !== undefined) {
+	if (run.beads_dir === undefined) {
+		lines.push("store: none recorded on the marker");
+		attention.push(`- marker names no beads_dir: isolated copies cannot reach the run's database; /orchestrate-start ${run.run_id} records it`);
+	} else {
+		lines.push(`store: ${run.beads_dir}${run.store_origin === undefined ? "" : ` (${run.store_origin})`}`);
 		try {
 			const probe = await probeStore(run.beads_dir);
 			if (probe.state === "locked") attention.push(`- store locked by ${probe.holder} (${probe.lock})`);
@@ -1055,18 +1171,42 @@ function words(args: string): string[] {
 	return found;
 }
 
-const START_USAGE = 'usage: /orchestrate-start <epic-id> | --new "<title>"';
+const START_USAGE = 'usage: /orchestrate-start [<epic-id> | --new "<title>"] [--store <path>]';
 
-/** The start command's arguments as a target, `undefined` for a bare restart, or a usage line. */
-function startTarget(args: string): StartTarget | undefined | string {
+/** What `/orchestrate-start` was asked: the target, `undefined` for a bare restart, and the options. */
+interface StartRequest {
+	target: StartTarget | undefined;
+	options: StartOptions;
+}
+
+/** The start command's arguments parsed, or a usage line. */
+function startRequest(args: string): StartRequest | string {
 	const parts = words(args);
-	if (parts.length === 0) return undefined;
+	const options: StartOptions = {};
+	const store = parts.indexOf("--store");
+	if (store !== -1) {
+		const named = parts[store + 1];
+		if (named === undefined || named.startsWith("--")) return START_USAGE;
+		options.store = named;
+		parts.splice(store, 2);
+	}
+	if (parts.length === 0) return { target: undefined, options };
 	if (parts[0] === "--new") {
 		const title = parts.slice(1).join(" ").trim();
-		return title.length === 0 ? START_USAGE : { title };
+		return title.length === 0 ? START_USAGE : { target: { title }, options };
 	}
 	if (parts.length > 1 || parts[0]!.startsWith("--")) return START_USAGE;
-	return { epic: parts[0]! };
+	return { target: { epic: parts[0]! }, options };
+}
+
+/**
+ * The checkout a command acts on: the root of the run the seat is inside, so a lead in a
+ * linked worktree reaches the primary's marker (`runScope` resolves it through git's common
+ * directory), else the seat itself, where `/orchestrate-start` writes a new marker.
+ */
+async function commandRoot(ctx: ExtensionCommandContext): Promise<string> {
+	const cwd = ctx.sessionManager.getCwd();
+	return (await runScope({ cwd }))?.root ?? cwd;
 }
 
 /** The wake OMP's own `hub send` performs, from the lead's seat. */
@@ -1077,13 +1217,14 @@ const ircWake: Wake = (to, body) => IrcBus.global().send({ from: MAIN_AGENT_ID, 
  * function rather than import-time work so the extension entry point owns the order
  * commands appear in, and so tests can import the marker functions without touching the
  * registry. `orchestrate-roster` reads queues, not the marker, and stays with the entry
- * point.
+ * point. Every command resolves the run through `commandRoot`.
  *
  * `onActivate` runs once a run is active in this session -- after `start` has written
  * the marker with the run's database in it, and after `resume` has adopted -- so the
  * settings preflight in `watchers.ts`, which imports this module, is injected rather
- * than imported. `deps` are the process registry and the wake `answer` reaches for;
- * tests hand in fakes.
+ * than imported. The lead contract is sent at the same moment: it is the model's
+ * counterpart of the notice the operator reads. `deps` are the process registry and the
+ * wake `answer` reaches for; tests hand in fakes.
  */
 export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string) => Promise<unknown>, deps: Partial<AnswerDeps> = {}): void {
 	// The registry is read at answer time, never at registration: OMP owns when its global
@@ -1102,23 +1243,24 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 	};
 
 	pi.registerCommand("orchestrate-start", {
-		description: 'Start a run here: /orchestrate-start <epic-id> binds an existing epic, --new "<title>" creates one; records the database, takes the lead lease, probes landing',
+		description: 'Start a run here: /orchestrate-start <epic-id> binds an existing epic, --new "<title>" creates one, --store <path> names the database; records the database, takes the lead lease, probes landing',
 		handler: async (args, ctx) => {
-			const target = startTarget(args);
-			if (typeof target === "string") {
-				ctx.ui.notify(target, "error");
+			const request = startRequest(args);
+			if (typeof request === "string") {
+				ctx.ui.notify(request, "error");
 				return;
 			}
-			const cwd = ctx.sessionManager.getCwd();
+			const cwd = await commandRoot(ctx);
 			let started: StartResult;
 			try {
-				started = await startRun(cwd, ctx.sessionManager.getSessionId(), target);
+				started = await startRun(cwd, ctx.sessionManager.getSessionId(), request.target, request.options);
 			} catch (error) {
 				ctx.ui.notify(reason(error), "error");
 				return;
 			}
 			let level: Level = "info";
 			const lines = [`orchestrate run ${started.created ? "started" : "bound"}: ${started.run}${started.created ? " (epic created)" : ""}`];
+			lines.push(`store: ${started.store.path} (${started.store.origin})`);
 			if (started.probe.state === "slow") {
 				lines.push(`store slow: one read took ${started.probe.ms} ms`);
 				level = "warning";
@@ -1141,6 +1283,8 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 				lines.push(`landing capabilities not recorded on ${started.run}: ${started.landing.error}; the sweep lands directly on CLEAN`);
 				level = "warning";
 			}
+			lines.push(...leadSummary(started.run));
+			injectLeadContract(pi, started.run);
 			if ((await activate(cwd, lines)) === "warning") level = "warning";
 			notify(ctx, lines, level);
 		},
@@ -1149,7 +1293,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 	pi.registerCommand("orchestrate-resume", {
 		description: "Take over the run in this checkout once its lead lease has lapsed; releases in-flight claims whose lease lapsed with the old lead",
 		handler: async (_args, ctx) => {
-			const cwd = ctx.sessionManager.getCwd();
+			const cwd = await commandRoot(ctx);
 			const outcome = await resumeRun(cwd, ctx.sessionManager.getSessionId());
 			switch (outcome.kind) {
 				case "no-run":
@@ -1178,6 +1322,8 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 					level = "warning";
 				}
 			}
+			lines.push(...leadSummary(outcome.run));
+			injectLeadContract(pi, outcome.run);
 			if ((await activate(cwd, lines)) === "warning") level = "warning";
 			notify(ctx, lines, level);
 		},
@@ -1186,7 +1332,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 	pi.registerCommand("orchestrate-status", {
 		description: "Active run: marker binding, run epic liveness, lead lease, and what needs attention",
 		handler: async (_args, ctx) => {
-			const report = await runStatusReport(ctx.sessionManager.getCwd());
+			const report = await runStatusReport(await commandRoot(ctx));
 			ctx.ui.notify(report.lines.join("\n"), report.healthy ? "info" : "warning");
 		},
 	});
@@ -1204,7 +1350,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			}
 			let hold: AnswerHold;
 			try {
-				hold = await answerBead(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionId(), beadId, text, answerDeps);
+				hold = await answerBead(await commandRoot(ctx), ctx.sessionManager.getSessionId(), beadId, text, answerDeps);
 			} catch (error) {
 				ctx.ui.notify(reason(error), "error");
 				return;
@@ -1232,7 +1378,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			}
 			let stopped: StopResult;
 			try {
-				stopped = await stopRun(ctx.sessionManager.getCwd(), ctx.sessionManager.getSessionId(), { force: parts.length > 0 });
+				stopped = await stopRun(await commandRoot(ctx), ctx.sessionManager.getSessionId(), { force: parts.length > 0 });
 			} catch (error) {
 				ctx.ui.notify(reason(error), "error");
 				return;

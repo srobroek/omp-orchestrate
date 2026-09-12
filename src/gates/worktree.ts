@@ -219,7 +219,7 @@ async function canonical(resolved: string): Promise<string> {
  }
 }
 
-function declaredTargets(toolName: string, input: Record<string, unknown>): string[] | undefined {
+export function declaredTargets(toolName: string, input: Record<string, unknown>): string[] | undefined {
  if (toolName === "write") {
   return typeof input.path === "string" && input.path.length > 0 ? [input.path] : [];
  }
