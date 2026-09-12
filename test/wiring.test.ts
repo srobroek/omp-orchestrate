@@ -1,11 +1,24 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import { AgentRegistry, type AgentSession, type ExtensionAPI, type ExtensionContext, type ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import * as actualBd from "../src/bd";
 import { BD_NOTICE_MESSAGE } from "../src/gates/bd";
 import ompOrchestrate from "../src/index";
+
+/**
+ * The session every `verdict` below runs as, registered as the spawned agent `wiring-agent`
+ * the way the executor registers a child: G6 hands each call that identity, and a claim by
+ * a session the registry does not know is refused.
+ */
+beforeAll(() => {
+	AgentRegistry.global().register({
+		id: "wiring-agent", displayName: "wiring-agent", kind: "sub",
+		session: { sessionManager: { getSessionId: () => "wiring-session" } } as unknown as AgentSession,
+	});
+});
+afterAll(() => AgentRegistry.global().unregister("wiring-agent"));
 
 /** Exercise the registered handlers, not just individual gates or hook counts. */
 
@@ -120,7 +133,7 @@ describe("gate dispatcher wiring", () => {
   await fs.rm(dir, { recursive: true, force: true });
  });
 
- test("an unattributed bd write inside a run emits the identity notice as a steer", async () => {
+ test("a bd write inside a run by a registered session carries that session's identity, with no notice", async () => {
   await pinnedRun(dir, "run-wiring-1");
   const { pi, handlers, sent } = runtimeApi();
   ompOrchestrate(pi);
@@ -131,13 +144,11 @@ describe("gate dispatcher wiring", () => {
    { cwd: dir },
   );
 
-  // The notice never refuses: no subscriber blocks, and the command runs.
+  // A registered session's write is attributed by the gate: this session's identity rides
+  // on the call's env, so no notice is owed and nothing refuses.
   expect(results.some((result) => result?.block === true)).toBe(false);
-  expect(sent).toHaveLength(1);
-  expect(sent[0]?.customType).toBe(BD_NOTICE_MESSAGE);
-  expect(sent[0]?.content).toContain("WARN bd identity");
-  // Mid-turn: a steer is consumed at the model call carrying this tool's result.
-  expect(sent[0]?.deliverAs).toBe("steer");
+  expect(sent).toEqual([]);
+  expect(results.some(result => (result?.input as { env?: Record<string, string> } | undefined)?.env?.BEADS_ACTOR === "wiring-agent")).toBe(true);
  });
 
  test("the same call outside a run emits nothing", async () => {
@@ -184,7 +195,10 @@ describe("gate dispatcher wiring", () => {
   );
 
   expect(errors).toEqual([]);
-  expect(results.every(result => result === undefined)).toBe(true);
+  // The one revision is the identity; the gate-only field does not survive it.
+  expect(results.filter(result => result !== undefined)).toEqual([
+   { input: { command: "echo ok", env: { BEADS_ACTOR: "wiring-agent", BD_ACTOR: "wiring-agent" } } },
+  ]);
  });
 
  test("a tool the gate does not cover reaches no gate at all", async () => {
@@ -365,14 +379,14 @@ describe("gate dispatcher wiring", () => {
    await pinnedRun(dir, LEAD_MARKER);
    const { pi, handlers } = runtimeApi();
    ompOrchestrate(pi);
-   expect(await verdict(handlers, event, { cwd: dir })).toBeUndefined();
+   expect((await verdict(handlers, event, { cwd: dir }))?.block).toBeUndefined();
   });
 
   test("another session in the same checkout is not the lead: its merge passes G9", async () => {
    await pinnedRun(dir, JSON.stringify({ schema_version: 1, run_id: "run-lead", session_id: "someone-else" }));
    const { pi, handlers } = runtimeApi();
    ompOrchestrate(pi);
-   expect(await verdict(handlers, { toolName: "bash", input: { command: "gh pr merge 3" } }, { cwd: dir })).toBeUndefined();
+   expect((await verdict(handlers, { toolName: "bash", input: { command: "gh pr merge 3" } }, { cwd: dir }))?.block).toBeUndefined();
   });
 
   test("the lead contract reaches the lead's session_start, and nobody else's", async () => {
@@ -485,7 +499,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
   const result = await verdict(handlers, call("helper-echo", "echo ok"), { cwd: isolated });
 
   expect(errors).toEqual([]);
-  expect(result?.input).toEqual({ command: "echo ok", env: { BD_READONLY: "1" } });
+  expect(result?.input).toEqual({ command: "echo ok", env: { BEADS_ACTOR: "wiring-agent", BD_ACTOR: "wiring-agent", BD_READONLY: "1" } });
  });
 
  describe("a copy that keeps a private store", () => {
@@ -566,7 +580,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
     const first = await verdict(handlers, call("claim-1", "bd update orc-1 --claim --json"), worker);
     const second = await verdict(handlers, call("claim-2", "bd update orc-2 --claim --json"), worker);
 
-    expect(first).toBeUndefined();
+    expect(first?.block).toBeUndefined();
     expect(second?.block).toBe(true);
     expect(second?.reason).toContain("a claim is already in flight this turn");
 
@@ -579,7 +593,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
     const third = await verdict(handlers, call("claim-3", "bd update orc-3 --claim --json"), worker);
 
     expect(errors).toEqual([]);
-    expect(third).toBeUndefined();
+    expect(third?.block).toBeUndefined();
    } finally {
     show.mockRestore();
    }
@@ -593,10 +607,10 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
     const worker = { cwd: dir, role: "implementer" };
     const ctx = { cwd: dir, getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
 
-    expect(await verdict(handlers, call("claim-1", "bd update orc-1 --claim --json"), worker)).toBeUndefined();
+    expect((await verdict(handlers, call("claim-1", "bd update orc-1 --claim --json"), worker))?.block).toBeUndefined();
     for (const turnEnd of turns) await turnEnd({}, ctx);
 
-    expect(await verdict(handlers, call("claim-2", "bd update orc-2 --claim --json"), worker)).toBeUndefined();
+    expect((await verdict(handlers, call("claim-2", "bd update orc-2 --claim --json"), worker))?.block).toBeUndefined();
    } finally {
     show.mockRestore();
    }
@@ -612,7 +626,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
     const worker = { cwd: dir, role: "implementer" };
 
     expect((await verdict(handlers, call("claim-two", "bd update orc-1 orc-2 --claim"), worker))?.block).toBe(true);
-    expect(await verdict(handlers, call("claim-one", "bd update orc-3 --claim --json"), worker)).toBeUndefined();
+    expect((await verdict(handlers, call("claim-one", "bd update orc-3 --claim --json"), worker))?.block).toBeUndefined();
    } finally {
     show.mockRestore();
    }

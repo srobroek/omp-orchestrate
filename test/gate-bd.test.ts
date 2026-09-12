@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "b
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { AgentRegistry, type AgentSession, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import * as actualBd from "../src/bd";
 import { createClaimState, type ClaimState } from "../src/claim-state";
 import {
@@ -12,7 +12,9 @@ import {
 	actorNotice,
 	BD_NOTICE_MESSAGE,
 	bugRouteNotice,
+	childActor,
 	commentVerbNotice,
+	fallbackIdentity,
 	gateBdDiscipline,
 } from "../src/gates/bd";
 import { type BdInvocation, bdInvocations } from "../src/shell";
@@ -518,7 +520,7 @@ function installActorNoticeArbiter(): Set<string> {
 
 /** One defect per notice, checked both inside and outside a run. */
 const THREE_DEFECTS: [string, string, string][] = [
-	["an unattributed mutation", "bd -C /run/repo update orc-1 --claim", "WARN bd identity"],
+	["an unattributed mutation", "bd -C /run/repo update orc-1 --status open", "WARN bd identity"],
 	[
 		"a comment leading with a non-verb",
 		'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo comment orc-1 "finished it"',
@@ -568,10 +570,12 @@ describe("G6 inside a run", () => {
 		["update --claim", "bd update orc-1 --claim"],
 		["update --claim=true", "bd update orc-1 --claim=true"],
 		["top-level claim", "bd claim orc-1"],
-	])("leaves unattributed %s to the beads blocking gate", async (_label, command) => {
+		["queue pull", "bd ready --claim --json"],
+	])("refuses an unattributed %s by a session the registry does not know", async (_label, command) => {
 		const handled = installActorNoticeArbiter();
 		const outcome = await gateInput({ command }, inRun, `claim-${_label}`);
-		expect(outcome).toEqual(SILENT);
+		expect(outcome.block).toContain("no identity");
+		expect(outcome.notices).toEqual([]);
 		expect(handled.has(`claim-${_label}`)).toBe(false);
 	});
 
@@ -585,7 +589,7 @@ describe("G6 inside a run", () => {
 	test("judges each invocation of a chain on its own", async () => {
 		// Attribution on one invocation must not silence a neighboring write.
 		const outcome = await gate(
-			'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo comment orc-1 "REPORTED a" && bd update orc-2 --claim',
+			'BEADS_ACTOR=impl BD_ACTOR=impl bd -C /run/repo comment orc-1 "REPORTED a" && bd update orc-2 --status open',
 		);
 		expect(outcome.notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
@@ -593,17 +597,17 @@ describe("G6 inside a run", () => {
 	test.each([
 		["a spaced subshell", '( bd comment orc-1 "REPORTED done" )'],
 		["a subshell after a cd", '(cd /repo && bd comment orc-1 "REPORTED done")'],
-		["sh -c", "sh -c 'bd update orc-1 --claim'"],
-		["a timeout prefix", "timeout 30 bd update orc-1 --claim"],
-		["eval", "eval 'bd update orc-1 --claim'"],
+		["sh -c", "sh -c 'bd update orc-1 --status open'"],
+		["a timeout prefix", "timeout 30 bd update orc-1 --status open"],
+		["eval", "eval 'bd update orc-1 --status open'"],
 	])("sees an unattributed mutation inside %s", async (_label, command) => {
 		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
 	});
 
 	test.each([
-		["an unspaced subshell", "(bd update orc-1 --claim)"],
-		["a nested unspaced subshell", "((bd update orc-1 --claim))"],
-		["an unspaced subshell around an assignment", "(FOO=1 bd update orc-1 --claim)"],
+		["an unspaced subshell", "(bd update orc-1 --status open)"],
+		["a nested unspaced subshell", "((bd update orc-1 --status open))"],
+		["an unspaced subshell around an assignment", "(FOO=1 bd update orc-1 --status open)"],
 	])("sees an unattributed mutation inside %s", async (_label, command) => {
 		// A glued `(` must not hide the executable or its flags. A glued `{` is not a
 		// group but a syntax error, so it has no row.
@@ -611,9 +615,9 @@ describe("G6 inside a run", () => {
 	});
 
 	test.each([
-		["env -u", "env -u FOO bd update orc-1 --claim"],
-		["env -C", "env -C /tmp bd update orc-1 --claim"],
-		["env -S", "env -S 'bd update orc-1 --claim'"],
+		["env -u", "env -u FOO bd update orc-1 --status open"],
+		["env -C", "env -C /tmp bd update orc-1 --status open"],
+		["env -S", "env -S 'bd update orc-1 --status open'"],
 	])("sees an unattributed mutation behind %s", async (_label, command) => {
 		// The env walk used to read the flag's operand as the executable and see no bd at all.
 		expect((await gate(command)).notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
@@ -656,45 +660,84 @@ describe("G6 inside a run", () => {
 		expect(sent[0]?.options).toEqual({ deliverAs: "steer" });
 	});
 
-	test("rewrites a single claim with the target bead metadata actor", async () => {
-		const show = spyOn(actualBd, "bdShow").mockResolvedValue({
-			id: "orc-1",
-			metadata: { actor: "metadata/actor" },
-		});
+	/** This session, registered as the spawned agent `impl-7`, as the executor registers a child. */
+	function registeredSession(cwd: string = inRun): { ctx: ExtensionContext; unregister: () => void } {
+		sent = [];
+		const sessionManager = { getSessionId: () => "session-impl-7" };
+		AgentRegistry.global().register({ id: "impl-7", displayName: "impl-7", kind: "sub", session: { sessionManager } as unknown as AgentSession });
+		return {
+			ctx: { cwd, getSystemPrompt: () => ["ORC-ROLE: implementer"], sessionManager } as unknown as ExtensionContext,
+			unregister: () => AgentRegistry.global().unregister("impl-7"),
+		};
+	}
+
+	test("childActor is the registry id for a spawned session and the lease actor for the main one", () => {
+		const session = (id: string) => ({ sessionManager: { getSessionId: () => id } }) as unknown as Pick<ExtensionContext, "sessionManager">;
+		const registry = { list: () => [
+			{ id: "Main", kind: "main", session: session("s-main") },
+			{ id: "impl-7", kind: "sub", session: session("s-7") },
+			{ id: "parked-9", kind: "sub", session: null },
+		] };
+		expect(childActor(session("s-7"), registry)).toBe("impl-7");
+		expect(childActor(session("s-main"), registry)).toBe("lead:s-main");
+		expect(childActor(session("s-unknown"), registry)).toBeUndefined();
+		expect(childActor({}, registry)).toBeUndefined();
+	});
+
+	test("hands a registered session its identity through env, on every bash call, marking a write for the adapter", async () => {
+		const { ctx, unregister } = registeredSession();
 		const handled = installActorNoticeArbiter();
 		try {
-			const result = await rawGateInput(
-				{ command: "bd update orc-1 --claim" },
-				inRun,
-				"metadata-claim",
-				createClaimState(),
-			);
-			expect(result).toEqual({ input: { command: "BEADS_ACTOR=metadata/actor BD_ACTOR=metadata/actor bd update orc-1 --claim" } });
+			const write = await gateBdDiscipline(pi, ctx, { command: "bd update orc-1 --claim" }, "claim-7", createClaimState());
+			expect(write).toEqual({ input: { command: "bd update orc-1 --claim", env: { BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7" } } });
+			expect(handled.has("claim-7")).toBe(true);
 			expect(sent).toEqual([]);
-			expect(handled.has("metadata-claim")).toBe(true);
+
+			const compound = await gateBdDiscipline(pi, ctx, { command: "cd dir && ./claim orc-2", env: { FOO: "1" } }, "helper-7", createClaimState());
+			expect(compound).toEqual({ input: { command: "cd dir && ./claim orc-2", env: { FOO: "1", BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7" } } });
+			expect(handled.has("helper-7")).toBe(false);
 		} finally {
-			show.mockRestore();
+			unregister();
 		}
 	});
 
-	test("rewrites later writes with the actor from an observed claim", async () => {
-		const claims = createClaimState();
-		claims.recordClaim({ actor: "worker actor", beadIds: ["orc-1"] });
-		const result = await rawGateInput(
-			{ command: "bd comments add orc-1 'REPORTED done'" },
-			inRun,
-			"observed-comment",
-			claims,
-		);
-		expect(result).toEqual({ input: { command: "BEADS_ACTOR='worker actor' BD_ACTOR='worker actor' bd comments add orc-1 'REPORTED done'" } });
-		expect(sent).toEqual([]);
+	test("the actor the store recorded for this session's claim wins over the registry id", async () => {
+		const { ctx, unregister } = registeredSession();
+		try {
+			const claims = createClaimState();
+			claims.recordClaim({ actor: "worker actor", beadIds: ["orc-1"] });
+			const result = await gateBdDiscipline(pi, ctx, { command: "bd comments add orc-1 'REPORTED done'" }, "observed-comment", claims);
+			expect(result).toEqual({ input: { command: "bd comments add orc-1 'REPORTED done'", env: { BEADS_ACTOR: "worker actor", BD_ACTOR: "worker actor" } } });
+			expect(sent).toEqual([]);
+		} finally {
+			unregister();
+		}
 	});
 
-	test("keeps the warning for a compound command", async () => {
-		const claims = createClaimState();
-		claims.recordClaim({ actor: "worker-1", beadIds: ["orc-1"] });
-		const result = await gate("cd dir && bd update orc-1");
-		expect(result).toEqual({ block: undefined, notices: [expect.stringContaining("WARN bd identity")] });
+	test("leaves a call whose env already names an actor alone", async () => {
+		const { ctx, unregister } = registeredSession();
+		try {
+			expect(await gateBdDiscipline(pi, ctx, { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen" } }, "env-actor")).toBeUndefined();
+			expect(sent).toEqual([]);
+		} finally {
+			unregister();
+		}
+	});
+
+	test("refuses a claim as the identity bd falls back to for nobody", async () => {
+		const { ctx, unregister } = registeredSession();
+		const name = (await fallbackIdentity(inRun)) ?? "";
+		try {
+			expect(name.length).toBeGreaterThan(0);
+			const inline = await gateBdDiscipline(pi, ctx, { command: `BEADS_ACTOR='${name}' bd ready --claim --json` }, "git-claim");
+			expect(inline?.block).toBe(true);
+			expect(inline?.reason).toContain("git identity");
+			expect(inline?.reason).toContain("impl-7");
+			const flagged = await gateBdDiscipline(pi, ctx, { command: `bd update orc-1 --claim --actor '${name}'` }, "git-flag");
+			expect(flagged?.block).toBe(true);
+		} finally {
+			unregister();
+		}
 	});
 
 	test("does not rewrite a command that already carries BD_ACTOR", async () => {
@@ -827,6 +870,37 @@ describe("G6 refusals", () => {
 			claims.recordClaim({ actor: "worker-1", beadIds: ["orc-1"] });
 			const result = await rawGateInput({ command: "bd --db /elsewhere/.beads comment orc-1 'REPORTED done'" }, inRun, "refused", claims);
 			expect(result).toEqual({ block: true, reason: expect.stringContaining(DATABASE_REASON) });
+		});
+	});
+
+	describe("a comment verb reserved to one role", () => {
+		const seat = (role: string | undefined, cwd: string = inRun): ExtensionContext =>
+			({ cwd, getSystemPrompt: () => (role === undefined ? [] : [`ORC-ROLE: ${role}`]) }) as unknown as ExtensionContext;
+
+		test.each([
+			["an implementer", "implementer"],
+			["a reviewer", "reviewer"],
+			["an architect", "architect"],
+			["a helper with no role", undefined],
+		])("LANDED from %s is refused as merge evidence, not warned about", async (_label, role) => {
+			tools = WORKER_TOOLS;
+			const result = await gateBdDiscipline(pi, seat(role), { command: 'BEADS_ACTOR=x bd comment orc-m "LANDED abc123 pr=4"' }, "landed");
+			expect(result).toEqual({ block: true, reason: expect.stringContaining("shepherd's comment verb") });
+			expect(sent).toEqual([]);
+		});
+
+		test("LANDED from the lead is refused too; the landing sweep writes it", async () => {
+			tools = LEAD_TOOLS;
+			const result = await gateBdDiscipline(pi, seat(undefined), { command: 'BEADS_ACTOR=x bd comment orc-m "LANDED abc123"' }, "landed-lead");
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toContain("the lead");
+		});
+
+		test("the shepherd writes LANDED, and every role writes the shared verbs", async () => {
+			tools = WORKER_TOOLS;
+			expect(await gateBdDiscipline(pi, seat("shepherd"), { command: 'BEADS_ACTOR=x bd comment orc-m "LANDED abc123"' }, "landed-ok")).toBeUndefined();
+			expect(await gateBdDiscipline(pi, seat("implementer"), { command: 'BEADS_ACTOR=x bd comment orc-1 "REPORTED done"' }, "reported-ok")).toBeUndefined();
+			expect(await gateBdDiscipline(pi, seat("implementer"), { command: 'BEADS_ACTOR=x bd comment orc-1 "NOTE landed elsewhere"' }, "note-ok")).toBeUndefined();
 		});
 	});
 });
