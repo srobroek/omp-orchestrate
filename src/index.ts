@@ -1,14 +1,14 @@
 /**
  * omp-orchestrate — Beads-backed multi-agent orchestration for OMP.
  *
- * Registers one `tool_call` handler, the worker-side protocol injection, and two
- * read-only slash commands. Everything else this plugin contributes — the skill, the
+ * Registers one `tool_call` handler, the worker-side protocol injection, and the
+ * slash commands. Everything else this plugin contributes — the skill, the
  * agents, the formulas — is data OMP discovers from the package tree.
  */
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
-import { bdListChecked, bdRun, resetReadBudget } from "./bd";
+import { bdListChecked, resetReadBudget } from "./bd";
 import { observeClaimResult } from "./claim-observer";
 import { createClaimState } from "./claim-state";
 import { DISPATCH_CONTRACT } from "./contract";
@@ -171,35 +171,15 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   observeClaimResult(claims, event);
  });
 
- pi.registerCommand("orchestrate-status", {
-  description: "Run status for the active epic",
-  handler: async (args, ctx) => {
-   const epic = args.trim();
-   const result = await bdRun([
-    "list",
-    "--type",
-    "epic",
-    ...(epic.length > 0 ? ["--parent", epic] : []),
-    "--json",
-   ]);
-   if (result === null || result.code !== 0) {
-    ctx.ui.notify("bd is unavailable", "warning");
-    return;
-   }
-   // An empty JSON array is a real answer, not a failure: the run has no epics
-   // yet. Reporting it as one sent readers looking for a broken bd install.
-   const body = result.stdout.trim();
-   ctx.ui.notify(body === "[]" || body.length === 0 ? "no epics" : body, "info");
-  },
- });
-
  pi.registerCommand("orchestrate-roster", {
   description: "Pull-queue depth for each role",
   handler: async (_args, ctx) => {
    resetReadBudget();
    const roles = ["architect", "implementer", "reviewer", "researcher", "shepherd"];
+   // Review and research queues are ephemeral wisps, which `bd ready` hides by
+   // default; without the flag those two roles always read as empty.
    const ready = await Promise.all(roles.map(role =>
-    bdListChecked(["ready", "--metadata-field", `role=${role}`, "--unassigned", "--limit", "0", "--json"]),
+    bdListChecked(["ready", "--metadata-field", `role=${role}`, "--unassigned", "--include-ephemeral", "--limit", "0", "--json"]),
    ));
    const lines = roles.map((role, index) => {
     const beads = ready[index];

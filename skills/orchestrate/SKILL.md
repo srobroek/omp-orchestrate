@@ -68,5 +68,8 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 | Architect domain | `feature: <id>` |
 | One actor's held work | `actor: <name>` |
 
-`/orchestrate-status` shows the run binding. `/orchestrate-roster` shows queue depth.
+`/orchestrate-status` shows the marker binding, the run epic's liveness, and whether the
+patrol is armed. `/orchestrate-roster` shows ready-queue depth per role, wisps included.
+`/orchestrate-close <epic>` ends a run by removing the marker; it refuses while any child
+is `in_progress` unless `--force`.
 Final assistant verdicts and durable comment verbs are separate channels.
