@@ -64,7 +64,7 @@ def fail(message):
 # are included. An allowlist avoids copying credentials, .git, .beads, node_modules,
 # .omp configuration, worktrees, sessions, or other checkout-local user state.
 # No symlinks: imports must not escape to live files outside this snapshot.
-owned = ('package.json', 'src', 'agents', 'skills', 'rules', 'formulas',
+owned = ('package.json', 'src', 'agents', 'skills', 'rules',
          '.omp-plugin', '.claude-plugin')
 excluded = {'.git', '.beads', 'node_modules', '.omp', '.pi', '__pycache__',
             'auth.json', 'auth.db', 'credentials.json', '.env'}
