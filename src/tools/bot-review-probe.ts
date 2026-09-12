@@ -1,9 +1,9 @@
 /**
  * `orc_bot_review_probe` — classify a PR's review-bot round at one exact head SHA.
  *
- * A native port of `skills/orchestrate/scripts/bot-review-probe.py`, keeping the split
- * that made the script testable: {@link fetchBotReviewEvidence} performs the four `gh`
- * reads through an injectable seam, and {@link classifyBotReviews} is pure, so every
+ * Originally a Python script in the orchestrate skill; ported here keeping the split that
+ * made the script testable: {@link fetchBotReviewEvidence} performs the five `gh` reads
+ * through an injectable seam, and {@link classifyBotReviews} is pure, so every
  * classification path is reachable without a network.
  *
  * Review bots (CodeRabbit, Copilot review, Greptile, ...) post findings outside every
@@ -11,10 +11,11 @@
  * way. That per-bot knowledge stays in one adapter table, so adding a bot is a table
  * entry rather than a parser change.
  *
- * The vocabulary is the landing contract's, verbatim from the script's docstring:
+ * The vocabulary is the landing contract's:
  *   0  absent      no configured bot on this PR; merge decision unchanged
  *   0  clean       the bot's latest round at this head reports nothing actionable
- *   10 pending     check still running, or no review at this head yet
+ *   10 pending     check still running, no review at this head yet, or the bot skipped
+ *                  the round (draft PR, auto-review disabled) and must be asked
  *   11 stale       the bot reviewed an older head only
  *   12 actionable
  *   13 declined    the bot refused the round (quota/rate limit); re-trigger, do not wait
@@ -52,11 +53,23 @@ export const MIN_SLUG_MATCH = 4;
 // Tightening either half into one sentence pattern reintroduces that bug: word order,
 // "included", "will be", bold markers, and minutes-vs-hours all vary.
 //
+// The looseness has a cost the callers below pay for: CodeRabbit's finding prose quotes
+// the code under review, so a real round on a PR that touches rate-limit or quota code
+// matches too. The indicator is therefore consulted only on bodies that carry no verdict
+// of their own -- see {@link classifyBotReviews} and {@link declines}.
+//
 // None of these patterns carries `g`: a global regexp keeps `lastIndex` between calls, so
 // the same body would match or not depending on what was tested before it.
-const DECLINE_INDICATORS =
- /limit\s+(?:is\s+)?(?:currently\s+)?reached|fair\s+usage|rate[-\s]?limit|quota|usage\s+limit|review\s+skipped/i;
+const DECLINE_INDICATORS = /limit\s+(?:is\s+)?(?:currently\s+)?reached|fair\s+usage|rate[-\s]?limit|quota|usage\s+limit/i;
 const WAIT_FIGURE = /(\d+)\s*\**\s*(minute|hour)s?/i;
+// "Review skipped": the bot did not review because the PR is a draft or auto-review is
+// off, and says so. Not a refusal -- a request (or marking the PR ready) is what unblocks
+// it -- so it must never read as `declined`, whose contract is "re-trigger, do not wait".
+const SKIP_INDICATOR = /review\s+skipped/i;
+// CodeRabbit's auto-generated walkthrough is a PR summary posted as an issue comment. Its
+// prose paraphrases the diff, so on a PR touching rate-limit code it matches the decline
+// indicator while saying nothing about the round.
+const WALKTHROUGH_MARKER = /<!--[^>]*summarize by coderabbit\.ai[^>]*-->/i;
 
 /** True when this body is the bot saying it refused the round. */
 export function indicatesDecline(body: string): boolean {
@@ -361,7 +374,8 @@ function declines(notices: unknown[], slugs: string[], now: Date): DeclineOutcom
   if (!isObject(notice)) return "malformed";
   const slug = loginSlug(str(notice.login), slugs);
   const body = str(notice.body);
-  if (slug === null || !adapterFor(slug).declined(body)) continue;
+  // The walkthrough summarises the diff; whatever it says about limits is the PR's code.
+  if (slug === null || WALKTHROUGH_MARKER.test(body) || !adapterFor(slug).declined(body)) continue;
   found.push([str(notice.at), body]);
  }
  const newest = found[0];
@@ -484,10 +498,18 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
   if (slug === null) continue;
   // A refusal is not a review round. Left in `botReviews` it would read as
   // `pending`/`stale` -- "keep waiting" -- exactly the ambiguity that cost the
-  // wasted re-triggers.
-  if (adapterFor(slug).declined(str(review.body))) refusals.push(review);
+  // wasted re-triggers. But a body the adapter reads a count from, or one GitHub gave a
+  // decisive state, IS the round: CodeRabbit's findings quote the code under review, so
+  // an actionable round on a PR touching rate-limit code matches the indicator too, and
+  // dropping it left an older round -- or nothing -- to decide the verdict.
+  const adapter = adapterFor(slug);
+  const body = str(review.body);
+  if (adapter.count(body) === null && str(review.state) === "COMMENTED" && adapter.declined(body)) refusals.push(review);
   else botReviews.push([slug, review]);
  }
+ const skipped = notices.some(
+  (entry) => isObject(entry) && loginSlug(str(entry.login), slugs) !== null && SKIP_INDICATOR.test(str(entry.body)),
+ );
 
  findings.check =
   botChecks.map((check) => `${str(check.name) || "?"}/${checkState(check) || "?"}`).join(",") || "none";
@@ -495,7 +517,9 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
  const decline = declines(refusals, slugs, now);
  if (decline === "malformed") return unknown("each notice must be an object");
 
- if (botChecks.length === 0 && botReviews.length === 0 && decline === null) {
+ // A skip notice is the bot on this PR, so the PR is not `absent` -- exit 0 would clear
+ // the gate on a round nobody ran.
+ if (botChecks.length === 0 && botReviews.length === 0 && decline === null && !skipped) {
   return verdictOf(findings, "absent", 0, "no configured review bot on this PR");
  }
 
@@ -522,6 +546,7 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
      findings: { ...findings, wait: decline.wait, detail: decline.detail },
     };
    }
+   if (skipped) return verdictOf(findings, "pending", EXIT_WAITING, "review skipped by bot policy; request or wait");
    return verdictOf(findings, "pending", EXIT_WAITING, "bot check complete, no review posted yet");
   }
   return verdictOf(findings, "stale", EXIT_STALE, "bot reviewed an older head only");
@@ -540,13 +565,21 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
  findings.changesRequested = changes;
  findings.summary = latest.url || "none";
  findings.files = [];
+ // GitHub re-anchors a thread's `commit` to the newest commit it still applies to, so
+ // "at head" already excludes outdated threads; `outdated` itself is carried for the
+ // reader and decides nothing here.
+ const resolvedAtHead: string[] = [];
  for (const entry of comments) {
-  if (!isObject(entry)) continue;
-  if (entry.resolved === true || loginSlug(str(entry.login), slugs) === null || str(entry.commit) !== head) continue;
+  if (!isObject(entry) || loginSlug(str(entry.login), slugs) === null || str(entry.commit) !== head) continue;
+  if (entry.resolved === true) {
+   resolvedAtHead.push(str(entry.threadId) || "?");
+   continue;
+  }
   const line = truthy(entry.line) ? str(entry.line) : "0";
   findings.files.push(`thread=${str(entry.threadId) || "?"} ${str(entry.path) || "?"}:${line} ${str(entry.url)}`.trim());
  }
  findings.files.sort(compare);
+ resolvedAtHead.sort(compare);
 
  if (latest.actionable === null) {
   if (changes) {
@@ -562,9 +595,29 @@ export function classifyBotReviews(payload: unknown, opts: ClassifyOptions): Bot
  }
 
  findings.actionable = latest.actionable;
- if (changes || latest.actionable > 0) {
+ if (changes) {
   return verdictOf(findings, "actionable", EXIT_ACTIONABLE, `${latest.actionable} actionable comment(s)`);
  }
+ if (latest.actionable > 0) {
+  // The summary count is the bot's verdict when it posted. Threads are its findings'
+  // live state: once every one at this head is resolved -- the rejection-only round,
+  // where nothing is pushed and the count never changes -- the round is answered. With
+  // threads still open the count is a floor under them, never a ceiling. A count with
+  // no threads at all has no evidence to downgrade on and stands.
+  if (findings.files.length === 0 && resolvedAtHead.length > 0) {
+   findings.actionable = 0;
+   return verdictOf(
+    findings,
+    "clean",
+    0,
+    `${latest.actionable} actionable comment(s), every thread at head resolved: ${resolvedAtHead.join(", ")}`,
+   );
+  }
+  findings.actionable = Math.max(latest.actionable, findings.files.length);
+  return verdictOf(findings, "actionable", EXIT_ACTIONABLE, `${findings.actionable} actionable comment(s)`);
+ }
+ // A zero count with open threads is CodeRabbit's nitpick-only round: those threads are
+ // listed below the verdict, and the round merges.
  return verdictOf(findings, "clean", 0, "0 actionable comments");
 }
 
@@ -606,7 +659,7 @@ export type Exec = (argv: string[], opts: ExecOptions) => Promise<ExecResult | n
  * Per-call bound on a `gh` read. None of the reads had a timeout, so a wedged `gh` -- an
  * auth prompt, a hung proxy -- hung the shepherd indefinitely rather than failing.
  *
- * FIVE SECONDS, not thirty. Four reads run per probe, so the bound has to leave the whole
+ * FIVE SECONDS, not thirty. Five reads run per probe, so the bound has to leave the whole
  * probe inside a caller's patience; a paginated GitHub read that has not answered in five
  * seconds is not about to. Overridable for a genuinely slow link.
  *
@@ -804,7 +857,7 @@ async function ghReviewThreads(
  return { ok: true, value: comments };
 }
 
-/** What the four `gh` reads produce, and the only input {@link classifyBotReviews} takes. */
+/** What the five `gh` reads produce, and the only input {@link classifyBotReviews} takes. */
 export interface BotReviewPayload {
  head: string;
  /**

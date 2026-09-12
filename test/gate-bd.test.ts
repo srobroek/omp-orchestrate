@@ -430,6 +430,7 @@ let outsideRun: string;
 /** A marker written as a bare run id, as early runs wrote it. */
 let legacyMarker: string;
 let priorMarkerFile: string | undefined;
+let priorPin: string | undefined;
 
 function ctxAt(cwd: string): ExtensionContext {
 	return { cwd, getSystemPrompt: () => [] } as unknown as ExtensionContext;
@@ -454,10 +455,16 @@ beforeAll(async () => {
 	// ambient environment would point every case at one file.
 	priorMarkerFile = process.env.ORCHESTRATE_MARKER_FILE;
 	delete process.env.ORCHESTRATE_MARKER_FILE;
+	// G6 fires only under a pinned run. The pin sits beside no marker, so each case's cwd
+	// alone decides whether it is in a run; the ambient shell's pin must not.
+	priorPin = process.env.BEADS_DIR;
+	process.env.BEADS_DIR = path.join(root, ".beads");
 });
 
 afterAll(async () => {
 	if (priorMarkerFile !== undefined) process.env.ORCHESTRATE_MARKER_FILE = priorMarkerFile;
+	if (priorPin === undefined) delete process.env.BEADS_DIR;
+	else process.env.BEADS_DIR = priorPin;
 	await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -532,6 +539,32 @@ describe("G6 outside a run", () => {
 		// `.catch(() => null)`: an unreadable marker is not a run. A cwd that does not
 		// exist is the cheapest shape of that, and an isolated worker's cwd can vanish.
 		expect(await gate("bd update orc-1 --claim", path.join(outsideRun, "no-such-dir"))).toEqual(SILENT);
+	});
+
+	test("is silent with a marker but no process pin", async () => {
+		// A marker without the run's pin is a stray or another process's run: the pin is
+		// what `/orchestrate-run` leaves on the process, and what every child inherits.
+		const pin = process.env.BEADS_DIR;
+		delete process.env.BEADS_DIR;
+		try {
+			expect(await gate("bd update orc-1 --claim", inRun)).toEqual(SILENT);
+		} finally {
+			process.env.BEADS_DIR = pin;
+		}
+	});
+
+	test("notifies from an isolated cwd when the pinned repository holds the marker", async () => {
+		// An isolated worker's copy carries no `.orchestration/`; the run is found beside
+		// the pin, as G1 finds it.
+		const pin = process.env.BEADS_DIR;
+		process.env.BEADS_DIR = path.join(inRun, ".beads");
+		try {
+			const outcome = await gate("bd update orc-1 --claim", outsideRun);
+			expect(outcome.block).toBeUndefined();
+			expect(outcome.notices.some(line => line.startsWith("WARN bd identity"))).toBe(true);
+		} finally {
+			process.env.BEADS_DIR = pin;
+		}
 	});
 });
 

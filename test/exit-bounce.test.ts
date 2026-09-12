@@ -21,6 +21,12 @@ let claims = createClaimState();
 let gateExitContract: ReturnType<typeof createExitGuard>;
 const spies = [
  spyOn(actualBd, "bdShow").mockImplementation(async id => id === BEAD ? bead : linkedBead),
+ // Linked beads arrive through the one-call hydration; an unreadable linked bead is a
+ // failed read, so the whole map is unknown rather than one entry missing.
+ spyOn(actualBd, "bdShowMany").mockImplementation(async ids => {
+  const hydrated = linkedBead;
+  return hydrated === null ? null : new Map(ids.map(id => [id, hydrated]));
+ }),
  spyOn(actualBd, "bdCommentsChecked").mockImplementation(async id => id === BEAD ? comments : linkedComments),
  spyOn(actualBd, "bdLinkedChecked").mockImplementation(async (_id, _type, _timeout, direction) => {
   const expected = bead?.ephemeral === true || bead?.wisp_type !== undefined ? "down" : "up";
@@ -105,13 +111,40 @@ describe("G4 activation refusal budget", () => {
 });
 
 describe("G4 checked evidence", () => {
- test.each(["bead", "comments", "links", "linked comments", "linked bead"])("unknown %s permits an unevaluated exit without mutation", async source => {
+ test.each(["bead", "comments", "links", "linked bead"])("unknown %s permits an unevaluated exit without mutation", async source => {
   if (source === "bead") bead = null;
   if (source === "comments") comments = null;
   if (source === "links") linked = null;
-  if (source.startsWith("linked")) linked = ["node"];
-  if (source === "linked comments") linkedComments = null;
+  if (source === "linked bead") linked = ["node"];
   expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
+ });
+ test("unknown linked comments permit an unevaluated exit for a role that reads them", async () => {
+  bead = { id: BEAD, ephemeral: true, wisp_type: "review", assignee: "", status: "closed" };
+  linked = ["node"];
+  linkedBead = { id: "node" };
+  linkedComments = null;
+  const reviewer = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+  expect(await gateExitContract(reviewer)).toBeUndefined();
+  expect(issued).toEqual([]);
+ });
+ test("an implementer's contract never reads linked comments, so their absence cannot excuse its exit", async () => {
+  // The implementer contract reads linked beads only for an open escalation; with
+  // none open, the unreported bead is judged and refused rather than waved through.
+  linked = ["review-wisp"];
+  linkedBead = { id: "review-wisp", ephemeral: true, wisp_type: "escalation", status: "closed" };
+  linkedComments = null;
+  expect((await gateExitContract(CTX))?.block).toBe(true);
+  expect(issued).toEqual([]);
+ });
+ test("a shepherd's contract reads no links at all", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["orc-merge"], metadata: { role: "shepherd", execution_kind: "git" } };
+  linked = null;
+  const shepherd = { getSystemPrompt: () => ["ORC-ROLE: shepherd"] } as unknown as ExtensionContext;
+  expect((await gateExitContract(shepherd))?.block).toBe(true);
+  comments = [{ text: `IDLE ${BEAD} waiting for merge window` }];
+  bead.assignee = "";
+  expect(await gateExitContract(shepherd)).toBeUndefined();
   expect(issued).toEqual([]);
  });
  test("a git implementer can report and release before host branch capture", async () => {

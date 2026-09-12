@@ -20,8 +20,9 @@
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../bd";
-import { bdList, bdShow } from "../bd";
+import { bdFailureText, bdList, bdShow, lastBdFailure } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
 import { scopeOf, scopesOverlap } from "../scope";
@@ -233,56 +234,101 @@ function parentId(bead: BdBead | null): string | undefined {
  return undefined;
 }
 
-/** IDs of a bead's ancestors, loading missing links only as far as the guard needs. */
-async function parentChain(bead: BdBead): Promise<Set<string>> {
- const ancestors = new Set<string>();
- let current: BdBead | null = bead;
- let parent = parentId(current);
- if (parent === undefined) {
-  // `bd list --json` may omit parent fields; refresh the candidate through the existing
-  // show seam before deciding that it has no lineage.
-  current = await bdShow(bead.id);
-  parent = parentId(current);
- }
- for (let depth = 0; depth < MAX_LINEAGE_DEPTH && parent !== undefined; depth++) {
-  if (ancestors.has(parent)) break;
-  ancestors.add(parent);
-  current = await bdShow(parent);
-  parent = parentId(current);
- }
- return ancestors;
+/**
+ * A bead's ancestry as far as the guard reads it.
+ *
+ * `complete` is false when a link could not be read -- budget spent, database slow,
+ * parent unreadable -- so the set is a prefix of the lineage rather than the lineage. A
+ * caller must not read an absent ancestor off a truncated set as "unrelated".
+ */
+interface Lineage {
+ ancestors: Set<string>;
+ complete: boolean;
 }
 
-/** Exclusive scope friction between held code-writing claims; read-only roles and a bead's own lineage keep their envelopes without reserving territory. An unrelated architect envelope still counts. */
+/**
+ * IDs of a bead's ancestors, loading each link through the memoised show seam.
+ *
+ * The bead's own row is trusted for its parent: `bd list --json` and `bd show --json`
+ * both emit `parent` when there is one and omit the key when there is none (measured on
+ * bd 1.2.2), so a bead handed in without one has none, and re-reading it would only
+ * spend a read to learn that again.
+ */
+async function parentChain(bead: BdBead): Promise<Lineage> {
+ const ancestors = new Set<string>();
+ let parent = parentId(bead);
+ for (let depth = 0; parent !== undefined; depth++) {
+  if (ancestors.has(parent)) break;
+  ancestors.add(parent);
+  // The guard's own horizon: an ancestor beyond it would be discarded, so the last
+  // ancestor kept is never read for its parent.
+  if (depth + 1 >= MAX_LINEAGE_DEPTH) break;
+  const current = await bdShow(parent);
+  if (current === null) return { ancestors, complete: false };
+  parent = parentId(current);
+ }
+ return { ancestors, complete: true };
+}
+
+/**
+ * Exclusive scope friction between held code-writing claims; read-only roles and a bead's
+ * own lineage keep their envelopes without reserving territory. An unrelated architect
+ * envelope still counts.
+ *
+ * Reads are spent only where a verdict needs them. The in-flight list is one read; a peer
+ * whose scope is empty or disjoint costs nothing more, because lineage is purely an
+ * exemption for an overlap. Only an overlapping pair walks lineage -- the candidate's once
+ * per call, the peer's once per peer -- through the dispatch-memoised show seam, so shared
+ * ancestors are read once however many peers share them.
+ */
 export async function scopeConflict(bead: BdBead | null): Promise<ToolCallEventResult | undefined> {
  if (!bead) return undefined;
  const role = beadRouting(bead)?.role;
  if (role === "researcher" || role === "reviewer") return undefined;
  const candidate = scopeOf(metadataRecord(bead));
  if (candidate.length === 0) return undefined;
- const candidateAncestors = await parentChain(bead);
- const inFlight = await bdList(["list", "--label", "orc-node", "--status", "in_progress", "--json"]);
+ const inFlight = await bdList(["list", "--label", "orc-node", "--status", "in_progress", "--limit", "0", "--json"]);
+ const lineages = new Map<string, Promise<Lineage>>();
+ const lineage = (of: BdBead): Promise<Lineage> => {
+  let pending = lineages.get(of.id);
+  if (pending === undefined) {
+   pending = parentChain(of);
+   lineages.set(of.id, pending);
+  }
+  return pending;
+ };
  for (const other of inFlight) {
   if (other.id === bead.id) continue;
   if (typeof other.assignee !== "string" || other.assignee.trim().length === 0) continue;
   const otherRole = beadRouting(other)?.role;
   if (otherRole === "researcher" || otherRole === "reviewer") continue;
-  // A feature's held envelope is intentionally the union of its tasks. Neither side of
-  // that parent/child relationship should turn the integration claim into friction.
-  if (candidateAncestors.has(other.id)) continue;
-  const otherAncestors = await parentChain(other);
-  if (otherAncestors.has(bead.id)) continue;
   const otherScope = scopeOf(metadataRecord(other));
   if (otherScope.length === 0) continue;
-  if (scopesOverlap(candidate, otherScope)) {
-   return {
-    block: true,
-    reason:
-     `scope conflict (friction guard): '${bead.id}' [${candidate.join(", ")}] overlaps in-flight ` +
-     `'${other.id}' [${otherScope.join(", ")}]. Two agents must not share a file; wait for ` +
-     `'${other.id}' to report, or re-scope one of the beads.`,
-   };
+  if (!scopesOverlap(candidate, otherScope)) continue;
+  // A feature's held envelope is intentionally the union of its tasks. Neither side of
+  // that parent/child relationship should turn the integration claim into friction.
+  const mine = await lineage(bead);
+  if (mine.ancestors.has(other.id)) continue;
+  const theirs = await lineage(other);
+  if (theirs.ancestors.has(bead.id)) continue;
+  if (!mine.complete || !theirs.complete) {
+   // An overlap whose lineage could not be read is unknown, not unrelated: refusing it
+   // would turn a slow database into a false conflict between a feature and its own
+   // task. Unknown fails open, as every gate's unreadable evidence does.
+   logger.warn("orchestrate scope friction unresolved: lineage unreadable", {
+    bead: bead.id,
+    other: other.id,
+    cause: lastBdFailure(),
+   });
+   continue;
   }
+  return {
+   block: true,
+   reason:
+    `scope conflict (friction guard): '${bead.id}' [${candidate.join(", ")}] overlaps in-flight ` +
+    `'${other.id}' [${otherScope.join(", ")}]. Two agents must not share a file; wait for ` +
+    `'${other.id}' to report, or re-scope one of the beads.`,
+  };
  }
  return undefined;
 }
@@ -349,9 +395,12 @@ function shepherdStateWrite(invocation: BdInvocation): boolean {
   }
   return false;
  }
- if (invocation.subcommand === "label") {
+ if (invocation.subcommand === "label" || invocation.subcommand === "tag") {
+  // `bd label add|set|propagate <id> <label>...` spells the write out; `bd tag <id>
+  // <label>` is bd's documented shorthand for `bd update <id> --add-label <label>` and
+  // must land on the same branch, or the alias walks past the denial.
   const args = claimTargets(invocation);
-  if (args[0] !== "add" && args[0] !== "set" && args[0] !== "propagate") return false;
+  if (invocation.subcommand === "label" && args[0] !== "add" && args[0] !== "set" && args[0] !== "propagate") return false;
   return args.slice(1).some(value => value.split(",").some(label => {
    const normalized = label.trim().toLowerCase();
    return normalized.startsWith("state:") && SHEPHERD_DENIED_STATES[normalized.slice(6)] === true;
@@ -431,7 +480,13 @@ export async function gateClaimEligibility(
   for (const beadId of previous.beadIds) {
    const bead = await bdShow(beadId);
    if (bead === null || typeof bead.status !== "string" || (bead.status === "in_progress" && typeof bead.assignee !== "string")) {
-    if (!sameBead) return { block: true, reason: `Cannot verify release of '${beadId}'; no new acquisition is permitted.` };
+    if (!sameBead) {
+     // Name the cause: a database that did not answer and a bead that is genuinely
+     // gone call for different next steps, and the old single sentence sent the model
+     // to "refresh ownership" for a timeout.
+     const cause = bead === null ? bdFailureText(lastBdFailure()) : "its status is unreadable";
+     return { block: true, reason: `Cannot verify release of '${beadId}': ${cause}; no new acquisition is permitted.` };
+    }
     live = true;
     continue;
    }
@@ -447,7 +502,19 @@ export async function gateClaimEligibility(
   // `bd ready --claim` selects by filter rather than naming a bead. When the
   // filter already pins a role, compare against that and skip the lookup.
   if (claim.subcommand === "ready") {
-   for (const filter of readyQueueRoles(claim.rest)) {
+   const filters = readyQueueRoles(claim.rest);
+   // Beads hands an unfiltered pull "the first ready issue", whatever role routes it,
+   // and after the pull nothing compares the bead's routing to the session's: G2 scopes
+   // to it and G4 judges it under the session's contract. So a role-marked session
+   // must name its queue. A role-less session is the lead or a helper, which may pull
+   // from any queue.
+   if (sessionRoleName !== undefined && filters.length === 0) {
+    return {
+     block: true,
+     reason: `queue pull must name your role: add --metadata-field ${ROUTING_KEY}=${sessionRoleName} to the bd ready command`,
+    };
+   }
+   for (const filter of filters) {
     if (sessionRoleName !== undefined && filter.role !== sessionRoleName) {
      return {
       block: true,

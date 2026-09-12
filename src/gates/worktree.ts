@@ -6,8 +6,16 @@
  * their effective cwd; their arbitrary redirections are not parsed.
  * Product mutations require every observed bead to remain in_progress and assigned
  * to this session's actor. Missing, unreadable, or stale beads fail closed for those
- * mutations; narrowly recognized Beads controls retain their safe behavior.
+ * mutations; narrowly recognized Beads controls retain their safe behavior. A comment
+ * on the claimed bead is also admitted once this session has released it, so the
+ * terminal report may follow the release. A bead this actor closed ends the claim:
+ * product work or a comment on it forgets the claim rather than being refused, while
+ * other `bd` commands on it stay under the reopen-then-reclaim grammar.
  * Uninspectable edit payloads are refused rather than silently reduced to a cwd-only check.
+ *
+ * The dispatcher (`src/index.ts`) runs this gate and the runtime database check only
+ * under orchestration: a declared `ORC-ROLE`, or the pinned run `pinnedRunActive`
+ * recognises. A plain session that claims a bead by hand is never contained by it.
  */
 
 import path from "node:path";
@@ -25,7 +33,6 @@ import type { ClaimState } from "../claim-state";
 import { fnmatch, normalizeScope, scopeOf } from "../scope";
 import { scopeConflict } from "./claim";
 import { splitSegments } from "../shell";
-import { readActiveRun } from "../run-state";
 
 /** Tools that mutate the working tree and therefore need a scope check. */
 export const GATED_WRITE_TOOLS: Record<string, true> = { bash: true, edit: true, write: true };
@@ -54,25 +61,31 @@ type RuntimeBeadsDirValidation =
  | { ok: true; input: Record<string, unknown>; changed: boolean }
  | { ok: false; refusal: ToolCallEventResult };
 
-/** Command text cannot grant database authority; BEADS_DIR belongs in structured env. */
-function commandNamesBeadsDir(command: string, assignmentsOnly = false): boolean {
+/**
+ * Command text cannot grant database authority; BEADS_DIR belongs in structured env.
+ *
+ * Every whitespace-separated word of every token is inspected, so a wrapper such as
+ * `env -S 'BEADS_DIR=… bd update'` or `sh -c 'BEADS_DIR=… bd …'` is caught without
+ * parsing it. That also refuses a bare mention inside quoted text, which is the price
+ * of the wrapper coverage and why the dispatcher runs this only under orchestration.
+ */
+function commandNamesBeadsDir(command: string): boolean {
  return splitSegments(command).some(segment => segment.some(token =>
-  token.split(/[ \t]+/).some(word => word.startsWith("BEADS_DIR=") || (!assignmentsOnly && word === "BEADS_DIR")),
+  token.split(/[ \t]+/).some(word => word === "BEADS_DIR" || word.startsWith("BEADS_DIR=")),
  ));
 }
 
 /**
- * Validate and canonicalize a structured Bash BEADS_DIR override.
+ * Validate and canonicalize a structured Bash BEADS_DIR override against the run's pin.
  *
- * The identity check defends a run's database, so it applies only where a run
- * marker binds this checkout. Outside a run the override merely has to name an
- * existing directory: a session scaffolding an unrelated repository, or one whose
- * process pin belongs to another live session, may point `bd` at its own database.
+ * Runs only under orchestration (see the module header), where the process pin names
+ * the run's database. A mention in command text is refused outright, and a structured
+ * override must identify the pinned directory, so a worker cannot redirect `bd` writes
+ * to a database the run never reads.
  */
 export async function normalizeRuntimeBeadsDir(
  ctx: ExtensionContext,
  input: Record<string, unknown>,
- bound?: boolean,
 ): Promise<RuntimeBeadsDirValidation> {
  const rawEnvironment = input.env;
  const hasOverride =
@@ -80,11 +93,8 @@ export async function normalizeRuntimeBeadsDir(
   typeof rawEnvironment === "object" &&
   !Array.isArray(rawEnvironment) &&
   Object.hasOwn(rawEnvironment, "BEADS_DIR");
- const inRun = bound ?? (await readActiveRun(ctx.cwd)) !== null;
  const command = input.command;
- // In a run any mention is refused. Outside one only assignments are: a read such as
- // `printenv BEADS_DIR` is not a database choice, an inline assignment escapes validation.
- if (typeof command === "string" && commandNamesBeadsDir(command, !inRun)) {
+ if (typeof command === "string" && commandNamesBeadsDir(command)) {
   return { ok: false, refusal: { block: true, reason: "BEADS_DIR must be supplied through the Bash tool environment, not command text" } };
  }
  if (!hasOverride) return { ok: true, input, changed: false };
@@ -93,17 +103,6 @@ export async function normalizeRuntimeBeadsDir(
  const requested = environment.BEADS_DIR;
  if (typeof requested !== "string" || requested.length === 0) {
   return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must name a database directory" } };
- }
- if (!inRun) {
-  try {
-   const base = typeof input.cwd === "string" && input.cwd.length > 0 ? resolveToCwd(input.cwd, ctx.cwd) : ctx.cwd;
-   const canonical = await fs.realpath(path.isAbsolute(requested) ? requested : path.resolve(base, requested));
-   if (!(await fs.stat(canonical)).isDirectory()) throw new Error("not a directory");
-   if (requested === canonical) return { ok: true, input, changed: false };
-   return { ok: true, input: { ...input, env: { ...environment, BEADS_DIR: canonical } }, changed: true };
-  } catch {
-   return { ok: false, refusal: { block: true, reason: "runtime BEADS_DIR must resolve to an existing database directory" } };
-  }
  }
  const pinned = process.env.BEADS_DIR;
  if (pinned === undefined || !path.isAbsolute(pinned)) {
@@ -355,8 +354,14 @@ function isControlCommand(command: string): boolean {
 /**
  * A deliberately narrow escape from a scope conflict, not a shell safety parser.
  * Only literal standalone Beads reads and own-claim comment/release/recovery forms qualify.
+ *
+ * `comment` is a write with one extra admission: it may land on the claimed bead after
+ * this session released it, so the terminal report may follow the release. Recovery is
+ * `bd reopen <id>` on an own closed bead, then `bd update <id> --claim [--json]`, the
+ * only spelling bd has for a reclaim. `--json` is popped before matching so the observer
+ * can re-record the claim from the report.
  */
-type ConflictControl = "read" | "write" | "release" | "reopen" | "claim" | "deny";
+type ConflictControl = "read" | "write" | "comment" | "release" | "reopen" | "claim" | "deny";
 
 function conflictControl(input: Record<string, unknown>, actor: string, beadId: string): ConflictControl | undefined {
  const command = input.command;
@@ -409,22 +414,20 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  if ((operation === "list" || operation === "blocked" || operation === "status") && tokens.length === 0) {
   return trustedEnvironment ? "read" : undefined;
  }
- if (operation !== "comment" && operation !== "comments" && operation !== "update" && operation !== "reopen" && operation !== "claim") return undefined;
- if (operation === "reopen" || operation === "claim") {
-  if (tokens.length === 1 && tokens[0] === beadId && trustedEnvironment) {
-   const inheritedActor = process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
-   if (hasExplicitActor || inheritedActor === actor) return operation === "reopen" ? "reopen" : "claim";
-  }
-  return undefined;
+ if (operation !== "comment" && operation !== "comments" && operation !== "update" && operation !== "reopen") return undefined;
+ const inheritedActor = process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
+ const attributed = hasExplicitActor || inheritedActor === actor;
+ if (operation === "reopen") {
+  return tokens.length === 1 && tokens[0] === beadId && trustedEnvironment && attributed ? "reopen" : undefined;
  }
  if (operation === "comments" && tokens[0] === "add") tokens.shift();
  if (tokens[0] !== beadId) return undefined;
  if (!trustedEnvironment) return undefined;
- const inheritedActor = process.env.BEADS_ACTOR ?? process.env.BD_ACTOR;
- if (!hasExplicitActor && inheritedActor !== actor) return undefined;
- if ((operation === "comment" || operation === "comments") && tokens.length === 2) return "write";
+ if (!attributed) return undefined;
+ if ((operation === "comment" || operation === "comments") && tokens.length === 2) return "comment";
  if (operation !== "update") return undefined;
  tokens.shift();
+ if (tokens.length === 1 && tokens[0] === "--claim") return "claim";
  let released = false;
  let changedStatus = false;
  while (tokens.length > 0) {
@@ -436,6 +439,18 @@ function conflictControl(input: Record<string, unknown>, actor: string, beadId: 
  }
  if (!released) return changedStatus ? "write" : undefined;
  return changedStatus ? "write" : "release";
+}
+
+/**
+ * Whether a pure release may land: the bead is held by this actor — in_progress, or
+ * open after its own reopen — or it is closed and either already unassigned or still
+ * assigned to this actor, so a release retried after a close stays idempotent.
+ */
+function releasable(bead: BdBead | null, actor: string): boolean {
+ if (bead === null) return false;
+ if (bead.status === "in_progress" || bead.status === "open") return bead.assignee === actor;
+ if (bead.status === "closed") return bead.assignee === undefined || bead.assignee === "" || bead.assignee === actor;
+ return false;
 }
 
 /** Refuse a mutation outside the tree, or the territory, the claimed bead names. */
@@ -458,17 +473,39 @@ export async function gateWorktreeScope(
  const hasControl = controls.some(control => control !== undefined);
  const beadViews: { beadId: string; bead: BdBead | null; control: ConflictControl | undefined }[] = [];
  for (const [index, beadId] of claim.beadIds.entries()) {
-  const bead = await bdShow(beadId);
-  const control = controls[index];
+  beadViews.push({ beadId, bead: await bdShow(beadId), control: controls[index] });
+ }
+
+ // A bead this actor closed is finished, not lost. Refusing every later edit would hold
+ // the session hostage until its next claim command, so product work — and a comment on
+ // the finished bead — forgets the claim instead and falls open as it does for a session
+ // that never claimed. Any other command naming `bd`, wrapped or literal, stays under
+ // the recovery grammar: reopen and reclaim keep the claim so the recovery stays
+ // observed, and a mention that is not one fails closed as before.
+ if (beadViews.every(({ bead }) => bead?.status === "closed" && bead.assignee === claim.actor)) {
+  const command = toolName === "bash" ? normalizedInput.command : undefined;
+  const namesBd = typeof command === "string" &&
+   splitSegments(command).some(segment => segment.some(token => token.split(/[ \t]+/).includes("bd")));
+  if (!namesBd || controls.some(control => control === "comment")) {
+   claims.forgetClaim();
+   return undefined;
+  }
+ }
+
+ for (const { beadId, bead, control } of beadViews) {
   if (control === "deny") {
    return { block: true, reason: `control command is not authorized for claimed bead '${beadId}'` };
   }
-  const checkFreshness = !hasControl || control === "write";
-  if (checkFreshness && (bead?.status !== "in_progress" || bead.assignee !== claim.actor)) {
-   return {
-    block: true,
-    reason: `claimed bead '${beadId}' is no longer in_progress and assigned to '${claim.actor}'; refresh ownership before mutating product files`,
-   };
+  if (!hasControl || control === "write" || control === "comment") {
+   const released = bead?.assignee === undefined || bead.assignee === "";
+   const fresh = bead?.status === "in_progress" && (bead.assignee === claim.actor || (control === "comment" && released));
+   if (!fresh) {
+    const next = control === undefined ? "mutating product files" : "writing to it";
+    return {
+     block: true,
+     reason: `claimed bead '${beadId}' is no longer in_progress and assigned to '${claim.actor}'; refresh ownership before ${next}`,
+    };
+   }
   }
   if (control === "reopen" && (bead?.status !== "closed" || bead.assignee !== claim.actor)) {
    return { block: true, reason: `cannot reopen claimed bead '${beadId}' unless it is closed and assigned to '${claim.actor}'` };
@@ -476,15 +513,9 @@ export async function gateWorktreeScope(
   if (control === "claim" && (bead?.status !== "open" || bead.assignee !== claim.actor)) {
    return { block: true, reason: `cannot reclaim claimed bead '${beadId}' unless it is open and assigned to '${claim.actor}'` };
   }
-  if (control === "release" && (
-   bead === null ||
-   (bead.status === "in_progress" && bead.assignee !== claim.actor) ||
-   (bead.status !== "in_progress" && bead.status !== "closed") ||
-   (bead.status === "closed" && bead.assignee !== undefined && bead.assignee !== "" && bead.assignee !== claim.actor)
-  )) {
+  if (control === "release" && !releasable(bead, claim.actor)) {
    return { block: true, reason: `cannot release ownership of claimed bead '${beadId}' without current ownership` };
   }
-  beadViews.push({ beadId, bead, control });
  }
 
  const sessionCwd = await realpathOrUndefined(ctx.cwd);
@@ -520,8 +551,7 @@ export async function gateWorktreeScope(
  // beads could possibly make.
  const scoped: { beadId: string; worktree: string; globs: string[] }[] = [];
  for (const { beadId, bead, control } of beadViews) {
-  const ownsControl = control === "read" || control === "write" || control === "release" || control === "reopen" || control === "claim";
-  if (!ownsControl) {
+  if (control === undefined) {
    const conflict = await scopeConflict(bead);
    if (conflict) return conflict;
   }

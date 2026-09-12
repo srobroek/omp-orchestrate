@@ -63,6 +63,10 @@ describe("shepherd state authorship", () => {
   "env BEADS_ACTOR=shep timeout 5s bd -C /repo update orc-merge --add-label state:approved",
   "bash -lc 'bd update orc-merge --set-labels=state:approved'",
   "printf ready\n# commentary\nbd update orc-merge --add-label state:approved",
+  // bd's documented shorthand for `bd update <id> --add-label <label>`.
+  "bd tag orc-merge state:approved",
+  "bd tag orc-merge STATE:Approved",
+  "bd -C /repo tag orc-merge state:reported",
  ])("refuses shepherd authored approval: %s", async command => {
   expect((await gateClaimEligibility(claims, shepherd, { command }))?.block).toBe(true);
  });
@@ -76,6 +80,8 @@ describe("shepherd state authorship", () => {
   "bd update orc-merge --remove-label state:approved --assignee ''",
   "bd update orc-merge --status open --assignee ''",
   "bd update orc-merge --add-label state:landed",
+  "bd tag orc-merge state:landed",
+  "bd tag orc-merge needs-review",
   "bd comment orc-merge 'IDLE head_sha=abc123 inherited state:approved'",
   "bd update orc-merge --description '--status' --notes state:approved",
   "bd update orc-merge --notes 'bd update orc-merge --status approved'",

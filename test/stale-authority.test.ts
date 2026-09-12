@@ -330,6 +330,10 @@ let issued: string[][];
 // Restore each export without leaving a process-wide module mock for later suites.
 const bdSpies = [
  spyOn(actualBd, "bdShow").mockImplementation(async () => reads.bead),
+ spyOn(actualBd, "bdShowMany").mockImplementation(async ids => {
+  const hydrated = reads.bead;
+  return hydrated === null ? null : new Map(ids.map(id => [id, hydrated]));
+ }),
  spyOn(actualBd, "bdList").mockImplementation(async () => []),
  spyOn(actualBd, "bdCommentsChecked").mockImplementation(async (id: string) => reads.comments[id] ?? []),
  spyOn(actualBd, "bdLinkedChecked").mockImplementation(async () => reads.linked),
