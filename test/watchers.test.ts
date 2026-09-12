@@ -901,9 +901,10 @@ describe("assignment enforcement", () => {
 
 		expect((await rig.fire("tool_call", { toolName: "bash", input: { command: "bd update bd-claim --status blocked" } }))[0]).toMatchObject({ block: true });
 		bd.resetReadBudget();
+		// Distinct ids: a repeated id would be served from the per-dispatch memo without spending budget.
 		let exhausted = false;
 		for (let read = 0; read < 50; read += 1) {
-			if ((await bd.bdShow("bd-claim")) !== null) continue;
+			if ((await bd.bdShow(`bd-claim-${read}`)) !== null) continue;
 			exhausted = true;
 			break;
 		}
