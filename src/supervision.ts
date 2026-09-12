@@ -76,8 +76,19 @@ function lines(stdout: string): string[] {
  return out;
 }
 
-/** Which row of the reclamation table one bead took. */
-export type ReapCase = "clean" | "incomplete" | "died-with-work" | "died-without-work" | "unknown" | "paused";
+/**
+ * Which row of the reclamation table one bead took. A child that did not complete is
+ * `died`; what its branch shows is a separate observation ({@link BranchState}), because
+ * the branch is all that is knowable about a failed child's work.
+ */
+export type ReapCase = "clean" | "incomplete" | "died" | "unknown" | "paused";
+
+/**
+ * What the repository shows for `omp/task/<id>`. `stale` is a branch by that name whose
+ * tip predates this child, so it is a leftover from an earlier run rather than this
+ * child's capture. Absence and staleness are not proof that no work was done.
+ */
+export type BranchState = "found" | "absent" | "stale" | "unknown";
 
 /** One bead's disposition. `failures` names the contract checks it did not satisfy. */
 export interface ReapedBead {
@@ -91,9 +102,9 @@ export interface ReapedBead {
 /** What one terminal event did. `reaped` is empty when there was nothing to reap. */
 export interface ReapOutcome {
  child: string;
- /** The captured branch, when the repository has one for this child. */
+ /** The captured branch, when the repository has a fresh one for this child. */
  branch?: string;
- branchState?: "found" | "absent" | "unknown";
+ branchState?: BranchState;
  discoveryUnknown?: boolean;
  reaped: ReapedBead[];
 }
@@ -101,6 +112,11 @@ export interface ReapOutcome {
 export interface ReapOptions {
  /** The repository the captured branches live in — the spawning session's cwd. */
  cwd: string;
+ /**
+  * When this session saw the child start (its `started` frame, else the reaper's own
+  * subscription). A branch whose tip was committed before this is not the child's.
+  */
+ startedAtMs: number;
  /** Subprocess seam; defaults to spawning `git`. */
  exec?: Exec;
 }
@@ -120,8 +136,8 @@ export async function reapChild(child: ChildLifecycle, options: ReapOptions): Pr
  if (candidates.length === 0) return outcome;
 
  const branch = await capturedBranch(child.id, options);
- outcome.branchState = branch === null ? "unknown" : branch === undefined ? "absent" : "found";
- if (typeof branch === "string") outcome.branch = branch;
+ outcome.branchState = branch;
+ if (branch === "found") outcome.branch = `omp/task/${child.id}`;
 
  for (const bead of candidates) {
   outcome.reaped.push(await reapBead(bead, child, branch));
@@ -148,18 +164,27 @@ async function candidateBeads(child: ChildLifecycle): Promise<{ beads: BdBead[];
  return { beads: [...beads.values()], unknown: claimed === null || wisps === null || stamped === null };
 }
 
+/** Hedged wording per branch state; the reaper never claims a branch proves or disproves work. */
+const BRANCH_EVIDENCE: Record<BranchState, (name: string) => string> = {
+ found: name => `captured branch observed: ${name}`,
+ absent: () => "no captured branch observed (not proof of no work)",
+ stale: name => `branch ${name} exists but predates this child (leftover from an earlier run, not this child's capture; not proof of no work)`,
+ unknown: () => "captured branch unknown",
+};
+
 /** Append observations only; even a fresh read cannot authorize an unconditional update. */
-async function reapBead(bead: BdBead, child: ChildLifecycle, branch: string | undefined | null): Promise<ReapedBead> {
+async function reapBead(bead: BdBead, child: ChildLifecycle, branch: BranchState): Promise<ReapedBead> {
  const failures = child.status === "completed" ? await contractFailures(bead) : [];
  const claimHeld = typeof bead.assignee === "string" && bead.assignee !== "";
  const disposition: ReapCase = child.status !== "completed"
-  ? branch === null ? "unknown" : branch === undefined ? "died-without-work" : "died-with-work"
+  ? "died"
   : failures === "paused" ? "paused" : failures === null ? "unknown" : failures.length === 0 && !claimHeld ? "clean" : "incomplete";
- if (disposition === "clean" && branch === undefined) {
+ // A clean exit is the documented success outcome whether or not it captured a branch;
+ // the branch is logged by the caller, not recorded as a recovery.
+ if (disposition === "clean") {
   return { bead: bead.id, case: disposition, failures: [], recovery: "not-needed" };
  }
- const branchEvidence = branch === null ? "captured branch unknown"
-  : branch === undefined ? "no captured branch observed (not proof of no work)" : `captured branch observed: ${branch}`;
+ const branchEvidence = BRANCH_EVIDENCE[branch](`omp/task/${child.id}`);
  const contractEvidence = failures === "paused" ? "paused on open escalation; preserve claim until architect resolves escalation"
   : failures === null ? "contract evidence unknown"
    : failures.length > 0 ? `unsatisfied checks: ${failures.join(", ")}` : `contract disposition: ${disposition}`;
@@ -176,24 +201,32 @@ async function reapBead(bead: BdBead, child: ChildLifecycle, branch: string | un
 }
 
 /**
- * Exact captured branch, undefined for a successful absent lookup, null for unknown.
- * Absence does not prove that a failed child produced no work or that its delta survived.
+ * What the repository shows for this child's `omp/task/<id>`.
  *
- * The glob is queried but only the exact name is accepted: ids are free-form, so
- * `omp/task/impl-7*` also matches child `impl-70`'s branch, and attributing another
- * child's commits to this bead is worse than recording no branch at all.
+ * Only the exact ref is accepted: ids are free-form, so a glob for `impl-7` also matches
+ * child `impl-70`'s branch, and attributing another child's commits to this bead is worse
+ * than recording no branch at all. `for-each-ref` matches a full ref name literally.
+ *
+ * A branch by the right name is not yet this child's: OMP allocates ids per session and
+ * force-overwrites a stale `omp/task/<id>` from an earlier run, so a leftover can carry
+ * the name until the capture replaces it. The tip's committer date is the session-scoped
+ * evidence available -- both capture paths commit after the child started -- so a tip
+ * older than the child's start is reported as `stale`, never as its capture.
  */
-async function capturedBranch(id: string, options: ReapOptions): Promise<string | undefined | null> {
+async function capturedBranch(id: string, options: ReapOptions): Promise<BranchState> {
  const exec = options.exec ?? spawnExec;
- const wanted = `omp/task/${id}`;
- const result = await exec(["git", "branch", "--list", `${wanted}*`], options.cwd);
- if (result === null || result.code !== 0) return null;
+ const ref = `refs/heads/omp/task/${id}`;
+ const result = await exec(["git", "for-each-ref", "--format=%(refname)%09%(committerdate:unix)", ref], options.cwd);
+ if (result === null || result.code !== 0) return "unknown";
  for (const line of lines(result.stdout)) {
-  // `git branch --list` marks the checked-out branch `*` and one checked out in
-  // another worktree `+`.
-  if (line.replace(/^[*+]\s*/, "") === wanted) return wanted;
+  const [name, committed] = line.split("\t");
+  if (name !== ref) continue;
+  const committedAt = Number(committed);
+  if (!Number.isFinite(committedAt)) return "unknown";
+  // Committer dates have second resolution; compare in the coarser unit.
+  return committedAt >= Math.floor(options.startedAtMs / 1000) ? "found" : "stale";
  }
- return undefined;
+ return "absent";
 }
 
 /**
@@ -267,6 +300,27 @@ async function contractFailures(bead: BdBead): Promise<string[] | "paused" | nul
  return failures;
 }
 
+/**
+ * Whether a linked wisp is this epic's live patrol. Any live patrol wisp counts, but
+ * the deterministic id has to name this epic: an id collision from another run is
+ * not this run's patrol.
+ */
+function livePatrol(epicId: string): (bead: BdBead) => boolean {
+ const id = `${epicId}-patrol`;
+ return bead => bead.wisp_type === "patrol" && bead.ephemeral === true
+  && ["open", "in_progress", "blocked", "deferred"].includes(bead.status ?? "")
+  && (bead.id !== id || bead.metadata?.patrol_epic === epicId);
+}
+
+/**
+ * Read-only: is a live patrol linked to this epic? `unknown` when the lookup failed.
+ * The query is the one `ensurePatrolWisp` arms against, so the two never disagree.
+ */
+export async function patrolState(epicId: string, cwd?: string): Promise<"armed" | "absent" | "unknown"> {
+ const linked = await bdListChecked(["dep", "list", epicId, "--direction=up", "--type", "relates-to", "--json"], undefined, cwd);
+ if (linked === null) return "unknown";
+ return linked.some(livePatrol(epicId)) ? "armed" : "absent";
+}
 
 /** Local calls share a lookup; database id uniqueness arbitrates cross-process creation. */
 const patrolChecks = new Map<string, Promise<void>>();
@@ -280,9 +334,7 @@ export async function ensurePatrolWisp(epicId: string, cwd?: string): Promise<vo
   const linked = await bdListChecked(query, undefined, cwd);
   if (linked === null) throw new Error(`Patrol ${epicId} lookup unknown; creation refused`);
   const id = `${epicId}-patrol`;
-  const live = (bead: BdBead) => bead.wisp_type === "patrol" && bead.ephemeral === true
-   && ["open", "in_progress", "blocked", "deferred"].includes(bead.status ?? "")
-   && (bead.id !== id || bead.metadata?.patrol_epic === epicId);
+  const live = livePatrol(epicId);
   if (linked.some(live)) return;
   if (linked.some(bead => bead.id === id)) {
    throw new Error(`Patrol ${id} is closed or invalid; architect must reconcile it before rearming`);
@@ -307,6 +359,23 @@ export async function ensurePatrolWisp(epicId: string, cwd?: string): Promise<vo
  }
 }
 
+/**
+ * What one lifecycle subscription remembers about its children.
+ *
+ * A revived agent's every follow-up turn ends in the same terminal frame as a first run
+ * (`runSubagentFollowUpTurn` -> `finalizeRunResult`), so without memory a parked
+ * architect would be reaped -- NOTE and notice -- on every wake. Start times make the
+ * captured-branch check session-scoped.
+ */
+interface ReaperMemory {
+	/** Children whose terminal frame already produced observations. */
+	reaped: Set<string>;
+	/** When this subscription saw each child's `started` frame. */
+	started: Map<string, number>;
+	/** When the subscription began; the floor for children whose start was not seen. */
+	subscribedAtMs: number;
+}
+
 /** Bind the reaper to the lifecycle bus for repositories with an active run. */
 export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) => Promise<boolean>): void {
 	let context: ExtensionContext | undefined;
@@ -314,12 +383,14 @@ export function registerSupervision(pi: ExtensionAPI, isRunBound: (cwd: string) 
 
 	const bindSession = (ctx: ExtensionContext): void => {
 		context = ctx;
-		unsubscribe ??= pi.events.on("task:subagent:lifecycle", data => {
+		if (unsubscribe !== undefined) return;
+		const memory: ReaperMemory = { reaped: new Set(), started: new Map(), subscribedAtMs: Date.now() };
+		unsubscribe = pi.events.on("task:subagent:lifecycle", data => {
 			// The session manager owns cwd. `/move` mutates it without another
 			// `session_start`, while switch and branch events may supply a new context.
 			const currentCwd = context?.sessionManager.getCwd();
 			if (currentCwd === undefined) return;
-			return handleLifecycle(pi, data, currentCwd, isRunBound);
+			return handleLifecycle(pi, data, currentCwd, isRunBound, memory);
 		});
 	};
 
@@ -339,21 +410,37 @@ async function handleLifecycle(
 	data: unknown,
 	cwd: string,
 	isRunBound: (cwd: string) => Promise<boolean>,
+	memory: ReaperMemory,
 ): Promise<void> {
 	const child = asLifecycle(data);
-	if (child === null || TERMINAL[child.status] !== true) return;
+	if (child === null) return;
+	if (child.status === "started") {
+		memory.started.set(child.id, Date.now());
+		return;
+	}
+	if (TERMINAL[child.status] !== true) return;
+	if (memory.reaped.has(child.id)) {
+		pi.logger.info("orchestrate reaper skipped a repeat terminal frame", { child: child.id, status: child.status });
+		return;
+	}
 	resetReadBudget();
 	try {
 		if (!await isRunBound(cwd)) return;
 	} catch (error) {
-		pi.logger.error("orchestrate run liveness check unavailable; recovery skipped", {
-			child: child.id,
-			error: error instanceof Error ? error.message : String(error),
-		});
+		// The same outage as a failed reap, so it gets the same notice: a child that
+		// exits while the store is unreadable must not vanish into a log line.
+		const reason = error instanceof Error ? error.message : String(error);
+		pi.logger.error("orchestrate run liveness check unavailable; recovery skipped", { child: child.id, error: reason });
+		pi.sendMessage({
+			customType: "orchestrate-recovery-needed",
+			content: `Recovery observation for child ${child.id} was skipped: ${reason}. Architect must explicitly reconcile its claims and evidence once the run's status can be read; no automatic recovery is confirmed. Exclude all claim/dispatch writers before any recovery mutation.`,
+			display: true,
+		}, { triggerTurn: false });
 		return;
 	}
 	try {
-		const outcome = await reapChild(child, { cwd });
+		const outcome = await reapChild(child, { cwd, startedAtMs: memory.started.get(child.id) ?? memory.subscribedAtMs });
+		if (outcome.reaped.length > 0) memory.reaped.add(child.id);
 		if (outcome.discoveryUnknown) pi.logger.warn("orchestrate recovery candidate discovery incomplete", { child: child.id });
 		for (const reaped of outcome.reaped) {
 			pi.logger.info("orchestrate recovery observation", {
@@ -368,7 +455,7 @@ async function handleLifecycle(
 			if (reaped.recovery !== "not-needed") {
 				pi.sendMessage({
 					customType: "orchestrate-recovery-needed",
-					content: `Recovery observation for ${reaped.bead}, child ${child.id}: ${reaped.case}; NOTE ${reaped.recovery}; branch=${outcome.branch ?? outcome.branchState ?? "unknown"}. No claim or metadata changed. Architect: inspect current bead and branch evidence; establish an exclusive recovery window excluding all dispatch/claim writers before any recovery mutation. Paused work must wait for escalation resolution. Failed NOTE persistence requires explicit reconciliation; this is not a recovery success.`,
+					content: `Recovery observation for ${reaped.bead}, child ${child.id}: ${reaped.case}; NOTE ${reaped.recovery}; branch: ${outcome.branchState ?? "unknown"}${outcome.branch === undefined ? "" : ` (${outcome.branch})`}. No claim or metadata changed. Architect: inspect current bead and branch evidence; establish an exclusive recovery window excluding all dispatch/claim writers before any recovery mutation. Paused work must wait for escalation resolution. Failed NOTE persistence requires explicit reconciliation; this is not a recovery success.`,
 					display: true,
 				}, { triggerTurn: false });
 			}

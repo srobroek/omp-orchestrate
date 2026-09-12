@@ -15,10 +15,12 @@
  * sentinel. Binding, conversely, refuses to move an already-bound marker to a
  * different id -- a second run epic in the same tree is a mistake, not a
  * retarget -- while rebinding to the same id stays a no-op so a retried command
- * is harmless.
+ * is harmless. Binding also refuses an epic Beads cannot show as open: a bound id
+ * that resolves to nothing would suspend supervision for the whole run.
  *
- * Writers hold an exclusive sibling lock through read/validate/rename. Readers see
- * atomic snapshots; a leftover lock requires explicit operator reconciliation.
+ * A run ends when `closeRun` removes the marker; nothing else does. Writers hold an
+ * exclusive sibling lock through read/validate/rename. Readers see atomic snapshots;
+ * a leftover lock requires explicit operator reconciliation.
  */
 
 import fs, { type FileHandle } from "node:fs/promises";
@@ -27,8 +29,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ensureBeadsPath } from "./beads-mode";
-import { bdShow, resetReadBudget } from "./bd";
-import { ensurePatrolWisp } from "./supervision";
+import { type BdBead, bdListChecked, bdShow, resetReadBudget } from "./bd";
+import { ensurePatrolWisp, patrolState } from "./supervision";
 
 /**
  * The marker's on-disk shape.
@@ -146,6 +148,20 @@ const ACTIVE_RUN_STATUSES: Record<string, true> = {
 	deferred: true,
 };
 
+/** What one `bd show` of a run epic establishes. Only `active` authorises supervision. */
+type RunLiveness =
+	| { kind: "active" | "closed"; status: string }
+	| { kind: "unverified" }
+	| { kind: "unknown"; status: string };
+
+function runLiveness(run: BdBead | null): RunLiveness {
+	if (run === null || typeof run.status !== "string") return { kind: "unverified" };
+	const status = run.status.toLowerCase();
+	if (status === "closed") return { kind: "closed", status: run.status };
+	if (ACTIVE_RUN_STATUSES[status] === true) return { kind: "active", status: run.status };
+	return { kind: "unknown", status: run.status };
+}
+
 /**
  * Verify that the bound run still authorises child supervision.
  *
@@ -157,14 +173,13 @@ const ACTIVE_RUN_STATUSES: Record<string, true> = {
 export async function isBoundRunActive(cwd: string): Promise<boolean> {
 	const marker = await readActiveRunStrict(cwd);
 	if (marker === null || marker.run_id === PENDING) return false;
-	const run = await bdShow(marker.run_id, undefined, cwd);
-	if (run === null || typeof run.status !== "string") {
-		throw new Error(`run liveness unavailable: bound run ${marker.run_id} status could not be verified`);
+	const liveness = runLiveness(await bdShow(marker.run_id, undefined, cwd));
+	switch (liveness.kind) {
+		case "active": return true;
+		case "closed": return false;
+		case "unverified": throw new Error(`run liveness unavailable: bound run ${marker.run_id} status could not be verified`);
+		case "unknown": throw new Error(`run liveness unavailable: bound run ${marker.run_id} has unknown status ${JSON.stringify(liveness.status)}`);
 	}
-	const status = run.status.toLowerCase();
-	if (status === "closed") return false;
-	if (ACTIVE_RUN_STATUSES[status] === true) return true;
-	throw new Error(`run liveness unavailable: bound run ${marker.run_id} has unknown status ${JSON.stringify(run.status)}`);
 }
 
 /** Write the marker atomically, leaving no temporary behind on either path. */
@@ -223,18 +238,38 @@ export async function activateRun(cwd: string, sessionId?: string): Promise<Acti
  });
 }
 
+/** How binding left the S2 patrol: armed, or why the architect must arm it by hand. */
+export interface BindResult {
+ patrol: "armed" | { failed: string };
+}
+
 /**
  * Name the run bead this run answers to. Throws on a refusal -- a malformed id,
- * no marker to bind, or a marker already bound elsewhere -- so callers surface
- * the reason rather than silently leaving the marker unbound.
+ * an epic Beads cannot show as open, no marker to bind, or a marker already bound
+ * elsewhere -- so callers surface the reason rather than silently leaving the
+ * marker unbound.
+ *
+ * The epic is read before the marker is written. A typo accepted here would leave
+ * `isBoundRunActive` throwing on every child exit, disabling supervision for the
+ * whole run while the operator believes it bound; the same rule that governs
+ * supervision -- only a positively observed status counts -- governs binding, so a
+ * bind with `bd` unreachable is refused rather than trusted.
  *
  * Arming the patrol wisp belongs here rather than in the command handler: the
  * patrol is the durable consequence of a binding existing, so every caller must
  * get it. It is idempotent, and a beads failure must not fail the bind -- an
- * unarmed patrol costs a reconciliation sweep, an unbound marker costs the run.
+ * unarmed patrol costs a reconciliation sweep, an unbound marker costs the run --
+ * but the failure is returned, not swallowed, so the caller can say so.
  */
-export async function bindRun(cwd: string, runId: string): Promise<void> {
+export async function bindRun(cwd: string, runId: string): Promise<BindResult> {
  if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
+ resetReadBudget();
+ const liveness = runLiveness(await bdShow(runId, undefined, cwd));
+ if (liveness.kind !== "active") {
+  throw new Error(liveness.kind === "unverified"
+   ? `run epic ${runId} could not be read from Beads; binding refused`
+   : `run epic ${runId} has status ${JSON.stringify(liveness.status)}, which cannot host a run; binding refused`);
+ }
  await withMarkerLock(cwd, async () => {
   const existing = await readActiveRunStrict(cwd);
   if (existing === null) throw new Error("no active-run marker to bind; run /orchestrate-run first");
@@ -245,20 +280,89 @@ export async function bindRun(cwd: string, runId: string): Promise<void> {
  });
  // Binding owns its evidence budget; arming failure must not undo the marker.
  resetReadBudget();
- await ensurePatrolWisp(runId, cwd).catch(error => {
-  process.emitWarning(
-   `Run ${runId} is bound, but patrol arming needs architect attention: ${error instanceof Error ? error.message : String(error)}`,
-   { code: "ORCHESTRATE_PATROL_UNCONFIRMED" },
-  );
- });
+ try {
+  await ensurePatrolWisp(runId, cwd);
+  return { patrol: "armed" };
+ } catch (error) {
+  return { patrol: { failed: error instanceof Error ? error.message : String(error) } };
+ }
 }
 
 /**
- * The two marker commands. Registration is a function rather than import-time
- * work so the extension entry point owns the order commands appear in, and so
- * tests can import the marker functions without touching the registry.
+ * End a run: remove the marker once it names `runId`.
  *
- * `orchestrate-status` is registered by the entry point, not here.
+ * A marker outliving its run keeps injecting the protocol into every `orc-*` session
+ * in the repository and refuses the next bind, so this is how a run ends. Children
+ * still `in_progress` are the reason to refuse: their claims would lose the supervision
+ * the marker arms. `force` skips that check for a run whose beads are already gone or
+ * unreadable. The lock is released, and its file removed, by the same exclusion that
+ * guards every marker write.
+ */
+export async function closeRun(cwd: string, runId: string, options: { force?: boolean } = {}): Promise<void> {
+ if (!RUN_ID_RE.test(runId)) throw new Error(`run id must be a Beads identifier, got ${JSON.stringify(runId)}`);
+ await withMarkerLock(cwd, async () => {
+  const existing = await readActiveRunStrict(cwd);
+  if (existing === null) throw new Error("no active-run marker to close");
+  if (existing.run_id !== runId) {
+   throw new Error(existing.run_id === PENDING
+    ? `active-run marker is pending, not bound to ${runId}; close it as ${PENDING}`
+    : `active-run marker is bound to ${existing.run_id}, not ${runId}`);
+  }
+  // A pending marker has no epic and so no children to protect.
+  if (options.force !== true && runId !== PENDING) {
+   resetReadBudget();
+   const inFlight = await bdListChecked(["list", "--parent", runId, "--status", "in_progress", "--limit", "0", "--json"], undefined, cwd);
+   if (inFlight === null) throw new Error(`in-flight children of ${runId} could not be read; pass --force to close without that check`);
+   if (inFlight.length > 0) {
+    throw new Error(`${inFlight.length} child${inFlight.length === 1 ? "" : "ren"} of ${runId} still in_progress (${inFlight.map(bead => bead.id).join(", ")}); pass --force to close anyway`);
+   }
+  }
+  await fs.rm(markerPath(cwd), { force: true });
+ });
+}
+
+/** What `/orchestrate-status` prints. `healthy` is bound, epic active, patrol armed -- nothing less. */
+export interface RunStatusReport {
+ lines: string[];
+ healthy: boolean;
+}
+
+/** The marker, the epic's liveness, the patrol. Reads only. */
+export async function runStatusReport(cwd: string): Promise<RunStatusReport> {
+ const marker = markerPath(cwd);
+ let run: ActiveRun | null;
+ try {
+  run = await readActiveRunStrict(cwd);
+ } catch (error) {
+  return { lines: [`marker ${marker}: ${error instanceof Error ? error.message : String(error)}`], healthy: false };
+ }
+ if (run === null) return { lines: [`no active run: ${marker} is absent; /orchestrate-run activates one`], healthy: false };
+ const session = run.session_id === undefined ? "" : `, activated by session ${run.session_id}`;
+ if (run.run_id === PENDING) {
+  return { lines: [`run: pending (marker ${marker}${session}); /orchestrate-bind <epic> binds it`], healthy: false };
+ }
+ const lines = [`run: bound to ${run.run_id} (marker ${marker}${session})`];
+ resetReadBudget();
+ const liveness = runLiveness(await bdShow(run.run_id, undefined, cwd));
+ switch (liveness.kind) {
+  case "active": lines.push(`epic ${run.run_id}: ${liveness.status}`); break;
+  case "closed": lines.push(`epic ${run.run_id}: closed; supervision is off, and /orchestrate-close ${run.run_id} removes the marker`); break;
+  case "unverified": lines.push(`epic ${run.run_id}: status could not be verified (bd unavailable or bead missing); child supervision is suspended until it can`); break;
+  case "unknown": lines.push(`epic ${run.run_id}: status ${JSON.stringify(liveness.status)} is not a run status; child supervision is suspended`); break;
+ }
+ const patrol = await patrolState(run.run_id, cwd);
+ lines.push(patrol === "armed" ? "patrol: armed"
+  : patrol === "absent" ? `patrol: absent; /orchestrate-bind ${run.run_id} arms it`
+   : "patrol: unknown (the linked-wisp lookup failed)");
+ return { lines, healthy: liveness.kind === "active" && patrol === "armed" };
+}
+
+/**
+ * The marker commands: activate, bind, status, close. Registration is a function
+ * rather than import-time work so the extension entry point owns the order commands
+ * appear in, and so tests can import the marker functions without touching the
+ * registry. `orchestrate-roster` reads queues, not the marker, and stays with the
+ * entry point.
  *
  * `onActivate` runs after the marker is written and the database is pinned. The
  * settings preflight lives in `watchers.ts`, which imports this module, so the
@@ -308,15 +412,45 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
  });
 
  pi.registerCommand("orchestrate-bind", {
-  description: "Bind the active orchestrate run to a run epic id",
+  description: "Bind the active orchestrate run to a run epic id and arm its patrol",
   handler: async (args, ctx) => {
    const runId = args.trim();
    try {
-    // `bindRun` arms the S2 patrol wisp; this handler only reports.
-    await bindRun(ctx.sessionManager.getCwd(), runId);
-    // Not "patrol armed": arming fails open, so the bind succeeding does not
-    // prove a patrol exists. `/orchestrate-status` reports the run's wisps.
-    ctx.ui.notify(`orchestrate run bound to ${runId}`, "info");
+    const bound = await bindRun(ctx.sessionManager.getCwd(), runId);
+    if (bound.patrol === "armed") {
+     ctx.ui.notify(`orchestrate run bound to ${runId}; patrol armed`, "info");
+    } else {
+     // The bind stands; the patrol does not. Said where the operator reads, because
+     // an unarmed patrol is the layer that covers process death.
+     ctx.ui.notify(`orchestrate run bound to ${runId}, but patrol arming needs architect attention: ${bound.patrol.failed}`, "warning");
+    }
+   } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+   }
+  },
+ });
+
+ pi.registerCommand("orchestrate-status", {
+  description: "Active run: marker binding, run epic liveness, patrol",
+  handler: async (_args, ctx) => {
+   const report = await runStatusReport(ctx.sessionManager.getCwd());
+   ctx.ui.notify(report.lines.join("\n"), report.healthy ? "info" : "warning");
+  },
+ });
+
+ pi.registerCommand("orchestrate-close", {
+  description: "End the run: remove the marker once it names <epic> and no child is in_progress (--force skips the check)",
+  handler: async (args, ctx) => {
+   const words = args.trim().split(/\s+/).filter(word => word.length > 0);
+   const ids = words.filter(word => word !== "--force");
+   const runId = ids[0];
+   if (runId === undefined || ids.length > 1) {
+    ctx.ui.notify("usage: /orchestrate-close <epic> [--force]", "error");
+    return;
+   }
+   try {
+    await closeRun(ctx.sessionManager.getCwd(), runId, { force: words.length > ids.length });
+    ctx.ui.notify(`orchestrate run ${runId} closed; marker removed`, "info");
    } catch (error) {
     ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
    }

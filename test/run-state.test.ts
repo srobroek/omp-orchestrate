@@ -2,20 +2,58 @@ import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "
 import fs, { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import * as supervision from "../src/supervision";
 import * as bd from "../src/bd";
-import { activateRun, bindRun, isBoundRunActive, markerPath, readActiveRun, registerRunCommands } from "../src/run-state";
+import type { BdBead } from "../src/bd";
+import { activateRun, bindRun, closeRun, isBoundRunActive, markerPath, readActiveRun, registerRunCommands, runStatusReport } from "../src/run-state";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockResolvedValue(undefined);
-afterAll(() => patrolSpy.mockRestore());
+/**
+ * What Beads answers. `bd show <id>` returns `epics[id]`, `null` when unknown; `bd list
+ * --parent <id>` returns `children`, `null` for an unreadable store. Spied once for the
+ * file, so a test that restores would not strip the default from the tests after it.
+ */
+let epics: Record<string, BdBead | null> = {};
+let children: BdBead[] | null = [];
+let listArgs: string[][] = [];
+const showSpy = spyOn(bd, "bdShow").mockImplementation(async id => epics[id] ?? null);
+const listSpy = spyOn(bd, "bdListChecked").mockImplementation(async args => {
+	listArgs.push(args);
+	return children;
+});
+let patrol: "armed" | "absent" | "unknown" = "armed";
+let arming: Error | undefined;
+const patrolSpy = spyOn(supervision, "ensurePatrolWisp").mockImplementation(async () => {
+	if (arming !== undefined) throw arming;
+});
+const patrolStateSpy = spyOn(supervision, "patrolState").mockImplementation(async () => patrol);
+afterAll(() => {
+	showSpy.mockRestore();
+	listSpy.mockRestore();
+	patrolSpy.mockRestore();
+	patrolStateSpy.mockRestore();
+});
 
 let cwd: string;
+
+/** A run epic Beads shows with `status`. */
+function epic(id: string, status = "open"): void {
+	epics[id] = { id, status };
+}
 
 beforeEach(async () => {
 	cwd = await mkdtemp(join(tmpdir(), "orc-run-state-"));
 	delete process.env.ORCHESTRATE_MARKER_FILE;
 	delete process.env.BD_BIN;
+	// Every id a test binds below is an open epic unless the test says otherwise.
+	epics = {};
+	for (const id of ["orc-1", "orc-2", "orc-7", "orc-42", "orc-a", "orc-b", "orc-legacy", "orc-new", "orc-other", "orc.run_1:2-3"]) epic(id);
+	children = [];
+	listArgs = [];
+	patrol = "armed";
+	arming = undefined;
+	showSpy.mockClear();
 });
 
 afterEach(async () => {
@@ -173,31 +211,21 @@ describe("readActiveRun", () => {
 
 describe("isBoundRunActive", () => {
 	test("does not query Beads for an absent or pending marker", async () => {
-		const show = spyOn(bd, "bdShow").mockResolvedValue(null);
-		try {
-			expect(await isBoundRunActive(cwd)).toBe(false);
-			await seed('{"schema_version": 1, "run_id": "pending"}');
-			expect(await isBoundRunActive(cwd)).toBe(false);
-			expect(show).not.toHaveBeenCalled();
-		} finally {
-			show.mockRestore();
-		}
+		expect(await isBoundRunActive(cwd)).toBe(false);
+		await seed('{"schema_version": 1, "run_id": "pending"}');
+		expect(await isBoundRunActive(cwd)).toBe(false);
+		expect(showSpy).not.toHaveBeenCalled();
 	});
 
 	test("requires a known run status and passes the repository cwd", async () => {
 		await seed('{"schema_version": 1, "run_id": "orc-7"}');
-		const show = spyOn(bd, "bdShow").mockResolvedValue({ id: "orc-7", status: "open" });
-		try {
-			for (const status of ["open", "in_progress", "blocked", "deferred"]) {
-				show.mockResolvedValue({ id: "orc-7", status });
-				expect(await isBoundRunActive(cwd)).toBe(true);
-			}
-			expect(show).toHaveBeenCalledWith("orc-7", undefined, cwd);
-			show.mockResolvedValue({ id: "orc-7", status: "closed" });
-			expect(await isBoundRunActive(cwd)).toBe(false);
-		} finally {
-			show.mockRestore();
+		for (const status of ["open", "in_progress", "blocked", "deferred"]) {
+			epic("orc-7", status);
+			expect(await isBoundRunActive(cwd)).toBe(true);
 		}
+		expect(showSpy).toHaveBeenCalledWith("orc-7", undefined, cwd);
+		epic("orc-7", "closed");
+		expect(await isBoundRunActive(cwd)).toBe(false);
 	});
 
 	test.each([
@@ -206,12 +234,8 @@ describe("isBoundRunActive", () => {
 		[{ id: "orc-7", status: "paused" }, "unknown status"],
 	])("throws when run evidence is unavailable or unknown: %j", async (run, reason) => {
 		await seed('{"schema_version": 1, "run_id": "orc-7"}');
-		const show = spyOn(bd, "bdShow").mockResolvedValue(run as { id: string; status?: string } | null);
-		try {
-			await expect(isBoundRunActive(cwd)).rejects.toThrow(reason);
-		} finally {
-			show.mockRestore();
-		}
+		epics["orc-7"] = run;
+		await expect(isBoundRunActive(cwd)).rejects.toThrow(reason);
 	});
 
 	test("throws when marker authority is unreadable", async () => {
@@ -308,6 +332,175 @@ describe("bindRun", () => {
 		await seed("orc-legacy\n");
 		await expect(bindRun(cwd, "orc-new")).rejects.toThrow(/already bound to orc-legacy/);
 	});
+
+	test.each([
+		["an epic Beads does not know", null, /could not be read from Beads; binding refused/],
+		["an epic whose status is unreadable", { id: "orc-typo" }, /could not be read from Beads; binding refused/],
+		["a closed epic", { id: "orc-typo", status: "closed" }, /status "closed", which cannot host a run/],
+		["an epic in a status supervision does not recognise", { id: "orc-typo", status: "paused" }, /status "paused", which cannot host a run/],
+	])("refuses %s and leaves the marker pending", async (_label, shown, reason) => {
+		// A typo accepted here disarmed supervision for the whole run: every child exit
+		// hit "run liveness unavailable" and the reaper skipped, while the operator was
+		// told the run was bound.
+		await activateRun(cwd);
+		epics["orc-typo"] = shown;
+		await expect(bindRun(cwd, "orc-typo")).rejects.toThrow(reason);
+		expect((await readActiveRun(cwd))?.run_id).toBe("pending");
+		expect(patrolSpy).not.toHaveBeenCalledWith("orc-typo", cwd);
+	});
+
+	test("reads the epic before touching the marker, in the repository cwd", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		expect(showSpy).toHaveBeenCalledWith("orc-7", undefined, cwd);
+	});
+
+	test("reports the patrol armed", async () => {
+		await activateRun(cwd);
+		expect(await bindRun(cwd, "orc-7")).toEqual({ patrol: "armed" });
+	});
+
+	test("a failed arming binds, is returned, and is not emitted as a process warning", async () => {
+		arming = new Error("Patrol orc-7 lookup unknown; creation refused");
+		const warnings: string[] = [];
+		const onWarning = (warning: Error) => { warnings.push(warning.message); };
+		process.on("warning", onWarning);
+		try {
+			await activateRun(cwd);
+			expect(await bindRun(cwd, "orc-7")).toEqual({ patrol: { failed: "Patrol orc-7 lookup unknown; creation refused" } });
+			expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+			await setImmediate();
+			expect(warnings).toEqual([]);
+		} finally {
+			process.off("warning", onWarning);
+		}
+	});
+});
+
+describe("closeRun", () => {
+	test("removes the marker and its lock once the marker names the run", async () => {
+		await activateRun(cwd, "session-a");
+		await bindRun(cwd, "orc-7");
+		await closeRun(cwd, "orc-7");
+		expect(await readActiveRun(cwd)).toBeNull();
+		expect(await readdir(join(cwd, ".orchestration"))).toEqual([]);
+		expect(listArgs).toEqual([["list", "--parent", "orc-7", "--status", "in_progress", "--limit", "0", "--json"]]);
+	});
+
+	test("refuses an id the marker does not name", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		await expect(closeRun(cwd, "orc-2")).rejects.toThrow(/bound to orc-7, not orc-2/);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		expect(listArgs).toEqual([]);
+	});
+
+	test("refuses while children are in_progress, naming them", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		children = [{ id: "orc-7.1", status: "in_progress" }, { id: "orc-7.4", status: "in_progress" }];
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/2 children of orc-7 still in_progress \(orc-7\.1, orc-7\.4\); pass --force/);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+	});
+
+	test("refuses when the children cannot be read, unless forced", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		children = null;
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/could not be read; pass --force/);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		await closeRun(cwd, "orc-7", { force: true });
+		expect(await readActiveRun(cwd)).toBeNull();
+	});
+
+	test("force skips the children check entirely", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		children = [{ id: "orc-7.1", status: "in_progress" }];
+		await closeRun(cwd, "orc-7", { force: true });
+		expect(await readActiveRun(cwd)).toBeNull();
+		expect(listArgs).toEqual([]);
+	});
+
+	test("a pending marker closes under its sentinel without a children read", async () => {
+		await activateRun(cwd);
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/pending, not bound to orc-7/);
+		await closeRun(cwd, "pending");
+		expect(await readActiveRun(cwd)).toBeNull();
+		expect(listArgs).toEqual([]);
+	});
+
+	test("refuses with no marker, a malformed marker, or a held lock", async () => {
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/no active-run marker/);
+		await seed("{broken");
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/malformed/);
+		expect(await readFile(markerPath(cwd), "utf8")).toBe("{broken");
+		await seed('{"schema_version":1,"run_id":"orc-7"}');
+		await writeFile(`${markerPath(cwd)}.lock`, "other writer");
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(/locked/);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+	});
+});
+
+describe("runStatusReport", () => {
+	test("an absent marker is an inactive repository", async () => {
+		const report = await runStatusReport(cwd);
+		expect(report.healthy).toBe(false);
+		expect(report.lines).toEqual([`no active run: ${markerPath(cwd)} is absent; /orchestrate-run activates one`]);
+		expect(showSpy).not.toHaveBeenCalled();
+	});
+
+	test("a malformed marker is reported for reconciliation, not hidden", async () => {
+		await seed("{broken");
+		const report = await runStatusReport(cwd);
+		expect(report.healthy).toBe(false);
+		expect(report.lines[0]).toContain("malformed");
+	});
+
+	test("a pending marker names the bind step and its session", async () => {
+		await activateRun(cwd, "session-a");
+		const report = await runStatusReport(cwd);
+		expect(report.healthy).toBe(false);
+		expect(report.lines).toEqual([`run: pending (marker ${markerPath(cwd)}, activated by session session-a); /orchestrate-bind <epic> binds it`]);
+	});
+
+	test("a bound, open, patrolled run is healthy", async () => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		epic("orc-7", "in_progress");
+		const report = await runStatusReport(cwd);
+		expect(report.healthy).toBe(true);
+		expect(report.lines).toEqual([
+			`run: bound to orc-7 (marker ${markerPath(cwd)})`,
+			"epic orc-7: in_progress",
+			"patrol: armed",
+		]);
+	});
+
+	test.each([
+		["closed", { id: "orc-7", status: "closed" }, "epic orc-7: closed; supervision is off, and /orchestrate-close orc-7 removes the marker"],
+		["unverifiable", null, "epic orc-7: status could not be verified (bd unavailable or bead missing); child supervision is suspended until it can"],
+		["unknown", { id: "orc-7", status: "paused" }, 'epic orc-7: status "paused" is not a run status; child supervision is suspended'],
+	])("a %s epic says what supervision does about it", async (_label, shown, line) => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		epics["orc-7"] = shown;
+		const report = await runStatusReport(cwd);
+		expect(report.healthy).toBe(false);
+		expect(report.lines[1]).toBe(line);
+	});
+
+	test.each([
+		["absent", "patrol: absent; /orchestrate-bind orc-7 arms it"],
+		["unknown", "patrol: unknown (the linked-wisp lookup failed)"],
+	] as const)("an %s patrol is not healthy", async (state, line) => {
+		await activateRun(cwd);
+		await bindRun(cwd, "orc-7");
+		patrol = state;
+		const report = await runStatusReport(cwd);
+		expect(report.healthy).toBe(false);
+		expect(report.lines[2]).toBe(line);
+	});
 });
 
 describe("registerRunCommands", () => {
@@ -326,17 +519,33 @@ describe("registerRunCommands", () => {
 			sessionManager: { getCwd: () => cwd, getSessionId: () => "session-t" },
 			ui: { notify: (text: string, level: string) => notices.push([level, text]) },
 		};
-		const run = handlers.get("orchestrate-run");
-		if (run === undefined) throw new Error("orchestrate-run not registered");
-		return { run: () => run("", ctx), notices };
+		const command = (name: string) => {
+			const handler = handlers.get(name);
+			if (handler === undefined) throw new Error(`${name} not registered`);
+			return (args = "") => handler(args, ctx);
+		};
+		return {
+			registered: [...handlers.keys()],
+			run: command("orchestrate-run"),
+			bind: command("orchestrate-bind"),
+			status: command("orchestrate-status"),
+			close: command("orchestrate-close"),
+			notices,
+		};
 	}
 
-	beforeEach(() => {
-		// An inherited pin is accepted as-is, which keeps bd out of these tests.
+	beforeEach(async () => {
+		// A valid inherited pin is accepted without consulting bd, which keeps bd out of
+		// these tests; an absent directory would now be refused.
+		await mkdir(join(cwd, ".beads"));
 		process.env.BEADS_DIR = join(cwd, ".beads");
 	});
 	afterEach(() => {
 		delete process.env.BEADS_DIR;
+	});
+
+	test("registers the four marker commands", () => {
+		expect(rig().registered).toEqual(["orchestrate-run", "orchestrate-bind", "orchestrate-status", "orchestrate-close"]);
 	});
 
 	test("/orchestrate-run calls the activation hook once, after the marker exists", async () => {
@@ -390,5 +599,79 @@ describe("registerRunCommands", () => {
 			readSpy.mockRestore();
 		}
 		expect(calls).toBe(0);
+	});
+
+	test("/orchestrate-bind reports an armed patrol as success", async () => {
+		const { run, bind, notices } = rig();
+		await run();
+		await bind("orc-7");
+		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-7; patrol armed"]);
+	});
+
+	test("/orchestrate-bind says so, as a warning, when the patrol did not arm", async () => {
+		// The bind stands and the marker is bound; what the operator was not told before is
+		// that the layer covering process death is missing.
+		arming = new Error("Patrol orc-7 lookup unknown; creation refused");
+		const { run, bind, notices } = rig();
+		await run();
+		await bind("orc-7");
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		expect(notices.at(-1)).toEqual([
+			"warning",
+			"orchestrate run bound to orc-7, but patrol arming needs architect attention: Patrol orc-7 lookup unknown; creation refused",
+		]);
+	});
+
+	test("/orchestrate-bind refuses an epic Beads cannot show as open", async () => {
+		const { run, bind, notices } = rig();
+		await run();
+		await bind("orc-typo");
+		expect(notices.at(-1)).toEqual(["error", "run epic orc-typo could not be read from Beads; binding refused"]);
+		expect((await readActiveRun(cwd))?.run_id).toBe("pending");
+	});
+
+	test("/orchestrate-status prints the report at the level its health warrants", async () => {
+		const { run, bind, status, notices } = rig();
+		await status();
+		expect(notices.at(-1)).toEqual(["warning", `no active run: ${markerPath(cwd)} is absent; /orchestrate-run activates one`]);
+		await run();
+		await bind("orc-7");
+		await status();
+		expect(notices.at(-1)).toEqual(["info", `run: bound to orc-7 (marker ${markerPath(cwd)}, activated by session session-t)\nepic orc-7: open\npatrol: armed`]);
+		patrol = "absent";
+		await status();
+		expect(notices.at(-1)?.[0]).toBe("warning");
+		expect(notices.at(-1)?.[1]).toContain("patrol: absent");
+	});
+
+	test("/orchestrate-close needs exactly one id and honours --force in either position", async () => {
+		const { run, bind, close, notices } = rig();
+		await run();
+		await bind("orc-7");
+		await close("");
+		expect(notices.at(-1)).toEqual(["error", "usage: /orchestrate-close <epic> [--force]"]);
+		await close("orc-7 orc-8");
+		expect(notices.at(-1)).toEqual(["error", "usage: /orchestrate-close <epic> [--force]"]);
+		children = [{ id: "orc-7.1", status: "in_progress" }];
+		await close("orc-7");
+		expect(notices.at(-1)?.[0]).toBe("error");
+		expect(notices.at(-1)?.[1]).toContain("still in_progress");
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		await close("--force orc-7");
+		expect(notices.at(-1)).toEqual(["info", "orchestrate run orc-7 closed; marker removed"]);
+		expect(await readActiveRun(cwd)).toBeNull();
+	});
+
+	test("/orchestrate-close then /orchestrate-bind starts the next run in the same repository", async () => {
+		// The operator-stranding path: without close, the second bind was refused as
+		// "already bound" until the marker was deleted by hand.
+		const { run, bind, close, notices } = rig();
+		await run();
+		await bind("orc-7");
+		await close("orc-7");
+		await run();
+		await bind("orc-2");
+		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-2; patrol armed"]);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-2");
 	});
 });
