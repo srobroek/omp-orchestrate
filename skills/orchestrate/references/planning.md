@@ -171,14 +171,16 @@ one sized past the cap simply idles against it.
 
 ## Runtime dispatch settings
 
-The required effective settings ship in the plugin's `config/orchestrate.overlay.yml`;
+The six required effective settings ship in the plugin's `config/orchestrate.overlay.yml`;
 the operator starts the lead session with `omp --config <plugin-root>/config/orchestrate.overlay.yml`.
+`modelRoles.reviewer` is optional and only warns when unset (`roles.md`).
 Before the first wave, preflight compares the effective values against it and reports a
-deviation as `WARN settings`. Preflight never rewrites config. On a deviation, the
-operator restarts with the overlay or explicitly accepts the reported limitations. Claim
-foreground observation remains mandatory even if a settings warning is accepted. Each
-spawner also needs its explicit `spawns:` allowlist; `task.maxRecursionDepth` alone does
-not grant a helper.
+deviation as `WARN settings`. Preflight never rewrites config.
+
+On a deviation, the operator restarts with the overlay or explicitly accepts the reported
+limitations. Claim foreground observation remains mandatory even if a settings warning is
+accepted. Each spawner also needs its explicit `spawns:` allowlist;
+`task.maxRecursionDepth` alone does not grant a helper.
 
 Architects use persistent Worktrunk feature trees, not isolated spawns. Worker entry:
 

@@ -18,8 +18,8 @@
  * an exclusive sibling lock through read/validate/rename. Readers see atomic snapshots; a
  * leftover lock requires explicit operator reconciliation.
  *
- * `pending`, the id `/orchestrate-run` once wrote before an epic existed, is still read so
- * a marker that command left behind binds or stops cleanly; nothing writes it any more.
+ * `pending`, the id an older plugin release wrote before an epic existed, is still read so
+ * a marker that release left behind binds or stops cleanly; nothing writes it any more.
  */
 
 import { execFile } from "node:child_process";
@@ -63,7 +63,7 @@ export interface ActiveRun {
 	beads_dir?: string;
 }
 
-/** Run id `/orchestrate-run` wrote before the run epic existed. Bindable; never treated as bound. */
+/** Run id an older plugin release wrote before the run epic existed. Bindable; never treated as bound. */
 const PENDING = "pending";
 
 /** A Beads identifier, as `orchestrator-run-activate.py` defined it. */
@@ -726,7 +726,7 @@ export async function resumeRun(cwd: string, sessionId: string, now = Date.now()
 	}
 	if (marker === null) return { kind: "no-run", reason: `no active run: ${markerPath(cwd)} is absent; /orchestrate-start starts one` };
 	if (marker.run.run_id === PENDING) {
-		return { kind: "no-run", reason: "the marker is pending, written by /orchestrate-run before an epic existed; /orchestrate-start <epic-id> binds it, /orchestrate-stop removes it" };
+		return { kind: "no-run", reason: "the marker is pending, written by an older plugin release before an epic existed; /orchestrate-start <epic-id> binds it, /orchestrate-stop removes it" };
 	}
 	resetReadBudget();
 	const adopted = await adoptRun(cwd, sessionId, now);
@@ -997,7 +997,7 @@ export async function runStatusReport(cwd: string, now = Date.now()): Promise<Ru
 	if (run === null) return { lines: [`no active run: ${marker} is absent; /orchestrate-start starts one`], healthy: false };
 	const session = run.session_id === undefined ? "" : `, session ${run.session_id}`;
 	if (run.run_id === PENDING) {
-		return { lines: [`run: pending (marker ${marker}${session}, written by /orchestrate-run); /orchestrate-start <epic-id> binds it, /orchestrate-stop removes it`], healthy: false };
+		return { lines: [`run: pending (marker ${marker}${session}, written by an older plugin release); /orchestrate-start <epic-id> binds it, /orchestrate-stop removes it`], healthy: false };
 	}
 	const lines = [`run: bound to ${run.run_id} (marker ${marker}${session})`];
 	resetReadBudget();

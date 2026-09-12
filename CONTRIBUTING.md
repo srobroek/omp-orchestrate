@@ -115,11 +115,11 @@ definition path resolves, the warning names it.
 ### Settings preflight
 
 At start and before each wave, the settings preflight (`src/watchers.ts`,
-`preflightSettings`) compares the effective values of the six `task` and `bash` settings and
-`modelRoles.reviewer` against the required values. It reports deviations through a
-`WARN settings` message in the lead transcript and a comment on the run epic. It never
-creates or rewrites project configuration. The required values ship in
-`config/orchestrate.overlay.yml`.
+`preflightSettings`) compares the effective values of the six required `task` and `bash`
+settings against the overlay and warns once when the optional `modelRoles.reviewer` is
+unset. It reports deviations through a `WARN settings` message in the lead transcript and
+a comment on the run epic. It never creates or rewrites project configuration. The
+required values ship in `config/orchestrate.overlay.yml`.
 
 If the backgrounding setting is unavailable or incorrect, the observer cannot reliably
 adopt claims. A warning neither establishes a claim nor makes dispatch safe.

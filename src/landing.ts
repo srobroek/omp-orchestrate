@@ -209,7 +209,7 @@ export async function probeLandingCapabilities(
  return caps === undefined ? { ok: false, error: "capability query payload lacks the repository fields" } : { ok: true, caps };
 }
 
-/** What `/orchestrate-bind` tells the operator after recording the capabilities. */
+/** What `/orchestrate-start` tells the operator after recording the capabilities. */
 export type LandingRecord = { ok: true; caps: LandingCapabilities; notice: string; level: "info" | "warning" } | { ok: false; error: string };
 
 /**

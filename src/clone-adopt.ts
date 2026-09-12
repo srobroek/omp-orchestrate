@@ -58,7 +58,7 @@ export async function adoptRunDatabase(cwd: string, run: ActiveRun): Promise<Ado
 	if (run.beads_dir === undefined) {
 		return {
 			kind: "refused",
-			reason: "the run marker names no database; re-run /orchestrate-run in the primary checkout to record it",
+			reason: "the run marker names no database; run /orchestrate-start <epic-id> in the primary checkout to record it",
 		};
 	}
 	const target = run.beads_dir;

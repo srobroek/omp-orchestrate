@@ -672,7 +672,7 @@ export function nestedOmpNotice(command: string): string | undefined {
 			`(isolated: true for an implementer). Read the cancelled worker's transcript (history://<name>) for ` +
 			`the refusal it hit, fix the cause on the bead, and re-dispatch; when the cause is outside the run, ` +
 			`write the escalation wisp and stop the wave. A probe outside the run, or the lead's rooted re-entry ` +
-			`with --config <run-overlay>, is exempt.`
+			`with --config <plugin-root>/config/orchestrate.overlay.yml, is exempt.`
 		);
 	}
 	return undefined;

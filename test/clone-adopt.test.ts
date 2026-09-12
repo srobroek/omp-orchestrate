@@ -107,7 +107,7 @@ describe("adoptRunDatabase", () => {
 
 		const adoption = await adoptRunDatabase(copy, marker());
 
-		expect(adoption.kind === "refused" && adoption.reason).toContain("/orchestrate-run");
+		expect(adoption.kind === "refused" && adoption.reason).toContain("/orchestrate-start");
 		expect(await fs.readdir(path.join(copy, ".beads"))).toEqual(["embeddeddolt"]);
 	});
 

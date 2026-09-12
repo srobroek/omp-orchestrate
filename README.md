@@ -28,7 +28,7 @@ step and names it.
 
 | Tool | Version | Used by |
 | --- | --- | --- |
-| `omp` | current | the lead session; the settings preflight runs `omp config list` |
+| `omp` | current | the lead session; the settings preflight and the doctor read its effective settings in process |
 | `bd` (Beads) | 1.2 or later | every claim, comment, and status read. `bd` embeds the database, so no server runs |
 | `wt` (Worktrunk) | current | architect feature worktrees |
 | `gh` | 2.100 or later, signed in (`gh auth status`) | conflict and review probes, the landing capability probe, and the merges |
@@ -65,7 +65,7 @@ After installing, restart the session. OMP loads a new extension module at start
 
 ## Configure
 
-The plugin ships its required OMP settings as one overlay,
+The plugin ships its six required OMP settings as one overlay,
 `config/orchestrate.overlay.yml`. Start the lead session with it:
 
 ```sh
@@ -86,11 +86,12 @@ error.
 | `task.enableEffort` | `true` | OMP ignores the per-spawn effort, so every agent runs at the session default |
 | `task.maxRecursionDepth` | `3` | a worker's helper sits at depth 3, so at the default `2` no worker can spawn one |
 | `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
-| `modelRoles.reviewer` | your model selector | the review role falls back to the session model or fails selection |
 
-The overlay carries `modelRoles.reviewer` as a commented line. Uncomment it and name the
-model you want independent review to use. The five agents select their models through
-`modelRoles` and inherit the role's thinking level:
+A seventh setting, `modelRoles.reviewer`, is optional. The overlay carries it as a
+commented line; uncomment it and name the model you want independent review to use.
+Left unset, `/orchestrate-doctor` reports a `warn` row and the preflight a `WARN`; the run
+still starts, and `orc-reviewer` falls back to the session model. The five agents select
+their models through `modelRoles` and inherit the role's thinking level:
 
 | Agent | Model role | Edits code |
 | --- | --- | --- |
@@ -143,7 +144,7 @@ Once the command reports the run, describe the goal to the lead. The lead follow
 | --- | --- |
 | `/orchestrate-status` | the run epic the marker names, its status or why its liveness check failed, the lead lease with its holder, then **Attention** |
 | `/orchestrate-roster` | ready-queue depth per role, wisps included |
-| `/orchestrate-doctor` | every prerequisite, the seven settings, the landing capabilities, and the store probe |
+| `/orchestrate-doctor` | every prerequisite, the six required settings and the optional reviewer role, the landing capabilities, and the store probe |
 
 **Attention** lists what needs you:
 
