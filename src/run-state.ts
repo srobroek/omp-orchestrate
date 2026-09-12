@@ -30,6 +30,7 @@ import path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@oh-my-pi/pi-coding-agent";
 import { locateBeadsDir } from "./beads-mode";
 import { type BdBead, bdListChecked, bdRun, bdShow, resetReadBudget } from "./bd";
+import { recordLandingCapabilities } from "./landing";
 import { type LeadLeaseRenewal, fenceRefused, leaseExpired, leaseState, leaseUntil } from "./lease";
 
 /**
@@ -589,6 +590,12 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
      // the lease is what a replacement lead adopts against.
      ctx.ui.notify(`orchestrate run bound to ${runId}, but the lead lease was not stamped: ${bound.lease.failed}`, "warning");
     }
+    // Landing capabilities are the durable consequence of a run having an epic to carry
+    // them: probed once here, read by every sweep. A failed probe leaves the bind
+    // standing and the sweep in `direct` mode, said where the operator reads.
+    const landing = await recordLandingCapabilities(ctx.sessionManager.getCwd(), runId);
+    if (landing.ok) ctx.ui.notify(landing.notice, landing.level);
+    else ctx.ui.notify(`landing capabilities not recorded on ${runId}: ${landing.error}; the sweep lands directly on CLEAN`, "warning");
    } catch (error) {
     ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
    }

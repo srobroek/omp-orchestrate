@@ -18,7 +18,7 @@ Escalation is per-spawn `effort`, not a second agent. There is no deep variant o
 | Implementer | `orc-implementer` | `@task` | ephemeral, one bead | an isolated copy; commits captured on `omp/task/<id>` | one task bead, pulled |
 | Reviewer | `orc-reviewer` | `@reviewer` | ephemeral, one verdict | inspects the captured branch or feature tree without editing code; dispatch determines checkout isolation | one review wisp, pulled |
 | Researcher | `orc-researcher` | `@smol` | ephemeral, one answer | reads assigned sources without editing code; dispatch determines checkout isolation | one escalation wisp or research bead, pulled |
-| Shepherd | `orc-shepherd` | `@task` | ephemeral, two phases across the CI gate | PR and merge state only; no content edits | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
+| Shepherd | `orc-shepherd` | `@task` | ephemeral, one pass over a bot round | PR review state only; no content edits, no merge | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
 | Helper | `scout`, or another non-claiming child its spawner's allowlist names | its loaded definition | ephemeral, inside its spawner's await | its spawner's checkout; mutation only when explicitly scoped and granted | nothing -- architect helpers are traced by a wisp; worker factual lookups return directly |
 
 The lead prepares and binds the unassigned architect epic before launching the native
@@ -74,7 +74,7 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 | Implementer | code inside `metadata.scope`, in its isolated copy | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
 | Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree without editing code; dispatch determines checkout isolation |
 | Researcher | comments (`NOTE` answers), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
-| Shepherd | PR state, `pr` and `merge_sha`, fix beads, merge-slot | nothing | observes provider requests and reviews; the only role that may merge; never edits or pushes content |
+| Shepherd | fix beads for an actionable bot round, `BOUNCED`/`ESCALATED`/`BLOCKED` | nothing | observes provider requests and reviews; never merges: the plugin's landing sweep merges, refreshes, reruns CI and files conflict and CI fix beads |
 | Helper | only explicitly scoped files in its spawner's checkout when write-capable | only its own allowlist within the depth limit | no bead, no commit, no PR, no worktree. An architect's helper outcome is promoted to a feature comment before its trace wisp can be compacted |
 
 `tools:` restricts built-in tools, not every execution path. The parser adds `yield`;
@@ -84,9 +84,9 @@ No `tools:` key means inherited tools. Bash, GitHub and eval-capable tools can m
 without `edit` or `write`; no-code-edit rules are behavioral contracts, not a sandbox.
 
 The architect uses the provider-request tool while it holds sole PR-update ownership. The
-shepherd explicitly requests its conflict/CI probe, bot-review probe, round-policy tool
-and `hub`. Missing tools require BLOCKED, not a shell substitute that skips evidence or
-posts an unverified command.
+shepherd explicitly requests its bot-review probe, round-policy tool and `hub`. Missing
+tools require BLOCKED, not a shell substitute that skips evidence or posts an unverified
+command.
 
 A declaration guarantees nothing about which definition answers to a name. Discovery resolves
 a bare name in order, and a marketplace plugin claims it before a bundled agent. Bundled
@@ -118,7 +118,7 @@ refused for depth. A bead-claiming role spawned by a worker stays a design error
 | A design or debug question that needs judgment, not a factual lookup | route it to `role=researcher` rather than deciding it yourself |
 | A small repository or external-library fact | read it directly; use `scout` only for a substantial bounded lookup. Worker factual returns need no bead, wisp or consent; external briefs require package/version and primary-source citations |
 | A verdict on work that reported | create the review wisp with `role=reviewer`; never review what you wrote |
-| A landing unit is approved | create the merge bead and spawn the shepherd |
+| A landing unit is approved | create the merge bead with `pr` and the reviewed `head_sha`; the landing sweep lands it. Spawn the shepherd only when `bot_review_requests` names a provider |
 
 A read-only node goes to the researcher rather than the architect in the first place. On
 pure analysis the reading *is* the reasoning, so a delegating layer only adds a hop and

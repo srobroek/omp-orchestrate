@@ -1092,7 +1092,31 @@ describe("registerWatchers", () => {
 			"task:subagent:event",
 			"task:subagent:progress",
 		]);
-		expect(rig.sweeps).toHaveLength(1);
+		// W1's sweep and the landing sweep, in that order: `rig.sweeps[0]` stays W1 below.
+		expect(rig.sweeps).toHaveLength(2);
+	});
+
+	test("the landing timer is dormant without a bound run and reads only merge beads under one", async () => {
+		await fakeBd();
+		const rig = harness(["bash"]);
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		const landing = rig.sweeps[1]!;
+
+		await landing();
+		expect(await bdCalls()).toEqual([]);
+
+		await mkdir(join(cwd, ".orchestration"), { recursive: true });
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "pending" }));
+		await landing();
+		expect(await bdCalls()).toEqual([]);
+
+		await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "bd-1" }));
+		await landing();
+		// One read, answered empty by the fake: no merge beads, so no `gh` and no writes.
+		expect((await bdCalls()).map(call => call.slice(0, 4))).toEqual([["list", "--label", "pr:merge", "--status"]]);
+		await rig.fire("session_shutdown", {});
+		expect(rig.sweeps).toEqual([]);
 	});
 
 	test("repeated starts replace timers and audit subscriptions", async () => {
@@ -1101,7 +1125,7 @@ describe("registerWatchers", () => {
 		registerWatchers(rig.pi);
 		await rig.fire("session_start", {});
 		await rig.fire("session_start", {});
-		expect(rig.sweeps).toHaveLength(1);
+		expect(rig.sweeps).toHaveLength(2);
 		await rig.emit("task:subagent:event", {
 			...(bashEnd("kid-1") as Record<string, unknown>),
 			event: {

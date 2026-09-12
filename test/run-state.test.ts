@@ -5,7 +5,9 @@ import { join, resolve } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import type { BdResult } from "../src/bd";
 import * as bd from "../src/bd";
+import * as landing from "../src/landing";
 import type { BdBead } from "../src/bd";
+import type { LandingRecord } from "../src/landing";
 import { activateRun, bindRun, closeRun, isBoundRunActive, markerPath, readActiveRun, registerRunCommands, runStatusReport } from "../src/run-state";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
@@ -31,10 +33,18 @@ const runSpy = spyOn(bd, "bdRun").mockImplementation(async (args, timeoutMs, cwd
 	writes.push(args);
 	return writeFails === undefined ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: writeFails };
 });
+/** What the bind handler hears from the landing probe; a stub, so no test reaches `gh`. */
+let landingRecord: LandingRecord = { ok: false, error: "not probed in this test" };
+const landingCalls: string[] = [];
+const landingSpy = spyOn(landing, "recordLandingCapabilities").mockImplementation(async (_cwd, runId) => {
+	landingCalls.push(runId);
+	return landingRecord;
+});
 afterAll(() => {
 	showSpy.mockRestore();
 	listSpy.mockRestore();
 	runSpy.mockRestore();
+	landingSpy.mockRestore();
 });
 
 let cwd: string;
@@ -55,6 +65,8 @@ beforeEach(async () => {
 	listArgs = [];
 	writes = [];
 	writeFails = undefined;
+	landingRecord = { ok: false, error: "not probed in this test" };
+	landingCalls.length = 0;
 	showSpy.mockClear();
 });
 
@@ -671,12 +683,22 @@ describe("registerRunCommands", () => {
 		expect(calls).toBe(0);
 	});
 
-	test("/orchestrate-bind reports the stamped lease as success", async () => {
+	test("/orchestrate-bind reports the stamped lease, then the recorded landing mode", async () => {
+		landingRecord = {
+			ok: true,
+			level: "info",
+			notice: "landing mode direct for o/r (main): auto-merge off, required checks none",
+			caps: { repo: "o/r", base: "main", mode: "direct", auto_merge_allowed: false, squash_allowed: true, required_checks: [], strict: false, queue: false, probed_at: "2026-01-01T00:00:00.000Z" },
+		};
 		const { run, bind, notices } = rig();
 		await run();
 		await bind("orc-7");
-		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-7; lead lease stamped"]);
+		expect(notices.slice(-2)).toEqual([
+			["info", "orchestrate run bound to orc-7; lead lease stamped"],
+			["info", "landing mode direct for o/r (main): auto-merge off, required checks none"],
+		]);
 		expect(writes.map(argv => argv.slice(2, 5))).toEqual([["--actor", "lead:session-t", "--claim"]]);
+		expect(landingCalls).toEqual(["orc-7"]);
 	});
 
 	test("/orchestrate-bind says so, as a warning, when the lease was not stamped", async () => {
@@ -686,10 +708,30 @@ describe("registerRunCommands", () => {
 		const { run, bind, notices } = rig();
 		await run();
 		await bind("orc-7");
-		expect(notices.at(-1)).toEqual([
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		expect(notices.at(-2)).toEqual([
 			"warning",
 			"orchestrate run bound to orc-7, but the lead lease was not stamped: store locked",
 		]);
+	});
+
+	test("/orchestrate-bind keeps the bind and warns when the landing probe fails", async () => {
+		landingRecord = { ok: false, error: "gh repo view failed: not authenticated" };
+		const { run, bind, notices } = rig();
+		await run();
+		await bind("orc-7");
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		expect(notices.at(-1)).toEqual([
+			"warning",
+			"landing capabilities not recorded on orc-7: gh repo view failed: not authenticated; the sweep lands directly on CLEAN",
+		]);
+	});
+
+	test("a refused bind never probes landing capabilities", async () => {
+		const { run, bind } = rig();
+		await run();
+		await bind("orc-typo");
+		expect(landingCalls).toEqual([]);
 	});
 
 	test("/orchestrate-bind refuses an epic Beads cannot show as open", async () => {
@@ -741,7 +783,7 @@ describe("registerRunCommands", () => {
 		await close("orc-7");
 		await run();
 		await bind("orc-2");
-		expect(notices.at(-1)).toEqual(["info", "orchestrate run bound to orc-2; lead lease stamped"]);
+		expect(notices.at(-2)).toEqual(["info", "orchestrate run bound to orc-2; lead lease stamped"]);
 		expect((await readActiveRun(cwd))?.run_id).toBe("orc-2");
 	});
 });

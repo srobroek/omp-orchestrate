@@ -354,21 +354,28 @@ also carries `foreign_store: true`. It is provenance of a sandbox or another rep
 a run mutation, and a reader counting the run's writes skips it. The ledger is passive
 provenance, never a gate, and it is the evidence a dead-claim recovery reads first.
 
-## Shepherd primitives
+## Landing primitives
 
-- **Mutual exclusion:** `bd merge-slot create` once per run (idempotent), with a stable
-  holder such as `run-<id>-shepherd`. Acquire without `--wait`. Contention is advisory, so
-  report the current holder and either enqueue as a waiter and yield, or retry after
-  release. Always release -- on success, conflict, CI wait, and failure alike. On restart,
-  `bd merge-slot check` and verify remote state before releasing a slot held by the same
-  stable actor.
-- **Async waits:** `bd gate create --type=gh:pr --blocks <bead> --await-id <pr#>` (PR merge)
-  or `--type=gh:run --await-id <run-id>` (CI). `bd gate check` evaluates and closes resolved
-  gates; `bd ready --gated` finds what a cleared gate released. A gated bead stays out of
-  `bd ready`.
-- **Evidence:** `orc_conflict_probe` (`conflicts`, `pairwise`, `ci`) predicts merges without
-  touching a tree and reads CI; `orc_bot_review_probe` grades the review-bot round at the
-  PR's exact head. `unknown` and `declined` are never clean.
+- **Capabilities:** `/orchestrate-bind` records `metadata.landing` on the run epic:
+  `repo`, `base`, `mode` (`auto` or `direct`), `auto_merge_allowed`, `squash_allowed`,
+  `required_checks`, `strict`, `queue`, `viewer_permission`, `probed_at`. The sweep
+  re-derives `mode` from the flags on every read.
+- **Merge bead state:** the sweep stamps `landing_state` (`armed`, `bounced`, `landed`,
+  `closed`), `armed_head`, `armed_at`, `ci_rerun_head`, `ci_reruns`, `landing_fix`,
+  `refreshed_from`, `refreshed_head`, `landing_notice` and, on landing, `merge_sha` and
+  `landed_head`. The architect owns `head_sha`: the sweep moves it only for its own
+  base refresh.
+- **Fix beads:** `bd create --parent <origin's feature> --deps discovered-from:<origin>,blocks:<merge>`
+  with `metadata.role`, `stage=fix`, `origin_bead=<merge>`, `landing_reason` (`conflict`
+  or `ci`) and, for the implementer, the origin's `scope`. The `blocks` edge is what
+  keeps the sweep off the merge bead: `bd blocked` lists it until the fix closes.
+- **Async waits:** `bd gate create --type=gh:pr --blocks <bead> --await-id <pr#>` for a PR
+  outside the run's landing. `bd gate check` evaluates and closes resolved gates;
+  `bd ready --gated` finds what a cleared gate released. A gated bead stays out of
+  `bd ready`. No gate wraps a merge bead's CI; the sweep observes it.
+- **Evidence:** `orc_conflict_probe` (`conflicts`, `pairwise`, `ci`) predicts merges
+  without touching a tree and reads CI; `orc_bot_review_probe` grades the review-bot
+  round at the PR's exact head. `unknown` and `declined` are never clean.
 
 ## Read the run (status / resume / close-out)
 
@@ -383,7 +390,7 @@ queries below are for the questions the report does not answer.
 | one bead's story | `bd show <bead> --json` + `bd comments <bead>` |
 | audit trail | `bd comments <bead>` for the verbs, plus `<spawning-session-cwd>/.orchestration/audit/*.bdlog` for every mutating command (skip rows tagged `foreign_store`) |
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
-| open waits | `bd gate list`, `bd merge-slot check`, `bd ready --gated --json` |
+| open waits | `bd gate list`, `bd ready --gated --json`, and the `BLOCKED landing:` comments on open merge beads |
 | unanswered patrols | `bd dep list <epic> --direction=up --type relates-to --json` filtered on `wisp_type == "patrol"` and a non-closed status. `bd list` hides ephemeral beads outright, even under `--wisp-type patrol`, and takes no `--include-ephemeral`: only `bd ready` does |
 | resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`; actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity); location = `metadata.worktree`/`branch`; surviving code = `git branch --list 'omp/task/*'` |
 | unintegrated code | integration is cherry-pick or squash, so ancestry and `git cherry` prove nothing: under squash every branch commit reads `+`. Landing proof is tree equality, `git merge-tree --write-tree <merge>^ <head>` equal to `git rev-parse <merge>^{tree}`, or one combined patch-id, `git diff <base> <head> \| git patch-id --stable` equal to `git diff <merge>^ <merge> \| git patch-id --stable` |

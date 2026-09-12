@@ -72,6 +72,16 @@ export function ghChecksArgv(pr: string): string[] {
 }
 
 /**
+ * The tree oid on `git merge-tree --write-tree`'s first line, or `undefined` when the
+ * output is not classifiable. Exported for the landing module, which commits that tree
+ * when the merge is clean.
+ */
+export function mergeTreeOid(stdout: string): string | undefined {
+ const head = (stdout.split("\n")[0] ?? "").trim();
+ return OID.test(head) ? head : undefined;
+}
+
+/**
  * Parse `git merge-tree --write-tree --name-only` output.
  *
  * Line 1 is the resulting tree oid; on conflict the conflicting paths follow,
@@ -80,12 +90,10 @@ export function ghChecksArgv(pr: string): string[] {
  * paths — the caller must treat that as unknown rather than as a clean merge.
  */
 export function parseMergeTreeOutput(stdout: string): { clean: boolean; paths: string[] } {
- const lines = stdout.split("\n");
- const head = (lines[0] ?? "").trim();
- if (!OID.test(head)) return { clean: false, paths: [] };
+ if (mergeTreeOid(stdout) === undefined) return { clean: false, paths: [] };
 
  const seen = new Set<string>();
- for (const raw of lines.slice(1)) {
+ for (const raw of stdout.split("\n").slice(1)) {
   const line = raw.trim();
   if (line === "") break;
   seen.add(line);
