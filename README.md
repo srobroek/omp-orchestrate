@@ -111,23 +111,21 @@ Unavailable evidence and bounded exit paths can fail open without accepting the 
 Five TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
 reminder on a protocol slip. None is a security boundary.
 
-What the host matches (`session/ttsr-coordinator.ts`, `export/ttsr.ts` in the pinned
-`@oh-my-pi/pi-coding-agent`): every `toolcall_delta` appends the provider's raw
-`partial_json` to a per-call buffer and re-runs each condition against the whole buffer.
-Only `edit` and `write` expose a `matcherDigest` (the file content); `bash`, `eval`,
-`task`, and `hub` are matched on the argument JSON itself, so a bash rule sees
-`{"command":"bd ready …"}`: `bd` follows `"`, a shell newline is the two characters
-`\n`, a quote is `\"`, and `^` never precedes a command. Anchors use `\b` or the
-`\n`/`\t` escape, "same line" ends at the next `\n` escape or the closing `"`, and a
-rule that asserts a key is absent (`orc-spawn-isolated`) waits for the object to close
-because the buffer is a prefix until the last delta.
+The host matches the raw tool-argument JSON as the model streams it (`session/ttsr-coordinator.ts`,
+`export/ttsr.ts` in the pinned `@oh-my-pi/pi-coding-agent`). Consequences for rule authors:
+
+- Each `toolcall_delta` appends the provider's `partial_json` to a per-call buffer. Every condition runs against the whole buffer again.
+- Only `edit` and `write` expose a `matcherDigest` with the file content. `bash`, `eval`, `task`, and `hub` match the argument JSON itself.
+- A bash rule therefore sees `{"command":"bd ready …"}`. `bd` follows `"`. A shell newline is the two characters `\n`. A quote is `\"`. `^` never precedes a command.
+- Anchor on `\b` or on the `\n`/`\t` escape. "Same line" ends at the next `\n` escape or the closing `"`.
+- A rule that asserts a key is absent (`orc-spawn-isolated`) must wait for the object to close. Until the last delta the buffer is a prefix.
 
 `interruptMode` sets the cost of a match. `never` lets the call run and folds the rule
-text into its result; `tool-only` aborts the assistant message, discards it, injects the
+text into its result. `tool-only` aborts the assistant message, discards it, injects the
 rule, and continues. Either way a rule fires once per session (`repeatMode: once`). The
-`bd ready` rules and `orc-no-nested-omp` are `never`: the flagged command is harmless
-(an empty queue, a doomed process) and the reminder arrives with the result.
-`orc-spawn-isolated` is `tool-only` because its reminder is useless after the worker
+`bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
+harmless (an empty queue, a doomed process) and the reminder arrives with the result.
+`orc-spawn-isolated` uses `tool-only`, because its reminder is useless after the worker
 has run.
 
 The run pins one absolute `BEADS_DIR` to its embedded database. G1 uses that process-local
