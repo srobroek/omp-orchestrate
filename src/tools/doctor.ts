@@ -21,7 +21,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type AgentDiscoveryFinding, CORE_AGENT_CONTRACTS, discoverAgentFindings, PLUGIN_AGENTS_BY_PACKAGE } from "../agent-preflight";
+import { type AgentDiscoveryFinding, agentModelOverrides, CORE_AGENT_CONTRACTS, discoverAgentFindings, PLUGIN_AGENTS_BY_PACKAGE } from "../agent-preflight";
 import { locateBeadsDir } from "../beads-mode";
 import { probeLandingCapabilities } from "../landing";
 import { probeStore } from "../store-probe";
@@ -185,13 +185,15 @@ async function checkOverlay(): Promise<DoctorCheck> {
 /**
  * Core agents fail the row; each borrowed package is its own warn row. A core agent's
  * model alias not resolving is the alias's row (`checkModelRoles`), not this one, so an
- * optional role stays the warning the README promises.
+ * optional role stays the warning the README promises. The effective
+ * `task.agentModelOverrides` go in with the definitions: after a marketplace install
+ * they are the only model binding a core agent has.
  */
-async function checkAgents(ctx: DoctorContext): Promise<DoctorCheck[]> {
+async function checkAgents(ctx: DoctorContext, observed: Record<string, unknown> | null): Promise<DoctorCheck[]> {
 	const borrowed = Object.values(PLUGIN_AGENTS_BY_PACKAGE).flat();
 	let findings: AgentDiscoveryFinding[];
 	try {
-		findings = await discoverAgentFindings(ctx, borrowed);
+		findings = await discoverAgentFindings(ctx, borrowed, agentModelOverrides(observed));
 	} catch (error) {
 		return [{ name: "agents", status: "fail", detail: `agent discovery failed: ${error instanceof Error ? error.message : String(error)}` }];
 	}
@@ -268,6 +270,7 @@ async function checkLanding(exec: Exec, cwd: string): Promise<DoctorCheck> {
 /** The whole report. Independent checks run together; the rows keep a fixed order. */
 export async function runDoctor(ctx: DoctorContext, exec: Exec = spawnExec): Promise<DoctorReport> {
 	const cwd = ctx.cwd;
+	const observed = readSettings();
 	const [bd, wt, git, gh, bun, overlay, agents, store, landing] = await Promise.all([
 		checkBd(exec, cwd),
 		requiredBinary(exec, "wt", cwd, "every architect and worker tree is a Worktrunk checkout"),
@@ -276,11 +279,10 @@ export async function runDoctor(ctx: DoctorContext, exec: Exec = spawnExec): Pro
 		// `omp` itself runs on bun, but its launcher may reach a bundled copy that is not on PATH.
 		optionalBinary(exec, "bun", cwd, "skills/orchestrate/scripts/worktree-sweep.ts at run end"),
 		checkOverlay(),
-		checkAgents(ctx),
+		checkAgents(ctx, observed),
 		checkStore(cwd),
 		checkLanding(exec, cwd),
 	]);
-	const observed = readSettings();
 	const checks = [bd, wt, git, gh, bun, overlay, checkSettings(observed), ...checkModelRoles(ctx, observed), ...agents, store, landing];
 	return { ok: checks.every(check => check.status !== "fail"), checks };
 }

@@ -7,8 +7,9 @@ import { zod } from "@oh-my-pi/pi-coding-agent";
 import * as hostSettings from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as agentPreflight from "../src/agent-preflight";
-import { PLUGIN_AGENTS_BY_PACKAGE } from "../src/agent-preflight";
+import { agentDiscoveryFindings, agentModelOverrides, CORE_AGENT_CONTRACTS, PLUGIN_AGENTS_BY_PACKAGE } from "../src/agent-preflight";
 import * as beadsMode from "../src/beads-mode";
 import * as storeProbe from "../src/store-probe";
 import type { Exec, ExecResult } from "../src/tools/bot-review-probe";
@@ -141,6 +142,18 @@ describe("the shipped overlay", () => {
 		expect(settingsDeviations(observed!)).toEqual([]);
 	});
 
+	test("its agent model overrides carry every core agent through the preflight with the frontmatter model dropped", async () => {
+		stubbed = await Settings.loadReadOnly({ cwd, agentDir: join(cwd, "agent"), configFiles: [OVERLAY_FILE] });
+		const overrides = agentModelOverrides(readSettings());
+		// What OMP's loader hands the preflight for a marketplace-installed plugin root.
+		const agents = Object.entries(CORE_AGENT_CONTRACTS).map(([name, contract]) => {
+			const agent = parseAgent(`/p/${name}.md`, `---\nname: ${name}\ndescription: core\n---\nORC-ROLE: ${contract.role}\n`, "user");
+			agent.model = undefined;
+			return agent;
+		});
+		expect(agentDiscoveryFindings(agents, [], () => ({ id: "m" }), overrides)).toEqual([]);
+	});
+
 	test("without the overlay the same reader deviates on every required setting", async () => {
 		stubbed = await Settings.loadReadOnly({ cwd, agentDir: join(cwd, "agent") });
 		expect(settingsDeviations(readSettings()!).map(item => item.key)).toEqual([
@@ -263,9 +276,12 @@ describe("runDoctor", () => {
 		expect(core.detail).toBe("orc-reviewer: resolved override declares ORC-ROLE missing; expected reviewer (/p/orc-reviewer.md)");
 	});
 
-	test("the doctor asks discovery for exactly the borrowed names", async () => {
+	test("the doctor asks discovery for exactly the borrowed names and the effective agent model overrides", async () => {
+		const overrides = { "orc-architect": "@plan" };
+		stubbed = Settings.isolated({ ...COMPLIANT, "task.agentModelOverrides": overrides });
 		await doctor();
 		expect(discoverSpy.mock.calls.at(-1)?.[1]).toEqual(Object.values(PLUGIN_AGENTS_BY_PACKAGE).flat());
+		expect(discoverSpy.mock.calls.at(-1)?.[2]).toEqual(overrides);
 	});
 
 	test.each([

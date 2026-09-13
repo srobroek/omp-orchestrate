@@ -31,8 +31,9 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { findScopedSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
- coreContractForAgent,
  type AgentDiscoveryFinding,
+ agentModelOverrides,
+ coreContractForAgent,
  discoverAgentFindings,
  requestedAgentNames,
 } from "./agent-preflight";
@@ -602,12 +603,7 @@ export async function preflightAgents(
  reportedAgentFindings?: Set<string>,
 ): Promise<AgentDiscoveryFinding[]> {
  if (ctx.models === undefined) return [];
- const settings = readSettings() ?? {};
- const rawOverrides = settings["task.agentModelOverrides"];
- const modelOverrides =
-  rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
-   ? (rawOverrides as Record<string, unknown>)
-   : {};
+ const modelOverrides = agentModelOverrides(readSettings());
  let rejectTimeout: (reason: Error) => void = () => { };
  const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
   rejectTimeout = reason => reject(reason);
