@@ -841,18 +841,38 @@ function unsatisfied(require: string, evidence: Evidence): string {
 }
 
 /**
+ * What bd prints when `--claim` finds nobody to displace and a status it will not claim
+ * through. Measured on bd 1.2.2: the assignee is checked first, so this text means the bead
+ * is unassigned or the actor's own, and its status is not `open`. Nothing is written.
+ */
+const CLAIM_NOT_OFFERED = /not claimable: status/i;
+
+/**
  * Record the commit origin was observed to hold, once every check has passed, and let the
- * yield proceed only when that record landed on the bead this session still owns.
+ * yield proceed only when that record landed on a bead no other actor holds.
  *
  * `metadata.push` and `metadata.branch` are targets a role stamps before pushing, so a
  * worker that died between the stamp and the push leaves them looking complete.
  * `pushed_sha` is the plugin's own word that it saw the head on origin. The contract has
- * the worker release before it yields, so by now the bead is unassigned and a successor
- * may already have claimed it; a plain update would land this session's stamp on that
- * successor's claim. The write is therefore fenced: `--claim` as the yielding actor wins an
- * unassigned bead (or its own), `--assignee ""` releases it again in the same write, and
- * the status is restated so a park stays parked. A fence refusal means another actor
- * holds the bead: nothing is written there, and the exit is refused with the holder named.
+ * the worker release before it yields, so by now the bead is unassigned; a plain update
+ * could land this session's stamp on a successor's claim. `--claim` as the yielding actor
+ * is the only fence bd 1.2.2 offers (`bd update --help` lists no release verb), and it
+ * answers one of three ways, measured on a real store:
+ *
+ * - Success: the bead was the actor's own, or unassigned and `open`. `--assignee ""`
+ *   releases it in the same write and the status is restated, so an open bead stays open
+ *   and a park stays parked. One write, stamped and released together.
+ * - `already claimed by <holder>`: the fence. Another actor holds the bead, nothing is
+ *   written there, and the exit is refused with the holder named.
+ * - `not claimable: status <s>`: the contract's own aftermath. bd claims nothing that is not
+ *   `open`, so a released `in_progress` bead refuses its ex-holder as it refuses everyone,
+ *   and a `blocked` bead the worker kept refuses the same way. The assignee check runs
+ *   first, so this text is proof that no other actor holds the bead. The stamp is then
+ *   written plainly under the same actor, touching neither assignee nor status: a retained
+ *   claim stays retained. The gap between the two writes is bounded, not closed -- a
+ *   successor can hold the bead only after a requeue to `open` and a claim, both by other
+ *   actors, and bd 1.2.2 has no metadata compare-and-swap to close it (`src/lease.ts`).
+ *
  * Any other failure is logged and the exit allowed: the proof holds, and the sha is a
  * record for offline readers rather than a condition of the exit.
  */
@@ -860,16 +880,22 @@ async function recordPushed(bead: BdBead, claim: ClaimObservation, evidence: Evi
  const proof = [evidence.origin, evidence.cloneWork].find(candidate => candidate?.matched === true && candidate.observed !== undefined);
  if (proof?.observed === undefined) return undefined;
  if (metadataString(bead, "pushed_sha") === proof.observed) return undefined;
- const args = ["update", bead.id, "--actor", claim.actor, "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${proof.observed}`];
- if (typeof bead.status === "string" && bead.status.length > 0) args.push("--status", bead.status);
- const written = await bdRun(args);
- if (written !== null && written.code === 0) return undefined;
- if (written !== null && fenceRefused(written)) {
-  return {
-   block: true,
-   reason: `${bead.id} is now claimed by another actor (${(written.stderr || written.stdout).trim()}); your pushed head ${proof.observed} is on origin but this exit cannot be recorded on a bead you no longer hold. Write nothing more to it and yield NO_WORK`,
-  };
+ const stamp = `pushed_sha=${proof.observed}`;
+ const fenced = ["update", bead.id, "--actor", claim.actor, "--claim", "--assignee", "", "--set-metadata", stamp];
+ if (typeof bead.status === "string" && bead.status.length > 0) fenced.push("--status", bead.status);
+ let written = await bdRun(fenced);
+ if (written !== null && written.code !== 0) {
+  if (fenceRefused(written)) {
+   return {
+    block: true,
+    reason: `${bead.id} is now claimed by another actor (${(written.stderr || written.stdout).trim()}); your pushed head ${proof.observed} is on origin but this exit cannot be recorded on a bead you no longer hold. Write nothing more to it and yield NO_WORK`,
+   };
+  }
+  if (CLAIM_NOT_OFFERED.test(written.stderr) || CLAIM_NOT_OFFERED.test(written.stdout)) {
+   written = await bdRun(["update", bead.id, "--actor", claim.actor, "--set-metadata", stamp]);
+  }
  }
+ if (written !== null && written.code === 0) return undefined;
  logger.warn("orchestrate exit contract: pushed_sha not recorded", {
   bead: bead.id,
   sha: proof.observed,

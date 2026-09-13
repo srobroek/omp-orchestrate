@@ -439,6 +439,38 @@ describe("G4 checked evidence", () => {
    });
   }
  });
+ test("a released bead bd will not claim through is stamped plainly, and the fence's other refusal is not", async () => {
+  // bd 1.2.2 claims nothing that is not `open`: the released `in_progress` bead the
+  // contract leaves behind refuses its ex-holder with `not claimable`, and the assignee
+  // check runs first, so that text means nobody else holds it. Every other refusal is
+  // logged, not retried: a second plain write after an unknown error could land anywhere.
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
+  let refusal = `Error claiming ${BEAD}: issue not claimable: status in_progress`;
+  const run = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+   issued.push(args);
+   return args.includes("--claim") ? { code: 1, stdout: "", stderr: refusal } : { code: 0, stdout: "", stderr: "" };
+  });
+  try {
+   expect(await gateExitContract(CTX)).toBeUndefined();
+   expect(issued).toEqual([
+    ["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"],
+    ["update", BEAD, "--actor", "A", "--set-metadata", "pushed_sha=abc1234"],
+   ]);
+   expect(warned).toEqual([]);
+   issued = [];
+   refusal = "Error: database is locked";
+   expect(await gateExitContract(CTX)).toBeUndefined();
+   expect(issued).toHaveLength(1);
+   expect(warned.map(entry => entry.cause)).toEqual(["Error: database is locked"]);
+  } finally {
+   run.mockRestore();
+   spies[3] = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+    issued.push(args);
+    return { code: 0, stdout: "", stderr: "" };
+   });
+  }
+ });
 });
 
 /**
