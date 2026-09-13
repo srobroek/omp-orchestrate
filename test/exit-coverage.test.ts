@@ -9,12 +9,13 @@ function ev(overrides: Partial<Evidence> = {}): Evidence {
 }
 
 describe("exit coverage predicates", () => {
-	test("integrated approve needs every live id, hash, and met", () => {
-		const base = ev({ linkedReviewComments: [`REVIEW verdict=approve nodes=node-a:${nodeHash}:met,node-b:0123456789ab:met`], integratedIds: ["node-a", "node-b"], integratedHashes: new Map([["node-a", nodeHash], ["node-b", "0123456789ab"]]) });
+	test("integrated approve needs every live id, hash, and met, from a code-dimension review", () => {
+		const base = ev({ linkedReviewComments: [`REVIEW dimension=code verdict=approve nodes=node-a:${nodeHash}:met,node-b:0123456789ab:met`], integratedIds: ["node-a", "node-b"], integratedHashes: new Map([["node-a", nodeHash], ["node-b", "0123456789ab"]]) });
 		expect(satisfies("linked.REVIEW covers integrated", base)).toBe(true);
-		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW verdict=approve nodes=node-a:${nodeHash}:met`] })).toBe(false);
-		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW verdict=approve nodes=node-a:${nodeHash}:met,node-b:0123456789ab:unmet`] })).toBe(false);
-		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW verdict=changes nodes=node-a:${nodeHash}:met,node-b:0123456789ab:unmet`] })).toBe(true);
+		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW dimension=code verdict=approve nodes=node-a:${nodeHash}:met`] })).toBe(false);
+		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW dimension=code verdict=approve nodes=node-a:${nodeHash}:met,node-b:0123456789ab:unmet`] })).toBe(false);
+		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW dimension=code verdict=changes nodes=node-a:${nodeHash}:met,node-b:0123456789ab:unmet`] })).toBe(true);
+		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW dimension=security verdict=approve nodes=node-a:${nodeHash}:met,node-b:0123456789ab:met`] })).toBe(false);
 	});
 	test("plan and override approvals are version-bound and must come from their own review dimension", () => {
 		expect(satisfies("linked.REVIEW covers plan", ev({ planHash: "0123456789ab", linkedReviewComments: ["REVIEW dimension=plan verdict=approve plan=0123456789ab"] }))).toBe(true);

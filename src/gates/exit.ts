@@ -445,6 +445,7 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
 	if (trimmed === "linked.REVIEW covers integrated") {
 		if (evidence.integratedIds === undefined || evidence.integratedHashes === undefined) return false;
 		return evidence.linkedReviewComments?.some(comment => {
+			if (tokenValue(comment, "dimension") !== "code") return false;
 			const coverage = nodesToken(comment);
 			if (coverage === undefined) return false;
 			const verdict = tokenValue(comment, "verdict");
