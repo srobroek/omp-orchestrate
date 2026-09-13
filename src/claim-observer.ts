@@ -33,16 +33,20 @@ import { type BdInvocation, effectiveSegments, parseBdInvocation } from "./shell
  * carries it, so the report is machine-readable by protocol rather than by luck.
  *
  * The report is the fast path, not the only one. The host caps every output line at
- * `tools.outputMaxColumns` (768 by default) before this handler sees it, and a bead's
- * description is one JSON line, so a brief-length bead arrives unparseable with only
- * `details.meta.limits.columnTruncated` to say so. A claim that plausibly succeeded but
- * whose report cannot be read is therefore resolved from the store instead: the actor the
- * command carried (`BEADS_ACTOR` inline or in the tool's `env`) names the bead it now
- * holds. That needs an explicit actor -- the process environment is shared by every
- * in-process session, so reading it there could bind another session's bead -- and when
- * no actor was carried, or the store answers nothing, the worker is told rather than left
- * with every claim-dependent gate silently unarmed. Each unrecorded claim is also logged
- * with the head of what arrived, so drift in `bd` or in the host is visible.
+ * `tools.outputMaxColumns` (768 by default) before this handler sees it, marking each cut
+ * line with `…` and setting `details.meta.limits.columnTruncated`. `bd` pretty-prints the
+ * report one field per line, so a brief-length bead arrives with its description line cut
+ * and every other line whole: dropping the cut lines restores a parseable report whose
+ * `id`, `status` and `assignee` are exactly what `bd` printed, and the claim is recorded
+ * from that. A claim that plausibly succeeded but whose report still cannot be read -- a
+ * cut line that carried a read field, single-line JSON, window or byte truncation -- is
+ * resolved from the store instead: the actor the command carried (`BEADS_ACTOR` inline or
+ * in the tool's `env`) names the bead it now holds. That needs an explicit actor -- the
+ * process environment is shared by every in-process session, so reading it there could
+ * bind another session's bead -- and when no actor was carried, or the store answers
+ * nothing, the worker is told rather than left with every claim-dependent gate silently
+ * unarmed. Each unrecorded claim is also logged with the head of what arrived, so drift in
+ * `bd` or in the host is visible.
  */
 
 /** A `tool_result` event, structurally: the host's own type is not needed at runtime. */
@@ -59,6 +63,9 @@ export const CLAIM_UNOBSERVED_MESSAGE = "com.srobroek.omp-orchestrate.claim-unob
 
 /** Characters of the unparsed result a warning carries: enough to see what arrived. */
 const WARN_HEAD_CHARS = 200;
+
+/** The mark the host's sink puts at the end of a line it cut at the column cap (`session/streaming-output.ts`). */
+const CAP_MARK = "…";
 
 /**
  * The identity carriers, in the order they are consulted. `bd --help` resolves `--actor` from
@@ -184,6 +191,35 @@ function claimedRecord(record: unknown): { id: string; assignee: string } | unde
 }
 
 /**
+ * `output` without the lines the column cap cut, or `undefined` when none was.
+ *
+ * A pretty-printed report holds one field per line, so a cut line is one whole field.
+ * Removing it leaves the enclosing object valid except for a trailing comma on the field
+ * before it when the cut field was the last: that comma is removed too. A cut line that
+ * was structural, or the whole record on one line, leaves text that does not parse, and
+ * the caller falls through to the store.
+ */
+function withoutCappedLines(output: string): string | undefined {
+	const lines = output.split("\n");
+	const kept: string[] = [];
+	let dropped = false;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] as string;
+		if (!line.endsWith(CAP_MARK)) {
+			kept.push(line);
+			continue;
+		}
+		dropped = true;
+		const previous = kept.at(-1);
+		const next = lines[index + 1]?.trimStart();
+		if (previous !== undefined && previous.endsWith(",") && next !== undefined && (next.startsWith("}") || next.startsWith("]"))) {
+			kept[kept.length - 1] = previous.slice(0, -1);
+		}
+	}
+	return dropped ? kept.join("\n") : undefined;
+}
+
+/**
  * Every claimed record a `--json` claim reports, when the output is exactly that.
  *
  * Plural on purpose. `bd update <a> <b> --claim` claims both, `recordClaim` takes
@@ -283,21 +319,28 @@ export async function observeClaimResult(pi: ExtensionAPI, claims: ClaimState, e
  const invocation = soleClaimingInvocation(command);
  if (invocation === undefined) return;
 
- const text = resultText(event.content).trim();
- let reason = reportCut(details);
- if (reason === undefined) {
-  const output = commandOutput(text, details);
-  if (output === undefined) reason = "footer not recognised";
-  else {
-   const claimed = reportedClaims(output);
-   if (claimed === "empty") return;
-   if (claimed !== undefined) {
-    claims.recordClaim(claimed);
-    return;
-   }
-   reason = "not a claim report";
-  }
- }
+	const text = resultText(event.content).trim();
+	let reason = reportCut(details);
+	// Window or byte truncation removes lines, and a partial array must not be read as a
+	// smaller claim: that report is not consulted. The column cap alone removes no line, only
+	// cuts some, so a report that parses once the cut lines are dropped is the whole report.
+	if (!details?.meta?.truncation) {
+		const output = commandOutput(text, details);
+		if (output === undefined) reason ??= "footer not recognised";
+		else {
+			let claimed = reportedClaims(output);
+			if (claimed === undefined) {
+				const repaired = withoutCappedLines(output);
+				if (repaired !== undefined) claimed = reportedClaims(repaired);
+			}
+			if (claimed === "empty") return;
+			if (claimed !== undefined) {
+				claims.recordClaim(claimed);
+				return;
+			}
+			reason ??= "not a claim report";
+		}
+	}
 
  const actor = commandActor(invocation, event.input?.env);
  pi.logger.warn("orchestrate claim not observed", { command, reason, actor, head: text.slice(0, WARN_HEAD_CHARS) });

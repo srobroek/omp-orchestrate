@@ -20,12 +20,24 @@ const PTY_NOTICE = "pty requested but unavailable in this environment; ran witho
 /**
  * The claimed bead as the host's sink delivers it when a line exceeds `tools.outputMaxColumns`
  * (768): pretty-printed, the description line cut at the cap and marked with `…`, every
- * other line intact. Modelled on `session/streaming-output.ts` `#applyColumnCap`.
+ * other line intact. Modelled on `session/streaming-output.ts` `#applyColumnCap`. `last`
+ * puts the description after the assignee, so the cut line is the record's last field.
  */
-function columnCapped(id: string, assignee: string): string {
- const pretty = JSON.stringify([{ id, title: "brief", description: "x".repeat(1200), status: "in_progress", assignee }], null, 2);
- return pretty.split("\n").map(line => line.length > 768 ? `${line.slice(0, 767)}…` : line).join("\n");
+function columnCapped(id: string, assignee: string, last = false): string {
+	const description = "x".repeat(1200);
+	const record = last
+		? { id, title: "brief", status: "in_progress", assignee, description }
+		: { id, title: "brief", description, status: "in_progress", assignee };
+	return JSON.stringify([record], null, 2).split("\n").map(line => line.length > 768 ? `${line.slice(0, 767)}…` : line).join("\n");
 }
+
+/** The same bead had `bd` printed it on one line: the cap cuts the whole record and nothing parseable is left. */
+function lineCapped(id: string, assignee: string): string {
+	return `${JSON.stringify([{ id, title: "brief", description: "x".repeat(1200), status: "in_progress", assignee }]).slice(0, 767)}…`;
+}
+
+const CAPPED = { wallTimeMs: 40, meta: { limits: { columnTruncated: { maxColumn: 768 } } } };
+const CAP_NOTICE = "\n\nWall time: 0.04 seconds\nSome lines truncated to 768 chars";
 
 /** What `bd list --assignee <actor> …` reports, by actor. Absent means the store holds none. */
 let held: Record<string, BdBead[]> = {};
@@ -166,27 +178,43 @@ describe("observeClaimResult", () => {
   expect(claims.observedClaim()).toBeUndefined();
  });
 
- test("a column-capped report is resolved from the store by the command's actor", async () => {
-  // F-BUG-01: the sink cuts every line over 768 columns and marks it with `…`, setting only
-  // `meta.limits.columnTruncated`. The description line is the brief, so a normal bead
-  // arrives this way. The report is unparseable; the store still knows who holds what.
-  const text = columnCapped("orc-42", "impl-1");
-  expect(text.split("\n").some(line => line.length > 768)).toBe(false);
-  expect(() => JSON.parse(text)).toThrow();
-  held["impl-1"] = [{ id: "orc-42", status: "in_progress", assignee: "impl-1" }];
+	test("a column-capped report is read from its intact lines; the store is not consulted", async () => {
+		// F-BUG-01 / rt-ts D3: the sink cuts every line over 768 columns and marks it with `…`,
+		// setting only `meta.limits.columnTruncated`. The description line is the brief, so a
+		// normal bead arrives this way. Every other field line is whole, and `bd` printed them.
+		for (const last of [false, true]) {
+			claims = createClaimState();
+			const text = columnCapped("orc-42", "impl-1", last);
+			expect(text.split("\n").some(line => line.length > 768)).toBe(false);
+			expect(() => JSON.parse(text)).toThrow();
 
-  await observe({
-   input: { command: QUEUE_CLAIM, env: { BEADS_ACTOR: "impl-1" } },
-   details: { wallTimeMs: 40, meta: { limits: { columnTruncated: { maxColumn: 768 } } } },
-   content: [{ text: `${text}\n\nWall time: 0.04 seconds\nSome lines truncated to 768 chars` }],
-  });
-  expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-42"] });
-  expect(listed).toHaveLength(1);
-  expect(listed[0]).toContain("--assignee");
-  expect(listed[0]).toContain("impl-1");
-  expect(warned).toMatchObject([{ message: "orchestrate claim not observed", reason: "lines truncated at the column cap", actor: "impl-1" }]);
-  expect(sent).toEqual([]);
- });
+			// No actor anywhere: the store could not have been asked.
+			await observe({ details: CAPPED, content: [{ text: `${text}${CAP_NOTICE}` }] });
+			expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-42"] });
+		}
+		expect(listed).toEqual([]);
+		expect(warned).toEqual([]);
+		expect(sent).toEqual([]);
+	});
+
+	test("a capped line that carried a read field leaves the report unreadable; the store answers by the command's actor", async () => {
+		// A single-line report is the whole record cut; a cut `assignee` line is a record with
+		// no assignee. Neither may be recorded from what is visible.
+		const cutAssignee = columnCapped("orc-42", `impl-${"1".repeat(800)}`).replace(/"description": "x+…/, '"description": "brief",');
+		expect(cutAssignee).toContain("…");
+		for (const text of [lineCapped("orc-42", "impl-1"), cutAssignee]) {
+			claims = createClaimState();
+			listed = [];
+			held["impl-1"] = [{ id: "orc-42", status: "in_progress", assignee: "impl-1" }];
+			await observe({ input: { command: QUEUE_CLAIM, env: { BEADS_ACTOR: "impl-1" } }, details: CAPPED, content: [{ text: `${text}${CAP_NOTICE}` }] });
+			expect(claims.observedClaim()).toEqual({ actor: "impl-1", beadIds: ["orc-42"] });
+			expect(listed).toHaveLength(1);
+			expect(listed[0]).toContain("--assignee");
+			expect(listed[0]).toContain("impl-1");
+		}
+		expect(warned).toMatchObject([{ reason: "lines truncated at the column cap", actor: "impl-1" }, { reason: "lines truncated at the column cap", actor: "impl-1" }]);
+		expect(sent).toEqual([]);
+	});
 
  test("the actor is the one bd read: BEADS_ACTOR inline over env, BD_ACTOR only as a last resort", async () => {
   // `bd --help`: `--actor` defaults to `$BEADS_ACTOR, git user.name, $USER`, so the assignee
@@ -195,15 +223,15 @@ describe("observeClaimResult", () => {
   held.inline = [{ id: "orc-7", status: "in_progress", assignee: "inline" }];
   held.exported = [{ id: "orc-8", status: "in_progress", assignee: "exported" }];
   held.plugin = [{ id: "orc-9", status: "in_progress", assignee: "plugin" }];
-  const cut = { meta: { limits: { columnTruncated: { maxColumn: 768 } } } };
-  await observe({ input: { command: `BEADS_ACTOR=inline ${QUEUE_CLAIM}`, env: { BEADS_ACTOR: "exported" } }, details: cut });
-  expect(claims.observedClaim()).toEqual({ actor: "inline", beadIds: ["orc-7"] });
-  claims = createClaimState();
-  await observe({ input: { command: `BD_ACTOR=plugin ${QUEUE_CLAIM}`, env: { BEADS_ACTOR: "exported" } }, details: cut });
-  expect(claims.observedClaim()).toEqual({ actor: "exported", beadIds: ["orc-8"] });
-  claims = createClaimState();
-  await observe({ input: { command: QUEUE_CLAIM, env: { BD_ACTOR: "plugin" } }, details: cut });
-  expect(claims.observedClaim()).toEqual({ actor: "plugin", beadIds: ["orc-9"] });
+		const cut = { details: CAPPED, content: [{ text: `${lineCapped("orc-1", "impl-1")}${CAP_NOTICE}` }] };
+		await observe({ input: { command: `BEADS_ACTOR=inline ${QUEUE_CLAIM}`, env: { BEADS_ACTOR: "exported" } }, ...cut });
+		expect(claims.observedClaim()).toEqual({ actor: "inline", beadIds: ["orc-7"] });
+		claims = createClaimState();
+		await observe({ input: { command: `BD_ACTOR=plugin ${QUEUE_CLAIM}`, env: { BEADS_ACTOR: "exported" } }, ...cut });
+		expect(claims.observedClaim()).toEqual({ actor: "exported", beadIds: ["orc-8"] });
+		claims = createClaimState();
+		await observe({ input: { command: QUEUE_CLAIM, env: { BD_ACTOR: "plugin" } }, ...cut });
+		expect(claims.observedClaim()).toEqual({ actor: "plugin", beadIds: ["orc-9"] });
  });
 
  test("a window-truncated report is resolved from the store the same way", async () => {
@@ -219,10 +247,7 @@ describe("observeClaimResult", () => {
  test("an unreadable report with no actor on the command warns and tells the worker", async () => {
   // The documented queue pull carries no BEADS_ACTOR, so the store cannot be asked. The
   // worker must learn the claim is unbound rather than proceed with every gate disarmed.
-  await observe({
-   details: { wallTimeMs: 40, meta: { limits: { columnTruncated: { maxColumn: 768 } } } },
-   content: [{ text: `${columnCapped("orc-42", "impl-1")}\n\nWall time: 0.04 seconds` }],
-  });
+		await observe({ details: CAPPED, content: [{ text: `${lineCapped("orc-42", "impl-1")}\n\nWall time: 0.04 seconds` }] });
   expect(claims.observedClaim()).toBeUndefined();
   expect(listed).toEqual([]);
   expect(warned).toHaveLength(1);
@@ -238,10 +263,11 @@ describe("observeClaimResult", () => {
  });
 
  test("an actor the store does not know warns and tells the worker", async () => {
-  await observe({
-   input: { command: `BEADS_ACTOR=ghost ${QUEUE_CLAIM}` },
-   details: { meta: { limits: { columnTruncated: { maxColumn: 768 } } } },
-  });
+		await observe({
+			input: { command: `BEADS_ACTOR=ghost ${QUEUE_CLAIM}` },
+			details: CAPPED,
+			content: [{ text: `${lineCapped("orc-1", "impl-1")}${CAP_NOTICE}` }],
+		});
   expect(claims.observedClaim()).toBeUndefined();
   expect(listed).toHaveLength(1);
   expect(sent).toHaveLength(1);
