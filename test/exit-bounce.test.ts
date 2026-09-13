@@ -186,6 +186,20 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(reviewer)).toBeUndefined();
   expect(issued).toEqual([]);
  });
+ test("a review wisp linked to its node by the parent edge alone is judged on the node's verdict", async () => {
+  // The documented shape: `bd create --parent <node> --ephemeral`, and bd refuses a
+  // relates-to from a child to its parent, so no dep list answers with the node.
+  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1 } };
+  linked = [];
+  linkedBead = { id: "node", metadata: { head_sha: "abc1234" } };
+  linkedComments = [{ text: "REPORTED node src/api.ts" }];
+  const reviewer = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(reviewer))!.reason!);
+  expect(verdict.failed_checks).toEqual([{ check: "verdict", detail: "unsatisfied: linked.comment.verb in [REVIEW, BLOCKED]" }]);
+  linkedComments.push({ text: "REVIEW node dimension=behavior verdict=approve head_sha=abc1234 review_round=1" });
+  expect(await gateExitContract(reviewer)).toBeUndefined();
+  expect(issued).toEqual([]);
+ });
  test("an implementer's contract never reads linked comments, so their absence cannot excuse its exit", async () => {
   // The implementer contract reads linked beads only for an open escalation; with
   // none open, the unreported bead is judged and refused rather than waved through.
@@ -205,12 +219,12 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(shepherd)).toBeUndefined();
   expect(issued).toEqual([]);
  });
- test("a git implementer whose pushed ref is at its head can report and release", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+ test("a git implementer whose pushed ref is at its head is stamped and released in one fenced write", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(asked).toEqual(["omp/task/A"]);
-  // The plugin's own word that the head was seen on origin, written before the yield proceeds.
+  // The plugin's own word that the head was seen on origin, and the release, in the one write bd fences.
   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
   delete bead.metadata!.head_sha;
   expect((await gateExitContract(CTX))?.block).toBe(true);
@@ -272,12 +286,19 @@ describe("G4 checked evidence", () => {
     ...overrides,
    };
   }
-  test("released, reported, feature head on origin: allowed, and the observed head is stamped", async () => {
-   bead = feature();
+  test("held, reported, feature head on origin: allowed, and the epic is stamped and released in one fenced write", async () => {
+   bead = feature({ assignee: "A" });
    comments = [{ text: `REPORTED ${BEAD} integrated 3 tasks; head_sha=abc1234` }];
    expect(await gateExitContract(ARCH)).toBeUndefined();
    expect(asked).toEqual([FEATURE]);
    expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
+  });
+  test("an epic released before the proof is allowed unstamped: no fence exists for a bead nobody holds", async () => {
+   bead = feature();
+   comments = [{ text: `REPORTED ${BEAD} integrated 3 tasks; head_sha=abc1234` }];
+   expect(await gateExitContract(ARCH)).toBeUndefined();
+   expect(issued).toEqual([]);
+   expect(warned.map(entry => entry.cause)).toEqual(["released before proof"]);
   });
   test("a feature head origin does not hold is refused, naming the push", async () => {
    bead = feature();
@@ -289,12 +310,14 @@ describe("G4 checked evidence", () => {
    expect(verdict.failed_checks[0]!.recovery).toContain("git push origin <branch>");
    expect(issued).toEqual([]);
   });
-  test("an epic still held by the architect is refused: an isolated architect cannot be revived", async () => {
+  test("a held epic whose head is not on origin is refused with the two-step recovery, and nothing is written", async () => {
    bead = feature({ assignee: "A" });
    comments = [{ text: `REPORTED ${BEAD} integrated; head_sha=abc1234` }];
+   remote = { kind: "missing" };
    const verdict: { failed_checks: { check: string; recovery?: string }[] } = JSON.parse((await gateExitContract(ARCH))!.reason!);
-   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["unclaimed"]);
-   expect(verdict.failed_checks[0]!.recovery).toContain('bd update <epic> --claim --assignee ""');
+   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["push_head"]);
+   expect(verdict.failed_checks[0]!.recovery).toContain("then yield holding the epic");
+   expect(issued).toEqual([]);
   });
   test("a park needs the comment, the release and the pushed head; the refusal names the two steps", async () => {
    bead = feature({ status: "blocked", assignee: "A" });
@@ -316,14 +339,14 @@ describe("G4 checked evidence", () => {
    expect((await gateExitContract(ARCH))?.block).toBe(true);
   });
  });
- test.each(["artifact", "comment", "external"])("%s writer completion requires handoff and release", async kind => {
+ test.each(["artifact", "comment", "external"])("%s writer completion requires handoff, and the gate releases the held claim", async kind => {
   bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: kind, artifacts_dir: path.join(fixture, "artifacts"), output_ref: path.join(fixture, "artifacts/result") } };
   comments = [{ text: "REPORTED result" }];
   const result = await gateExitContract(CTX);
-  expect(JSON.parse(result!.reason!).failed_checks.map((failure: { check: string }) => failure.check)).toEqual(["handoff", "unclaimed"]);
-  bead.assignee = "";
+  expect(JSON.parse(result!.reason!).failed_checks.map((failure: { check: string }) => failure.check)).toEqual(["handoff"]);
   bead.labels = ["agent:reviewer"];
   expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--status", "in_progress"]]);
  });
  test.each(["review", "escalation"])("claimed %s wisp reads its outgoing node verdict", async kind => {
   bead = { id: BEAD, ephemeral: true, wisp_type: kind, assignee: "", status: "closed" };
@@ -403,13 +426,14 @@ describe("G4 checked evidence", () => {
    expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("commit and push (`git push origin HEAD:$ORC_PUSH_REF`), or discard them, before yielding");
    expect(asked).toEqual([]);
   });
-  test("commits past the base with the pushed ref at HEAD are allowed, and the head is stamped in the fenced release", async () => {
+  test("commits past the base with the pushed ref at HEAD are allowed; a park keeps its claim, so nothing is stamped", async () => {
    local = { head: HEAD, dirty: false };
    comments = [{ text: "BLOCKED missing prerequisite" }, { text: `REPORTED partial: src/x.ts ${pushed(HEAD.slice(0, 7))}` }];
    remote = { kind: "at", sha: HEAD };
    expect(await gateExitContract(CTX)).toBeUndefined();
    expect(asked).toEqual(["omp/task/A"]);
-   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "blocked"]]);
+   expect(issued).toEqual([]);
+   expect(warned.map(entry => entry.cause)).toEqual(["status blocked keeps its claim"]);
   });
   test("a clone git cannot read is judged as work present", async () => {
    unreadableClone = true;
@@ -417,8 +441,8 @@ describe("G4 checked evidence", () => {
    expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("could not be read");
   });
  });
- test("a successor's claim in the release-to-yield gap refuses the exit and stamps nothing on its bead", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+ test("a successor's claim by the time of the write refuses the exit and stamps nothing on its bead", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
   const run = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
    issued.push(args);
@@ -438,6 +462,15 @@ describe("G4 checked evidence", () => {
     return { code: 0, stdout: "", stderr: "" };
    });
   }
+ });
+ test("a bead released before the proof is accepted with no write; the missing stamp is logged", async () => {
+  // bd 1.2.2 claims nothing that is not `open`, so a released `in_progress` bead has no
+  // fence for anyone. An unfenced stamp could land on a successor's claim, so none is written.
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
+  expect(warned).toEqual([{ bead: BEAD, sha: "abc1234", cause: "released before proof" }]);
  });
 });
 

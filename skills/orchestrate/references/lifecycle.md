@@ -31,7 +31,7 @@ never stored as a bead state.
 |---|---|
 | `pending → ready` | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` reports the bead, no gate is open, and its routing envelope is complete |
 | `ready → working` | a worker pulls it: `bd ready … --claim` returns the bead, atomically and first-wins, and the worker adopts what it was given |
-| `working → reported` | the worker pushes its head to `origin/omp/task/<own id>` (`git push origin HEAD:$ORC_PUSH_REF`), stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED` carrying `pushed=omp/task/<id>@<sha>`, then releases with a single `bd update <id> --assignee ""`. The release comes last: it clears the ownership every other write on the bead is checked against, and only the terminal comment is admitted after it. G4 refuses the yield until `git ls-remote origin refs/heads/omp/task/<id>` shows `head_sha`. Successful task completion also captures the branch in the architect's clone |
+| `working → reported` | the worker pushes its head to `origin/omp/task/<own id>` (`git push origin HEAD:$ORC_PUSH_REF`), stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED` carrying `pushed=omp/task/<id>@<sha>` as its last write, and yields still holding the claim. G4 refuses the yield until `git ls-remote origin refs/heads/omp/task/<id>` shows `head_sha`; then it stamps `pushed_sha` and clears the assignee in one write fenced on the worker's own claim, the only fence bd has (a released bead is unclaimable for everyone, so a worker that releases first yields unstamped). Successful task completion also captures the branch in the architect's clone |
 | `reported → in_review` | the architect collects the successful terminal task result, verifies the pushed ref and head, integrates it, pushes the feature branch, re-stamps the epic's `head_sha`, then creates review-wisp shells. A pre-yield report alone is not integration |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with a `NOTE` on the node |
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
@@ -61,9 +61,10 @@ the paused worker's actual terminal result and any pushed capture. Resuming
 unfinished work requires the reaper to release its retained claim under the lease;
 neither a ping nor wisp closure automatically requeues it.
 
-An architect's own escalation pauses differently. It releases its epic before yield and
-nobody resumes it; the `NOTE` reopens the epic for a fresh architect (`planning.md`,
-Replacement).
+An architect's own escalation pauses differently. It sets the epic `blocked` and releases it
+before yield, and nobody resumes it; the `NOTE` reopens the epic for a fresh architect
+(`planning.md`, Replacement). On completion the plugin releases the epic in the fenced write
+that stamps the proven push.
 
 ## Completion paths
 
@@ -215,7 +216,7 @@ those markers and probes every bot; the landing sweep lands the PR.
 | Class | Agents | Rule |
 |---|---|---|
 | Session | the lead | owns the run epics and the marker; restartable from bead state alone |
-| Domain | architect | one epic, one feature branch on origin; replaceable mid-epic, because origin and the beads carry the domain. It releases its epic before every yield and is never revived |
+| Domain | architect | one epic, one feature branch on origin; replaceable mid-epic, because origin and the beads carry the domain. Its epic is released at every yield, by the plugin on completion and by the architect on a pause, and it is never revived |
 | Landing | the plugin's landing sweep; the shepherd only for a bot round | one merge bead; the sweep is a 60 s timer in the lead session, the shepherd one ephemeral pass |
 | Task-scoped | implementer, reviewer, researcher | claim one bead or wisp, report there, release, exit. Respawn reads the bead, its comments, and its linked wisps |
 | Untracked | helper | runs inside its spawner's awaited job; architect outcomes are promoted to feature comments before trace compaction. A task receipt is not completion; the parent must collect the terminal result before mutating a shared checkout |

@@ -78,6 +78,12 @@ const CONTRACTS: Record<string, Contract> = {
 };
 
 /**
+ * Roles whose contracts leave the claim held at a completed yield for the gate to release
+ * in the write that stamps the proven push. A boolean table, like {@link ORCHESTRATOR_ANCHORS}.
+ */
+const RELEASING_ROLES: Record<string, true> = { implementer: true, architect: true };
+
+/**
  * Metadata keys the orchestrator stamps, exempt from `deny_metadata`.
  *
  * A role must not be faulted for a key its dispatcher wrote. Mirrors
@@ -444,6 +450,12 @@ export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  * epic is bound. Absent `needs`, everything is read, which is what a caller judging an
  * unknown contract must do.
  *
+ * A wisp's parent is one of its links. The documented shape hangs a review or escalation
+ * wisp off its node with `bd create --parent <node> --ephemeral`, and bd refuses a
+ * `relates-to` from a child to its own parent (`already a child ... would create a
+ * deadlock`, measured on 1.2.2), so the parent edge is the only link that wisp can have to
+ * the node its verdict is written on. The hydrated bead already names it; no read is spent.
+ *
  * An unreadable run epic is logged and leaves the base unknown rather than voiding the
  * evidence: the rest of the contract is still judged, and the one predicate that wanted
  * the base fails open on its own.
@@ -475,6 +487,7 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
  const wantEscalation = needs.escalation && direction === "up";
  if (needs.verbs || wantEscalation) {
   const linkedIds: string[] = [];
+  if (direction === "down" && typeof bead.parent === "string" && bead.parent.length > 0) linkedIds.push(bead.parent);
   for (const type of ["relates-to", "replies-to"]) {
    const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
    if (linked === null) return null;
@@ -749,7 +762,7 @@ async function gateClaimedExit(
   const clone = asksClone(require);
   // One refusal is enough: the clone is not read once origin has already said no.
   if (clone !== undefined && evidence.origin?.matched !== false) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
-  if (satisfies(require, evidence)) return await recordPushed(bead, claim, evidence);
+  if (satisfies(require, evidence)) return await recordPushed(bead, claim, evidence, RELEASING_ROLES[role] === true);
   escapeFailure = { check: "escape", detail: unsatisfied(require, evidence), recovery: contract.escape.recovery };
  }
 
@@ -805,7 +818,8 @@ async function gateClaimedExit(
   }
  }
 
- if (failures.length === 0) return await recordPushed(bead, claim, evidence);
+ // A pause is not a completion: an open escalation holds the implementer's claim for it.
+ if (failures.length === 0) return await recordPushed(bead, claim, evidence, RELEASING_ROLES[role] === true && !paused);
  if (escapeFailure !== undefined) failures.unshift(escapeFailure);
 
  // Refusals belong to this activation, not to mutable shared bead metadata.
@@ -841,38 +855,66 @@ function unsatisfied(require: string, evidence: Evidence): string {
 }
 
 /**
- * Record the commit origin was observed to hold, once every check has passed, and let the
- * yield proceed only when that record landed on the bead this session still owns.
+ * Record the commit origin was observed to hold, once every check has passed, and release
+ * the yielding actor's claim in the same fenced write.
  *
  * `metadata.push` and `metadata.branch` are targets a role stamps before pushing, so a
  * worker that died between the stamp and the push leaves them looking complete.
- * `pushed_sha` is the plugin's own word that it saw the head on origin. The contract has
- * the worker release before it yields, so by now the bead is unassigned and a successor
- * may already have claimed it; a plain update would land this session's stamp on that
- * successor's claim. The write is therefore fenced: `--claim` as the yielding actor wins an
- * unassigned bead (or its own), `--assignee ""` releases it again in the same write, and
- * the status is restated so a park stays parked. A fence refusal means another actor
- * holds the bead: nothing is written there, and the exit is refused with the holder named.
- * Any other failure is logged and the exit allowed: the proof holds, and the sha is a
- * record for offline readers rather than a condition of the exit.
+ * `pushed_sha` is the plugin's own word that it saw the head on origin. `--claim` as the
+ * yielding actor is the only fence bd 1.2.2 offers (`bd update --help` lists no release
+ * verb), and the one write it fences is the holder's own, measured on a real store:
+ * `--actor A --claim --assignee "" --set-metadata pushed_sha=<sha> --status in_progress`
+ * stamps and releases an `in_progress` bead A holds in one step; it is refused with
+ * `already claimed by <holder>` when another actor holds the bead; and it is refused with
+ * `not claimable: status <s>` on any bead bd will not claim through -- a released one, its
+ * ex-holder included, or a parked one. An implementer therefore keeps its claim through the
+ * yield, and this is where the claim is released, with the stamp when there is a proof.
+ *
+ * - Held by the actor, `in_progress`: the fenced stamp-and-release. A fence refusal means
+ *   a successor holds the bead: nothing is written there, and the exit is refused with the
+ *   holder named. Any other failure is logged and the exit allowed: the proof holds, and
+ *   the sha is a record for offline readers rather than a condition of the exit.
+ * - Unassigned: the worker released before the proof. No unfenced write is ever issued, so
+ *   nothing can land on a successor's claim; the exit is allowed and the missing stamp
+ *   logged. The successor's own exit stamps its own head.
+ * - Held by the actor in any other status: a park keeps its claim by contract, and bd fences
+ *   no write on it, so nothing is written and the missing stamp is logged.
+ *
+ * `releases` is the implementer's and the completing architect's: neither clears the assignee before
+ * yielding, so a held bead is released here whether or not there is a head to stamp; a parking
+ * architect releases itself, and bd fences nothing on a blocked bead. Every
+ * other contract releases in its own terms and is only stamped.
  */
-async function recordPushed(bead: BdBead, claim: ClaimObservation, evidence: Evidence): Promise<ToolCallEventResult | undefined> {
+async function recordPushed(bead: BdBead, claim: ClaimObservation, evidence: Evidence, releases: boolean): Promise<ToolCallEventResult | undefined> {
  const proof = [evidence.origin, evidence.cloneWork].find(candidate => candidate?.matched === true && candidate.observed !== undefined);
- if (proof?.observed === undefined) return undefined;
- if (metadataString(bead, "pushed_sha") === proof.observed) return undefined;
- const args = ["update", bead.id, "--actor", claim.actor, "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${proof.observed}`];
- if (typeof bead.status === "string" && bead.status.length > 0) args.push("--status", bead.status);
+ const observed = proof?.observed !== undefined && metadataString(bead, "pushed_sha") !== proof.observed ? proof.observed : undefined;
+ if (observed === undefined && !releases) return undefined;
+ const holder = typeof bead.assignee === "string" ? bead.assignee : "";
+ const status = (bead.status ?? "").toLowerCase();
+ if (holder !== claim.actor || status !== "in_progress") {
+  if (observed !== undefined) {
+   logger.warn("orchestrate exit contract: pushed_sha not stamped", {
+    bead: bead.id,
+    sha: observed,
+    cause: holder === "" ? "released before proof" : `status ${status} keeps its claim`,
+   });
+  }
+  return undefined;
+ }
+ const args = ["update", bead.id, "--actor", claim.actor, "--claim", "--assignee", ""];
+ if (observed !== undefined) args.push("--set-metadata", `pushed_sha=${observed}`);
+ args.push("--status", "in_progress");
  const written = await bdRun(args);
  if (written !== null && written.code === 0) return undefined;
  if (written !== null && fenceRefused(written)) {
   return {
    block: true,
-   reason: `${bead.id} is now claimed by another actor (${(written.stderr || written.stdout).trim()}); your pushed head ${proof.observed} is on origin but this exit cannot be recorded on a bead you no longer hold. Write nothing more to it and yield NO_WORK`,
+   reason: `${bead.id} is now claimed by another actor (${(written.stderr || written.stdout).trim()}); ${observed === undefined ? "your work is reported" : `your pushed head ${observed} is on origin`} but this exit cannot be recorded on a bead you no longer hold. Write nothing more to it and yield NO_WORK`,
   };
  }
- logger.warn("orchestrate exit contract: pushed_sha not recorded", {
+ logger.warn(observed === undefined ? "orchestrate exit contract: claim not released" : "orchestrate exit contract: pushed_sha not recorded", {
   bead: bead.id,
-  sha: proof.observed,
+  sha: observed,
   cause: written === null ? lastBdFailure() : written.stderr.trim() || `bd exited ${written.code}`,
  });
  return undefined;

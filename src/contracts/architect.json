@@ -22,7 +22,7 @@
       "check": "push_head",
       "require": "origin.branch == head_sha and clone.work on origin.branch",
       "when": "git",
-      "recovery": "push the feature branch (`git push origin <branch>`) and stamp head_sha with the pushed commit, then release the epic (`bd update <epic> --claim --assignee \"\"`); the clone is deleted at yield and origin is the only copy"
+      "recovery": "push the feature branch (`git push origin <branch>`) and stamp head_sha with the pushed commit, then yield holding the epic: the plugin releases it in the fenced write that stamps the proven push; the clone is deleted at yield and origin is the only copy"
     },
     {
       "check": "output_ref",
@@ -41,11 +41,6 @@
     {
       "check": "handoff",
       "require": "label ~ ^agent:reviewer$"
-    },
-    {
-      "check": "unclaimed",
-      "require": "assignee cleared",
-      "recovery": "release the epic last, once the feature head is on origin: `bd update <epic> --claim --assignee \"\"`; an isolated architect cannot be revived, so a held epic strands the feature"
     },
     {
       "check": "reported",

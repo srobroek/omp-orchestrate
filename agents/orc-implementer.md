@@ -26,16 +26,16 @@ Never launch `omp`, run a credential helper, or create a worktree (`wt switch --
 3. Implement within scope. A required out-of-scope change → stop and ask the architect to widen or split ownership, never silently edit a sibling's files.
 4. Run the acceptance criteria's verification and report actual results. Never claim success over failed verification.
 5. Commit in your isolated workspace. Push your head to your own capture ref and nowhere else: `git push origin HEAD:$ORC_PUSH_REF`. The plugin sets `ORC_PUSH_REF=omp/task/<your id>` in your bash environment beside `BEADS_ACTOR`; never set or override it. Successful completion also captures `omp/task/<id>` in the architect's clone with apply=false. A failed isolated task loses everything it did not push; a commit is not a checkpoint, a push is.
-6. Report, release and yield without waiting for review or pre-emptively fixing hypothetical findings. CHANGES returns through a fresh worker pull.
+6. Report and yield without waiting for review or pre-emptively fixing hypothetical findings; the plugin releases your claim after proving the push. CHANGES returns through a fresh worker pull.
 
 ## Reporting contract
 
-Follow the injected dispatch contract for actor identity and evidence semantics. Persist terminal evidence and the reviewer handoff as one mutation batch where `bd` command semantics permit, write `REPORTED`, and release last with a single `bd update <id> --assignee ""`; claim and release checks remain separate. Before yielding, record:
+Follow the injected dispatch contract for actor identity and evidence semantics. Persist terminal evidence and the reviewer handoff as one mutation batch where `bd` command semantics permit, then write `REPORTED` as your last write. Do not clear the assignee: the plugin releases your claim after proving the push, in the same fenced write that stamps `pushed_sha`. Before yielding, record:
 - bead id and changed paths;
 - git work: final `metadata.head_sha`, and `pushed=omp/task/<id>@<sha>` in the `REPORTED` comment. Until `git ls-remote origin refs/heads/omp/task/<id>` shows that head, G4 refuses your yield; when it does, G4 stamps `pushed_sha`. On a failed push, retry the push and the report;
 - non-git work: `metadata.output_ref`, with artifacts inside stamped `artifacts_dir`;
 - exact verification command and result;
-- `agent:reviewer` and `REPORTED`, then the cleared assignee.
+- `agent:reviewer` and `REPORTED`, with the claim still held.
 
 NOT Close the bead or write `merge_sha` or `pr`.
 NOT Rewrite `metadata.role`; handoff labels do not change routing. Escalate misrouting to the architect. New routed bug beads remain permitted.

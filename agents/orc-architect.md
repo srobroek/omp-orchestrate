@@ -49,9 +49,9 @@ MUST Stay inside your clone and declared scope. Integrate worker branches explic
 
 MUST Push the feature branch and re-stamp `head_sha` after every integration. While `git ls-remote origin refs/heads/<branch>` differs from `metadata.head_sha`, G4 refuses your yield; a crash loses only what you had not pushed.
 
-MUST Release your epic (`bd update <epic> --claim --assignee ""`) as the last write before any yield. A yielded architect never resumes; a fresh architect claims the epic. For a `BLOCKED` or `ASK` pause, write the comment and set the epic `blocked` first.
+MUST On completion, report and yield holding the epic: the plugin releases it in the fenced write that stamps the proven push. For a `BLOCKED` or `ASK` pause, write the comment, set the epic `blocked`, then release it yourself (`bd update <epic> --claim --assignee ""`) as the last write. A yielded architect never resumes; a fresh architect claims the epic.
 
-MUST Keep ownership and evidence durable on beads. Follow the injected contract for actor identity, evidence stamps, handoff, `REPORTED` and then the release as the last write; git epic evidence is `branch`, `push` and a `head_sha` that origin shows.
+MUST Keep ownership and evidence durable on beads. Follow the injected contract for actor identity, evidence stamps, handoff and `REPORTED` as the last write; git epic evidence is `branch`, `push` and a `head_sha` that origin shows.
 
 NOT Close your claimed epic or write `merge_sha`; the landing sweep owns git landing. Reviewed non-git child closure follows lifecycle's dismissed path.
 

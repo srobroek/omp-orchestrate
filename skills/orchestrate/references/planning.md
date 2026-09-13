@@ -236,18 +236,19 @@ Entry, after the claim (`bd ready --parent <run-epic> --metadata-field role=arch
 
    G4 refuses your yield, terminal or paused, while
    `git ls-remote origin refs/heads/<branch>` differs from `metadata.head_sha`.
-5. Release the epic claim as the last write before any yield: `bd update "<epic>" --claim
-   --assignee ""`. A yielded isolated architect is finished: its clone is gone and no wake
-   revives it. A pause writes `BLOCKED` (escalation wisp) or `ASK` first and sets the epic
-   `blocked`, then releases; G4 admits that exit only with the feature head on origin. The
-   escalation's `NOTE` or `/orchestrate-answer` reopens the epic for the fresh architect the
-   lead spawns.
+5. On completion, write `REPORTED` and yield holding the epic: G4 proves the feature head
+   on origin, then releases the claim in the same fenced write that stamps `pushed_sha`.
+   A yielded isolated architect is finished: its clone is gone and no wake revives it. A
+   pause is different: write `BLOCKED` (escalation wisp) or `ASK` first, set the epic
+   `blocked`, then release it yourself (`bd update "<epic>" --claim --assignee ""`); G4
+   admits that exit only with the feature head on origin. The escalation's `NOTE` or
+   `/orchestrate-answer` reopens the epic for the fresh architect the lead spawns.
 
 ### Replacement
 
 A timeout or cancel ends the architect's process and deletes its clone; the reaper in
 the lead's session releases the epic claim under the lease fence and writes `RECOVERED`.
-A voluntary yield has already released it. Either way the lead spawns one replacement
+A voluntary yield has released it, by the plugin on completion or by the architect on a pause. Either way the lead spawns one replacement
 `orc-architect`, `isolated: true`, naming the run epic and the role. The replacement:
 
 1. Pulls the epic by role. The claimed epic carries `branch`, `push`, `head_sha`.

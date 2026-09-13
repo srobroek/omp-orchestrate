@@ -427,7 +427,12 @@ export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads:
    const head = metadataString(bead, "head_sha");
    const pushed = metadataString(bead, "pushed_sha");
    const branch = metadataString(bead, "branch");
-   if (head !== undefined && (pushed === undefined || !sameCommit(head, pushed))) {
+   // The stamp is G4's, written as it releases a completing implementer's or architect's
+   // claim. Only an implementer task is judged by it: a parked bead was never proven (the
+   // pause releases itself and bd fences nothing on a blocked bead), and every other git
+   // node is judged by its push target below.
+   const stamped = metadataString(bead, "role") === "implementer" && status !== "blocked";
+   if (head !== undefined && stamped && (pushed === undefined || !sameCommit(head, pushed))) {
     const entry: NotOnOrigin = { id: bead.id, head };
     if (pushed !== undefined) entry.pushed = pushed;
     notOnOrigin.push(entry);
