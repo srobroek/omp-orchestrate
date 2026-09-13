@@ -653,6 +653,24 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    expect(result?.reason).toContain(SHAPE);
   });
 
+  test("an architect spawned by the lead without isolation is refused, naming the role", async () => {
+   await pinnedRun(dir);
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(
+    handlers,
+    { toolName: "task", toolCallId: "spawn-arch", input: { name: "Arch1", agent: "orc-architect", task: "run run-wiring, epic orc-1" } },
+    { cwd: dir },
+   );
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("'Arch1'");
+   expect(result?.reason).toContain("an architect must run in an isolated copy");
+   expect(result?.reason).toContain('agent: "orc-architect", task: "<epic id + queue, not the work>", isolated: true');
+  });
+
   test("a batch names the entry that lacks isolation", async () => {
    await pinnedRun(dir);
    const { pi, handlers } = runtimeApi();
@@ -674,6 +692,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
 
   test.each([
    ["an isolated implementer", { name: "Impl1", agent: "orc-implementer", task: "epic orc-1", isolated: true }],
+   ["an isolated architect", { name: "Arch1", agent: "orc-architect", task: "epic orc-1", isolated: true }],
    ["a reviewer, whose isolation is a dispatch decision", { name: "Rev", agent: "orc-reviewer", task: "epic orc-1" }],
    ["an isolated batch", { context: "wave 1", tasks: [{ name: "A", agent: "orc-implementer", task: "orc-1", isolated: true }] }],
    ["a plain helper", { task: "count the tests" }],
@@ -740,7 +759,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
 
     expect(errors).toEqual([]);
     expect(result?.block).toBe(true);
-    expect(result?.reason).toContain("pushing to main is the lead's landing step");
+    expect(result?.reason).toContain("pushing to main is refused inside a run");
    } finally {
     show.mockRestore();
    }
@@ -758,7 +777,7 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    expect(errors).toEqual([]);
    expect(result?.block).toBe(true);
    expect(result?.reason).toMatch(/refused for the lead of run run-wiring: the lead plans and never edits or merges/);
-   expect(result?.reason).not.toContain("pushing to main is the lead's landing step");
+   expect(result?.reason).not.toContain("pushing to main is refused inside a run");
   });
 
   test("a worker's bare push after a cd is blocked as unresolvable, before any bead is read", async () => {
@@ -777,6 +796,63 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    } finally {
     show.mockRestore();
    }
+  });
+
+  test("a role session's push to $ORC_PUSH_REF is judged by the env G6 hands forward, not by the text", async () => {
+   // G6 runs before G7 in the dispatch and carries the call's env (with ORC_PUSH_REF once
+   // G6 injects it) into the revised input; G7 resolves the variable from that env alone.
+   const show = spyOn(actualBd, "bdShow").mockResolvedValue(null);
+   try {
+    await pinnedRun(dir);
+    const { pi, handlers, errors } = workerApi();
+    ompOrchestrate(pi);
+    const worker = { cwd: dir, role: "implementer" };
+    const env = { ORC_PUSH_REF: "omp/task/wiring-agent" };
+
+    const allowed = await verdict(handlers, { toolName: "bash", toolCallId: "push-ref", input: { command: "git push origin HEAD:$ORC_PUSH_REF", env } }, worker);
+    const opaque = await verdict(handlers, { toolName: "bash", toolCallId: "push-other", input: { command: "git push origin HEAD:$OTHER", env } }, worker);
+
+    expect(errors).toEqual([]);
+    expect(allowed?.block).toBeUndefined();
+    expect(opaque?.block).toBe(true);
+    expect(opaque?.reason).toContain("filled in by the shell");
+   } finally {
+    show.mockRestore();
+   }
+  });
+ });
+
+ describe("G10 refusals reach the verdict", () => {
+  test.each([
+   ["a nested omp from an architect", "omp -p 'claim the epic' --cwd /tmp/wt", "architect", "omp is refused for architect"],
+   ["a credential helper from an implementer", "isengardcli credentials --awscli", "implementer", "isengardcli credentials is refused"],
+   ["a credential print from the lead", "cat ~/.aws/credentials", undefined, "a read of ~/.aws/credentials is refused"],
+  ])("%s is blocked", async (_label, command, role, text) => {
+   await pinnedRun(dir, JSON.stringify({ schema_version: 1, run_id: "run-wiring", session_id: "wiring-session" }));
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   const result = await verdict(handlers, call(`nested-${role ?? "lead"}`, command), { cwd: dir, role });
+
+   expect(errors).toEqual([]);
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain(text);
+  });
+
+  test("the lead's omp --version opens no session and passes", async () => {
+   await pinnedRun(dir, JSON.stringify({ schema_version: 1, run_id: "run-wiring", session_id: "wiring-session" }));
+   const { pi, handlers, errors } = runtimeApi();
+   ompOrchestrate(pi);
+
+   expect((await verdict(handlers, call("lead-version", "omp --version"), { cwd: dir }))?.block).toBeUndefined();
+   expect(errors).toEqual([]);
+  });
+
+  test("outside a run an omp launch is not this plugin's business", async () => {
+   const { pi, handlers } = runtimeApi();
+   ompOrchestrate(pi);
+
+   expect(await verdict(handlers, call("free-omp", "omp -p hello"), { cwd: dir, role: "architect" })).toBeUndefined();
   });
  });
 });
