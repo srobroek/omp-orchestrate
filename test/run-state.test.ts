@@ -851,20 +851,44 @@ describe("answerBead", () => {
 		expect(wakes).toEqual([]);
 	});
 
-	test("records NOTE ANSWER as the lead, then wakes a holder this process knows -- parked, idle or running", async () => {
+	test("records NOTE ANSWER as the lead, then wakes a holder this process knows live -- idle or running", async () => {
 		epic("orc-7", "blocked", { assignee: "arch-1" });
 		ask("orc-7", "arch-1");
-		for (const status of ["parked", "idle", "running"] as const) {
+		for (const status of ["idle", "running"] as const) {
 			registry["arch-1"] = { status };
 			expect(await answerBead(cwd, SESSION, "orc-7", "blue, and ship it", deps)).toEqual({ kind: "woken", holder: "arch-1", outcome: "revived" });
 		}
-		expect(writes).toEqual(Array(3).fill(["comment", "orc-7", "NOTE ANSWER orc-7: blue, and ship it", "--actor", LEAD]));
-		expect(wakes).toEqual(Array(3).fill(["arch-1", "ANSWER recorded on orc-7; read `bd comments orc-7` and resume"]));
+		expect(writes).toEqual(Array(2).fill(["comment", "orc-7", "NOTE ANSWER orc-7: blue, and ship it", "--actor", LEAD]));
+		expect(wakes).toEqual(Array(2).fill(["arch-1", "ANSWER recorded on orc-7; read `bd comments orc-7` and resume"]));
+	});
+
+	test("a parked holder is not woken: its blocked epic is requeued for a new architect with no wake", async () => {
+		// An isolated architect's clone is gone once it parks; reviving it replays the failure.
+		epic("orc-7.1", "blocked", { assignee: "arch-1", metadata: { role: "architect" } });
+		registry["arch-1"] = { status: "parked" };
+		ask("orc-7.1", "arch-1");
+		expect(await answerBead(cwd, SESSION, "orc-7.1", "blue", deps)).toEqual({ kind: "requeued", holder: "arch-1", next: "architect", gates: [] });
+		expect(wakes).toEqual([]);
+		expect(writes.map(argv => argv[0])).toEqual(["comment", "update"]);
+	});
+
+	test("a parked holder still holding its epic in_progress is released fenced as the holder, attributed to the lead", async () => {
+		epic("orc-7.1", "in_progress", { assignee: "arch-1", metadata: { role: "architect" } });
+		registry["arch-1"] = { status: "parked" };
+		expect(await answerBead(cwd, SESSION, "orc-7.1", "blue", deps)).toEqual({ kind: "requeued", holder: "arch-1", next: "architect", gates: [] });
+		expect(wakes).toEqual([]);
+		expect(writes[1]?.slice(0, 9)).toEqual(["update", "orc-7.1", "--actor", "arch-1", "--claim", "--assignee", "", "--status", "open"]);
+		expect(writes[2]?.[2]).toMatch(/^RECOVERED arch-1 answered while parked/);
+		expect(writes[2]?.slice(3)).toEqual(["--actor", LEAD]);
+
+		writes = [];
+		failWrites.update = "Error claiming orc-7.1: issue already claimed by arch-2";
+		expect(await answerBead(cwd, SESSION, "orc-7.1", "blue", deps)).toEqual({ kind: "requeue-refused", holder: "arch-1", reason: "a successor already holds it" });
 	});
 
 	test("a wake the bus refuses leaves the claim standing and says why", async () => {
 		epic("orc-7", "blocked", { assignee: "arch-1" });
-		registry["arch-1"] = { status: "parked" };
+		registry["arch-1"] = { status: "idle" };
 		wakeOutcome = { outcome: "failed", error: "Agent \"arch-1\" has no live session." };
 		expect(await answerBead(cwd, SESSION, "orc-7", "blue", deps)).toEqual({ kind: "wake-failed", holder: "arch-1", error: "Agent \"arch-1\" has no live session." });
 		expect(writes.filter(argv => argv[0] === "update")).toEqual([]);
@@ -873,7 +897,7 @@ describe("answerBead", () => {
 	test.each(["ASK", "ESCALATED", "FAILED"])("a blocked bead whose exited holder wrote %s is requeued: assignee cleared, status open", async verb => {
 		epic("orc-7.1", "blocked", { assignee: "impl-1" });
 		comments["orc-7.1"] = [{ text: "REPORTED earlier", author: "impl-0" }, { text: `${verb} orc-7.1\nquestion: which?`, author: "impl-1" }, { text: "NOTE claim preserved: child exited", author: "extension" }];
-		expect(await answerBead(cwd, SESSION, "orc-7.1", "the second", deps)).toEqual({ kind: "requeued", holder: "impl-1", gates: [] });
+		expect(await answerBead(cwd, SESSION, "orc-7.1", "the second", deps)).toEqual({ kind: "requeued", holder: "impl-1", next: undefined, gates: [] });
 		expect(writes).toEqual([
 			["comment", "orc-7.1", "NOTE ANSWER orc-7.1: the second", "--actor", LEAD],
 			// Unfenced: bd's `--claim` fence refuses a blocked bead outright, and nobody can have claimed one.
@@ -899,7 +923,7 @@ describe("answerBead", () => {
 			],
 		});
 		ask("orc-7.2", "arch-1");
-		expect(await answerBead(cwd, SESSION, "orc-7.2", "yes", deps)).toEqual({ kind: "requeued", holder: undefined, gates: ["orc-g1"] });
+		expect(await answerBead(cwd, SESSION, "orc-7.2", "yes", deps)).toEqual({ kind: "requeued", holder: undefined, next: undefined, gates: ["orc-g1"] });
 		expect(writes.slice(1)).toEqual([
 			["update", "orc-7.2", "--status", "open", "--assignee", "", "--actor", LEAD],
 			["gate", "resolve", "orc-g1", "--reason", `ANSWER by ${LEAD} on orc-7.2`, "--actor", LEAD],
@@ -917,10 +941,13 @@ describe("answerBead", () => {
 		expect(writes.filter(argv => argv[0] === "update")).toHaveLength(1);
 	});
 
-	test("a bead that is not blocked, or blocked without a hold verb, keeps the note only", async () => {
+	test("an absent holder's in_progress bead is released fenced; a blocked bead without a hold verb keeps the note only", async () => {
 		epic("orc-7.1", "in_progress", { assignee: "impl-1" });
 		ask("orc-7.1", "impl-1");
-		expect(await answerBead(cwd, SESSION, "orc-7.1", "x", deps)).toEqual({ kind: "kept", reason: "orc-7.1 is in_progress with last hold ASK; nothing requeued" });
+		expect(await answerBead(cwd, SESSION, "orc-7.1", "x", deps)).toEqual({ kind: "requeued", holder: "impl-1", next: undefined, gates: [] });
+		expect(writes[1]?.slice(0, 5)).toEqual(["update", "orc-7.1", "--actor", "impl-1", "--claim"]);
+		expect(writes[2]?.[2]).toMatch(/^RECOVERED impl-1 answered; the holder is no longer registered/);
+		writes = [];
 		epic("orc-7.3", "blocked");
 		comments["orc-7.3"] = [{ text: "BLOCKED orc-7.3 waits on gate orc-g9", author: "impl-1" }];
 		expect(await answerBead(cwd, SESSION, "orc-7.3", "x", deps)).toEqual({ kind: "kept", reason: "orc-7.3 is blocked with no hold verb; nothing requeued" });
@@ -1294,7 +1321,7 @@ describe("registerRunCommands", () => {
 		comments["orc-7.1"] = [{ text: "ASK orc-7.1 which?", author: "impl-1" }];
 		const wakes: string[] = [];
 		const { answer, notices } = rig(undefined, {
-			registry: { get: id => (id === "arch-1" ? { status: "parked" } : undefined) },
+			registry: { get: id => (id === "arch-1" ? { status: "idle" } : undefined) },
 			wake: async to => {
 				wakes.push(to);
 				return { outcome: "revived" };

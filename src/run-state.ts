@@ -937,7 +937,7 @@ export type Wake = (to: string, body: string) => Promise<{ outcome: string; erro
 export type AnswerHold =
 	| { kind: "woken"; holder: string; outcome: string }
 	| { kind: "wake-failed"; holder: string; error: string }
-	| { kind: "requeued"; holder: string | undefined; gates: string[] }
+	| { kind: "requeued"; holder: string | undefined; /** `metadata.role`: who the requeued bead is offered to. */ next: string | undefined; gates: string[] }
 	| { kind: "requeue-refused"; holder: string; reason: string }
 	| { kind: "kept"; reason: string };
 
@@ -975,16 +975,19 @@ async function underRun(bead: BdBead, runId: string, cwd: string): Promise<boole
  * (`scratch/audit/e2e/operator-fuzz.ledger.md`, row 2.10); a bead outside the run, or one
  * whose ancestry cannot be read, is refused before anything is written.
  *
- * A holder this process knows as a live or parked agent is woken through the IRC bus
- * -- an architect parked on its epic revives and reads the answer off the bead. A
- * holder absent from the registry has exited (workers yield after `ASK`/`FAILED`), so a
- * `blocked` bead whose last hold verb is one of those is requeued: assignee cleared,
- * status opened, and any open human gate blocking it resolved, so `bd ready --claim`
- * offers it to the next worker, answer in hand. The release is unfenced by necessity and
- * safe by construction: bd's `--claim` fence applies to `in_progress` beads only
- * (measured on 1.2.2: "not claimable: status blocked"), and a blocked bead is one no
- * successor can have claimed in the meantime. A bead in any other state keeps the note
- * and nothing else.
+ * A holder this process knows as a live agent (`running` or `idle`) is woken through the
+ * IRC bus and reads the answer off the bead. A parked holder is not: an architect runs in
+ * an isolated clone that OMP deletes when it completes, so a parked architect has no tree
+ * to resume in, and reviving it replays the failure. A parked or absent holder's bead is
+ * requeued instead, answer in hand. A bead still `in_progress` under that holder is
+ * released fenced, as the holder and attributed to the lead ({@link releaseDeadClaim}),
+ * so a successor that claimed meanwhile is never displaced. A `blocked` bead whose last
+ * hold verb is `ASK`, `ESCALATED` or `FAILED` is opened and unassigned, and any open human
+ * gate blocking it resolved, so `bd ready --claim` offers it to the next worker. That
+ * release is unfenced by necessity and safe by construction: bd's `--claim` fence applies
+ * to `in_progress` beads only (measured on 1.2.2: "not claimable: status blocked"), and a
+ * blocked bead is one no successor can have claimed in the meantime. A bead in any other
+ * state keeps the note and nothing else.
  */
 export async function answerBead(cwd: string, sessionId: string, beadId: string, text: string, deps: AnswerDeps): Promise<AnswerHold> {
 	if (!RUN_ID_RE.test(beadId)) throw new Error(`bead id must be a Beads identifier, got ${JSON.stringify(beadId)}`);
@@ -1005,11 +1008,18 @@ export async function answerBead(cwd: string, sessionId: string, beadId: string,
 
 	const holder = epicHolder(bead);
 	const state = holder === undefined ? undefined : deps.registry.get(holder)?.status;
-	if (holder !== undefined && state !== undefined && state !== "aborted") {
+	const next = metadataString(bead, "role");
+	if (holder !== undefined && (state === "running" || state === "idle")) {
 		const receipt = await deps.wake(holder, `ANSWER recorded on ${beadId}; read \`bd comments ${beadId}\` and resume`);
 		return receipt.outcome === "failed"
 			? { kind: "wake-failed", holder, error: receipt.error ?? "delivery failed" }
 			: { kind: "woken", holder, outcome: receipt.outcome };
+	}
+	if (holder !== undefined && bead.status === "in_progress") {
+		const cause = state === "parked" ? "answered while parked; an isolated holder's clone is gone once it parks" : "answered; the holder is no longer registered";
+		const released = await releaseDeadClaim(beadId, holder, { cause, recoveredBy: actor }, cwd);
+		if (released === "released" || released === "comment-failed") return { kind: "requeued", holder, next, gates: [] };
+		return { kind: "requeue-refused", holder, reason: released === "held-by-other" ? "a successor already holds it" : "bd did not answer or refused the fenced release" };
 	}
 	if (comments === null) return { kind: "kept", reason: `comments on ${beadId} could not be read, so the hold is unknown; nothing requeued` };
 	const hold = comments.findLast(comment => HOLD_VERBS[commentVerb(comment.text)] === true);
@@ -1029,7 +1039,7 @@ export async function answerBead(cwd: string, sessionId: string, beadId: string,
 		const resolved = await bdRun(["gate", "resolve", gate.id, "--reason", `ANSWER by ${actor} on ${beadId}`, "--actor", actor], EPIC_WRITE_TIMEOUT_MS, cwd);
 		if (resolved?.code === 0) gates.push(gate.id);
 	}
-	return { kind: "requeued", holder, gates };
+	return { kind: "requeued", holder, next, gates };
 }
 
 // ============================================================================
@@ -1360,7 +1370,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 				case "woken": notify(ctx, [noted, `${hold.holder} ${hold.outcome}`], "info"); return;
 				case "wake-failed": notify(ctx, [noted, `${hold.holder} could not be woken: ${hold.error}; its claim stands`], "warning"); return;
 				case "requeued":
-					notify(ctx, [noted, `${beadId} requeued${hold.holder === undefined ? "" : ` (released from ${hold.holder})`}${hold.gates.length === 0 ? "" : `; human gate${hold.gates.length === 1 ? "" : "s"} ${hold.gates.join(", ")} resolved`}`], "info");
+					notify(ctx, [noted, `${beadId} requeued${hold.next === undefined ? "" : ` for a new ${hold.next}`}${hold.holder === undefined ? "" : ` (released from ${hold.holder})`}${hold.gates.length === 0 ? "" : `; human gate${hold.gates.length === 1 ? "" : "s"} ${hold.gates.join(", ")} resolved`}`], "info");
 					return;
 				case "requeue-refused": notify(ctx, [noted, `${beadId} not requeued: ${hold.reason}`], "warning"); return;
 				case "kept": notify(ctx, [noted, hold.reason], "info"); return;
