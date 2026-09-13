@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { credentialAct, gateNestedInvocation, opensOmpSession } from "../src/gates/nested";
+import { credentialAct, gateNestedHubInvocation, gateNestedInvocation, opensOmpSession } from "../src/gates/nested";
 import type { RunScope } from "../src/run-scope";
 
 const SCOPE = { runId: "orc-run", root: "/repo" } as RunScope;
@@ -58,6 +58,25 @@ describe("G10 refuses an omp launch from any seat of a run", () => {
 		expect(opensOmpSession(command)).toBe(false);
 		expect(gateNestedInvocation(seat("architect"), SCOPE, { command })).toBeUndefined();
 		expect(gateNestedInvocation(seat(), SCOPE, { command })).toBeUndefined();
+	});
+});
+
+describe("G10 refuses nested omp launches through hub", () => {
+	test.each([
+		["direct omp", { op: "start", application: "omp", args: ["-p", "child"] }],
+		["shell wrapper", { op: "start", application: "sh", args: ["-c", "omp -p child"] }],
+	])("blocks %s", (_label, input) => {
+		const result = gateNestedHubInvocation(seat("architect"), SCOPE, input);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("omp is refused for architect inside run orc-run");
+	});
+
+	test.each([
+		["help", { op: "start", application: "omp", args: ["--help"] }],
+		["quoted mention", { op: "start", application: "sh", args: ["-c", "echo 'omp -p child'"] }],
+		["other application", { op: "start", application: "bun", args: ["x"] }],
+	])("allows %s", (_label, input) => {
+		expect(gateNestedHubInvocation(seat("architect"), SCOPE, input)).toBeUndefined();
 	});
 });
 

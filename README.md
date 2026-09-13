@@ -8,7 +8,7 @@ answers the questions it raises, and stops it. Agents claim their own work from 
 | --- | --- |
 | Status | Prerelease. OMP reports the version it installs. |
 | Requires | the tools and plugins under [Prerequisites](#prerequisites) |
-| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md): gates, rules, architecture, development |
+| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md): gates, architecture, development |
 
 ## How it works
 
@@ -19,7 +19,7 @@ answers the questions it raises, and stops it. Agents claim their own work from 
    feature branch it integrates those refs into. One PR per feature. OMP deletes a clone
    when its agent finishes; origin is the only store that outlives one.
 4. The plugin merges each approved PR at its reviewed head. No agent merges.
-5. Ten tool-call gates and three rules hold every agent to its claim. The operator's writes
+5. Ten tool-call gates hold every agent to its claim and run-scoped protocol. The operator's writes
    are `start`, `answer`, and `stop`.
 
 ## Prerequisites
@@ -337,9 +337,9 @@ native discovery can load its agents. Files under `agents/` alone do not registe
 Outside a run the plugin spawns no process, sends no message and refuses no tool call. Its
 one write is at activation: it removes stray copies of a checkout's `.beads` store,
 `.orchestration/` and `scratch/` from its own plugin-cache entry, which a local-path
-marketplace install copies in. A plain session sees the slash commands, the `orc_*` tools,
-the agents, the skill, and three rules. A run scope exists only while a valid marker
-`.orchestration/.active-run` is readable at one of three places:
+marketplace install copies in. A plain session sees the slash commands, the `worktree_sweep`
+and `orc_*` tools, the agents, and the skill. Protocol notices run only inside a valid run
+scope, which a marker `.orchestration/.active-run` makes readable at one of three places:
 
 - the checkout
 - an isolated copy of the checkout

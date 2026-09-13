@@ -720,7 +720,44 @@ export const bugRouteNotice: BdCheck = invocation => {
 };
 
 /** The advisory checks, in the order their notices read best. */
-const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice];
+const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice, readyEphemeralNotice, shepherdParentNotice];
+
+const READY_ROLE_LABELS: Record<string, true> = { reviewer: true, researcher: true };
+
+function flagValues(rest: readonly string[], names: Record<string, true>): string[] {
+ const values: string[] = [];
+ for (let index = 0; index < rest.length; index++) {
+  const token = rest[index] as string;
+  const { flag, inline } = splitFlag(token);
+  if (names[flag] !== true) continue;
+  if (inline !== undefined) values.push(inline);
+  else if (index + 1 < rest.length) values.push(rest[++index] as string);
+ }
+ return values;
+}
+
+/** Warn when an ephemeral reviewer/researcher queue pull omits its visibility flag. */
+export function readyEphemeralNotice(invocation: BdInvocation): string | undefined {
+ if (invocation.subcommand !== "ready") return undefined;
+ if (invocation.rest.some(token => splitFlag(token).flag === "--include-ephemeral")) return undefined;
+ const labels = flagValues(invocation.rest, { "--label": true, "--labels": true });
+ const metadata = flagValues(invocation.rest, { "--metadata-field": true });
+ const role = [...labels.flatMap(value => value.split(",").map(label => label.split(":")[1])), ...metadata.map(value => value.split("=")[1])]
+  .find(candidate => candidate !== undefined && READY_ROLE_LABELS[candidate] === true);
+ if (role === undefined) return undefined;
+ return `WARN ephemeral queue: 'bd ready' for ${role} hides wisps by default; add --include-ephemeral or the queue will read empty`;
+}
+
+/** Warn when a shepherd merge queue is narrowed by a parent filter. */
+export function shepherdParentNotice(invocation: BdInvocation): string | undefined {
+ if (invocation.subcommand !== "ready") return undefined;
+ if (flagValues(invocation.rest, { "--parent": true }).length === 0) return undefined;
+ const labels = flagValues(invocation.rest, { "--label": true, "--labels": true });
+ const metadata = flagValues(invocation.rest, { "--metadata-field": true });
+ const shepherd = labels.some(value => value.split(",").some(label => label === "pr:merge" || label === "agent:integrator")) || metadata.some(value => value === "role=shepherd");
+ if (!shepherd) return undefined;
+ return "WARN shepherd queue: merge beads are unparented; drop --parent and filter with --metadata-field role=shepherd or --label pr:merge";
+}
 
 /**
  * Refusal: a command that sets or unsets `ORC_PUSH_REF` in its own text.
@@ -736,6 +773,7 @@ export function pushRefEditRefusal(command: string): string | undefined {
 	if (!effectiveSegments(command).some(segment => editsVariable(segment, PUSH_REF_VAR))) return undefined;
 	return `${PUSH_REF_VAR} is set by the plugin: it names the branch your capture is pushed to, and a command that assigns or unsets it is refused. Push with 'git push origin HEAD:$${PUSH_REF_VAR}' and leave the variable alone.`;
 }
+
 
 /** The seat a refusal judges: the lead's, or a spawned session's with its declared role, if any. */
 export interface Seat {

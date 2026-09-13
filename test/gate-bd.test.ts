@@ -16,6 +16,8 @@ import {
 	commentVerbNotice,
 	fallbackIdentity,
 	gateBdDiscipline,
+	readyEphemeralNotice,
+	shepherdParentNotice,
 	pushRefFor,
 } from "../src/gates/bd";
 import { type BdInvocation, bdInvocations } from "../src/shell";
@@ -551,6 +553,21 @@ describe("G6 outside a run", () => {
 		// exist is the cheapest shape of that, and an isolated worker's cwd can vanish.
 		expect(await gate("bd update orc-1 --claim", path.join(outsideRun, "no-such-dir"))).toEqual(SILENT);
 	});
+});
+
+describe("run-aware protocol notices", () => {
+ test("fires the ephemeral and shepherd checks only for structured bd slots", async () => {
+  expect((await gate("bd ready --label agent:reviewer")).notices.some(line => line.startsWith("WARN ephemeral queue"))).toBe(true);
+  expect((await gate("bd ready --parent orc-1 --label pr:merge")).notices.some(line => line.startsWith("WARN shepherd queue"))).toBe(true);
+  const quoted = await gate('bd comment orc-1 "bd ready --label agent:reviewer"');
+  expect(quoted.notices.some(line => line.startsWith("WARN ephemeral queue"))).toBe(false);
+ });
+
+ test("nested process policy uses command slots and no quoted prose", () => {
+  expect(readyEphemeralNotice(only("bd ready --label agent:researcher"))).toContain("ephemeral");
+  expect(readyEphemeralNotice(only('bd comment orc-1 "bd ready --label agent:researcher"'))).toBeUndefined();
+  expect(shepherdParentNotice(only("bd ready --parent orc-1 --label pr:merge"))).toContain("shepherd");
+ });
 });
 
 describe("G6 inside a run", () => {
