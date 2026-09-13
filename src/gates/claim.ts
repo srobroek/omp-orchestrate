@@ -1326,12 +1326,12 @@ async function planReviewDenial(
   return undefined;
  }
  const approved = comments.some(comment =>
-  commentVerb(comment.text) === "REVIEW" && /\bverdict=approve\b/i.test(comment.text) && planToken(comment.text) === currentHash,
+  commentVerb(comment.text) === "REVIEW" && /\bdimension=plan\b/i.test(comment.text) && /\bverdict=approve\b/i.test(comment.text) && planToken(comment.text) === currentHash,
  );
  if (approved) return undefined;
  return {
   block: true,
-  reason: `plan review missing for epic '${epicId}': require REVIEW verdict=approve plan=${currentHash} on the epic before an implementer pulls it`,
+  reason: `plan review missing for epic '${epicId}': require REVIEW dimension=plan verdict=approve plan=${currentHash} on the epic before an implementer pulls it`,
  };
 }
 

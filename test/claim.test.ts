@@ -1515,8 +1515,10 @@ describe("G5 plan review gate", () => {
 		expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toContain("plan review missing");
 	});
 
-	test("a changes verdict at the live hash is not an approval", async () => {
+	test("a changes verdict, or an approve from another dimension, at the live hash is not a plan approval", async () => {
 		comments["orc-epic"] = [{ text: `REVIEW orc-epic dimension=plan verdict=changes plan=${await liveHash()}` }];
+		expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.block).toBe(true);
+		comments["orc-epic"] = [{ text: `REVIEW orc-epic dimension=code verdict=approve plan=${await liveHash()}` }];
 		expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.block).toBe(true);
 	});
 
