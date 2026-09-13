@@ -110,7 +110,7 @@ async function gateChain(
  input: Record<string, unknown>,
 ): Promise<ToolCallEventResult | undefined> {
  if (toolName === "bash") {
-  const ownership = gateWorktrunkOwnership(input);
+  const ownership = gateWorktrunkOwnership(input, ctx);
   if (ownership) return ownership;
   const eligibility = await gateClaimEligibility(claims, ctx, input);
   if (eligibility) return eligibility;
@@ -219,10 +219,21 @@ describe("G3 refuses a checkout Worktrunk would not know about", () => {
   const result = await bash(command);
 
   expect(result?.block).toBe(true);
-  // The refusal has to name what was refused and the sanctioned route, or the
-  // agent's next move is another shape of the same command.
+  // The refusal has to name what was refused and the route the seat actually has, or
+  // the agent's next move is another shape of the same command. A role has no
+  // Worktrunk route: G7 refuses `wt switch --create` from every role.
   expect(result?.reason).toContain(named);
-  expect(result?.reason).toContain("wt switch");
+  expect(result?.reason).toContain("Worktrunk is the operator's");
+  expect(result?.reason).not.toContain("wt switch");
+ });
+
+ test.each([
+  ["a role-less helper", () => ctxAt(owned, null)],
+  ["the lead, whose seat G3 does not read", () => undefined],
+ ])("names the Worktrunk route to %s", async (_label, ctx) => {
+  const result = gateWorktrunkOwnership({ command: "git worktree add ../wt" }, ctx());
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("wt switch --create");
  });
 });
 
@@ -486,6 +497,8 @@ describe("G1 outside its sandbox", () => {
   // Every `orc-*` role must write beads to satisfy its exit contract, and
   // `bd comment` is blocked under BD_READONLY, so sandboxing one would make its
   // contract unsatisfiable and bounce the worker.
+  // The architect's claimed epic already records its location; G5 refuses its writes until it does.
+  beads[BEAD]!.metadata = { worktree: owned, branch: "feat/a", base_sha: "64df1c1", push: "origin/feat/a" };
   for (const role of ["architect", "implementer", "reviewer", "researcher", "shepherd"]) {
    expect(await bash(`BEADS_ACTOR=${ACTOR} bd comment ${BEAD} "REPORTED done"`, ctxAt(owned, role))).toBeUndefined();
   }
