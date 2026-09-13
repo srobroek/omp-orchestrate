@@ -125,8 +125,19 @@ other roles release as their
 contract says. A positively open linked escalation pauses an
 implementer without releasing its claim; an architect parks instead. Unknown bd evidence
 allows an unevaluated exit; three failed evaluations in this activation allow exit without
-accepting work or changing owner, status or metadata. Recovery requires explicit release by
-the reaper under the lease fence, never a blind release by an agent.
+accepting work or changing owner, status or metadata, and leave a NOTE on the bead saying
+so. Recovery requires explicit release by the reaper under the lease fence, never a blind
+release by an agent.
+
+Review evidence is version-bound. A reviewer writes one line on the linked node:
+
+    REVIEW <node> dimension=<d> verdict=approve|changes head_sha=<sha> review_round=<n>
+
+with head_sha and review_round copied from the claimed wisp's metadata, the node's when
+the wisp lacks one. The exit gate counts only a REVIEW carrying both tokens for the
+current head and round; its refusal names the missing or mismatched token and the values
+it expected. Closing or releasing the wisp does not end the claim: the yield stays bound
+to that verdict until it is written.
 
 Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role carries
 it, the architect that decomposed the epic writes it, and no other role may rewrite it.
