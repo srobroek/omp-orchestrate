@@ -17,6 +17,7 @@ function claims(observation?: ClaimObservation): ClaimState {
  return {
   recordClaim: () => { },
   observedClaim: () => observation,
+  heldClaim: () => observation,
   forgetClaim: () => { },
  };
 }

@@ -129,13 +129,22 @@ test("a held bead is a valid exit: status blocked plus ASK, claim retained", asy
 });
 
 describe("G4 activation refusal budget", () => {
- test("repeated invalid exits are bounded without rewriting shared state", async () => {
+ test("repeated invalid exits are bounded without rewriting shared state, and the valve is loud", async () => {
   bead!.metadata = { execution_kind: "git", stop_attempts: "bad" };
   expect((await gateExitContract(CTX))?.block).toBe(true);
   expect(JSON.parse((await gateExitContract(CTX))!.reason!).attempt).toBe(2);
-  expect(await gateExitContract(CTX)).toBeUndefined();
-  expect(await gateExitContract(CTX)).toBeUndefined();
   expect(issued).toEqual([]);
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  // The third strike accepts nothing and changes no owner, status or metadata; it leaves a
+  // NOTE where the architect reads and a warn line where the operator does, both naming
+  // the unmet checks, because an allowed-unaccepted exit is otherwise silent.
+  expect(issued).toHaveLength(1);
+  expect(issued[0]!.slice(0, 2)).toEqual(["comment", BEAD]);
+  expect(issued[0]![2]).toStartWith("NOTE exit allowed unaccepted after 3 refusals; claim retained; ");
+  expect(issued[0]![2]).toContain("reported: unsatisfied: comment.verb in [REPORTED]");
+  expect(issued[0]!.slice(3)).toEqual(["--actor", "A"]);
+  expect(warned.some(entry => entry.bead === BEAD && entry.attempts === 3 && Array.isArray(entry.failed_checks))).toBe(true);
+  expect(await gateExitContract(CTX)).toBeUndefined();
   expect(bead!.assignee).toBe("A");
   expect(bead!.status).toBe("in_progress");
  });
@@ -155,7 +164,7 @@ describe("G4 activation refusal budget", () => {
  test("closed invalid work is never reopened at the cap", async () => {
   bead!.status = "closed";
   for (let i = 0; i < 3; i++) await gateExitContract(CTX);
-  expect(issued).toEqual([]);
+  expect(issued.map(args => args[0])).toEqual(["comment"]);
   expect(bead!.status).toBe("closed");
  });
  test("completion of the first bead does not conceal another unfinished claim", async () => {
@@ -359,15 +368,38 @@ describe("G4 checked evidence", () => {
   linkedComments = [];
   expect((await gateExitContract(ctx))?.block).toBe(true);
  });
- test("historical linked verdict cannot satisfy the current head and round", async () => {
+ test("historical linked verdict cannot satisfy the current head and round, and the refusal names the mismatch", async () => {
   bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2 } };
   linked = ["node"];
   linkedBead = { id: "node", metadata: { head_sha: "old", review_round: 1 } };
   linkedComments = [{ text: "REVIEW node head_sha=old review_round=1" }];
   const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
-  expect((await gateExitContract(ctx))?.block).toBe(true);
+  const refused = await gateExitContract(ctx);
+  expect(refused?.block).toBe(true);
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse(refused!.reason!);
+  expect(verdict.failed_checks).toEqual([{
+   check: "verdict",
+   detail: "unsatisfied: linked.comment.verb in [REVIEW, BLOCKED] -- REVIEW on node carries head_sha=old, expected head_sha=new and carries review_round=1, expected review_round=2; the expected values are the claimed bead's metadata, else the node's",
+  }]);
   linkedComments = [{ text: "REVIEW node head_sha=new review_round=2" }];
   expect(await gateExitContract(ctx)).toBeUndefined();
+ });
+ test("a verdict written without the version tokens is refused naming each token it lacks", async () => {
+  // Measured (omp-orchestrate-gqx): the reviewer wrote `head 73018a2`, and the bare
+  // predicate gave it nothing to fix. A comment with a verb outside the set is not named.
+  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1 } };
+  linked = [];
+  linkedBead = { id: "node", metadata: { head_sha: "abc1234" } };
+  linkedComments = [
+   { text: "REPORTED node src/api.ts" },
+   { text: "REVIEW node dimension=behavior verdict=approve head abc1234" },
+  ];
+  const reviewer = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(reviewer))!.reason!);
+  expect(verdict.failed_checks).toEqual([{
+   check: "verdict",
+   detail: "unsatisfied: linked.comment.verb in [REVIEW, BLOCKED] -- REVIEW on node lacks head_sha=abc1234 and lacks review_round=1; the expected values are the claimed bead's metadata, else the node's",
+  }]);
  });
  test.each(["traversal", "symlink", "missing"])("artifact %s is not contained evidence", async kind => {
   await writeFile(path.join(fixture, "outside"), "outside");
@@ -624,6 +656,35 @@ describe("G4 unclaimed exit", () => {
   // A worker revived after a crash holds a claim this process never observed.
   expect((await gateExitContract(CTX, { result: { data: "done" } }))?.block).toBe(true);
   expect(await gateExitContract(CTX, { result: { data: "done" } })).toBeUndefined();
+ });
+
+ test("a claim G2 or G5 forgot still binds the exit: the never-claimed path is not reachable by forgetting", async () => {
+  // Measured (omp-orchestrate-cdo): the forgotten claim took the one-shot reminder, and
+  // the yield after that was accepted with the contract never judged.
+  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
+  claims.forgetClaim();
+  bead = { id: BEAD, status: "closed", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+  const first = await gateExitContract(CTX, { result: { data: "done" } });
+  expect(first?.block).toBe(true);
+  expect(JSON.parse(first!.reason!)).toMatchObject({ bead: BEAD, attempt: 1 });
+  const second = await gateExitContract(CTX, { result: { data: "done" } });
+  expect(JSON.parse(second!.reason!)).toMatchObject({ bead: BEAD, attempt: 2 });
+  // NO_WORK is a claimless token and buys nothing here: the third yield is allowed by the
+  // refusal budget alone, and the NOTE records that nothing was accepted.
+  expect(await gateExitContract(CTX, { result: { data: "NO_WORK" } })).toBeUndefined();
+  expect(issued.map(args => args[0])).toEqual(["comment"]);
+ });
+
+ test("a claim recorded after a forget replaces the bound one: only the new bead is judged", async () => {
+  claims.recordClaim({ actor: "A", beadIds: ["first"] });
+  claims.forgetClaim();
+  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
+  // Were "first" still bound it would be refused: held, unreported.
+  linkedBead = { id: "first", status: "in_progress", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+  bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+  comments = [{ text: `ASK ${BEAD} question: which API?` }];
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(issued).toEqual([]);
  });
 
  test("a declared NO_WORK exit is allowed immediately", async () => {

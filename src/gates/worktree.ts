@@ -8,15 +8,16 @@
  *
  * A gate that catches slips refuses on evidence, never on its absence. A product
  * mutation is refused when the claimed bead is readable and proves the loss: assigned
- * to another actor, or closed. A bead the store cannot read -- `bd` missing, slow,
- * over budget, or answering nothing -- proves nothing, so the call proceeds and the
- * cause is logged. Narrowly recognized Beads controls keep their grammar on a readable
- * bead: reopen needs the closed bead this actor still holds, reclaim the reopened one,
- * release current ownership. A comment on the claimed bead is admitted once this
- * session has released it, so the terminal report may follow the release. A bead this
- * actor closed ends the claim: product work or a comment on it forgets the claim rather
- * than being refused, while other `bd` commands on it stay under the reopen-then-reclaim
- * grammar. Uninspectable edit payloads are refused rather than silently reduced to a
+ * to another actor. A bead the store cannot read -- `bd` missing, slow, over budget, or
+ * answering nothing -- proves nothing, so the call proceeds and the cause is logged.
+ * Narrowly recognized Beads controls keep their grammar on a readable bead: reopen needs
+ * the closed bead this actor still holds, reclaim the reopened one, release current
+ * ownership. A bead this actor closed is finished, not lost: the claim stays, with the
+ * report, the handoff and the exit contract still hanging off it, and only a status
+ * write on the closed bead is steered to reopen-then-reclaim. One observation ends a
+ * claim: a read showing the assignee cleared, which only the holder's own release or the
+ * reaper writes. A read of the bead, a close, or product work after the close ends
+ * nothing. Uninspectable edit payloads are refused rather than silently reduced to a
  * cwd-only check.
  *
  * Every path is compared in the filesystem's own spelling. The declared tree comes from
@@ -412,22 +413,22 @@ function releasable(bead: BdBead, actor: string): boolean {
 /**
  * The refusal a readable bead proves, or `undefined` while it proves no loss.
  *
- * Loss is another actor's name on the bead, or a close. A released bead -- assignee
- * cleared, still open -- is held by nobody and taken from nobody, so `next` proceeds:
- * a worker bounced by G4 after its release must be able to repair its evidence. A bead
- * this actor closed is a slip of grammar rather than of ownership, and the refusal
- * names the recovery instead of an owner.
+ * Loss is another actor's name on the bead. A released bead -- assignee cleared -- is held
+ * by nobody and taken from nobody, so `next` proceeds: a worker bounced by G4 after its
+ * release must be able to repair its evidence. A bead this actor closed is still its own:
+ * the report, the handoff and the exit contract all follow the close, so product work and
+ * comments proceed, and only a status write on the closed bead is a slip of grammar, whose
+ * refusal names the recovery instead of an owner.
  */
-function ownershipRefusal(bead: BdBead, actor: string, next: string): string | undefined {
+function ownershipRefusal(bead: BdBead, actor: string, next: string, control: ConflictControl | undefined): string | undefined {
  const assignee = typeof bead.assignee === "string" && bead.assignee.length > 0 ? bead.assignee : undefined;
  if (assignee !== undefined && assignee !== actor) {
   return `claimed bead '${bead.id}' is now assigned to '${assignee}', not '${actor}'; another actor owns it, so ${next} is refused`;
  }
- if (bead.status !== "closed") return undefined;
- if (assignee === actor) {
+ if (bead.status === "closed" && assignee === actor && control === "write") {
   return `claimed bead '${bead.id}' is closed; run 'bd reopen ${bead.id}' and 'bd update ${bead.id} --claim --json' before ${next}`;
  }
- return `claimed bead '${bead.id}' was closed by another actor, so ${next} is refused`;
+ return undefined;
 }
 
 /** One claimed bead as this call read it. `failure` is why the read answered nothing. */
@@ -457,20 +458,17 @@ export async function gateWorktreeScope(
   beadViews.push({ beadId, bead, failure: bead === null ? lastBdFailure() : undefined, control: controls[index] });
  }
 
- // A bead this actor closed is finished, not lost. Refusing every later edit would hold
- // the session hostage until its next claim command, so product work — and a comment on
- // the finished bead — forgets the claim instead and falls open as it does for a session
- // that never claimed. Any other command naming `bd`, wrapped or literal, stays under
- // the recovery grammar: reopen and reclaim keep the claim so the recovery stays
- // observed, and a mention that is not one is refused with the grammar named.
- if (beadViews.every(({ bead }) => bead?.status === "closed" && bead.assignee === claim.actor)) {
-  const command = toolName === "bash" ? input.command : undefined;
-  const namesBd = typeof command === "string" &&
-   splitSegments(command).some(segment => segment.some(token => token.split(/[ \t]+/).includes("bd")));
-  if (!namesBd || controls.some(control => control === "comment")) {
-   claims.forgetClaim();
-   return undefined;
-  }
+ // Only a release ends a claim: the assignee cleared by the holder's own fenced write or
+ // by the reaper, seen on a read. A close is not one -- the closed bead's report, handoff
+ // and exit contract still hang off the claim -- and neither is a read of the bead nor
+ // product work after the close. Measured (omp-orchestrate-cdo): `bd close <wisp>` then
+ // `echo hello` dropped the claim, and the yield after the next was accepted with the
+ // verdict never judged. Once released, product work falls open as it does for a session
+ // that never claimed; a recognized Beads control keeps its grammar on the released bead,
+ // so a foreign actor, a reopen or a reclaim of a bead nobody holds is still judged below.
+ if (!hasControl && beadViews.every(({ bead }) => bead !== null && (bead.assignee === undefined || bead.assignee === ""))) {
+  claims.forgetClaim();
+  return undefined;
  }
 
  for (const { beadId, bead, failure, control } of beadViews) {
@@ -490,7 +488,7 @@ export async function gateWorktreeScope(
    continue;
   }
   if (!hasControl || control === "write" || control === "comment") {
-   const refusal = ownershipRefusal(bead, claim.actor, control === undefined ? "mutating product files" : "writing to it");
+   const refusal = ownershipRefusal(bead, claim.actor, control === undefined ? "mutating product files" : "writing to it", control);
    if (refusal !== undefined) return { block: true, reason: refusal };
   }
   if (control === "reopen" && (bead.status !== "closed" || bead.assignee !== claim.actor)) {
