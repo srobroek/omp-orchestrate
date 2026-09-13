@@ -65,6 +65,12 @@ After installing, restart the session. OMP loads a new extension module at start
 `omp plugin link <checkout>` attaches a development checkout instead of a marketplace
 install. Use it to work on the plugin. Run the plugin from a marketplace install.
 
+Never point `omp plugin marketplace add` at a local checkout. OMP copies the whole directory
+into `~/.omp/plugins/cache/plugins/`, untracked files included: the checkout's
+`.beads/embeddeddolt` store, `.beads/backups`, `.beads/interactions.jsonl`, `.orchestration/`
+and `scratch/`. The plugin deletes those five paths from its own cache entry at activation and
+logs the removal once; the GitHub install above ships tracked files only.
+
 ## Configure
 
 The plugin ships its six required OMP settings and the model binding for each core agent as
