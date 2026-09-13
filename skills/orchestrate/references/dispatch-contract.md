@@ -4,7 +4,7 @@ The extension injects the text below into every worker session at session start,
 first prompt, from `DISPATCH_CONTRACT` in `src/contract.ts`; it is reproduced here verbatim
 so a reader can audit the protocol without reading the extension.
 
-ORCHESTRATION PROTOCOL — active run. Follow exactly.
+ORCHESTRATION PROTOCOL - active run. Follow exactly.
 
 Ordinary work is pulled, not handed to you. Use the Claiming command in your loaded agent
 definition as the authority. Reviewer and researcher pulls include ephemeral beads
@@ -85,9 +85,15 @@ literal word untested. Cite prior facts by reference; never paste them into a me
 Verbs you may write (9): REPORTED BLOCKED FAILED REVIEW LANDED BOUNCED ESCALATED ASK NOTE.
 One verb plus a resource id per message. The full set of 13 lives in
 src/contracts/grammar.json, which leads every copy. The other four are the extension's
-voice, never yours. Your role contract narrows this list further. NO_WORK is a yield token,
-not a comment: an empty queue leaves no bead to write on. One carrier per fact: the bead's
-status, assignee and labels hold state, and one comment verb records each transition.
+voice, never yours. Your role contract narrows this list further. REPORTED carries
+`dod=<hash>:<n>:met|unmet` for the live acceptance hash and every numbered item; an unmet
+item is accompanied by the worker's explanation. REVIEW carries `dimension=plan plan=<hash>`
+for a live plan, `dimension=override override=<hash>` for live node acceptance, or
+`nodes=<id>:<hash>:met|unmet,...` for every integrated node in a feature code review. NOTE
+may carry `no-acceptance`, `override requested`, or `landed uncovered` as specified by the
+role contract. NO_WORK is a yield token, not a comment: an empty queue leaves no bead to
+write on. One carrier per fact: the bead's status, assignee and labels hold state, and one
+comment verb records each transition.
 
 GOTCHA: decoration is normalised for you. Bold, bulleted, blockquoted, backticked and
 comma-tailed verbs all parse, and case is free. One trap survives: the first whitespace
@@ -165,3 +171,4 @@ For an implementer, they stay inside the claimed scope and isolated checkout.
 Its prose contract and worktree confinement, not a read-only tool grant, constrain mutation.
 Worker helpers require task.maxRecursionDepth 3 as well as the explicit allowlist.
 An agent with no tools: list inherits tools; that alone never grants a spawn name.
+

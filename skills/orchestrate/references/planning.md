@@ -34,9 +34,10 @@ understood, and agents update state live. It is not a static authored graph.
 
 1. Split the work into tasks small enough for one worker. Give every task a disjoint `scope`:
    tracked-file globs for git work, or canonical artifact and resource prefixes for non-git
-   work. Serialize overlapping scopes with a dependency.
+   work. Serialize overlapping scopes with a dependency. Every routed node gets numbered
+   `--acceptance` items; an empty acceptance field is not a valid route.
 2. One bead per task under its feature: `bd create "<title>" --parent
-   <feature> --labels orc-node --metadata '{"role":"<role>", <rest of the envelope>}'
+   <feature> --labels orc-node --acceptance "1. <criterion>\n2. <criterion>" --metadata '{"role":"<role>", <rest of the envelope>}'
    --silent`.
 3. Encode dependencies with `bd dep add <dependent> <dependency>`; the dependency must close
    before the dependent becomes ready. `bd dep cycles` must stay clean, and `bd` rejects a
@@ -47,10 +48,16 @@ understood, and agents update state live. It is not a static authored graph.
    `outside epic` warning naming a merge bead is expected and correct -- merge beads are
    deliberately unparented, and `work → merge bead` is the required edge direction. The same
    warning naming anything else is a real finding. Validation needs no swarm marker, so it
-   runs on a bare epic.
+   runs on a bare epic. After validation, file one plan-review wisp under the epic before the
+   first worker wave.
 5. Drive execution off the ready front: `bd ready --parent <epic>
    --metadata-field role=<role> --unassigned --claim --json`, run by the worker, not by
-   you.
+   you. The implementer pull is refused until the epic has an approve `REVIEW` whose `plan=`
+   equals the live plan hash, unless `metadata.plan_review=off` is recorded.
+
+`plan_hash` is recomputed from live `orc-node` descendants before each pull. It includes each
+child id, scope, dependency edges and live acceptance hash. Any edit to children, scope,
+dependencies or acceptance invalidates prior approval.
 
 `bd swarm status <epic>` is a coarse progress view. It omits external blockers, gates, and
 deferral, so it never proves a run is healthy. Create a `bd swarm` marker only when durable

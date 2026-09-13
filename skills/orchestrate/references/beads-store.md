@@ -181,8 +181,11 @@ derives it from the fields below, and `orc_run_status` renders the same derivati
 | `in_review` | `in_progress` | an open review wisp linked to the node | the architect, when it creates the review wisps |
 | `changes_requested` | `in_progress` | `REVIEW … verdict=changes` on the node at the current head and round | the reviewer's comment |
 | `approved` | `in_progress` | every required `REVIEW … verdict=approve` at the current head and round; the wisps closed | the reviewers' comments |
-| `merged` | `closed` | `LANDED` and `metadata.merge_sha` on the merge bead; `bd close <bead> --reason merged` on the node | shepherd |
-| `dismissed` | `closed` | `bd close <bead> --reason dismissed` after accepted non-git evidence | architect |
+| `merged` | `closed` | `LANDED <sha> merge=<merge-bead-id>` on the node, then `bd close <node> --reason merged`; feature closes with the same reason after every `orc-node` child is closed | landing sweep |
+| `dismissed` | `closed` | `REVIEW … verdict=approve` covers the node, then `bd close <node> --reason dismissed` after accepted non-git evidence | landing sweep |
+| `deferred` | `deferred` | fenced claim release for missing acceptance, with `NOTE no-acceptance` | claim gate |
+| `landed uncovered` | `in_progress` or `open` | landing evidence exists but no covering approve; `NOTE landed uncovered: merge=<id> head=<sha>` is present | landing sweep, auditor derives attention |
+| `override pending` | `in_progress` or `open` | `NOTE override requested` exists and its single review wisp is open | landing sweep, auditor derives attention |
 | `failed` | `blocked` | `FAILED` comment; `bd update <bead> --status blocked` | claimant |
 | `waiting_human` | `blocked` | `ASK` comment (or a shepherd's `ESCALATED` carrying the same fields); a human gate when the bead had not started | the holding actor |
 | `waiting_gate` | `open` | a gate bead blocks it; `BLOCKED` names the gate; assignee cleared | the actor that discovered the wait |
@@ -230,10 +233,10 @@ Anchors are stamped so any later session can find where work lives:
 | Task dispatched | architect | nothing to provision: an isolated child runs in a clone of the architect's clone, on the feature branch at its head; a non-isolated child inherits the architect's cwd. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
 | Worker reported | worker | `git push origin HEAD:$ORC_PUSH_REF`, then `head_sha=<final commit>` and `REPORTED … pushed=omp/task/<id>@<sha>` before yield. G4 runs `git ls-remote origin refs/heads/omp/task/<id>`, refuses the yield unless it shows `head_sha`, and stamps `pushed_sha=<observed sha>` itself |
 | Successful child result collected | architect | verify the `omp/task/<id>` capture in your clone, or `origin/omp/task/<id>`, against the reported head before integrating; include accepted dirty delta in the source snapshot |
-| Integration pushed | architect | `git push origin <branch>`, then `--set-metadata head_sha=<sha>`. G4 refuses the architect's yield, terminal or paused, while `git ls-remote origin refs/heads/<branch>` differs from `head_sha`, and stamps `pushed_sha` when it matches |
+| Integration pushed | architect | `git push origin <branch>`, then `--set-metadata head_sha=<sha>` and `--set-metadata integrated='["<node-id>",…]'` on the **feature** at every feature-branch push. The set is the review's `nodes=` coverage |
 | Recovery or branch cleanup | architect | the reaper releases a dead holder's claim under the lease fence and records `RECOVERED`; only the architect rewrites anchors or deletes branches, after the patch-containment scan |
 | Claim | claim-holder | a claim binds a role to a bead, never to a path. Every claimant works in the checkout the runtime gave it; `metadata.worktree` names source ownership and relocates nobody |
-| Merge | shepherd | `bd update <bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` |
+| Merge | landing sweep | `bd update <merge-bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'`, write `LANDED <sha> merge=<merge-bead-id>` on merge and origin node, then close covered nodes and the feature with `--reason merged` |
 
 Add a `repo` key when work lands in a different repository than the run epic. `--metadata`
 merges with existing keys, so stamps never clobber `node` or `scope`. Branch, push, PR, and
@@ -391,8 +394,8 @@ below are for the questions the report does not answer.
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
 | open waits | `bd gate list`, `bd ready --gated --json`, and the `BLOCKED landing:` comments on open merge beads |
 | resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`. Actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity). Location = `metadata.push`/`branch` on origin; every clone died with its agent. Surviving code = `git ls-remote origin 'refs/heads/omp/task/*'` |
-| unintegrated code | integration is cherry-pick or squash, so ancestry and `git cherry` prove nothing: under squash every branch commit reads `+`. Landing proof is tree equality, `git merge-tree --write-tree <merge>^ <head>` equal to `git rev-parse <merge>^{tree}`, or one combined patch-id, `git diff <base> <head> \| git patch-id --stable` equal to `git diff <merge>^ <merge> \| git patch-id --stable` |
-| close-out gate | `orc_run_status` with `epic=<run>`: `CLOSE-OUT: clean` means every row below is known and empty. The unintegrated-code row above proves a `merge_sha` stamp against the tree. `/orchestrate-stop` makes the in-progress check itself before it removes the marker; `--force` skips it |
+| unintegrated code | integration is cherry-pick or squash, so ancestry does not prove containment. In the bare clone, fetch the feature branch and each candidate `omp/task/<id>` ref, then run `git cherry <feature-head> <pushed_sha> <base>` where `base` is the node or epic `base_sha`, or `git merge-base` of the two. Containment means no line starts with `+`; a fetch or comparison failure is `unverified` and blocks close-out |
+| close-out gate | `orc_run_status` with `epic=<run>`: `CLOSE-OUT: clean` means every row below is known and empty. The unintegrated-code row above proves patch-id containment against the reviewed pre-squash head. `/orchestrate-stop` makes the in-progress and containment checks itself before it removes the marker; `--force` skips them |
 | stranded beads | the `stranded` row: open and unassigned, absent from `bd ready --include-ephemeral`, and not blocked, so no worker can ever pull it. Then check each nonempty `assignee` in the rollup against a live actor |
 
 A bead that is neither ready nor claimed counts as stranded. The store never reports a dead

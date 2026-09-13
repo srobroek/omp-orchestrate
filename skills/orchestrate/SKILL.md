@@ -41,7 +41,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - DEFAULT Check small facts directly. Delegate substantial work, not every lookup.
 - MUST Retain independent review. Add another specialist only for a material risk or unresolved gap, or when project policy requires it.
 - MUST Keep feature-tree writes under the architect's control. Only the architect or one scoped helper may write there at a time.
-- MUST Spawn the architect and every implementer `isolated: true` with apply=false. Before integration, verify the terminal result and the pushed `omp/task/<id>` ref at its head. Integrate captures serially. After each integration, push the feature branch.
+- MUST Spawn the architect and every implementer `isolated: true` with apply=false. Before integration, verify the terminal result, `dod=` coverage and the pushed `omp/task/<id>` ref at its head. Integrate captures serially. After each integration, push the feature branch and stamp the feature's `metadata.integrated` node-id array.
 - MUST Confine helpers to the owner's checkout and scope. Keep their grants unchanged.
 - NOT Let helpers claim beads or commit. They cannot touch PRs or manage worktrees either.
 - MUST Collect a helper's terminal result before another writer acts. A job receipt is not completion.
@@ -54,8 +54,8 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - MUST Leave dead-claim release to the reaper. It releases under the claim fence on the holder's terminal frame, or on registry `aborted` plus a lapsed lease read fresh; a lapsed lease alone proves nothing.
 - NOT Infer authority from age or a fresh read. Unknown ownership or evidence permits neither claim release nor cleanup.
 - NOT Treat gates as isolation or atomic authorization.
-- NOT Let the lead claim beads. Workers cannot rewrite existing routing; only shepherds merge.
 - MUST Keep decisions on beads. Messages carry ids rather than relayed findings.
+- MUST Let the landing sweep write `LANDED`, close covered nodes with `--reason merged`, and close an all-closed feature. Architects never close nodes; they reopen a closed feature before filing a child. `/orchestrate-stop` refuses non-forced teardown when patch containment is unresolved.
 
 ## Tools and status
 
