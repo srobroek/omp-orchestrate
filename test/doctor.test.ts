@@ -201,15 +201,22 @@ describe("runDoctor", () => {
 		expectRow(report, "bd", "fail", "/opt/nowhere/bd not found");
 	});
 
-	test("missing required binaries fail; a missing bun warns and leaves ok standing", async () => {
-		const report = await doctor({ ...healthy(), "wt --version": null, "bun --version": null });
-		expect(row(report, "wt").status).toBe("fail");
+	test("a missing git fails; a missing bun warns and leaves ok standing", async () => {
+		const report = await doctor({ ...healthy(), "git --version": null, "bun --version": null });
+		expect(row(report, "git").status).toBe("fail");
 		expectRow(report, "bun", "warn", "worktree-sweep.ts");
 		expect(report.ok).toBe(false);
 
 		const optionalOnly = await doctor({ ...healthy(), "bun --version": null });
 		expect(optionalOnly.ok).toBe(true);
 		expect(renderDoctor(optionalOnly).split("\n")[0]).toBe("doctor: ok (1 warning)");
+	});
+
+	test("Worktrunk is the operator's, not the run's: absent is info, counted as neither warning nor failure", async () => {
+		const report = await doctor({ ...healthy(), "wt --version": null });
+		expectRow(report, "wt", "info", "Worktrunk not on PATH; optional, operator worktrees only");
+		expect(report.ok).toBe(true);
+		expect(renderDoctor(report).split("\n")[0]).toBe("doctor: ok (0 warnings)");
 	});
 
 	test("gh present but unauthenticated fails with the login repair", async () => {

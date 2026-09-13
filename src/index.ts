@@ -28,6 +28,7 @@ import { gateImplementerIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
+import { sweepInstallTree } from "./install-hygiene";
 import { createLeaseRenewer } from "./lease";
 import { runScope } from "./run-scope";
 import { injectLeadContract, isBoundRunActive, isLeadSession, registerRunCommands, renewLeadLease } from "./run-state";
@@ -37,6 +38,7 @@ import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
 import { registerConflictProbe } from "./tools/conflict-probe";
 import { registerDoctor } from "./tools/doctor";
+import { commandNotice } from "./tools/notice";
 import { registerRunStatus } from "./tools/run-status";
 import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 import { preflightSettings, registerWatchers } from "./watchers";
@@ -51,6 +53,12 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  const leadExitWatch = createLeadExitWatch(claims, process.cwd(), pi.sendMessage.bind(pi));
  const leases = createLeaseRenewer(pi, claims, renewLeadLease);
  pi.setLabel("Orchestrate");
+ // The one file operation outside a run: a marketplace copy of a local checkout carries
+ // the checkout's store and run state into the package tree, and only this package's own
+ // install root is touched (`install-hygiene.ts`). A failure is logged, never raised.
+ void sweepInstallTree(pi.logger).catch(error => {
+  pi.logger.error("orchestrate install hygiene failed", { error: error instanceof Error ? error.message : String(error) });
+ });
 
  // Deterministic surfaces the pull loop and the shepherd call by schema, not prose.
  // Activation is the moment the coordination contract starts to matter, so the
@@ -257,7 +265,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     const beads = ready[index];
     return `${role}: ${beads == null ? "unavailable" : `${beads.length} ready`}`;
    });
-   ctx.ui.notify(lines.join("\n"), ready.some(beads => beads === null) ? "warning" : "info");
+   commandNotice(pi, ctx, lines.join("\n"), ready.some(beads => beads === null) ? "warning" : "info");
   },
  });
 }
