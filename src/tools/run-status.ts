@@ -15,6 +15,7 @@
 
 import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdBlockedChecked, bdCyclesChecked, bdListChecked, metadataString, resetReadBudget } from "../bd";
+import { sameCommit } from "../gates/exit";
 
 /**
  * A bead's derived lifecycle state.
@@ -99,6 +100,22 @@ export interface UnlandedMerge {
 }
 
 /**
+ * A node whose recorded head is not known to be on origin. Under the architect runtime
+ * every role works in an isolated clone OMP deletes when the agent completes, so a commit
+ * that was never pushed is gone with it; the bead carries the proof, and this row reads
+ * nothing but the bead.
+ */
+export interface NotOnOrigin {
+ id: string;
+ /** `metadata.head_sha`, when the node recorded a head. */
+ head?: string;
+ /** `metadata.pushed_sha`, the head G4 saw on origin at the last yield, when there is one. */
+ pushed?: string;
+ /** `metadata.branch`, when the node names a branch without a push target. */
+ branch?: string;
+}
+
+/**
  * The close-out gate as data: what still stands between a run and `/orchestrate-stop`.
  *
  * A row is a list, or `null` when the read behind it did not answer, and `clean` holds
@@ -121,6 +138,11 @@ export interface CloseOut {
  undrainable: UndrainableMerge[];
  /** Merge beads not closed, with neither `merge_sha` nor `landing_state=landed`. */
  unlanded: UnlandedMerge[];
+ /**
+  * Open nodes whose work is not proven on origin: `head_sha` with a `pushed_sha` that is
+  * absent or names another commit, or a `branch` with no `push` target.
+  */
+ not_on_origin: NotOnOrigin[];
  clean: boolean;
 }
 
@@ -372,7 +394,10 @@ export interface CloseOutReads {
  * which of them are in scope. The merge rows are the two the shepherd queue cannot
  * answer itself: a merge bead missing an anchor is never matched by the cross-run
  * `bd ready` net, and a merge bead without `merge_sha` holds captured code the run has
- * not proven landed.
+ * not proven landed. The origin row is the one the clones cannot answer: a node whose
+ * `head_sha` no `pushed_sha` matches, or whose `branch` has no `push` target, holds work
+ * that lived only in a clone. Merge beads are left out of it: their `branch` and
+ * `head_sha` describe the feature they land, which carries its own row.
  */
 export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads: CloseOutReads): CloseOut {
  const scope = treeIds(tree);
@@ -384,6 +409,7 @@ export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads:
  const stranded: string[] = [];
  const undrainable: UndrainableMerge[] = [];
  const unlanded: UnlandedMerge[] = [];
+ const notOnOrigin: NotOnOrigin[] = [];
  for (const bead of beads) {
   const status = bead.status ?? "";
   const labels = bead.labels ?? [];
@@ -395,6 +421,19 @@ export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads:
    if (status === "in_progress") inProgress.push(bead.id);
    if (isBlocked && status !== "closed" && status !== "deferred") blocked.push(bead.id);
    if (status === "open" && !bead.assignee && !isBlocked && ready !== null && !ready.has(bead.id)) stranded.push(bead.id);
+  }
+
+  if (scope.has(bead.id) && status !== "closed" && !isMergeBead) {
+   const head = metadataString(bead, "head_sha");
+   const pushed = metadataString(bead, "pushed_sha");
+   const branch = metadataString(bead, "branch");
+   if (head !== undefined && (pushed === undefined || !sameCommit(head, pushed))) {
+    const entry: NotOnOrigin = { id: bead.id, head };
+    if (pushed !== undefined) entry.pushed = pushed;
+    notOnOrigin.push(entry);
+   } else if (branch !== undefined && metadataString(bead, "push") === undefined) {
+    notOnOrigin.push({ id: bead.id, branch });
+   }
   }
 
   if (status === "open" && (isMergeBead || metadataString(bead, "role") === "shepherd")) {
@@ -426,10 +465,22 @@ export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads:
   stranded: ready === null ? null : stranded,
   undrainable,
   unlanded,
+  not_on_origin: notOnOrigin,
   clean:
    cycles !== null && cycles.length === 0 && inProgress.length === 0 && blocked.length === 0 && ready !== null && stranded.length === 0
-   && undrainable.length === 0 && unlanded.length === 0,
+   && undrainable.length === 0 && unlanded.length === 0 && notOnOrigin.length === 0,
  };
+}
+
+/** A sha as the report prints it: the first seven digits, or the text as written when it is not one. */
+function short(sha: string): string {
+ return /^[0-9a-f]{7,40}$/i.test(sha) ? sha.slice(0, 7) : sha;
+}
+
+/** One node of the origin row: what it recorded, and what origin was last seen holding. */
+function describeNotOnOrigin(entry: NotOnOrigin): string {
+ if (entry.head === undefined) return `${entry.id} (${entry.branch}, no push target)`;
+ return `${entry.id} (head ${short(entry.head)}, ${entry.pushed === undefined ? "never pushed" : `pushed ${short(entry.pushed)}`})`;
 }
 
 /** The close-out section: one line when clean, otherwise one line per row that is not. */
@@ -450,6 +501,9 @@ function renderCloseOut(gate: CloseOut, lines: string[]): void {
  }
  if (gate.unlanded.length > 0) {
   lines.push(`  unlanded (${gate.unlanded.length}): ${gate.unlanded.map(m => `${m.id} (${m.branch === undefined ? m.state : `${m.branch}, ${m.state}`})`).join("; ")}`);
+ }
+ if (gate.not_on_origin.length > 0) {
+  lines.push(`  not on origin (${gate.not_on_origin.length}): ${gate.not_on_origin.map(describeNotOnOrigin).join("; ")}`);
  }
 }
 

@@ -1,6 +1,7 @@
 /**
- * G6 — bd call discipline: the identity, the comment verb, the bug route, the nested
- * `omp`; and two refusals, the routed sync and a named database.
+ * G6 — bd call discipline: the identity, the comment verb, the bug route; three
+ * refusals, the routed sync, a named database and a taken-over push-ref variable; and
+ * the environment every role session pushes under.
  *
  * TTSR rules, converted. Each was advisory because a regex over a command string cannot
  * see whether a run is active and cannot parse a shell line. The verb condition ran from
@@ -13,13 +14,21 @@
  * `pi.sendMessage` and the command runs. `ToolCallEventResult` carries no advisory shape,
  * but `pi` is in scope inside the handler, so a notice needs no new return channel.
  *
- * The two refusals do block, and both guard the same invariant: one database per run,
- * open for writing in one lock domain at a time. `bd dolt push|pull|fetch|clone|sync`
- * from a spawned session is refused because the `bd` router runs those verbs in a
- * container whose `flock` the host never sees, so a second engine writes the journal
- * beside the host's writers; the lead syncs once at the barrier, after every agent has
- * yielded (`scratch/audit/research/ResCorruption.md`). `--db <path>` and `BEADS_DB=` are
- * refused in every role because they name a store other than the run's.
+ * The revised input also carries `ORC_PUSH_REF` for every role session: the origin
+ * branch (`omp/task/<registry id>`, {@link pushRefFor}) a worker pushes its capture to
+ * before it yields, so the commits survive the clone OMP deletes when the agent
+ * completes. G7 resolves the variable from that `env`; G4 checks the pushed head. The
+ * variable is plugin-owned: a caller's value is overwritten and a command that assigns
+ * it in its own text is refused.
+ *
+ * The refusals do block. Two guard one invariant: one database per run, open for writing
+ * in one lock domain at a time. `bd dolt push|pull|fetch|clone|sync` from a spawned
+ * session is refused because the `bd` router runs those verbs in a container whose
+ * `flock` the host never sees, so a second engine writes the journal beside the host's
+ * writers; the lead syncs once at the barrier, after every agent has yielded
+ * (`scratch/audit/research/ResCorruption.md`). `--db <path>` and `BEADS_DB=` are refused
+ * in every role because they name a store other than the run's. The third refuses a
+ * command that names its own `ORC_PUSH_REF` ({@link pushRefEditRefusal}).
  *
  * A pin check (`-C <run repo>` required on every call) existed here and was removed: the
  * run's database is reached from a worker's clone through the `.beads/redirect` written
@@ -31,9 +40,8 @@
  * Nothing here fires outside a run: `runScope` (`src/run-scope.ts`) — a valid marker in
  * the session checkout — is the whole discriminator, and a plain session in this
  * repository sees no gate at all. That is the defect the conversion exists to fix — a rule
- * condition matched every session that mentioned `bd`. The nested-`omp` notice moved here
- * from `rules/orc-no-nested-omp.md` for the same reason: its shell condition fired on an
- * `omp -p` probe in a session no run ever touched.
+ * condition matched every session that mentioned `bd`. A nested-`omp` notice once lived
+ * here too; G10 (`./nested`) refuses the process outright, so it is gone.
  *
  * Each check is pure and takes the parsed invocation, so the shell parsing stays at the
  * entry point and the predicates are testable without a tool event. A check that cannot
@@ -53,7 +61,7 @@ import type { ClaimState } from "../claim-state";
 import grammar from "../contracts/grammar.json";
 import { legacyRoleFromLabel, type OrcRole, orcRole, ROUTING_KEY, sessionRole } from "../identity";
 import { leadActor } from "../run-state";
-import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, effectiveSegments, splitFlag } from "../shell";
+import { BD_VALUE_FLAGS, type BdInvocation, BEAD_ID, bdInvocations, editsVariable, effectiveSegments, splitFlag } from "../shell";
 import { runScope } from "../run-scope";
 import { reviseBashEnv } from "./readonly";
 
@@ -362,6 +370,24 @@ const MOL_WISP_WRITES: Record<string, true> = { create: true, gc: true };
 
 /** The identity carriers, either of which attributes the write. */
 const ACTOR_VARS = ["BEADS_ACTOR", "BD_ACTOR"] as const;
+
+/**
+ * The variable naming the branch a worker pushes its capture to before it yields. G6
+ * sets it on every `bash` call of a role session in a run; G7 resolves `$ORC_PUSH_REF`
+ * in a refspec from the revised `env` and never from the command text.
+ */
+export const PUSH_REF_VAR = "ORC_PUSH_REF";
+
+/**
+ * The origin branch a session's capture is pushed to: `omp/task/<actor>`, the same name
+ * OMP gives the branch it captures from an isolated clone, so the pushed ref and the
+ * capture carry the same commits under one name. `actor` is the registry id
+ * ({@link childActor}), never the observed claim actor: the capture is named after the
+ * agent, and a claim made under another name does not move it.
+ */
+export function pushRefFor(actor: string): string {
+	return `omp/task/${actor}`;
+}
 
 /**
  * Whether this invocation writes to the bead store.
@@ -696,44 +722,19 @@ export const bugRouteNotice: BdCheck = invocation => {
 /** The advisory checks, in the order their notices read best. */
 const NOTICES: readonly BdCheck[] = [actorNotice, commentVerbNotice, bugRouteNotice];
 
-/** `omp` flags that start a fresh agent session rather than answer a query. */
-const NESTED_OMP_FLAGS: Record<string, true> = {
-	"-p": true, "--print": true, "--prompt": true, "--cwd": true, "--agent": true, "--session-dir": true,
-};
-
-/** Leading `NAME=value` words a shell strips before the program name. */
-const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
-
 /**
- * Notice: a role launched as a nested `omp` process instead of a `task` subagent.
+ * Refusal: a command that sets or unsets `ORC_PUSH_REF` in its own text.
  *
- * Reads the command's leaf segments, wrapper shells expanded, and speaks when one runs
- * `omp` with a flag that opens a session. `--config` anywhere on that segment exempts it:
- * the lead's rooted re-entry carries a run overlay and is the one sanctioned nested
- * process. Advisory, because the process runs either way; the notice tells the agent why
- * its claims from there will be dead and what to do instead.
+ * The variable is the plugin's: G6 writes it into the call's `env`, and G7 reads the
+ * destination of `git push origin HEAD:$ORC_PUSH_REF` from that `env` alone. An inline
+ * assignment (`ORC_PUSH_REF=main git push ...`), an `export`, or an `env NAME=` prefix
+ * would make the shell push somewhere the gate never judged, so the text is refused in
+ * every seat of a run. The same walk G1 uses for its sandbox variable: wrapper shells
+ * and `eval` expanded, transparent runners skipped.
  */
-export function nestedOmpNotice(command: string): string | undefined {
-	for (const segment of effectiveSegments(command)) {
-		let index = 0;
-		while (index < segment.length && ASSIGNMENT_WORD.test(segment[index] as string)) index++;
-		const head = segment[index];
-		if (head === undefined || head.slice(head.lastIndexOf("/") + 1) !== "omp") continue;
-		const flags = segment.slice(index + 1).map(token => splitFlag(token).flag);
-		if (flags.includes("--config")) continue;
-		const opener = flags.find(flag => NESTED_OMP_FLAGS[flag] === true);
-		if (opener === undefined) continue;
-		return (
-			`WARN nested omp: 'omp ${opener}' from a shell starts a process with no parent link. It does not ` +
-			`inherit BEADS_ACTOR, its claims are dead claims, and its receipts never reach the wave barrier; ` +
-			`stopping and restarting it replays the same failure. Roles in a run are spawned with 'task' ` +
-			`(isolated: true for an implementer). Read the cancelled worker's transcript (history://<name>) for ` +
-			`the refusal it hit, fix the cause on the bead, and re-dispatch; when the cause is outside the run, ` +
-			`write the escalation wisp and stop the wave. A probe outside the run, or the lead's rooted re-entry ` +
-			`with --config <plugin-root>/config/orchestrate.overlay.yml, is exempt.`
-		);
-	}
-	return undefined;
+export function pushRefEditRefusal(command: string): string | undefined {
+	if (!effectiveSegments(command).some(segment => editsVariable(segment, PUSH_REF_VAR))) return undefined;
+	return `${PUSH_REF_VAR} is set by the plugin: it names the branch your capture is pushed to, and a command that assigns or unsets it is refused. Push with 'git push origin HEAD:$${PUSH_REF_VAR}' and leave the variable alone.`;
 }
 
 /** The seat a refusal judges: the lead's, or a spawned session's with its declared role, if any. */
@@ -828,14 +829,16 @@ const REFUSALS: readonly BdRefusal[] = [syncRefusal, databaseRefusal, soleWriter
 
 /**
  * Refuse a `bd` call that would open a second store or a second engine, forge another
- * role's verb, or claim under no identity; otherwise hand every `bash` call this session's
- * identity through the tool's `env`, and warn about a write this run cannot attribute,
- * cannot read, or cannot route, and about a role started as a nested `omp` process.
+ * role's verb, or claim under no identity, and any command that takes over the push-ref
+ * variable; otherwise hand every `bash` call this session's identity through the tool's
+ * `env` -- and, for a role session, the branch its capture is pushed to -- and warn about
+ * a write this run cannot attribute, cannot read, or cannot route.
  *
  * The identity rides on `env` rather than on a command prefix because `env` reaches every
  * process the call starts: a `cd x && bd ...` chain, a helper script that runs bd inside,
  * a nested tree. The campaign found the prefix covered only a lone `bd` and every other
- * shape wrote as the git user. A call whose `env` already names an actor is left alone.
+ * shape wrote as the git user. A call whose `env` already names an actor is left alone;
+ * `ORC_PUSH_REF` is not the caller's to name, so a value the call carries is overwritten.
  */
 export async function gateBdDiscipline(
 	pi: ExtensionAPI,
@@ -848,8 +851,10 @@ export async function gateBdDiscipline(
 	if (typeof command !== "string" || command.length === 0) return undefined;
 	if ((await runScope(ctx)) === null) return undefined;
 
+	const pushRefEdit = pushRefEditRefusal(command);
+	if (pushRefEdit !== undefined) return { block: true, reason: pushRefEdit };
+
 	const invocations = bdInvocations(command);
-	const nestedOmp = nestedOmpNotice(command);
 	const seat: Seat = { lead: sessionRole(pi) === "lead", role: orcRole(ctx) };
 	for (const invocation of invocations) {
 		for (const refusal of REFUSALS) {
@@ -886,7 +891,7 @@ export async function gateBdDiscipline(
 			(invocation.subcommand === "claim" || invocation.hasClaim) &&
 			!invocationCarriesActor(invocation, env),
 	);
-	const notices: string[] = nestedOmp === undefined ? [] : [nestedOmp];
+	const notices: string[] = [];
 	let deliveredActorNotice = false;
 	for (const invocation of invocations) {
 		for (const notice of NOTICES) {
@@ -909,7 +914,16 @@ export async function gateBdDiscipline(
 		);
 		if (deliveredActorNotice) arbiter?.handledToolCalls.add(toolCallId);
 	}
-	if (injected === undefined) return undefined;
-	if (invocations.some(writesBeads)) arbiter?.handledToolCalls.add(toolCallId);
-	return reviseBashEnv(input, { BEADS_ACTOR: injected, BD_ACTOR: injected });
+	// The branch a role's capture is pushed to, named after the agent the registry knows
+	// this session as. The lead and a role-less helper push nothing of their own.
+	const registryId = seat.role === undefined ? undefined : childActor(ctx);
+	const additions: Record<string, string> = {};
+	if (injected !== undefined) {
+		additions.BEADS_ACTOR = injected;
+		additions.BD_ACTOR = injected;
+		if (invocations.some(writesBeads)) arbiter?.handledToolCalls.add(toolCallId);
+	}
+	if (registryId !== undefined) additions[PUSH_REF_VAR] = pushRefFor(registryId);
+	if (Object.keys(additions).length === 0) return undefined;
+	return reviseBashEnv(input, additions);
 }

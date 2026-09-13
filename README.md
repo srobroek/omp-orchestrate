@@ -65,6 +65,12 @@ After installing, restart the session. OMP loads a new extension module at start
 `omp plugin link <checkout>` attaches a development checkout instead of a marketplace
 install. Use it to work on the plugin. Run the plugin from a marketplace install.
 
+Never point `omp plugin marketplace add` at a local checkout. OMP copies the whole directory
+into `~/.omp/plugins/cache/plugins/`, untracked files included: the checkout's
+`.beads/embeddeddolt` store, `.beads/backups`, `.beads/interactions.jsonl`, `.orchestration/`
+and `scratch/`. The plugin deletes those five paths from its own cache entry at activation and
+logs the removal once; the GitHub install above ships tracked files only.
+
 ## Configure
 
 The plugin ships its six required OMP settings and the model binding for each core agent as
@@ -298,6 +304,21 @@ You started the lead session without the overlay, or your global configuration o
 row. Restart the session with `omp --config <plugin-root>/config/orchestrate.overlay.yml`.
 Accepting the warning leaves captured branches, deliberate integration, and cross-worker
 claim exclusion unavailable.
+
+### Slash commands under `omp -p`
+
+Print mode attaches no UI, so OMP drops every notification a command would show. The
+plugin prints each `/orchestrate-*` and `/orchestrate-doctor` result itself: to stdout
+under `omp -p`, and to stderr under `omp -p --mode json`, where stdout carries the event
+stream. A warning or error line starts with `warning:` or `error:`. Inside a spawned
+agent the same commands print nothing, because the lead's terminal is not theirs.
+
+### `INFO wt` in the doctor report
+
+`wt` (Worktrunk) is optional. No role uses it: the lead spawns roles with `task`,
+isolation clones the checkout, and captures reach `origin` by push. When `wt` is absent
+the row reads `Worktrunk not on PATH; optional, operator worktrees only`, and the
+verdict ignores it.
 
 ### Unknown agent or a missing helper
 

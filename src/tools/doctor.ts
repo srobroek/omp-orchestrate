@@ -27,8 +27,10 @@ import { probeLandingCapabilities } from "../landing";
 import { probeStore } from "../store-probe";
 import { OVERLAY_FILE, readSettings, settingsDeviations } from "../watchers";
 import { type Exec, spawnExec } from "./bot-review-probe";
+import { commandNotice } from "./notice";
 
-export type CheckStatus = "pass" | "warn" | "fail";
+/** `info` is a row that is neither a defect nor a degradation: present for the operator's eye only. */
+export type CheckStatus = "pass" | "warn" | "fail" | "info";
 
 export interface DoctorCheck {
 	name: string;
@@ -94,6 +96,17 @@ async function optionalBinary(exec: Exec, bin: string, cwd: string, consumer: st
 	const found = await version(exec, bin, cwd);
 	if (found === null) return { name: bin, status: "warn", detail: `not found on PATH; ${consumer} fails without it` };
 	return { name: bin, status: "pass", detail: found.parsed?.text ?? found.text };
+}
+
+/**
+ * Worktrunk. No agent uses it: the lead spawns every role with `task`, isolation clones
+ * the primary, and captures travel through `origin`. An operator may still keep their own
+ * `wt` worktrees, so the row reports what is there and never changes the verdict.
+ */
+async function checkWorktrunk(exec: Exec, cwd: string): Promise<DoctorCheck> {
+	const found = await version(exec, "wt", cwd);
+	if (found === null) return { name: "wt", status: "info", detail: "Worktrunk not on PATH; optional, operator worktrees only" };
+	return { name: "wt", status: "pass", detail: `${found.parsed?.text ?? found.text} (optional, operator worktrees only)` };
 }
 
 async function checkBd(exec: Exec, cwd: string): Promise<DoctorCheck> {
@@ -270,7 +283,7 @@ export async function runDoctor(ctx: DoctorContext, exec: Exec = spawnExec): Pro
 	const observed = readSettings();
 	const [bd, wt, git, gh, bun, overlay, agents, store, landing] = await Promise.all([
 		checkBd(exec, cwd),
-		requiredBinary(exec, "wt", cwd, "every architect and worker tree is a Worktrunk checkout"),
+		checkWorktrunk(exec, cwd),
 		requiredBinary(exec, "git", cwd, "every capture and integration step is a git operation"),
 		checkGh(exec, cwd),
 		// `omp` itself runs on bun, but its launcher may reach a bundled copy that is not on PATH.
@@ -295,8 +308,8 @@ export function renderDoctor(report: DoctorReport): string {
 }
 
 const DESCRIPTION = [
-	"Report the run prerequisites with pass/warn/fail rows: bd (1.2 or newer), wt, git, gh and its",
-	"authentication, bun for the worktree sweep, the shipped settings overlay, the required task and",
+	"Report the run prerequisites with pass/warn/fail rows: bd (1.2 or newer), git, gh and its",
+	"authentication, bun for the worktree sweep, wt for the operator's own worktrees (optional), the shipped settings overlay, the required task and",
 	"bash settings, one row per model role (plan, task, smol, reviewer must each resolve), the core and borrowed agents, the beads store probe,",
 	"and the repository's landing capabilities. Reads only; never writes a file, a bead, or a",
 	"setting. Call it before /orchestrate-start, or when a run misbehaves.",
@@ -328,7 +341,7 @@ export function registerDoctor(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			const report = await runInDiscoveryScope(() => runDoctor(ctx));
 			const level = report.ok ? (report.checks.some(check => check.status === "warn") ? "warning" : "info") : "error";
-			ctx.ui.notify(renderDoctor(report), level);
+			commandNotice(pi, ctx, renderDoctor(report), level);
 		},
 	});
 }

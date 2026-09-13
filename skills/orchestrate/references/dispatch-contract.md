@@ -27,18 +27,24 @@ Claim error naming a serialization or transaction conflict -- contention, not ab
 
     {"error":"dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with ..."}
 
-Match on Error 1213, 40001, or serialization failure. Prose alone misses it. The loser of
-a simultaneous claim receives that error and nothing else, even when a second unclaimed
-bead still matches its filter. Retry the identical pull, at most three times, waiting 2s,
-then 5s, then 10s. A retry cannot double-claim: the claim is mutually exclusive, and
-measured contention never assigned one bead twice. Yielding NO_WORK here is wrong. It
-abandons ready work and reports an empty queue that is not empty. If all three retries
-lose, leave a BLOCKED comment quoting the error, and quote it in your yield payload too.
-The exit gate discriminates on the error signature, not on the verb. It admits a
+Match on Error 1213, 40001, or serialization failure. Prose alone misses it. One measured
+loser of a simultaneous claim received that error and nothing else, even when a second
+unclaimed bead still matched its filter. Retry the identical pull, at most three
+times, waiting 2s, then 5s, then 10s. A retry cannot double-claim: the claim is mutually
+exclusive, and measured contention never assigned one bead twice. Yielding NO_WORK here is
+wrong. It abandons ready work and reports an empty queue that is not empty. If all three
+retries lose, leave a BLOCKED comment quoting the error, and quote it in your yield payload
+too. The exit gate discriminates on the error signature, not on the verb. It admits a
 claimless exit carrying Error 1213, 40001, or serialization failure, and refuses a bare
 BLOCKED without saying which half was missing. That check is a floor, not a proof: it
 cannot tell your real error from this example copied out of the contract. It widens
 nothing, because NO_WORK is admitted on a bare token with no evidence at all.
+
+Two more loser shapes, measured on bd 1.2.2 with one ready bead. A bd ready --claim loser
+receives [] with exit 0: the empty result above, because the winner drained the queue, so
+NO_WORK is then correct and the plugin records no claim. A bd update <id> --claim loser
+receives exit 1 with "Error claiming <id>: issue already claimed by <actor>": the winner
+holds the bead, so pull again rather than reporting it.
 
 Any other error -- report it verbatim and stop. Never invent a retry for an error you
 cannot name.
@@ -97,6 +103,12 @@ Under a run the plugin sets BEADS_ACTOR and BD_ACTOR to your identity in the env
 of every bash call; never set them yourself. A claim under no identity is refused. So is a
 claim as the git user.name that unattributed writes fall back to, and so is a write
 attributed to anyone but you.
+
+A role session's environment also carries ORC_PUSH_REF, the origin branch
+omp/task/<your id> that your capture is pushed to. Before you yield, commit and run
+git push origin HEAD:$ORC_PUSH_REF, then report pushed=<ref>@<sha>. Your isolated copy is
+deleted when you finish, so origin is the only place your commits survive. The variable
+is the plugin's: a command that assigns or unsets it is refused.
 
 Exit. Follow your role's evidence and disposition contract, not another role's report
 shape. Git work is proven on origin: an implementer reports head_sha and pushed=<ref>@<sha>
