@@ -20,10 +20,11 @@
  * Several checks are on writes rather than claims, because the write is where the
  * authority is spent: a routing re-point of `metadata.role`, a `merge_sha` stamped by a
  * role that never lands, a run-epic governance key rewritten from a role, a node filed
- * under a closed parent, a node closed without landing evidence, and an architect's
- * `scope` that overlaps a live node outside the bead's own lineage. Scope disjointness
- * is judged at decomposition and at claim, never per write: G2 compares each write
- * against the claimed territory and reads nothing else.
+ * under a closed parent, a node closed without landing evidence, an architect's write on
+ * its claimed epic before the epic records where the work is, and an architect's `scope`
+ * that overlaps a live node outside the bead's own lineage. Scope disjointness is judged
+ * at decomposition and at claim, never per write: G2 compares each write against the
+ * claimed territory and reads nothing else.
  *
  * Every refusal is on evidence. A `bd` that does not answer -- missing, slow, over
  * budget -- proves nothing, so the check that needed it logs the cause and lets the
@@ -47,6 +48,7 @@ import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../ident
 import { runScope } from "../run-scope";
 import { scopeOf, scopesOverlap } from "../scope";
 import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments, splitFlag } from "../shell";
+import { writesBeads } from "./bd";
 import { resourceKind } from "./exit";
 
 /** A queue filter on a `bd ready`, resolved to the role it pulls for. */
@@ -257,6 +259,65 @@ function landingWriteDenial(
    `'${written}' stamps metadata.${LANDED_KEY}, which is the landing sweep's record that a merge landed, and ` +
    `${sessionRoleName} does not land work. The sweep stamps it when the PR merges; a node without it is not landed.`,
  };
+}
+
+/**
+ * The keys that locate an architect's feature work: the branch it integrates on, the
+ * commit that branch left the primary at, the origin ref the branch is pushed to, and the
+ * clone it is standing in. The first three are what a replacement architect resumes from
+ * once this one's clone is gone; the fourth is informational, since G2 substitutes the
+ * isolation root, but it is what the status and the reaper print.
+ */
+const LOCATION_KEYS = ["branch", "base_sha", "push", "worktree"] as const;
+
+/**
+ * Refuse an architect's write on its claimed epic until the epic says where the work is.
+ *
+ * An architect runs in an isolated clone, and the clone is deleted when the agent
+ * completes or is cancelled, so the feature branch is durable only on origin and the bead
+ * is the one place that names it. The queue pull carries no `worktree` filter any more:
+ * the epic is claimed bare, and the claim's first write stamps every {@link LOCATION_KEYS}
+ * key at once, or completes the set a lapsed predecessor left (a replacement architect
+ * re-stamps `worktree` for its own clone and keeps the branch it fetched). Until the set is
+ * complete, every other write on that bead -- a comment, a route, a scope, a release -- is
+ * refused with the missing keys named. The claim itself, and a same-bead retry of it, are
+ * not writes after the claim and pass. A bead the store cannot read proves nothing and
+ * the write runs, with the cause logged.
+ */
+async function locationStampDenial(invocation: BdInvocation, claims: ClaimState): Promise<ToolCallEventResult | undefined> {
+ if (invocation.hasClaim || !writesBeads(invocation)) return undefined;
+ const claim = claims.observedClaim();
+ if (claim === undefined) return undefined;
+ const targets = claimTargets(invocation);
+ const held = claim.beadIds.filter(beadId => targets.includes(beadId));
+ if (held.length === 0) return undefined;
+
+ const writes = metadataWrites(invocation);
+ const stamped = new Set(writes.flatMap(write => write.flag === "--unset-metadata" ? [] : write.keys));
+ const cleared = new Set(writes.flatMap(write => write.flag === "--unset-metadata" ? write.keys : []));
+ for (const beadId of held) {
+  const bead = await bdShow(beadId);
+  if (bead === null) {
+   logger.warn("orchestrate G5: claimed epic could not be read; location stamp not checked", {
+    bead: beadId,
+    cause: bdFailureText(lastBdFailure()),
+   });
+   continue;
+  }
+  const missing = LOCATION_KEYS.filter(key => cleared.has(key) || (!stamped.has(key) && metadataString(bead, key) === undefined));
+  if (missing.length === 0) continue;
+  return {
+   block: true,
+   reason:
+    `'bd ${invocation.subcommand}' on ${beadId} before its location is recorded. An architect's first write after ` +
+    `claiming ${beadId} stamps ${LOCATION_KEYS.join(", ")} (missing: ${missing.join(", ")}); every other write on ` +
+    `it waits for that stamp. Create the feature branch in this clone and push it, then ` +
+    `'bd update ${beadId} --set-metadata branch=<branch> --set-metadata base_sha=<sha the branch left main at> ` +
+    `--set-metadata push=origin/<branch> --set-metadata worktree=<this clone's root>'. A replacement architect ` +
+    `fetches the recorded branch and re-stamps worktree for its own clone.`,
+  };
+ }
+ return undefined;
 }
 
 /** Maximum number of parent links traversed while checking claim lineage. */
@@ -1047,6 +1108,8 @@ export async function gateClaimEligibility(
   const close = await closeDenial(invocation, sessionRoleName);
   if (close) return close;
   if (sessionRoleName === "architect") {
+   const location = await locationStampDenial(invocation, claims);
+   if (location) return location;
    const overlap = await decompositionConflict(invocation);
    if (overlap) return overlap;
   }
