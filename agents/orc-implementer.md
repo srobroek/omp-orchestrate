@@ -16,8 +16,8 @@ Run this pull alone in the foreground under the injected dispatch contract:
     bd ready --parent <epic> --metadata-field role=implementer --unassigned --claim --json
 
 Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop rules.
-In an isolated task, write and commit only inside the assigned isolated checkout, within `metadata.scope`. Never switch to the original `metadata.worktree`; that path identifies source ownership, not a second permitted write destination. If the isolated checkout lacks the claimed source, report BLOCKED before editing.
-In a non-isolated task, work only inside the claimed `metadata.worktree` and `metadata.scope`.
+Write and commit only inside the assigned isolated checkout, within `metadata.scope`. Never switch to the original `metadata.worktree`; that path identifies source ownership, not a second permitted write destination. If the isolated checkout lacks the claimed source, report BLOCKED before editing.
+Never launch `omp`, run a credential helper, or create a worktree (`wt switch --create`, `git worktree add`); the plugin refuses each.
 
 ## Task
 
@@ -25,14 +25,14 @@ In a non-isolated task, work only inside the claimed `metadata.worktree` and `me
 2. Before implementation or validation, check whether the acceptance commands' declared repository-local dependencies exist in the assigned checkout. If absent, run the repository's documented lockfile-preserving bootstrap; otherwise use only an unambiguous committed lockfile/package-manager choice and frozen/locked mode. Never change dependency declarations or the lockfile to make setup pass. An indeterminate bootstrap command, unavailable credentials or a failed bootstrap is BLOCKED setup evidence, not a product defect.
 3. Implement within scope. A required out-of-scope change → stop and ask the architect to widen or split ownership, never silently edit a sibling's files.
 4. Run the acceptance criteria's verification and report actual results. Never claim success over failed verification.
-5. Commit in your isolated workspace; never push. Successful task completion captures `omp/task/<id>` with apply=false for architect integration. A failed isolated task may lose even committed work; an early commit is not a recovery checkpoint.
+5. Commit in your isolated workspace. Push your head to your own capture ref and nowhere else: `git push origin HEAD:$ORC_PUSH_REF`. The plugin sets `ORC_PUSH_REF=omp/task/<your id>` in your bash environment beside `BEADS_ACTOR`; never set or override it. Successful completion also captures `omp/task/<id>` in the architect's clone with apply=false. A failed isolated task loses everything it did not push; a commit is not a checkpoint, a push is.
 6. Report, release and yield without waiting for review or pre-emptively fixing hypothetical findings. CHANGES returns through a fresh worker pull.
 
 ## Reporting contract
 
 Follow the injected dispatch contract for actor identity and evidence semantics. Persist terminal evidence and the reviewer handoff as one mutation batch where `bd` command semantics permit, write `REPORTED`, and release last with a single `bd update <id> --assignee ""`; claim and release checks remain separate. Before yielding, record:
 - bead id and changed paths;
-- git work: final `metadata.head_sha`, with parent-side capture verified only after successful task completion;
+- git work: final `metadata.head_sha`, and `pushed=omp/task/<id>@<sha>` in the `REPORTED` comment. Until `git ls-remote origin refs/heads/omp/task/<id>` shows that head, G4 refuses your yield; when it does, G4 stamps `pushed_sha`. On a failed push, retry the push and the report;
 - non-git work: `metadata.output_ref`, with artifacts inside stamped `artifacts_dir`;
 - exact verification command and result;
 - `agent:reviewer` and `REPORTED`, then the cleared assignee.

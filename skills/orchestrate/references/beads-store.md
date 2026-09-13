@@ -1,10 +1,10 @@
 # Beads store: run state, mapping, audit, coordination
 
 A run's DAG, bead state, and audit trail live in the project's beads database (the `bd`
-CLI). Every worktree and every isolated worker copy shares one database, so agents read and
-write live state with plain `bd` commands -- no shared-path bookkeeping. Artifacts (full
-briefs and reports) are files under `<primary>/.orchestration/run-<id>/artifacts/`. Bead
-comments reference them by absolute path.
+CLI). Every isolated clone reaches the same database through `.beads/redirect`, so agents
+read and write live state with plain `bd` commands -- no shared-path bookkeeping. Artifacts
+(full briefs and reports) are files under `<primary>/.orchestration/run-<id>/artifacts/`.
+Bead comments reference them by absolute path.
 
 ## Coordination and policy carriers
 
@@ -14,7 +14,7 @@ comments reference them by absolute path.
 | `decision` bead | A choice that affects a second bead, agent, or package, or constrains later work | The durable cross-boundary truth. It carries an owner, a stable key, a design, acceptance/verification, status/disposition. Each affected bead gets a non-blocking link. |
 | Message wisp | Live coordination: a question, a reply, a notification, a trace | Ephemeral coordination only. Wisps are TTL-compacted, so promote a material outcome to a comment or decision bead before acting on it or closing it. Neither acknowledgment nor compaction deletes the promoted truth. |
 | Artifact / `output_ref` | A large inspectable payload of evidence: a brief, a report, a test log. A citing bead names its absolute path | Evidence only. A citing comment or decision bead joins it to a decision or report. Alone it is not policy or lifecycle state. |
-| Captured branch | The code a worker produced, on `omp/task/<id>` in the parent repository | Evidence that survives the worker, the architect, and the process. It is not integration: only `git cherry` against the feature branch proves that. |
+| Pushed ref | The code a worker produced, on `origin/omp/task/<id>`, pushed before the worker yields; OMP also captures it in the architect's clone at completion | Evidence that survives the worker, the architect, and the process, because origin holds it; a clone's copy dies with the clone. It is not integration: only `git cherry` against the feature branch proves that. |
 
 A message counts as material when it changes any of these:
 
@@ -71,8 +71,9 @@ only when a choice leaves one bead's scope.
 
 ## Prerequisite (checked once, at run start)
 
-- Require both `bd` and `wt` on `PATH`; missing either → stop. No fallback store or
-  alternate checkout mechanism exists. A failed database read is not proof no database exists.
+- Require `bd` on `PATH`; missing → stop. No fallback store exists. A failed database read
+  is not proof no database exists. Worktrunk (`wt`) is optional and operator-only; the
+  doctor reports it as information.
 - `bd` present, no database → `bd init --stealth --prefix orc` (git-invisible: writes
   `.git/info/exclude`, leaves `git status` clean).
 
@@ -108,7 +109,7 @@ Sync discipline:
 | Type | Use |
 |---|---|
 | `epic` | architect domain / run root |
-| `feature` | the grouping an architect creates: the natural PR + Worktrunk branch unit |
+| `feature` | the grouping an architect creates: the natural PR + branch unit |
 | `task` | worker-sized unit |
 | `bug` | mid-run defect, linked `discovered-from` its finder |
 | `decision` | architecture decision record. The `adr` skill and `bd lint` already handle these |
@@ -138,8 +139,8 @@ passed, which is why the review and research queues carry that flag and the othe
 | Object | Beads representation |
 |---|---|
 | Run | one **epic** bead. Metadata `run_id` `primary_branch` `base_sha` `artifacts` (abs dir) `origin_actor`, with an optional `swarm` handle |
-| Architect domain | **epic** bead, one architect. Metadata `run_epic` `artifacts_dir` `worktree` |
-| Feature | **feature** bead: one Worktrunk branch, one PR. Metadata `worktree` `branch` `base_sha` |
+| Architect domain | **epic** bead, one architect. Metadata `run_epic` `artifacts_dir` `branch` `base_sha` `push` `head_sha` `worktree` |
+| Feature | **feature** bead: one branch, one PR. Metadata `worktree` `branch` `base_sha` |
 | DAG node | **task** bead under its feature, label `orc-node`. Metadata `role`, `node`, `scope` (JSON array of globs), `execution_kind`, `origin_actor` |
 | Node dep | `bd dep add <dependent> <dependency>` (`blocks` type), one per edge |
 | Merge bead | label `pr:merge`, **no parent**. Metadata `role=shepherd` `repo` `branch` `base_sha` `origin_bead` `integration_owner` |
@@ -176,7 +177,7 @@ derives it from the fields below, and `orc_run_status` renders the same derivati
 | `pending` | `open` | no assignee, `bd ready` does not list it (a dependency or gate is open) | creator at `bd create` |
 | `ready` | `open` | no assignee and `bd ready --parent <epic> --metadata-field role=<role> --unassigned` lists it | derived, never stored |
 | `working` | `in_progress` | assignee set | the claimant: `bd ready … --claim` (atomic, first-wins, sets assignee) |
-| `reported` | `in_progress` | assignee cleared, label `agent:reviewer`, last verb `REPORTED` | the worker, before yield; the parent verifies capture after the terminal task result |
+| `reported` | `in_progress` | assignee cleared, label `agent:reviewer`, last verb `REPORTED` carrying `pushed=`, `metadata.pushed_sha` stamped by the exit gate | the worker, before yield; the parent integrates after the terminal task result |
 | `in_review` | `in_progress` | an open review wisp linked to the node | the architect, when it creates the review wisps |
 | `changes_requested` | `in_progress` | `REVIEW … verdict=changes` on the node at the current head and round | the reviewer's comment |
 | `approved` | `in_progress` | every required `REVIEW … verdict=approve` at the current head and round; the wisps closed | the reviewers' comments |
@@ -191,9 +192,9 @@ Semantics that fall out of the status column:
 - **Deps clear on `closed`.** A dependent becomes ready only once its upstreams are
   `merged`/`dismissed`.
 - **Pick the dependency type from what the dependent waits for.** `blocks` waits for the
-  shepherd's merge. A pre-yield `reported` phase does not prove parent-side branch capture.
-  - Needs upstream CODE: first verify successful task completion and its captured branch,
-    then use a non-blocking type and stamp `base_ref=<upstream branch>` on the dependent.
+  shepherd's merge. A `reported` phase proves a pushed ref (`pushed_sha`), not integration.
+  - Needs upstream CODE: first verify the pushed `omp/task/<id>` ref at `pushed_sha`, then
+    use a non-blocking type and stamp `base_ref=<upstream ref>` on the dependent.
   - Needs the upstream DECISION to land first: keep `blocks`, which gates `bd ready`.
   - A `base_ref` dependent rebases when the upstream takes review changes. That rebase
     returns through the `BOUNCED reason=conflict` path.
@@ -211,53 +212,46 @@ Semantics that fall out of the status column:
 
 Two mechanisms hold code, and they are not interchangeable.
 
-- **Worktrunk owns feature branches.** An architect works in a `wt` checkout that outlives
-  it, so a replacement architect resumes the same tree. It is the **sole mutator** of that
-  tree.
+- **Origin owns feature branches.** An architect works in an isolated clone that OMP deletes
+  when the architect completes. It pushes the feature branch at creation and after every
+  integration, and it is the **sole writer** of that branch. A replacement architect fetches
+  the branch; no local tree outlives its agent.
 - **OMP isolation owns task work.** A worker is spawned `isolated: true` with
   `task.isolation.merge: branch` and `task.isolation.apply: false`, so its commits are
-  captured on `omp/task/<id>` in the parent repository and no worker ever writes the
-  architect's tree. The architect integrates those branches by explicit cherry-pick, when it
-  chooses.
+  captured on `omp/task/<id>` in the architect's clone and no worker ever writes the
+  architect's tree. Before yield the worker pushes the same head to `origin/omp/task/<id>`.
+  The architect integrates by explicit cherry-pick, when it chooses.
 
-Anchors are stamped so any later session can find where work physically lives:
+Anchors are stamped so any later session can find where work lives:
 
 | When | Who | Stamp |
 |---|---|---|
-| Feature worktree prepared | architect | `wt switch --create <branch> --base <base> --no-cd --format=json`, stamp the Worktrunk var `bead=<feature-id>` on the branch (`wt config state vars set bead=<feature-id> --branch <branch>`), stamp the feature's `branch`, canonical `worktree`, `base_sha`; `--no-cd` reports the path but does not relocate the architect session |
-| Task dispatched | architect | nothing to provision: non-isolated children inherit the parent session's `cwd`; isolated children run in runtime-created copies snapshotted from that parent-session `cwd`. Metadata and checkout flags do not relocate either session. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
-| Worker reported | worker | `head_sha=<final commit>` before yield; no claim that parent-side capture exists yet |
-| Successful child result collected | architect | verify the actual architect-repository `omp/task/<id>` branch and reported head before recording the capture anchor or integrating; include accepted dirty delta in the source snapshot |
+| Feature branch created | architect | `git switch -c <branch> && git push -u origin <branch>`; stamp the epic's `branch`, `base_sha`, `push=origin/<branch>`, `head_sha`, and `worktree` (the clone root). `push` is the target, `pushed_sha` the proof |
+| Task dispatched | architect | nothing to provision: an isolated child runs in a clone of the architect's clone, on the feature branch at its head; a non-isolated child inherits the architect's cwd. Stamp `scope`, `execution_kind`, `origin_actor` on the task bead |
+| Worker reported | worker | `git push origin HEAD:$ORC_PUSH_REF`, then `head_sha=<final commit>` and `REPORTED … pushed=omp/task/<id>@<sha>` before yield. G4 runs `git ls-remote origin refs/heads/omp/task/<id>`, refuses the yield unless it shows `head_sha`, and stamps `pushed_sha=<observed sha>` itself |
+| Successful child result collected | architect | verify the `omp/task/<id>` capture in your clone, or `origin/omp/task/<id>`, against the reported head before integrating; include accepted dirty delta in the source snapshot |
+| Integration pushed | architect | `git push origin <branch>`, then `--set-metadata head_sha=<sha>`. G4 refuses the architect's yield, terminal or paused, while `git ls-remote origin refs/heads/<branch>` differs from `head_sha`, and stamps `pushed_sha` when it matches |
 | Recovery or branch cleanup | architect | the reaper releases a dead holder's claim under the lease fence and records `RECOVERED`; only the architect rewrites anchors or deletes branches, after the patch-containment scan |
-| Claim | claim-holder | resolve the authoritative `metadata.worktree`, including inheritance. A persistent architect must establish session `cwd` at its canonical Worktrunk path and verify its binding; an isolated worker/reviewer uses the runtime-assigned isolated root and claimed scope, even when metadata inherits the feature path. A mismatch or unresolved owner stops the claim without writing |
+| Claim | claim-holder | a claim binds a role to a bead, never to a path. Every claimant works in the checkout the runtime gave it; `metadata.worktree` names source ownership and relocates nobody |
 | Merge | shepherd | `bd update <bead> --metadata '{"pr":<n>,"merge_sha":"<sha>"}'` |
-
-The architect establishes its canonical session cwd before claiming or dispatching. Runtime
-re-entry preserves absolute `ORCHESTRATE_MARKER_FILE`; metadata inheritance
-identifies ownership but never switches cwd. The supported re-entry and source-object
-procedure is canonical in `planning.md`; preserve dirty resumed trees and distinguish missing
-Git objects from cwd failures.
 
 Add a `repo` key when work lands in a different repository than the run epic. `--metadata`
 merges with existing keys, so stamps never clobber `node` or `scope`. Branch, push, PR, and
-merge anchors survive checkout teardown.
+merge anchors survive the clone they were written from.
 
 `worktree` rules:
 
-- Every claim-holder resource that owns a tree owns its own canonical `worktree`. Task beads
-  inherit from their feature; do not store a reviewer's path on a work node.
-- Validate an inherited feature checkout against that feature's binding. Architects
-  still validate the binding of the persistent checkout they own, from the canonical session cwd.
-- Runtime-owned isolated task copies have no task-specific Worktrunk binding.
-  Use the assigned isolated root and claimed scope; never require its inherited
-  feature binding to equal the task id or rewrite that binding for the task.
-- Stamp it as an absolute path. The worktree-confinement rule matches the session's `cwd`
-  against that value; reading the value does not relocate the session.
-- Clear the pointer only after the claim is released and the checkout is reclaimed.
+- The architect stamps its clone root on the epic; the feature and task beads beneath it
+  inherit the value. Do not store a reviewer's path on a work node.
+- It is informational. G2 confines a write to the isolation root the runtime reports, and no
+  queue pull filters on the path.
+- Stamp it as an absolute path.
+- No run checkout carries a Worktrunk binding. `wt config state vars` and `wt step eval`
+  are the operator's tools for the operator's worktrees.
 
-On resumed work, preserve dirty trees, captured branches, accepted deltas, and anchors.
-Do not release a claim for runtime re-entry; dead-claim release is the reaper's, per
-`lifecycle.md` before any replacement.
+On resumed work, preserve pushed refs, accepted deltas, and anchors; a dead clone's dirty
+tree is gone. Dead-claim release is the reaper's, per `lifecycle.md`, before any replacement.
+
 Choosing between a label and a metadata key is a cardinality rule plus an authority rule,
 not a style preference. Both filter on `bd ready` and both compose with `--claim`, so
 filterability does not distinguish them.
@@ -265,7 +259,7 @@ filterability does not distinguish them.
 | Carrier | Cardinality | Carries |
 |---|---|---|
 | Label | multi-value. A bead holds every label added | multi-value classification: `pr:`, `state:`, `kind:`, `lang:`, `evidence:` |
-| Metadata | single-value per key. `--metadata` merges per key on write, so stamps never clobber `node` or `scope` | single-value enforcement: `role`, `worktree`, `branch`, `scope`, `base_sha`, `actor`, `origin_actor`, `origin_bead`, `run_epic`, `merge_sha`, `stage`, `bot_same_issue_limit`, `bot_issue_attempts`, `bot_round_limit`, `bot_rounds_completed`, `bot_review_requests` |
+| Metadata | single-value per key. `--metadata` merges per key on write, so stamps never clobber `node` or `scope` | single-value enforcement: `role`, `worktree`, `branch`, `push`, `head_sha`, `pushed_sha`, `scope`, `base_sha`, `actor`, `origin_actor`, `origin_bead`, `run_epic`, `merge_sha`, `stage`, `bot_same_issue_limit`, `bot_issue_attempts`, `bot_round_limit`, `bot_rounds_completed`, `bot_review_requests` |
 
 Cardinality first. A label set accumulates: a stage pipeline built on labels collected
 `stage:implement` + `stage:review` + `stage:fix` and sat in three queues simultaneously.
@@ -324,7 +318,7 @@ accepts whatever the claim returns rather than cherry-picking a candidate. A que
 no bead before it runs, so no overlap test runs on it; the decomposition check is what keeps
 a queue's beads disjoint from each other.
 
-No check runs per write. G2 confines a mutation to the claimed worktree and `metadata.scope`
+No check runs per write. G2 confines a mutation to the claimant's own checkout and `metadata.scope`
 and never consults other claims. Both overlap checks are friction, not a boundary: they catch
 the honest mistake and are bypassable by construction. Disjoint `scope` globs written at
 decomposition time are the real mechanism.
@@ -396,7 +390,7 @@ below are for the questions the report does not answer.
 | audit trail | `bd comments <bead>` for the verbs, plus `<spawning-session-cwd>/.orchestration/audit/*.bdlog` for every mutating command (skip rows tagged `foreign_store`) |
 | dep structure / impact | `bd dep tree <bead>`, `bd graph` |
 | open waits | `bd gate list`, `bd ready --gated --json`, and the `BLOCKED landing:` comments on open merge beads |
-| resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`. Actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity). Location = `metadata.worktree`/`branch`. Surviving code = `git branch --list 'omp/task/*'` |
+| resume after crash | in-flight = the `in_progress` rows of `orc_run_status`, or `bd list --status in_progress --limit 0 --json` filtered to beads whose parent chain reaches `<epic>`. Actor = `assignee`, the identity the claim report printed (`metadata.actor` is not identity). Location = `metadata.push`/`branch` on origin; every clone died with its agent. Surviving code = `git ls-remote origin 'refs/heads/omp/task/*'` |
 | unintegrated code | integration is cherry-pick or squash, so ancestry and `git cherry` prove nothing: under squash every branch commit reads `+`. Landing proof is tree equality, `git merge-tree --write-tree <merge>^ <head>` equal to `git rev-parse <merge>^{tree}`, or one combined patch-id, `git diff <base> <head> \| git patch-id --stable` equal to `git diff <merge>^ <merge> \| git patch-id --stable` |
 | close-out gate | `orc_run_status` with `epic=<run>`: `CLOSE-OUT: clean` means every row below is known and empty. The unintegrated-code row above proves a `merge_sha` stamp against the tree. `/orchestrate-stop` makes the in-progress check itself before it removes the marker; `--force` skips it |
 | stranded beads | the `stranded` row: open and unassigned, absent from `bd ready --include-ephemeral`, and not blocked, so no worker can ever pull it. Then check each nonempty `assignee` in the rollup against a live actor |
@@ -419,6 +413,7 @@ The `CLOSE-OUT` rows, each a list of bead ids or `unknown` when its read did not
 | `stranded` | `bd ready --include-ephemeral` | open, unassigned, not ready, not blocked |
 | `undrainable merge beads` | the whole store | open beads carrying `pr:merge` or `role=shepherd` that lack the label, the role, `repo`, `origin_bead` (or legacy `origin`), or `branch` |
 | `unlanded` | the whole store, narrowed to the report | merge beads not closed, with neither `merge_sha` nor `landing_state=landed`; a merge bead counts when it or the feature it captured is in the tree |
+| `not on origin` | the rollup, `pr:merge` beads excluded | open beads whose `head_sha` has no `pushed_sha`, or one naming another commit (`head <sha>, never pushed` / `head <sha>, pushed <sha>`), and open beads carrying `branch` without a `push` target (`<branch>, no push target`). `details.closeOut.not_on_origin` |
 
 Merge beads carry no `orc-node` label and no parent, so the tree rows skip them. They
 strand a third way: the bead is open and unassigned, yet missing an anchor the cross-run

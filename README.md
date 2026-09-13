@@ -14,8 +14,10 @@ answers the questions it raises, and stops it. Agents claim their own work from 
 
 1. A run is one Beads epic. Each feature under it is an epic holding its tasks.
 2. Agents pull the next bead in their queue with `bd ready --claim`; nobody assigns work.
-3. Workers edit in isolated copies of the checkout. The architect integrates their captured
-   branches into one feature branch and opens one PR per feature.
+3. Every agent that claims work edits in an isolated clone of the checkout. Before it
+   yields, it pushes its result to origin: a worker to `omp/task/<id>`, the architect to the
+   feature branch it integrates those refs into. One PR per feature. OMP deletes a clone
+   when its agent finishes; origin is the only store that outlives one.
 4. The plugin merges each approved PR at its reviewed head. No agent merges.
 5. Ten tool-call gates and three rules hold every agent to its claim. The operator's writes
    are `start`, `answer`, and `stop`.
@@ -30,9 +32,9 @@ step and names it.
 | --- | --- | --- |
 | `omp` | current | the lead session; the settings preflight and the doctor read its effective settings in process |
 | `bd` (Beads) | 1.2 or later | every claim, comment, and status read. `bd` embeds the database, so no server runs |
-| `wt` (Worktrunk) | current | architect feature worktrees |
+| `wt` (Worktrunk) | optional | the operator's own worktrees and `skills/orchestrate/scripts/worktree-sweep.ts`; no agent runs it, and the doctor reports it as information |
 | `gh` | 2.100 or later, signed in (`gh auth status`) | conflict and review probes, the landing capability probe, and the merges |
-| `git` | 2.x | every worktree, capture, and integration step |
+| `git` | 2.x | every clone, push, capture, and integration step; agents need push access to origin |
 | `bun` | 1.3.14 or later, the runtime `omp` itself requires | `skills/orchestrate/scripts/worktree-sweep.ts` at run end |
 
 The architect and implementer may spawn seven helpers. `scout` and `security-reviewer`
@@ -167,10 +169,13 @@ checkout without starting a run. Every slash command finds the run through the m
 the checkout, or at the primary checkout of a linked worktree.
 
 Once the command reports the run, describe the goal to the lead. The lead plans the
-graph and spawns `orc-architect` with the run id; it never claims a work bead. While the
-run is active, the plugin refuses the lead's `git commit`, `git push`, `gh pr merge`,
-`gh pr ready`, and every `edit` or `write` of a file inside a git working tree outside
-`.orchestration/`. Each refusal names the recovery: spawn `orc-architect`.
+graph and spawns `orc-architect` with the run id and `isolated: true`; it never claims a
+work bead. While the run is active, the plugin refuses the lead's `git commit`, `git push`,
+`gh pr merge`, `gh pr ready`, and every `edit` or `write` of a file inside a git working
+tree outside `.orchestration/`. Each refusal names the recovery: spawn `orc-architect`.
+
+In a run, the plugin refuses three commands from every role session: launching `omp`,
+running a credential helper, and creating a worktree.
 
 ## Watch
 
@@ -205,9 +210,10 @@ whose parent chain cannot be read, is refused and nothing is written. Otherwise 
 command writes a `NOTE` comment prefixed `ANSWER` on the bead. Then it acts on the
 bead's state:
 
-- last verbs `FAILED` and `ASK` from an implementer: it requeues the bead as `open` and
-  unassigned, so the next worker pulls it with your answer
-- held by a parked architect: it wakes that architect
+- last verbs `FAILED` and `ASK` from an implementer, or `ASK` from an architect that has
+  yielded: it requeues the bead as `open` and unassigned, so the next worker or a fresh
+  architect pulls it with your answer
+- held by a live non-isolated agent: it wakes that agent
 
 ## Stop
 
@@ -241,7 +247,7 @@ in the same checkout, started with the overlay. The lease lasts 15 minutes witho
   lease, writing `RECOVERED` on it. It names a live lease in the summary and keeps it
 
 After adoption the lead dispatches again. A replacement worker pulls the same bead
-atomically, and a parked architect gets a wake.
+atomically, and a fresh architect resumes its epic from origin.
 
 ## Troubleshooting
 
@@ -342,9 +348,10 @@ into every `orc-*` session and sandboxes generic helpers. `/orchestrate-stop` re
 A marker written by an older plugin version that names no epic reads the same way:
 `/orchestrate-start <epic-id>` adopts it, `/orchestrate-stop` removes it.
 
-### Worker copies and the redirect
+### Isolated clones and the redirect
 
-OMP isolation clones the whole checkout, `.beads/` included. At a worker's first turn the
+OMP isolation clones the whole checkout, `.beads/` included, for the architect and for each
+worker. A worker's clone is a clone of the architect's. At an isolated agent's first turn the
 plugin writes `.beads/redirect` in the copy, naming the run's `.beads` from the marker, and
 removes the copied store. Every `bd` call from the copy reaches the run's database.
 `bd where --json` in a copy shows `redirected_from`.
