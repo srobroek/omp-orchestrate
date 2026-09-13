@@ -182,6 +182,7 @@ describe.skipIf(!BD_AVAILABLE)("probeStore on a store bd built", () => {
 		return env;
 	}
 
+	// `bd init` builds a Dolt store; it flaked once at bun's 5 s default under load.
 	beforeAll(async () => {
 		root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "orc-probe-bd-"));
 		const store = path.join(root, "store");
@@ -192,7 +193,7 @@ describe.skipIf(!BD_AVAILABLE)("probeStore on a store bd built", () => {
 		const [stderr, code] = await Promise.all([new Response(init.stderr).text(), init.exited]);
 		if (code !== 0) throw new Error(`bd init failed (${code}): ${stderr}`);
 		beadsDir = path.join(store, ".beads");
-	});
+	}, 30_000);
 
 	/** A copy of the built store's `.beads` under `name`, with its journal replaced by `journal`. */
 	async function copyWithJournal(name: string, journal: Buffer): Promise<string> {
