@@ -11,12 +11,15 @@
  * `CLAIM` activation message, no WAIT bootstrap, and no waiting to be released. A
  * worker acquires its own work.
  *
- * The pull instruction names three outcomes, not two. A lost claim race returns no
- * empty list. It hands the loser a Dolt 1213 serialization failure and nothing else,
- * even when another unclaimed bead matches its filter. The earlier two-outcome text
- * therefore sent that worker to `NO_WORK`, abandoning ready work. An immediate retry
- * recovers it, and mutual exclusion held throughout the measurement, so a retry
- * cannot double-claim.
+ * The pull instruction names three outcomes, not two, and the race-loser sentence names
+ * every loser shape measured so far. One measurement (bd 1.2.x, two ready beads) handed
+ * the loser a Dolt 1213 serialization failure and nothing else, even when another
+ * unclaimed bead matched its filter; a two-outcome text would have sent that worker to
+ * `NO_WORK`, abandoning ready work. Re-measured on bd 1.2.2 with one ready bead
+ * (8 rounds per form, `dolt fsck` clean, no double assignment): the `bd ready --claim`
+ * loser got `[]` and exit 0, and the `bd update <id> --claim` loser got exit 1 with
+ * `Error claiming <id>: issue already claimed by <actor>`. Neither is a 1213, so the
+ * text says what each means, and the claim observer records nothing for `[]`.
  */
 export const DISPATCH_CONTRACT = `ORCHESTRATION PROTOCOL — active run. Follow exactly.
 
@@ -41,18 +44,24 @@ Claim error naming a serialization or transaction conflict -- contention, not ab
 
     {"error":"dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with ..."}
 
-Match on Error 1213, 40001, or serialization failure. Prose alone misses it. The loser of
-a simultaneous claim receives that error and nothing else, even when a second unclaimed
-bead still matches its filter. Retry the identical pull, at most three times, waiting 2s,
-then 5s, then 10s. A retry cannot double-claim: the claim is mutually exclusive, and
-measured contention never assigned one bead twice. Yielding NO_WORK here is wrong. It
-abandons ready work and reports an empty queue that is not empty. If all three retries
-lose, leave a BLOCKED comment quoting the error, and quote it in your yield payload too.
-The exit gate discriminates on the error signature, not on the verb. It admits a
+Match on Error 1213, 40001, or serialization failure. Prose alone misses it. One measured
+loser of a simultaneous claim received that error and nothing else, even when a second
+unclaimed bead still matched its filter. Retry the identical pull, at most three
+times, waiting 2s, then 5s, then 10s. A retry cannot double-claim: the claim is mutually
+exclusive, and measured contention never assigned one bead twice. Yielding NO_WORK here is
+wrong. It abandons ready work and reports an empty queue that is not empty. If all three
+retries lose, leave a BLOCKED comment quoting the error, and quote it in your yield payload
+too. The exit gate discriminates on the error signature, not on the verb. It admits a
 claimless exit carrying Error 1213, 40001, or serialization failure, and refuses a bare
 BLOCKED without saying which half was missing. That check is a floor, not a proof: it
 cannot tell your real error from this example copied out of the contract. It widens
 nothing, because NO_WORK is admitted on a bare token with no evidence at all.
+
+Two more loser shapes, measured on bd 1.2.2 with one ready bead. A bd ready --claim loser
+receives [] with exit 0: the empty result above, because the winner drained the queue, so
+NO_WORK is then correct and the plugin records no claim. A bd update <id> --claim loser
+receives exit 1 with "Error claiming <id>: issue already claimed by <actor>": the winner
+holds the bead, so pull again rather than reporting it.
 
 Any other error -- report it verbatim and stop. Never invent a retry for an error you
 cannot name.
