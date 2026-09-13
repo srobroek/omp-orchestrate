@@ -129,7 +129,17 @@ export function requestedAgentNames(input: unknown): string[] {
  return [...new Set(names)];
 }
 
-/** Validate the definitions that this run depends on without changing spawn policy. */
+/**
+ * Validate the definitions that this run depends on without changing spawn policy.
+ *
+ * A core agent's effective selector is its `task.agentModelOverrides` entry when one is
+ * set, else its frontmatter `model`; OMP's spawn resolution ranks them the same way.
+ * OMP loads every plugin-root agent with the frontmatter model dropped
+ * (`task/discovery.ts`, `ignoreModel`), so after a marketplace install the override is
+ * the only binding, and a core agent with neither is reported as such, naming the key.
+ * When both are present both must satisfy the contract: a stale frontmatter alias would
+ * otherwise bind a `omp plugin link` checkout to the wrong role unnoticed.
+ */
 export function agentDiscoveryFindings(
  agents: readonly AgentDefinition[],
  requested: readonly string[],
@@ -163,8 +173,15 @@ export function agentDiscoveryFindings(
 
   const hasOverride = Object.hasOwn(modelOverrides, name);
   if (contract !== undefined) {
-   validateCoreSelector(name, agent.filePath, agent.model, contract, findings, resolveModel);
    if (hasOverride) validateCoreSelector(name, agent.filePath, modelOverrides[name], contract, findings, resolveModel);
+   if (agent.model !== undefined) validateCoreSelector(name, agent.filePath, agent.model, contract, findings, resolveModel);
+   if (!hasOverride && agent.model === undefined) {
+    findings.push({
+     agent: name,
+     message: `effective model selector is missing: OMP ignores plugin-root agent model frontmatter; set task.agentModelOverrides[${JSON.stringify(name)}] (the shipped overlay does)`,
+     path: agent.filePath,
+    });
+   }
    continue;
   }
 
@@ -195,4 +212,10 @@ export async function discoverAgentFindings(
  const resolveModel =
   typeof ctx.models?.resolve === "function" ? (spec: string) => ctx.models!.resolve(spec) : undefined;
  return agentDiscoveryFindings(agents, requested, resolveModel, modelOverrides);
+}
+
+/** The `task.agentModelOverrides` record from observed settings; anything else reads as no overrides. */
+export function agentModelOverrides(settings: Readonly<Record<string, unknown>> | null): Readonly<Record<string, unknown>> {
+ const raw = settings?.["task.agentModelOverrides"];
+ return raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 }

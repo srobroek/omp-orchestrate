@@ -1,4 +1,5 @@
-# omp-orchestrate settings overlay: the six constants every run needs.
+# omp-orchestrate settings overlay: the six constants every run needs, and the model
+# binding for each core agent.
 #
 # Apply it to the lead session with OMP's config overlay flag:
 #
@@ -26,13 +27,26 @@ task:
   enableEffort: true
   # A worker's helper sits at depth 3. At the default 2 no worker can spawn librarian, scout, or operator.
   maxRecursionDepth: 3
+  # OMP loads a marketplace-installed plugin's agents with their `model` frontmatter
+  # dropped (pi-coding-agent `task/discovery.ts`: plugin roots load with `ignoreModel`),
+  # so after `omp plugin install` these entries are the only binding between a core agent
+  # and its role alias. Without them the spawn preflight refuses every core agent. A
+  # checkout attached with `omp plugin link` keeps the frontmatter, which is why a
+  # development install never shows the refusal. Each value is the alias the agent's
+  # contract requires; the preflight rejects any other.
+  agentModelOverrides:
+    orc-architect: "@plan"
+    orc-implementer: "@task"
+    orc-researcher: "@smol"
+    orc-reviewer: "@reviewer"
+    orc-shepherd: "@task"
 
 bash:
   autoBackground:
     # A claim must finish in the foreground. A backgrounded claim's result bypasses the tool_result observer and the claim is never adopted.
     enabled: false
 
-# The seventh setting is yours to choose: `orc-reviewer` selects its model through the
+# One setting is yours to choose: `orc-reviewer` selects its model through the
 # `reviewer` role. Left unset, the preflight warns once and review may fall back to the
 # session model. Uncomment and name one selector (bare family or provider/id):
 #
