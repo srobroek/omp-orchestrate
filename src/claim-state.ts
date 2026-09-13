@@ -5,6 +5,15 @@
  * The extension factory is imported once and reused across sessions, so claim
  * state must be allocated by each factory invocation rather than stored here at
  * module scope. Successful claim reports supply the actor and bead IDs.
+ *
+ * Two views of one record. `observedClaim` is the claim as G2 and G5 track it: it ends when
+ * a read shows the bead released, or a new claim supersedes it. `heldClaim` is the claim
+ * the exit gate is bound to: the same beads, kept through every forget, and replaced only
+ * by the next claim this activation records. The exit contract hangs off the claim, not
+ * off its bookkeeping: a reviewer that closed its wisp and did some unrelated work still
+ * owes the wisp's evidence when it yields. Measured escape (omp-orchestrate-cdo): the
+ * forgotten claim sent the yield to the never-claimed reminder, and the yield after that
+ * was accepted with the verdict check never run.
  */
 
 /** Actor and beads seen on this session's own `bd --claim`. */
@@ -15,25 +24,36 @@ export interface ClaimObservation {
 
 export interface ClaimState {
  recordClaim(observation: ClaimObservation): void;
+ /** The claim G2 and G5 currently track; `undefined` once forgotten. */
  observedClaim(): ClaimObservation | undefined;
+ /** The claim the exit gate judges: the observed one, kept through a forget until the next claim replaces it. */
+ heldClaim(): ClaimObservation | undefined;
  forgetClaim(): void;
 }
 
 /** Create private claim state for one extension factory invocation. */
 export function createClaimState(): ClaimState {
  let observed: ClaimObservation | undefined;
+ let held: ClaimObservation | undefined;
 
  return {
   recordClaim(observation: ClaimObservation): void {
    if (observation.actor.length === 0 || observation.beadIds.length === 0) return;
    if (observed === undefined) {
+    // A claim after a forget is new work; the forgotten one is the reaper's to judge.
     observed = { actor: observation.actor, beadIds: [...new Set(observation.beadIds)] };
+    held = observed;
    } else if (observed.actor === observation.actor) {
+    // One session has one identity: a second actor's claim is ignored.
     observed = { actor: observed.actor, beadIds: [...new Set([...observed.beadIds, ...observation.beadIds])] };
+    held = observed;
    }
   },
   observedClaim(): ClaimObservation | undefined {
    return observed;
+  },
+  heldClaim(): ClaimObservation | undefined {
+   return held;
   },
   forgetClaim(): void {
    observed = undefined;

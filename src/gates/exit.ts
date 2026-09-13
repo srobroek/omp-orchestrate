@@ -175,11 +175,23 @@ export interface OriginProof {
  detail: string;
 }
 
+/**
+ * A linked-node comment the version filter dropped: its verb, the bead it sits on, and
+ * each token it should have carried, as expected and as written (`undefined`: absent).
+ */
+export interface UnstampedComment {
+ verb: string;
+ bead: string;
+ tokens: { key: string; expected: string; found: string | undefined }[];
+}
+
 /** State a predicate may need, fetched once per evaluation. */
 export interface Evidence {
  bead: BdBead;
  verbs: string[];
  linkedVerbs: string[];
+ /** Linked-node comments at another head or round, so a refusal can say which token was missing or mismatched. */
+ unstamped?: UnstampedComment[];
  openEscalation?: boolean;
  artifactContained?: boolean;
  /** The commit the bead's work started from: its own `base_sha`, else the run epic's. Absent when neither is known. */
@@ -398,17 +410,28 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
   return (bead.labels ?? []).some(label => pattern.test(label));
  }
 
- const verbMatch = /^(linked\.)?comment\.verb\s+in\s*\[([^\]]*)\]$/.exec(trimmed);
- if (verbMatch !== null) {
-  const wanted = (verbMatch[2] ?? "")
-   .split(",")
-   .map(entry => entry.trim().toUpperCase())
-   .filter(entry => entry.length > 0);
-  const pool = verbMatch[1] === undefined ? verbs : linkedVerbs;
-  return pool.some(verb => wanted.includes(verb));
+ const verbSet = verbPredicate(trimmed);
+ if (verbSet !== undefined) {
+  const pool = verbSet.linked ? linkedVerbs : verbs;
+  return pool.some(verb => verbSet.wanted.includes(verb));
  }
 
  return false;
+}
+
+/**
+ * `comment.verb in [A, B]` or `linked.comment.verb in [A, B]` taken apart: which pool it
+ * reads and which verbs satisfy it. `undefined` for any other predicate. One parse for the
+ * verdict and for the refusal that explains it, so the two cannot disagree on the set.
+ */
+function verbPredicate(predicate: string): { linked: boolean; wanted: string[] } | undefined {
+ const match = /^(linked\.)?comment\.verb\s+in\s*\[([^\]]*)\]$/.exec(predicate.trim());
+ if (match === null) return undefined;
+ const wanted = (match[2] ?? "")
+  .split(",")
+  .map(entry => entry.trim().toUpperCase())
+  .filter(entry => entry.length > 0);
+ return { linked: match[1] !== undefined, wanted };
 }
 
 /**
@@ -481,6 +504,7 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
   }
  }
  const linkedVerbs: string[] = [];
+ const unstamped: UnstampedComment[] = [];
  let openEscalation = false;
  const direction = linkedEvidenceDirection(bead);
  // An escalation pauses the node it hangs off, so only outgoing links can carry one.
@@ -510,9 +534,14 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
    });
    for (const comment of linkedComments) {
     const tokens = comment.text.split(/\s+/);
-    if (version.every(({ key, value }) => value === undefined || tokens.includes(`${key}=${value}`))) {
-     linkedVerbs.push(commentVerb(comment.text));
-    }
+    // Each version token the comment should carry and does not, with what it wrote instead.
+    const gaps = version.flatMap(({ key, value }) => {
+     if (value === undefined || tokens.includes(`${key}=${value}`)) return [];
+     return [{ key, expected: value, found: tokens.find(token => token.startsWith(`${key}=`))?.slice(key.length + 1) }];
+    });
+    const verb = commentVerb(comment.text);
+    if (gaps.length === 0) linkedVerbs.push(verb);
+    else unstamped.push({ verb, bead: linkedId, tokens: gaps });
    }
   }
  }
@@ -539,7 +568,7 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
    }
   }
  }
- return { bead, verbs, linkedVerbs, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted, pushed };
+ return { bead, verbs, linkedVerbs, unstamped, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted, pushed };
 }
 
 /**
@@ -630,6 +659,13 @@ const EXIT_READ_BUDGET = 24;
 /**
  * Create an exit guard with reminder and refusal budgets private to one factory invocation.
  *
+ * The guard binds to the claim this activation holds, `heldClaim`, not to the view G2 and
+ * G5 track and forget: a claim ends for the exit contract only when the next claim replaces
+ * it. A bead a successor now holds is skipped; a released or closed bead is judged by its
+ * own contract, which every self-releasing role satisfies before it releases. Measured
+ * (omp-orchestrate-cdo): a reviewer that closed its wisp and ran one unrelated command had
+ * its claim forgotten, took the never-claimed reminder once, and was accepted unevaluated.
+ *
  * Every claimed bead is hydrated in one `bd list --id` before any is judged; a bead the
  * list does not carry is logged and left unjudged, as an unreadable bead always was.
  */
@@ -637,7 +673,7 @@ export function createExitGuard(claims: ClaimState): (ctx: ExtensionContext, inp
  const state: ExitGuardState = { unclaimedReminded: false, refusalClaim: undefined, refusalCount: 0 };
  return async (ctx, input) => {
   resetReadBudget(EXIT_READ_BUDGET);
-  const claim = claims.observedClaim();
+  const claim = claims.heldClaim();
   if (claim === undefined || claim.beadIds.length === 0) return await gateUnclaimedExit(state, ctx, input);
   const beads = await bdShowMany(claim.beadIds);
   for (const beadId of claim.beadIds) {
@@ -716,6 +752,10 @@ async function gateClaimedExit(
  bead: BdBead,
 ): Promise<ToolCallEventResult | undefined> {
  const beadId = bead.id;
+ // The bead is judged by its current state. One a successor now holds is theirs to finish;
+ // one this actor released or closed is still judged, because every self-releasing exit
+ // (a parked architect, a shepherd's BLOCKED wait, a reviewer's changes round) satisfies
+ // its clause before releasing, and one that did not is the escape the contract exists for.
  if (bead.assignee && bead.assignee !== claim?.actor) return undefined;
 
  const routing = beadRouting(bead);
@@ -829,7 +869,28 @@ async function gateClaimedExit(
  }
  const attempts = ++state.refusalCount;
  const maxAttempts = contract.bounce?.max_attempts ?? 3;
- if (attempts >= maxAttempts) return undefined;
+ if (attempts >= maxAttempts) {
+  // The liveness valve: a worker that cannot meet its contract is not held for ever, but
+  // nothing is accepted, nothing on the bead changes, and the claim stays for the reaper.
+  // The valve is loud where each reader looks: a warn line for the operator, and a NOTE
+  // on the bead for the architect and the Attention list. Its failure to land is logged
+  // and does not hold the exit, which is the valve's whole point.
+  logger.warn("orchestrate exit contract: refusal budget spent; exit allowed without accepting work, claim retained", {
+   bead: beadId,
+   role,
+   attempts,
+   failed_checks: failures,
+  });
+  const unmet = failures.map(failure => `${failure.check}: ${failure.detail}`).join("; ");
+  const noted = await bdRun(["comment", beadId, `NOTE exit allowed unaccepted after ${attempts} refusals; claim retained; ${unmet}`, "--actor", claim.actor]);
+  if (noted === null || noted.code !== 0) {
+   logger.warn("orchestrate exit contract: budget NOTE not recorded", {
+    bead: beadId,
+    cause: noted === null ? lastBdFailure() : (noted.stderr || noted.stdout).trim(),
+   });
+  }
+  return undefined;
+ }
 
  return {
   block: true,
@@ -846,11 +907,27 @@ async function gateClaimedExit(
  };
 }
 
-/** `unsatisfied: <require>`, with origin's or the clone's answer when the predicate asked and it said no. */
+/**
+ * `unsatisfied: <require>`, with the answer that failed it when one was read: origin's or
+ * the clone's when the predicate asked, and for a linked-verb predicate every comment with
+ * a wanted verb that the version filter dropped, naming the token it lacked or carried
+ * wrong and the value expected. Measured (omp-orchestrate-gqx): a reviewer wrote
+ * `head 73018a2` for `head_sha=73018a2…`, and the bare predicate gave it nothing to fix.
+ */
 function unsatisfied(require: string, evidence: Evidence): string {
  const causes: string[] = [];
  if (asksOrigin(require) !== undefined && evidence.origin !== undefined && !evidence.origin.matched) causes.push(evidence.origin.detail);
  if (asksClone(require) !== undefined && evidence.cloneWork !== undefined && !evidence.cloneWork.matched) causes.push(evidence.cloneWork.detail);
+ const verbSet = verbPredicate(require);
+ if (verbSet?.linked === true) {
+  for (const dropped of evidence.unstamped ?? []) {
+   if (!verbSet.wanted.includes(dropped.verb)) continue;
+   const gaps = dropped.tokens.map(({ key, expected, found }) =>
+    found === undefined ? `lacks ${key}=${expected}` : `carries ${key}=${found}, expected ${key}=${expected}`);
+   const cause = `${dropped.verb} on ${dropped.bead} ${gaps.join(" and ")}; the expected values are the claimed bead's metadata, else the node's`;
+   if (!causes.includes(cause)) causes.push(cause);
+  }
+ }
  return `unsatisfied: ${require}${causes.length === 0 ? "" : ` -- ${causes.join("; ")}`}`;
 }
 

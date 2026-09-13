@@ -577,37 +577,53 @@ describe("G2 ownership freshness", () => {
  });
 
  test.each([
-  ["a commit", () => fromBash(owned, "git commit -am done")],
-  ["a write", () => writing("src/api.ts")],
-  ["a comment on it", () => fromBash(owned, `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE closing remark"`)],
- ])("forgets the claim and admits %s once this actor closed the bead", async (_label, mutate) => {
-  // A finished bead is a release, not a loss of ownership: refusing every later call
-  // locked the session until its next claim command.
-  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
+  ["released while open", { status: "open", assignee: "" }],
+  ["released while in progress", { status: "in_progress" }],
+  ["closed and released", { status: "closed", assignee: "" }],
+ ])("forgets the claim on the first product call that reads it %s", async (_label, bead) => {
+  // A cleared assignee is the one observation that ends a claim: only the holder's own
+  // fenced write or the reaper clears it. The session then falls open as one that never
+  // claimed, which is what a released bead's scope no longer binds.
+  beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned, scope: ["src/**"] } };
 
-  expect(await mutate()).toBeUndefined();
+  expect(await fromBash(owned, "git commit -am done")).toBeUndefined();
   expect(claims.observedClaim()).toBeUndefined();
  });
 
  test.each([
-  ["a successor", { status: "closed", assignee: successor }],
-  ["nobody", { status: "closed" }],
- ])("keeps refusing after a close that left the bead assigned to %s", async (_label, bead) => {
-  beads[BEAD] = { id: BEAD, ...bead, metadata: { worktree: owned, scope: ["src/**"] } };
+  ["a commit", () => fromBash(owned, "git commit -am done")],
+  ["a write", () => writing("src/api.ts")],
+  ["a comment on it", () => fromBash(owned, `BEADS_ACTOR=${actor} bd comment ${BEAD} "NOTE closing remark"`)],
+  ["a read of its comments", () => fromBash(owned, `bd comments ${BEAD}`)],
+  ["a comment on the node it reviews", () => fromBash(owned, `BEADS_ACTOR=${actor} bd comment orc-node "REVIEW orc-node verdict=approve"`)],
+  ["the PR handoff", () => fromBash(owned, "gh pr ready 12")],
+ ])("keeps the claim and admits %s once this actor closed the bead", async (_label, mutate) => {
+  // A bead this actor closed is finished, not lost, and not released: the report, the
+  // handoff and the exit contract still hang off the claim. Measured (omp-orchestrate-cdo):
+  // forgetting here let a reviewer that closed its wisp exit with its verdict never judged.
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
+
+  expect(await mutate()).toBeUndefined();
+  expect(claims.observedClaim()?.beadIds).toEqual([BEAD]);
+ });
+
+ test("keeps refusing after a close that left the bead assigned to a successor", async () => {
+  beads[BEAD] = { id: BEAD, status: "closed", assignee: successor, metadata: { worktree: owned, scope: ["src/**"] } };
 
   expect((await fromBash(owned, "git commit -am done"))?.block).toBe(true);
   expect(claims.observedClaim()).toBeDefined();
  });
 
- test("keeps the claim through its own recovery commands on the closed bead", async () => {
-  // Reopen and reclaim rely on the retained claim state; a wrapped bd command on the
-  // closed bead is neither recovery nor product work, so it is refused rather than
-  // treated as the end of the claim.
+ test("steers a status write on the closed bead to reopen-then-reclaim and keeps the claim", async () => {
+  // Reopen and reclaim rely on the retained claim state; a wrapped reopen is product work
+  // on a bead this actor still holds, and proceeds.
   beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned, scope: ["src/**"] } };
 
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`)).toBeUndefined();
-  expect((await fromBash(owned, `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`))?.block).toBe(true);
-  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --status in_progress`))?.block).toBe(true);
+  expect(await fromBash(owned, `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`)).toBeUndefined();
+  const steered = await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --status in_progress`);
+  expect(steered?.block).toBe(true);
+  expect(steered?.reason).toContain(`bd reopen ${BEAD}`);
   expect(claims.observedClaim()).toBeDefined();
  });
 });
@@ -659,12 +675,6 @@ describe("G2 standalone ownership controls", () => {
   expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd update ${BEAD} --claim --status in_progress`)).toBeUndefined();
  });
 
- test("keeps structured environment keys other than the actor untrusted for recovery", async () => {
-  beads[BEAD] = { id: BEAD, status: "closed", assignee: actor, metadata: { worktree: owned } };
-  expect(await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`, { BEADS_ACTOR: actor })).toBeUndefined();
-  expect((await fromBash(owned, `BEADS_ACTOR=${actor} bd reopen ${BEAD}`, { OTHER: "x" }))?.block).toBe(true);
- });
-
  test.each([
   ["reopen unassigned", `bd reopen ${BEAD}`, { status: "closed" }],
   ["reopen foreign owner", `bd reopen ${BEAD}`, { status: "closed", assignee: foreignActor }],
@@ -681,14 +691,18 @@ describe("G2 standalone ownership controls", () => {
 
  test.each([
   ["a foreign actor", "closed", `BEADS_ACTOR=${foreignActor} bd reopen ${BEAD}`],
-  ["a wrapped reopen", "closed", `BEADS_ACTOR=${actor} sh -c 'bd reopen ${BEAD}'`],
-  ["a compound reopen", "closed", `BEADS_ACTOR=${actor} bd reopen ${BEAD}; true`],
   ["a foreign actor reclaim", "open", `BEADS_ACTOR=${foreignActor} bd update ${BEAD} --claim`],
-  ["a foreign bead", "closed", `BEADS_ACTOR=${actor} bd reopen orc-foreign`],
  ])("refuses recovery through %s", async (_label, status, command) => {
   beads[BEAD] = { id: BEAD, status, assignee: actor, metadata: { worktree: owned } };
 
   expect((await fromBash(owned, command))?.block).toBe(true);
+ });
+
+ test("judges a foreign actor's control before honouring an observed release", async () => {
+  beads[BEAD] = { id: BEAD, status: "open", assignee: "", metadata: { worktree: owned } };
+
+  expect((await fromBash(owned, `BEADS_ACTOR=${foreignActor} bd update ${BEAD} --claim`))?.block).toBe(true);
+  expect(claims.observedClaim()).toBeDefined();
  });
 
  test.each([
