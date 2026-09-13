@@ -5,6 +5,7 @@
 
 ### Features
 
+* replace run/bind/close with start, resume, answer and stop; add an Attention section to status ([#119](https://github.com/srobroek/omp-orchestrate/issues/119)) ([d82b16d](https://github.com/srobroek/omp-orchestrate/commit/d82b16dbae6e71bc7e0db53ceaf0d2da91566b84))
 * architect gates and G10 nested-invocation refusal ([#133](https://github.com/srobroek/omp-orchestrate/issues/133)) ([ce3bddb](https://github.com/srobroek/omp-orchestrate/commit/ce3bddb916ac2714b848a23b85fb73a8f6b2bc7a))
 * land approved PRs from the lead session's landing sweep ([#116](https://github.com/srobroek/omp-orchestrate/issues/116)) ([64cb28b](https://github.com/srobroek/omp-orchestrate/commit/64cb28b1dc164dd7fcc916ce87f22024a2f557ef))
 * lease-based claim recovery and a fenced lead lease ([#117](https://github.com/srobroek/omp-orchestrate/issues/117)) ([5539406](https://github.com/srobroek/omp-orchestrate/commit/553940618c58100d76afa87eea7f4fade88944d0))
@@ -36,7 +37,6 @@
 * redirect isolated copies to the run's beads database and drop the pin ([#114](https://github.com/srobroek/omp-orchestrate/issues/114)) ([68a1e22](https://github.com/srobroek/omp-orchestrate/commit/68a1e22822ac80cc4f1e2fba52f1d61280a0939a))
 * refuse a second claim per turn, gate implementer spawns, and drop G7 ([#109](https://github.com/srobroek/omp-orchestrate/issues/109)) ([a2d7f65](https://github.com/srobroek/omp-orchestrate/commit/a2d7f6529bf42b3c3b6a42e042835364381e314d))
 * refuse opaque scopes, unlanded closes, governance rewrites from roles, and zero-work reports ([#124](https://github.com/srobroek/omp-orchestrate/issues/124)) ([4d49892](https://github.com/srobroek/omp-orchestrate/commit/4d49892f800a413e05f1bc979097c87831245465))
-* replace run/bind/close with start, resume, answer and stop; add an Attention section to status ([#119](https://github.com/srobroek/omp-orchestrate/issues/119)) ([d82b16d](https://github.com/srobroek/omp-orchestrate/commit/d82b16dbae6e71bc7e0db53ceaf0d2da91566b84))
 * run-scope the refusing gates, admit the terminal comment after release, recognise the real reclaim ([#102](https://github.com/srobroek/omp-orchestrate/issues/102)) ([ac6b8ed](https://github.com/srobroek/omp-orchestrate/commit/ac6b8ed6fc7441fd65a0d24570c326c02aad3378))
 * see the bd command behind env flags and refuse a helper that edits its sandbox ([#106](https://github.com/srobroek/omp-orchestrate/issues/106)) ([4d5bf83](https://github.com/srobroek/omp-orchestrate/commit/4d5bf833f542549472edbf60aa494af5a24fbd61))
 * the plugin is dormant outside a run scope ([#115](https://github.com/srobroek/omp-orchestrate/issues/115)) ([07e0199](https://github.com/srobroek/omp-orchestrate/commit/07e0199b1800874ffcce75001f79464e09dd067d))
