@@ -6,8 +6,10 @@
  * agents — is data OMP discovers from the package tree.
  *
  * Every handler opens with `runScope` (`src/run-scope.ts`). Outside a run scope the plugin
- * spawns no process, writes no file, sends no message and refuses no tool call; the slash
- * commands, the six tools, the agents and the skill are its whole surface there.
+ * spawns no process, sends no message and refuses no tool call; its one write is the
+ * activation sweep of stray checkout paths inside its own plugin-cache entry
+ * (`src/install-hygiene.ts`). The slash commands, the six tools, the agents and the skill
+ * are its whole surface there.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";

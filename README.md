@@ -334,9 +334,11 @@ native discovery can load its agents. Files under `agents/` alone do not registe
 
 ### Dormancy
 
-Outside a run the plugin spawns no process and writes no file. It sends no message and
-refuses no tool call. A plain session sees the slash commands, the `orc_*` tools, the
-agents, the skill, and three rules. A run scope exists only while a valid marker
+Outside a run the plugin spawns no process, sends no message and refuses no tool call. Its
+one write is at activation: it removes stray copies of a checkout's `.beads` store,
+`.orchestration/` and `scratch/` from its own plugin-cache entry, which a local-path
+marketplace install copies in. A plain session sees the slash commands, the `orc_*` tools,
+the agents, the skill, and three rules. A run scope exists only while a valid marker
 `.orchestration/.active-run` is readable at one of three places:
 
 - the checkout
