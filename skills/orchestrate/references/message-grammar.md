@@ -38,7 +38,7 @@ The same first-token rule applies to it: `NO WORK` is neither the token nor a ve
 
 | Verb | Meaning | Who may write it |
 |---|---|---|
-| `REPORTED` | Evidence delivered, next role's label added, assignee cleared -- the node's exit contract is met. | `architect`, `implementer`, `researcher`, `unlisted` -- any claimant with no per-role contract |
+| `REPORTED` | Evidence delivered, next role's label added -- the node's exit contract is met. An implementer or a completing architect writes it holding the claim and yields; the exit gate releases the claim in the fenced write that stamps the proven push. Other writers clear the assignee as their contract says. | `architect`, `implementer`, `researcher`, `unlisted` -- any claimant with no per-role contract |
 | `BLOCKED` | Work cannot proceed. A worker writes it on an escalation wisp linked to its node; a shepherd writes it on the merge bead, naming the gate, provider or slot the landing waits on. Never stored as a bead state. | `*` -- every claiming role |
 | `FAILED` | Unrecoverable failure. A valid exit paired with status `blocked`, never a faked success. | `*` -- every claiming role |
 | `REVIEW` | One reviewer's verdict, written on the node its review wisp links to: `verdict=approve|changes` at a named head and round. The review outcome a reader needs is this comment. | `reviewer` |

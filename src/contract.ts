@@ -130,7 +130,7 @@ is the plugin's: a command that assigns or unsets it is refused.
 Exit. Follow your role's evidence and disposition contract, not another role's report
 shape. Git work is proven on origin: an implementer reports head_sha and pushed=<ref>@<sha>
 before yield and the exit gate asks origin for that ref; an architect stamps head_sha with
-the pushed feature head and releases its epic before every yield or park, because an
+the pushed feature head, and when it parks it releases its epic itself, because an
 isolated architect cannot be revived. Every exit deletes the clone, a blocked one included:
 commits past the base must be pushed and reported, an uncommitted change committed and
 pushed or discarded, before you yield. Origin not answering refuses the exit: retry the
