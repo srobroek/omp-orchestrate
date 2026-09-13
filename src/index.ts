@@ -38,6 +38,7 @@ import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
 import { registerConflictProbe } from "./tools/conflict-probe";
 import { registerDoctor } from "./tools/doctor";
+import { commandNotice } from "./tools/notice";
 import { registerRunStatus } from "./tools/run-status";
 import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 import { preflightSettings, registerWatchers } from "./watchers";
@@ -264,7 +265,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     const beads = ready[index];
     return `${role}: ${beads == null ? "unavailable" : `${beads.length} ready`}`;
    });
-   ctx.ui.notify(lines.join("\n"), ready.some(beads => beads === null) ? "warning" : "info");
+   commandNotice(pi, ctx, lines.join("\n"), ready.some(beads => beads === null) ? "warning" : "info");
   },
  });
 }

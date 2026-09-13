@@ -38,6 +38,7 @@ import { type LandingRecord, recordLandingCapabilities } from "./landing";
 import { type LeadLeaseRenewal, fenceRefused, leaseExpired, leaseState, leaseUntil, releaseDeadClaim } from "./lease";
 import { runScope } from "./run-scope";
 import { probeStore, type StoreProbe } from "./store-probe";
+import { commandNotice, type NoticeLevel } from "./tools/notice";
 
 /** The marker shape this plugin writes; a marker stamped with a higher number is refused. */
 export const MARKER_SCHEMA = 1;
@@ -1154,11 +1155,7 @@ export async function runStatusReport(cwd: string, now = Date.now()): Promise<Ru
 // ============================================================================
 
 /** Notification level; `warning` wins over `info`, `error` over both. */
-type Level = "info" | "warning" | "error";
-
-function notify(ctx: ExtensionCommandContext, lines: string[], level: Level): void {
-	ctx.ui.notify(lines.join("\n"), level);
-}
+type Level = NoticeLevel;
 
 function reason(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -1231,6 +1228,8 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 	// exists, and a test's fake stands in for the whole of it.
 	const answerDeps: AnswerDeps = { registry: deps.registry ?? { get: id => AgentRegistry.global().get(id) }, wake: deps.wake ?? ircWake };
 
+	const notify = (ctx: ExtensionCommandContext, lines: string[], level: Level): void => commandNotice(pi, ctx, lines.join("\n"), level);
+
 	/** The run is active by now, whatever the hook does; a failing readiness check must not read as a failed start. */
 	const activate = async (cwd: string, lines: string[]): Promise<Level> => {
 		try {
@@ -1247,7 +1246,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 		handler: async (args, ctx) => {
 			const request = startRequest(args);
 			if (typeof request === "string") {
-				ctx.ui.notify(request, "error");
+				notify(ctx, [request], "error");
 				return;
 			}
 			const cwd = await commandRoot(ctx);
@@ -1255,7 +1254,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			try {
 				started = await startRun(cwd, ctx.sessionManager.getSessionId(), request.target, request.options);
 			} catch (error) {
-				ctx.ui.notify(reason(error), "error");
+				notify(ctx, [reason(error)], "error");
 				return;
 			}
 			let level: Level = "info";
@@ -1298,10 +1297,10 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			switch (outcome.kind) {
 				case "no-run":
 				case "refused":
-					ctx.ui.notify(outcome.reason, "error");
+					notify(ctx, [outcome.reason], "error");
 					return;
 				case "held-by-other":
-					ctx.ui.notify(`resume refused: ${outcome.reason}`, "error");
+					notify(ctx, [`resume refused: ${outcome.reason}`], "error");
 					return;
 				case "resumed":
 					break;
@@ -1333,7 +1332,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 		description: "Active run: marker binding, run epic liveness, lead lease, and what needs attention",
 		handler: async (_args, ctx) => {
 			const report = await runStatusReport(await commandRoot(ctx));
-			ctx.ui.notify(report.lines.join("\n"), report.healthy ? "info" : "warning");
+			notify(ctx, report.lines, report.healthy ? "info" : "warning");
 		},
 	});
 
@@ -1345,14 +1344,14 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			const beadId = split === -1 ? trimmed : trimmed.slice(0, split);
 			const text = split === -1 ? "" : trimmed.slice(split).trim();
 			if (beadId.length === 0 || text.length === 0) {
-				ctx.ui.notify("usage: /orchestrate-answer <bead> <text>", "error");
+				notify(ctx, ["usage: /orchestrate-answer <bead> <text>"], "error");
 				return;
 			}
 			let hold: AnswerHold;
 			try {
 				hold = await answerBead(await commandRoot(ctx), ctx.sessionManager.getSessionId(), beadId, text, answerDeps);
 			} catch (error) {
-				ctx.ui.notify(reason(error), "error");
+				notify(ctx, [reason(error)], "error");
 				return;
 			}
 			const noted = `answer recorded on ${beadId}`;
@@ -1373,14 +1372,14 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 		handler: async (args, ctx) => {
 			const parts = words(args);
 			if (parts.some(word => word !== "--force")) {
-				ctx.ui.notify("usage: /orchestrate-stop [--force]", "error");
+				notify(ctx, ["usage: /orchestrate-stop [--force]"], "error");
 				return;
 			}
 			let stopped: StopResult;
 			try {
 				stopped = await stopRun(await commandRoot(ctx), ctx.sessionManager.getSessionId(), { force: parts.length > 0 });
 			} catch (error) {
-				ctx.ui.notify(reason(error), "error");
+				notify(ctx, [reason(error)], "error");
 				return;
 			}
 			const lines = [`orchestrate run ${stopped.run} stopped; marker removed`];
