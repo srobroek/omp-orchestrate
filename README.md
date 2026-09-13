@@ -299,6 +299,21 @@ row. Restart the session with `omp --config <plugin-root>/config/orchestrate.ove
 Accepting the warning leaves captured branches, deliberate integration, and cross-worker
 claim exclusion unavailable.
 
+### Slash commands under `omp -p`
+
+Print mode attaches no UI, so OMP drops every notification a command would show. The
+plugin prints each `/orchestrate-*` and `/orchestrate-doctor` result itself: to stdout
+under `omp -p`, and to stderr under `omp -p --mode json`, where stdout carries the event
+stream. A warning or error line starts with `warning:` or `error:`. Inside a spawned
+agent the same commands print nothing, because the lead's terminal is not theirs.
+
+### `INFO wt` in the doctor report
+
+`wt` (Worktrunk) is optional. No role uses it: the lead spawns roles with `task`,
+isolation clones the checkout, and captures reach `origin` by push. When `wt` is absent
+the row reads `Worktrunk not on PATH; optional, operator worktrees only`, and the
+verdict ignores it.
+
 ### Unknown agent or a missing helper
 
 When `/agents` and task dispatch disagree, check the effective `extensions` roots. With
