@@ -562,6 +562,10 @@ export async function closeRun(cwd: string, runId: string, options: { force?: bo
 			if (inFlight.length > 0) {
 				throw new Error(`${inFlight.length} bead${inFlight.length === 1 ? "" : "s"} under ${runId} still in_progress (${inFlight.map(bead => bead.id).join(", ")}); pass --force to close anyway`);
 			}
+			const uncontained = await uncontainedNodes(cwd, beads, runId);
+			if (uncontained.length > 0) {
+				throw new Error(`${uncontained.length} pushed ref${uncontained.length === 1 ? "" : "s"} under ${runId} not integrated in the feature branch (${uncontained.join(", ")}); integrate or record them, or pass --force to close anyway`);
+			}
 		}
 		await fs.rm(markerPath(cwd), { force: true });
 	});
@@ -602,6 +606,53 @@ async function gitRead(cwd: string, args: readonly string[]): Promise<string | u
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Open `orc-node` descendants of the run whose pushed work is not in their feature branch.
+ *
+ * A worker's commits reach the feature branch by cherry-pick, so ancestry proves nothing;
+ * `git cherry` compares patch ids against `origin/<branch>` as the lead's checkout last saw
+ * it, `branch` being the nearest ancestor's stamp (the epic's, under the architect
+ * runtime). A ref this checkout cannot compare -- no branch stamped, no such remote branch,
+ * a pushed commit it never fetched -- is named as unverifiable and counts against the
+ * close: absence of proof is not proof of integration, and `--force` is the recorded escape.
+ */
+async function uncontainedNodes(cwd: string, beads: readonly BdBead[], run: string): Promise<string[]> {
+	const byId = new Map(beads.map(bead => [bead.id, bead]));
+	const bad: string[] = [];
+	for (const bead of beads) {
+		const pushed = metadataString(bead, "pushed_sha");
+		if (pushed === undefined || bead.status === "closed" || !(bead.labels ?? []).includes("orc-node")) continue;
+		let branch: string | undefined;
+		let base = metadataString(bead, "base_sha");
+		let inRun = false;
+		const seen = new Set<string>();
+		for (let parent = typeof bead.parent === "string" ? byId.get(bead.parent) : undefined; parent !== undefined && !seen.has(parent.id); parent = typeof parent.parent === "string" ? byId.get(parent.parent) : undefined) {
+			seen.add(parent.id);
+			branch ??= metadataString(parent, "branch");
+			base ??= metadataString(parent, "base_sha");
+			if (parent.id === run) {
+				inRun = true;
+				break;
+			}
+		}
+		if (!inRun) continue;
+		if (branch === undefined) {
+			bad.push(`${bead.id} (no branch stamped on its lineage)`);
+			continue;
+		}
+		const env = { ...process.env };
+		for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
+		try {
+			const args = ["-C", cwd, "cherry", `origin/${branch}`, pushed, ...(base === undefined ? [] : [base])];
+			const { stdout } = await execFileAsync("git", args, { env, timeout: 10_000 });
+			if (stdout.split("\n").some(line => line.startsWith("+"))) bad.push(bead.id);
+		} catch {
+			bad.push(`${bead.id} (unverifiable: origin/${branch} or ${pushed.slice(0, 7)} not in this checkout)`);
+		}
+	}
+	return bad;
 }
 
 /** The id a `bd create --json` answer names, or `undefined` when it names none. */
@@ -874,8 +925,9 @@ export async function stopRun(cwd: string, sessionId: string, options: { force?:
 	}
 	// Read what a forced stop abandons before the marker goes, note it after: a refused
 	// close must leave no note claiming the run was stopped.
-	const beads = options.force === true ? await bdListChecked(STORE_LIST, undefined, cwd) : [];
-	const abandoned = beads === null ? [] : inFlightDescendants(beads, run).map(bead => bead.id);
+ const beads = options.force === true ? await bdListChecked(STORE_LIST, undefined, cwd) : [];
+ const uncontained = options.force === true && beads !== null ? await uncontainedNodes(cwd, beads, run) : [];
+ const abandoned = beads === null ? [] : [...inFlightDescendants(beads, run).map(bead => bead.id), ...uncontained];
 	await closeRun(cwd, run, options);
 	if (options.force === true) {
 		const detail = beads === null ? "in-flight beads could not be read" : abandoned.length === 0 ? "no bead in_progress" : `${abandoned.length} in_progress: ${abandoned.join(", ")}`;
