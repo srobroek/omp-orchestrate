@@ -78,6 +78,12 @@ const CONTRACTS: Record<string, Contract> = {
 };
 
 /**
+ * Roles whose contracts leave the claim held at a completed yield for the gate to release
+ * in the write that stamps the proven push. A boolean table, like {@link ORCHESTRATOR_ANCHORS}.
+ */
+const RELEASING_ROLES: Record<string, true> = { implementer: true, architect: true };
+
+/**
  * Metadata keys the orchestrator stamps, exempt from `deny_metadata`.
  *
  * A role must not be faulted for a key its dispatcher wrote. Mirrors
@@ -756,7 +762,7 @@ async function gateClaimedExit(
   const clone = asksClone(require);
   // One refusal is enough: the clone is not read once origin has already said no.
   if (clone !== undefined && evidence.origin?.matched !== false) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
-  if (satisfies(require, evidence)) return await recordPushed(bead, claim, evidence, role === "implementer");
+  if (satisfies(require, evidence)) return await recordPushed(bead, claim, evidence, RELEASING_ROLES[role] === true);
   escapeFailure = { check: "escape", detail: unsatisfied(require, evidence), recovery: contract.escape.recovery };
  }
 
@@ -813,7 +819,7 @@ async function gateClaimedExit(
  }
 
  // A pause is not a completion: an open escalation holds the implementer's claim for it.
- if (failures.length === 0) return await recordPushed(bead, claim, evidence, role === "implementer" && !paused);
+ if (failures.length === 0) return await recordPushed(bead, claim, evidence, RELEASING_ROLES[role] === true && !paused);
  if (escapeFailure !== undefined) failures.unshift(escapeFailure);
 
  // Refusals belong to this activation, not to mutable shared bead metadata.
@@ -874,8 +880,9 @@ function unsatisfied(require: string, evidence: Evidence): string {
  * - Held by the actor in any other status: a park keeps its claim by contract, and bd fences
  *   no write on it, so nothing is written and the missing stamp is logged.
  *
- * `releases` is the implementer contract's: its worker no longer clears the assignee before
- * yielding, so a held bead is released here whether or not there is a head to stamp. Every
+ * `releases` is the implementer's and the completing architect's: neither clears the assignee before
+ * yielding, so a held bead is released here whether or not there is a head to stamp; a parking
+ * architect releases itself, and bd fences nothing on a blocked bead. Every
  * other contract releases in its own terms and is only stamped.
  */
 async function recordPushed(bead: BdBead, claim: ClaimObservation, evidence: Evidence, releases: boolean): Promise<ToolCallEventResult | undefined> {

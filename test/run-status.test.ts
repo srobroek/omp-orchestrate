@@ -489,25 +489,29 @@ describe("buildCloseOut", () => {
 		expect(renderStatus(domain, { closeOut: gate })).toContain("unlanded (2): m-open (omp/task/m-open, active); m-legacy (ready)");
 	});
 
-	test("not on origin: an open node's head_sha without a matching pushed_sha, or a branch with no push target; a proven push or a closed node clears it", () => {
+	test("not on origin: an unblocked implementer task's head_sha without a matching pushed_sha, or any node's branch with no push target; a feature, a parked task, a proven push or a closed node clears it", () => {
 		const beads = [
 			...DOMAINS,
 			bead("f-stamped", { parent: "dom-a", issue_type: "feature", status: "in_progress", metadata: { branch: "feat/a", push: "origin/feat/a", head_sha: "abc1234abc", pushed_sha: "abc1234" } }),
-			bead("f-stale", { parent: "dom-a", issue_type: "feature", status: "in_progress", metadata: { branch: "feat/b", push: "origin/feat/b", head_sha: "bbb2222", pushed_sha: "aaa1111" } }),
+			// An architect's feature carries a head no stamp matches when it parked or yielded released; its push target is the row that judges it.
+			bead("f-stale", { parent: "dom-a", issue_type: "feature", status: "in_progress", metadata: { role: "architect", branch: "feat/b", push: "origin/feat/b", head_sha: "bbb2222", pushed_sha: "aaa1111" } }),
 			bead("f-target-only", { parent: "dom-a", issue_type: "feature", status: "open", metadata: { branch: "feat/c" } }),
-			bead("t-unpushed", { parent: "f-stale", status: "in_progress", metadata: { head_sha: "ccc3333" } }),
-			bead("t-done", { parent: "f-stale", status: "closed", metadata: { head_sha: "ddd4444" } }),
+			bead("t-unpushed", { parent: "f-stale", status: "in_progress", metadata: { role: "implementer", head_sha: "ccc3333" } }),
+			bead("t-stale", { parent: "f-stale", status: "in_progress", metadata: { role: "implementer", head_sha: "eee5555", pushed_sha: "aaa1111" } }),
+			// A parked task was never proven: the pause keeps its claim, and bd fences nothing on a blocked bead.
+			bead("t-parked", { parent: "f-stale", status: "blocked", metadata: { role: "implementer", head_sha: "fff6666" } }),
+			bead("t-done", { parent: "f-stale", status: "closed", metadata: { role: "implementer", head_sha: "ddd4444" } }),
 			merge("m-feat", { status: "open", metadata: { branch: "feat/b", head_sha: "bbb2222", origin_bead: "f-stale", repo: "o/r", role: "shepherd" } }),
 		];
 		const gate = buildCloseOut(beads, buildStatusTree(beads, []), ALL_READY);
 		expect(gate.not_on_origin).toEqual([
-			{ id: "f-stale", head: "bbb2222", pushed: "aaa1111" },
 			{ id: "f-target-only", branch: "feat/c" },
 			{ id: "t-unpushed", head: "ccc3333" },
+			{ id: "t-stale", head: "eee5555", pushed: "aaa1111" },
 		]);
 		expect(gate.clean).toBe(false);
 		expect(renderStatus(buildStatusTree(beads, []), { closeOut: gate })).toContain(
-			"not on origin (3): f-stale (head bbb2222, pushed aaa1111); f-target-only (feat/c, no push target); t-unpushed (head ccc3333, never pushed)",
+			"not on origin (3): f-target-only (feat/c, no push target); t-unpushed (head ccc3333, never pushed); t-stale (head eee5555, pushed aaa1111)",
 		);
 	});
 });

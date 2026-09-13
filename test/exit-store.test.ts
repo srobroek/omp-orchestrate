@@ -226,6 +226,52 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 			expect(after.assignee).toBe("impl-B");
 			expect(after.status).toBe("in_progress");
 		}, YIELD_MS);
+
+		/** A git feature epic as the architect stamps it: branch, push target and the integrated head. */
+		function feature(title: string): Promise<string> {
+			return create(title, "-t", "feature", "--labels", "orc-node", "--metadata", JSON.stringify({ role: "architect", execution_kind: "git", branch: "feat/login", push: "origin/feat/login", head_sha: HEAD, base_sha: BASE }));
+		}
+
+		test("an architect completing its epic yields holding it, and is stamped and released in one fenced write", async () => {
+			const id = await feature("completed feature");
+			await write("update", id, "--actor", "arch-A", "--claim");
+			await write("update", id, "--actor", "arch-A", "--add-label", "agent:reviewer");
+			await write("comments", "add", id, `REPORTED ${id} integrated 2 tasks; head_sha=${HEAD}`, "--actor", "arch-A");
+			const writes = recordWrites();
+			try {
+				claims.recordClaim({ actor: "arch-A", beadIds: [id] });
+				expect(await gate(ctx(root, "architect"))).toBeUndefined();
+			} finally {
+				writes.restore();
+			}
+			expect(writes.issued).toEqual([["update", id, "--actor", "arch-A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "in_progress"]]);
+
+			const after = await shown(id);
+			expect(after.metadata?.pushed_sha).toBe(HEAD);
+			expect(after.assignee ?? "").toBe("");
+			expect(after.status).toBe("in_progress");
+		}, YIELD_MS);
+
+		test("an architect's park releases itself and is accepted unstamped with no write", async () => {
+			const id = await feature("parked feature");
+			await write("update", id, "--actor", "arch-A", "--claim");
+			await write("comments", "add", id, `BLOCKED ${id} design question on the token format`, "--actor", "arch-A");
+			await write("update", id, "--actor", "arch-A", "--status", "blocked");
+			await write("update", id, "--actor", "arch-A", "--assignee", "");
+			const writes = recordWrites();
+			try {
+				claims.recordClaim({ actor: "arch-A", beadIds: [id] });
+				expect(await gate(ctx(root, "architect"))).toBeUndefined();
+			} finally {
+				writes.restore();
+			}
+			expect(writes.issued).toEqual([]);
+
+			const after = await shown(id);
+			expect(after.metadata?.pushed_sha).toBeUndefined();
+			expect(after.assignee ?? "").toBe("");
+			expect(after.status).toBe("blocked");
+		}, YIELD_MS);
 	});
 
 	describe("a reviewer's verdict on the wisp's parent", () => {

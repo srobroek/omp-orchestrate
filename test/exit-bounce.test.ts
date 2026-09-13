@@ -286,12 +286,17 @@ describe("G4 checked evidence", () => {
     ...overrides,
    };
   }
-  test("released, reported, feature head on origin: allowed, and the stamp is skipped on a bead nobody holds", async () => {
-   bead = feature();
+  test("held, reported, feature head on origin: allowed, and the epic is stamped and released in one fenced write", async () => {
+   bead = feature({ assignee: "A" });
    comments = [{ text: `REPORTED ${BEAD} integrated 3 tasks; head_sha=abc1234` }];
    expect(await gateExitContract(ARCH)).toBeUndefined();
    expect(asked).toEqual([FEATURE]);
-   // No fence exists for a released bead, so no write is issued; the missing stamp is logged.
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
+  });
+  test("an epic released before the proof is allowed unstamped: no fence exists for a bead nobody holds", async () => {
+   bead = feature();
+   comments = [{ text: `REPORTED ${BEAD} integrated 3 tasks; head_sha=abc1234` }];
+   expect(await gateExitContract(ARCH)).toBeUndefined();
    expect(issued).toEqual([]);
    expect(warned.map(entry => entry.cause)).toEqual(["released before proof"]);
   });
@@ -305,12 +310,14 @@ describe("G4 checked evidence", () => {
    expect(verdict.failed_checks[0]!.recovery).toContain("git push origin <branch>");
    expect(issued).toEqual([]);
   });
-  test("an epic still held by the architect is refused: an isolated architect cannot be revived", async () => {
+  test("a held epic whose head is not on origin is refused with the two-step recovery, and nothing is written", async () => {
    bead = feature({ assignee: "A" });
    comments = [{ text: `REPORTED ${BEAD} integrated; head_sha=abc1234` }];
+   remote = { kind: "missing" };
    const verdict: { failed_checks: { check: string; recovery?: string }[] } = JSON.parse((await gateExitContract(ARCH))!.reason!);
-   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["unclaimed"]);
-   expect(verdict.failed_checks[0]!.recovery).toContain('bd update <epic> --claim --assignee ""');
+   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["push_head"]);
+   expect(verdict.failed_checks[0]!.recovery).toContain("then yield holding the epic");
+   expect(issued).toEqual([]);
   });
   test("a park needs the comment, the release and the pushed head; the refusal names the two steps", async () => {
    bead = feature({ status: "blocked", assignee: "A" });
