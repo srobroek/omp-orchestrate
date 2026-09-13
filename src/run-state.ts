@@ -1001,7 +1001,7 @@ export async function answerBead(cwd: string, sessionId: string, beadId: string,
 	const member = beadId === marker.run_id ? true : await underRun(bead, marker.run_id, cwd);
 	if (member === undefined) throw new Error(`${beadId}'s ancestry could not be read, so whether it belongs to run ${marker.run_id} is unknown; nothing recorded`);
 	if (!member) throw new Error(`${beadId} is not under run ${marker.run_id}; /orchestrate-answer writes only to the run's beads, and nothing was recorded`);
-	const comments = await bdCommentsChecked(beadId);
+	const comments = await bdCommentsChecked(beadId, undefined, cwd);
 	const noted = await bdRun(["comment", beadId, `NOTE ANSWER ${beadId}: ${text}`, "--actor", actor], EPIC_WRITE_TIMEOUT_MS, cwd);
 	if (noted === null || noted.code !== 0) {
 		throw new Error(`answer not recorded on ${beadId}: ${noted === null ? "bd did not answer" : noted.stderr.trim() || `bd exited ${noted.code}`}`);
@@ -1081,7 +1081,7 @@ async function storeAttention(cwd: string, run: string, now: number): Promise<st
 	}
 	for (const bead of beads) {
 		if (bead.status !== "blocked" || bead.comment_count === 0) continue;
-		const comments = await bdCommentsChecked(bead.id);
+		const comments = await bdCommentsChecked(bead.id, undefined, cwd);
 		if (comments === null) {
 			items.push(`- ${bead.id} is blocked; its comments could not be read`);
 			continue;
@@ -1093,8 +1093,8 @@ async function storeAttention(cwd: string, run: string, now: number): Promise<st
 }
 
 /** The epic's own comments: the latest adoption the run refused, the latest WARN. */
-async function epicAttention(run: string): Promise<string[]> {
-	const comments = await bdCommentsChecked(run);
+async function epicAttention(cwd: string, run: string): Promise<string[]> {
+	const comments = await bdCommentsChecked(run, undefined, cwd);
 	if (comments === null) return [`- comments on ${run} could not be read`];
 	const items: string[] = [];
 	const refused = comments.findLast(comment => /^\W*NOTE\s+adoption refused/i.test(comment.text));
@@ -1158,7 +1158,7 @@ export async function runStatusReport(cwd: string, now = Date.now()): Promise<Ru
 		}
 	}
 	attention.push(...await storeAttention(cwd, run.run_id, now));
-	attention.push(...await epicAttention(run.run_id));
+	attention.push(...await epicAttention(cwd, run.run_id));
 	lines.push(attention.length === 0 ? "attention: none" : "attention:", ...attention);
 	return { lines, healthy: liveness.kind === "active" };
 }
