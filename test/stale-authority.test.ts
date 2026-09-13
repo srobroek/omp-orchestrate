@@ -373,14 +373,14 @@ const IMPLEMENTER = roleCtx("implementer");
 
 /**
  * An implementer node satisfying its git contract outright: captured branch, final sha,
- * reviewer handoff, assignee cleared, and a REPORTED comment naming a changed path. The
+ * reviewer handoff, the claim still held for the gate to release, and a REPORTED comment naming a changed path. The
  * control every authority case below is one field away from.
  */
 function delivered(metadata: Record<string, unknown> = {}, overrides: Partial<BdBead> = {}): BdBead {
  return {
   id: NODE,
   status: "in_progress",
-  assignee: "",
+  assignee: "orc-impl-1",
   labels: ["agent:reviewer"],
   metadata: { worktree: "/tmp/wt", branch: "omp/task/orc-42", head_sha: DELIVERED_SHA, ...metadata },
   ...overrides,
@@ -448,7 +448,7 @@ describe("G4 replay of an earlier round's verdict", () => {
   }
 
   expect(verdicts).toEqual([undefined, undefined, undefined]);
-  // The one write is the plugin's own: the head it saw on origin, stamped before each allowed yield.
+  // The one write is the plugin's own: the head it saw on origin, stamped as the claim is released before each allowed yield.
   expect(issued).toEqual(Array(3).fill(["update", NODE, "--actor", "orc-impl-1", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${DELIVERED_SHA}`, "--status", "in_progress"]));
  });
 

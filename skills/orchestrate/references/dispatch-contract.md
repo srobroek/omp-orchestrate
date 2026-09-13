@@ -118,7 +118,9 @@ isolated architect cannot be revived. Every exit deletes the clone, a blocked on
 commits past the base must be pushed and reported, an uncommitted change committed and
 pushed or discarded, before you yield. Origin not answering refuses the exit: retry the
 push and the report, you stay alive until proven. Non-git work needs output_ref. Completion
-requires the role's handoff and release. A positively open linked escalation pauses an
+requires the role's handoff. An implementer reports and yields holding its claim; the plugin
+releases it in the fenced write that stamps the proven push. Other roles release as their
+contract says. A positively open linked escalation pauses an
 implementer without releasing its claim; an architect parks instead. Unknown bd evidence
 allows an unevaluated exit; three failed evaluations in this activation allow exit without
 accepting work or changing owner, status or metadata. Recovery requires explicit release by

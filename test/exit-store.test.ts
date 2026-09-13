@@ -112,26 +112,36 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 		return create(title, "--labels", "orc-node", "--metadata", JSON.stringify({ role: "implementer", execution_kind: "git", head_sha: HEAD, base_sha: BASE }));
 	}
 
-	/** The implementer's pre-yield sequence: report with the pushed token, hand off, release last. */
-	async function reportAndRelease(id: string, actor: string): Promise<void> {
-		await write("comments", "add", id, `REPORTED ${id} src/api.ts pushed=omp/task/${actor}@${HEAD}`, "--actor", actor);
+	/** The implementer's pre-yield writes: the pushed token in REPORTED, the handoff label, the claim kept. */
+	async function report(id: string, actor: string): Promise<void> {
 		await write("update", id, "--actor", actor, "--add-label", "agent:reviewer");
-		await write("update", id, "--actor", actor, "--assignee", "");
+		await write("comments", "add", id, `REPORTED ${id} src/api.ts pushed=omp/task/${actor}@${HEAD}`, "--actor", actor);
+	}
+
+	/** Every write the gate issues, each passed through to the real binary. */
+	function recordWrites(): { issued: string[][]; restore: () => void } {
+		const issued: string[][] = [];
+		const realRun = actualBd.bdRun;
+		const run = spyOn(actualBd, "bdRun").mockImplementation(async (args, timeoutMs, cwd) => {
+			issued.push(args);
+			return await realRun(args, timeoutMs, cwd);
+		});
+		return { issued, restore: () => run.mockRestore() };
 	}
 
 	describe("recordPushed", () => {
-		test("a released report gets its pushed head stamped, and the assignee stays cleared", async () => {
-			const id = await task("released task");
+		test("a held report is stamped and released in one fenced write", async () => {
+			const id = await task("held task");
 			await write("update", id, "--actor", "impl-A", "--claim");
-			await reportAndRelease(id, "impl-A");
-			// The refusal the release re-test observed: the released bead is `in_progress`,
-			// and bd claims nothing that is not `open`, its ex-holder included.
-			const shipped = await bd("update", id, "--actor", "impl-A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "in_progress");
-			expect(shipped.code).toBe(1);
-			expect(shipped.stderr).toContain("not claimable: status in_progress");
-
-			claims.recordClaim({ actor: "impl-A", beadIds: [id] });
-			expect(await gate(ctx(root, "implementer"))).toBeUndefined();
+			await report(id, "impl-A");
+			const writes = recordWrites();
+			try {
+				claims.recordClaim({ actor: "impl-A", beadIds: [id] });
+				expect(await gate(ctx(root, "implementer"))).toBeUndefined();
+			} finally {
+				writes.restore();
+			}
+			expect(writes.issued).toEqual([["update", id, "--actor", "impl-A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "in_progress"]]);
 
 			const after = await shown(id);
 			expect(after.metadata?.pushed_sha).toBe(HEAD);
@@ -139,36 +149,65 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 			expect(after.status).toBe("in_progress");
 		}, YIELD_MS);
 
-		test("a parked bead the worker kept is stamped and its claim retained", async () => {
+		test("a bead released before the proof is accepted with no write at all", async () => {
+			const id = await task("released task");
+			await write("update", id, "--actor", "impl-A", "--claim");
+			await report(id, "impl-A");
+			await write("update", id, "--actor", "impl-A", "--assignee", "");
+			// The refusal the release re-test observed: the released bead is `in_progress`,
+			// and bd claims nothing that is not `open`, its ex-holder included. No fence exists
+			// for this bead, so the gate must not write to it.
+			const shipped = await bd("update", id, "--actor", "impl-A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "in_progress");
+			expect(shipped.code).toBe(1);
+			expect(shipped.stderr).toContain("not claimable: status in_progress");
+			const writes = recordWrites();
+			try {
+				claims.recordClaim({ actor: "impl-A", beadIds: [id] });
+				expect(await gate(ctx(root, "implementer"))).toBeUndefined();
+			} finally {
+				writes.restore();
+			}
+			expect(writes.issued).toEqual([]);
+
+			const after = await shown(id);
+			expect(after.metadata?.pushed_sha).toBeUndefined();
+			expect(after.assignee ?? "").toBe("");
+		}, YIELD_MS);
+
+		test("a parked bead the worker kept is accepted unstamped with its claim retained", async () => {
 			const id = await task("parked task");
 			await write("update", id, "--actor", "impl-A", "--claim");
 			await write("comments", "add", id, `BLOCKED ${id} missing prerequisite`, "--actor", "impl-A");
 			await write("comments", "add", id, `REPORTED ${id} partial: src/x.ts pushed=omp/task/impl-A@${HEAD}`, "--actor", "impl-A");
 			await write("update", id, "--actor", "impl-A", "--status", "blocked");
-
-			claims.recordClaim({ actor: "impl-A", beadIds: [id] });
-			expect(await gate(ctx(root, "implementer"))).toBeUndefined();
+			const writes = recordWrites();
+			try {
+				claims.recordClaim({ actor: "impl-A", beadIds: [id] });
+				expect(await gate(ctx(root, "implementer"))).toBeUndefined();
+			} finally {
+				writes.restore();
+			}
+			expect(writes.issued).toEqual([]);
 
 			const after = await shown(id);
-			expect(after.metadata?.pushed_sha).toBe(HEAD);
+			expect(after.metadata?.pushed_sha).toBeUndefined();
 			expect(after.assignee).toBe("impl-A");
 			expect(after.status).toBe("blocked");
 		}, YIELD_MS);
 
-		test("a successor's claim between the read and the write refuses the exit and leaves its bead untouched", async () => {
+		test("a successor holding the bead by the time of the write refuses the exit and is left untouched", async () => {
 			const id = await task("raced task");
 			await write("update", id, "--actor", "impl-A", "--claim");
-			await reportAndRelease(id, "impl-A");
-			// The gate has read the bead unassigned; before its write lands, the architect
-			// requeues the node and a successor claims it. Interposed on the one seam every
-			// write takes, so the refusal below is bd's own.
+			await report(id, "impl-A");
+			// The gate has read the bead held by impl-A; before its write lands, the claim has
+			// changed hands (a lapsed lease reaped and re-claimed). Interposed on the one seam
+			// every write takes, so the refusal below is bd's own.
 			const realRun = actualBd.bdRun;
 			let raced = false;
 			const run = spyOn(actualBd, "bdRun").mockImplementation(async (args, timeoutMs, cwd) => {
 				if (args[0] === "update" && !raced) {
 					raced = true;
-					await write("update", id, "--actor", "arch", "--status", "open", "--assignee", "");
-					await write("update", id, "--actor", "impl-B", "--claim");
+					await write("update", id, "--actor", "reaper", "--assignee", "impl-B");
 				}
 				return await realRun(args, timeoutMs, cwd);
 			});
