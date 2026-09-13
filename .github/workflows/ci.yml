@@ -46,7 +46,7 @@ jobs:
           export GIT_INDEX_FILE="$index_file"
           git read-tree HEAD
           export AGNIX_DIFF_BASE="$BASE_SHA"
-          scripts/check-agnix-staged.sh
+          python3 scripts/check-agnix-staged.py
 
       - run: bun install --frozen-lockfile
 

@@ -15,7 +15,7 @@ same_hook() {
 	cmp -s -- "$candidate" "$current"
 }
 
-# Activate this hook in a checkout with ./scripts/install-agnix-hooks.sh. The
+# Activate this hook in a checkout with ./scripts/install-agnix-hooks.py. The
 # installer uses per-worktree Git config and preserves the previous hook path.
 # Git does not install tracked hooks automatically.
 
@@ -39,4 +39,4 @@ if [[ -n "$previous_hooks" ]]; then
 	fi
 fi
 
-exec "$repo_root/scripts/check-agnix-staged.sh" "$@"
+exec "$repo_root/scripts/check-agnix-staged.py" "$@"

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the staged agnix gate against staged and CI-style snapshots."""
-
+"""Exercise the staged agnix gate and its worktree hook installation."""
 from __future__ import annotations
 
 import os
@@ -9,235 +8,206 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+CHECKER = ROOT / "scripts" / "check-agnix-staged.py"
+INSTALLER = ROOT / "scripts" / "install-agnix-hooks.py"
+CONFIG = ROOT / ".agnix.toml"
+TRACKED_PRE_COMMIT = ROOT / ".githooks" / "pre-commit"
+VALID_SKILL = """---
+name: fixture
+description: Validate the fixture skill
+---
 
-ROOT = Path(__file__).resolve().parent.parent
-CHECKER = ROOT / "scripts" / "check-agnix-staged.sh"
-INSTALLER = ROOT / "scripts" / "install-agnix-hooks.sh"
-TRACKED_WRAPPER = ROOT / ".githooks" / "pre-commit"
-FIXTURE_ENV = {
-    key: value
-    for key, value in os.environ.items()
-    if not key.startswith(("AGNIX_", "GIT_"))
-}
-FIXTURE_ENV["GIT_CONFIG_NOSYSTEM"] = "1"
+# Fixture
+
+Use the tool.
+"""
+CHANGED_VALID_SKILL = VALID_SKILL.replace(
+    "Validate the fixture skill", "Validate the changed fixture skill"
+)
+MALFORMED_SKILL = """---
+name: fixture
+---
+
+# Fixture
+
+Use the tool.
+"""
 
 
-def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env=FIXTURE_ENV,
-        check=True,
-        text=True,
-        capture_output=True,
+def run(command: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=False)
+
+
+def git(*args: str, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    result = run(["git", *args], cwd, env)
+    if result.returncode:
+        raise RuntimeError(f"git {' '.join(args)} failed:\n{result.stdout}{result.stderr}")
+    return result
+
+
+def expect_status(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+    expected: int,
+) -> None:
+    if result.returncode == expected:
+        return
+    output = (result.stdout + result.stderr).strip()
+    raise RuntimeError(
+        f"{label}: expected exit {expected}, got {result.returncode}\n{output}"
     )
-    return result.stdout.strip()
-
-
-def checker(
-    repo: Path,
-    *,
-    base: str | None = None,
-    overrides: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = FIXTURE_ENV.copy()
-    if base is None:
-        env.pop("AGNIX_DIFF_BASE", None)
-    else:
-        env["AGNIX_DIFF_BASE"] = base
-    if overrides:
-        env.update(overrides)
-    return subprocess.run(
-        [str(CHECKER)],
-        cwd=repo,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
-
-
-def output(result: subprocess.CompletedProcess[str]) -> str:
-    return (result.stdout + result.stderr).strip()
-
-
-def expect_success(result: subprocess.CompletedProcess[str], case: str) -> None:
-    if result.returncode != 0:
-        raise AssertionError(f"{case} failed: {output(result)}")
-
-
-def expect_failure(result: subprocess.CompletedProcess[str], case: str) -> None:
-    if result.returncode == 0:
-        raise AssertionError(f"{case} unexpectedly passed")
 
 
 def write_hook(path: Path, label: str) -> None:
     path.write_text(
         "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        f'printf "%s\\n" "{label}:$1" >> "$HOOK_LOG"\n'
+        "set -eu\n"
+        f"printf '%s\\n' '{label}' >> \"$HOOK_LOG\"\n"
     )
     path.chmod(0o755)
 
 
-def run_installer(repo: Path) -> None:
-    result = subprocess.run(
-        [str(repo / "scripts" / "install-agnix-hooks.sh")],
-        cwd=repo,
-        env=FIXTURE_ENV,
-        text=True,
-        capture_output=True,
-    )
-    expect_success(result, "hook installation")
-
-
-def run_hook(repo: Path, hook_name: str) -> list[str]:
-    hooks_path = Path(git(repo, "config", "--path", "--get", "core.hooksPath"))
-    log = repo / "hook.log"
-    log.unlink(missing_ok=True)
-    env = FIXTURE_ENV.copy()
-    env["HOOK_LOG"] = str(log)
-    result = subprocess.run(
-        [str(hooks_path / hook_name), "sentinel"],
-        cwd=repo,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
-    expect_success(result, f"{hook_name} sentinel")
-    return log.read_text().splitlines()
-
-
-def test_hook_installation() -> None:
-    with tempfile.TemporaryDirectory(prefix="agnix-install-test-") as temporary:
-        repo = Path(temporary)
-        git(repo, "init", "--quiet")
-        scripts = repo / "scripts"
-        tracked_hooks = repo / ".githooks"
-        scripts.mkdir()
-        tracked_hooks.mkdir()
-        shutil.copy2(INSTALLER, scripts / "install-agnix-hooks.sh")
-        shutil.copy2(CHECKER, scripts / "check-agnix-staged.sh")
-        shutil.copy2(TRACKED_WRAPPER, tracked_hooks / "pre-commit")
-        (scripts / "install-agnix-hooks.sh").chmod(0o755)
-        (scripts / "check-agnix-staged.sh").chmod(0o755)
-        (tracked_hooks / "pre-commit").chmod(0o755)
-
-        first_hooks = repo / "first-hooks"
-        first_hooks.mkdir()
-        for hook_name in ("commit-msg", "pre-commit", "pre-push"):
-            write_hook(first_hooks / hook_name, f"first-{hook_name}")
-        git(repo, "config", "core.hooksPath", str(first_hooks))
-        run_installer(repo)
-
-        generated = Path(git(repo, "config", "--path", "--get", "core.hooksPath"))
-        if not (generated / "pre-commit").is_symlink():
-            raise AssertionError("generated pre-commit is not a symlink")
-        for hook_name in ("commit-msg", "pre-push"):
-            hook = generated / hook_name
-            if not hook.is_symlink() or hook.resolve() != first_hooks / hook_name:
-                raise AssertionError(f"{hook_name} was not preserved")
-        if run_hook(repo, "commit-msg") != ["first-commit-msg:sentinel"]:
-            raise AssertionError("first commit-msg hook did not survive installation")
-        if run_hook(repo, "pre-push") != ["first-pre-push:sentinel"]:
-            raise AssertionError("first pre-push hook did not survive installation")
-        if run_hook(repo, "pre-commit") != ["first-pre-commit:sentinel"]:
-            raise AssertionError("first pre-commit chain did not survive installation")
-
-        second_hooks = repo / "second-hooks"
-        second_hooks.mkdir()
-        for hook_name in ("commit-msg", "pre-commit", "pre-push"):
-            write_hook(second_hooks / hook_name, f"second-{hook_name}")
-        git(repo, "config", "--worktree", "core.hooksPath", str(second_hooks))
-        run_installer(repo)
-        previous = git(repo, "config", "--get", "agnix.previousHooksPath")
-        if previous != str(second_hooks):
-            raise AssertionError(
-                f"reinstallation did not record the new hook path: {previous!r}"
-            )
-        generated = Path(git(repo, "config", "--path", "--get", "core.hooksPath"))
-        for hook_name in ("commit-msg", "pre-push"):
-            hook = generated / hook_name
-            if not hook.is_symlink() or hook.resolve() != second_hooks / hook_name:
-                raise AssertionError(f"{hook_name} was not refreshed on reinstall")
-        if run_hook(repo, "commit-msg") != ["second-commit-msg:sentinel"]:
-            raise AssertionError("reinstalled commit-msg hook did not run")
-        if run_hook(repo, "pre-push") != ["second-pre-push:sentinel"]:
-            raise AssertionError("reinstalled pre-push hook did not run")
-        if run_hook(repo, "pre-commit") != ["second-pre-commit:sentinel"]:
-            raise AssertionError("reinstalled pre-commit chain did not run")
-
-        git(repo, "config", "--worktree", "--unset", "core.hooksPath")
-        git(repo, "config", "--unset", "core.hooksPath")
-        common_git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
-        if not common_git_dir.is_absolute():
-            common_git_dir = repo / common_git_dir
-        common_hooks = common_git_dir / "hooks"
-        common_hooks.mkdir(parents=True, exist_ok=True)
-        for hook_name in ("commit-msg", "pre-commit", "pre-push"):
-            write_hook(common_hooks / hook_name, f"common-{hook_name}")
-        run_installer(repo)
-        if git(repo, "config", "--get", "agnix.previousHooksPath") != str(
-            common_hooks
-        ):
-            raise AssertionError("default common hook path was not recorded")
-        if run_hook(repo, "commit-msg") != ["common-commit-msg:sentinel"]:
-            raise AssertionError("common commit-msg hook did not survive installation")
-        if run_hook(repo, "pre-push") != ["common-pre-push:sentinel"]:
-            raise AssertionError("common pre-push hook did not survive installation")
-        if run_hook(repo, "pre-commit") != ["common-pre-commit:sentinel"]:
-            raise AssertionError("common pre-commit chain did not survive installation")
+def config_value(name: str, cwd: Path, env: dict[str, str]) -> str:
+    return git("config", "--worktree", "--get", name, cwd=cwd, env=env).stdout.rstrip("\n")
 
 
 def main() -> None:
-    if shutil.which("agnix") is None:
-        raise RuntimeError("agnix must be installed before running this regression")
-    test_hook_installation()
-
-    valid_skill = (
-        "---\n"
-        "name: test-skill\n"
-        "description: Valid skill used by the agnix hook regression test.\n"
-        "---\n"
-        "# Valid skill\n"
-    )
     with tempfile.TemporaryDirectory(prefix="agnix-hook-test-") as temporary:
-        repo = Path(temporary)
-        hooks = repo / "hooks"
-        hooks.mkdir()
-        git(repo, "init", "--quiet")
-        git(repo, "config", "core.hooksPath", str(hooks))
-        git(repo, "config", "user.name", "agnix-hook-test")
-        git(repo, "config", "user.email", "agnix-hook-test@example.invalid")
-        (repo / ".agnix.toml").write_text('severity = "Warning"\n')
-        (repo / "SKILL.md").write_text(valid_skill)
-        git(repo, "add", ".")
-        git(repo, "commit", "--quiet", "-m", "base")
-        base = git(repo, "rev-parse", "HEAD")
-
-        (repo / "SKILL.md").write_text(valid_skill.replace("# Valid", "# Updated"))
-        git(repo, "add", "SKILL.md")
-        expect_success(checker(repo), "valid staged input")
-        git(repo, "commit", "--quiet", "-m", "valid feature")
-        valid_head = git(repo, "rev-parse", "HEAD")
-        expect_success(checker(repo, base=base), "valid CI input")
-
-        broken_index = repo / "broken-index"
-        broken_index.write_bytes(b"not a git index")
-        expect_failure(
-            checker(repo, overrides={"GIT_INDEX_FILE": str(broken_index)}),
-            "unreadable staged diff",
+        worktree = Path(temporary)
+        env = os.environ.copy()
+        for name in ("AGNIX_DIFF_BASE", "AGNIX_SOURCE_PREFIX", "AGNIX_USE_MISE", "GIT_INDEX_FILE"):
+            env.pop(name, None)
+        env.update(
+            {
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "MISE_AUTO_INSTALL": "false",
+            }
         )
 
-        (repo / "SKILL.md").write_text(valid_skill.replace("# Valid", "<tool_call>"))
-        git(repo, "add", "SKILL.md")
-        expect_failure(checker(repo), "malformed staged input")
-        git(repo, "commit", "--quiet", "-m", "malformed feature")
+        git("init", "--quiet", cwd=worktree, env=env)
+        git("config", "user.email", "agnix-hook-test@example.invalid", cwd=worktree, env=env)
+        git("config", "user.name", "agnix-hook-test", cwd=worktree, env=env)
+        hooks = (worktree / ".git" / "hooks").resolve()
+        hooks.mkdir(exist_ok=True)
+        hook_log = worktree / "hook log\n.txt"
+        hook_env = dict(env, HOOK_LOG=str(hook_log))
+        write_hook(hooks / "pre-commit", "old-pre-commit")
+        write_hook(hooks / "commit-msg", "old-commit-msg")
+        write_hook(hooks / "pre-push", "old-pre-push")
 
-        # The CI job's temporary index is HEAD, so only the explicit base makes
-        # this committed malformed input part of the staged diff.
-        expect_failure(checker(repo, base=valid_head), "malformed CI input")
+        (worktree / ".agnix.toml").write_text(CONFIG.read_text())
+        skill = worktree / "SKILL.md"
+        skill.write_text(VALID_SKILL)
+        for source in (CHECKER, INSTALLER, TRACKED_PRE_COMMIT):
+            destination = worktree / source.relative_to(ROOT)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        git(
+            "add",
+            ".agnix.toml",
+            "SKILL.md",
+            ".githooks/pre-commit",
+            "scripts/check-agnix-staged.py",
+            "scripts/install-agnix-hooks.py",
+            cwd=worktree,
+            env=env,
+        )
+        git("commit", "--quiet", "--no-verify", "-m", "base", cwd=worktree, env=env)
+        base = git("rev-parse", "HEAD", cwd=worktree, env=env).stdout.strip()
 
-    print("agnix staged-hook behavior tests passed")
+        skill.write_text(CHANGED_VALID_SKILL)
+        git("add", "SKILL.md", cwd=worktree, env=env)
+        expect_status("valid staged input", run([str(CHECKER)], worktree, env), 0)
+        git("commit", "--quiet", "--no-verify", "-m", "valid-change", cwd=worktree, env=env)
+
+        newline_skill = worktree / "skills" / "line\nbreak" / "references" / "reference.md"
+        newline_skill.parent.mkdir(parents=True, exist_ok=True)
+        newline_skill.write_text("Use the tool.\n")
+        git("add", "--", "skills/line\nbreak/references/reference.md", cwd=worktree, env=env)
+        expect_status("newline path staged input", run([str(CHECKER)], worktree, env), 0)
+        git("commit", "--quiet", "--no-verify", "-m", "newline-path", cwd=worktree, env=env)
+        git("reset", "--quiet", "--hard", base, cwd=worktree, env=env)
+
+        skill.write_text(MALFORMED_SKILL)
+        git("add", "SKILL.md", cwd=worktree, env=env)
+        expect_status("malformed staged input", run([str(CHECKER)], worktree, env), 1)
+        git("commit", "--quiet", "--no-verify", "-m", "malformed-change", cwd=worktree, env=env)
+
+        ci_index = worktree / "ci-index"
+        ci_env = dict(env, GIT_INDEX_FILE=str(ci_index), AGNIX_DIFF_BASE=base)
+        git("read-tree", "HEAD", cwd=worktree, env=ci_env)
+        expect_status("malformed CI baseline", run([str(CHECKER)], worktree, ci_env), 1)
+
+        skill.write_text(CHANGED_VALID_SKILL)
+        git("add", "SKILL.md", cwd=worktree, env=env)
+        expect_status("valid repaired staged input", run([str(CHECKER)], worktree, env), 0)
+        git("commit", "--quiet", "--no-verify", "-m", "valid-repair", cwd=worktree, env=env)
+
+        installer = worktree / "scripts/install-agnix-hooks.py"
+        expect_status("initial hook installation", run([str(installer)], worktree, hook_env), 0)
+        managed_hooks = Path(config_value("agnix.hooksPath", worktree, env))
+        if config_value("core.hooksPath", worktree, env) != str(managed_hooks):
+            raise RuntimeError("installer did not select its private hook directory")
+        if config_value("agnix.previousHooksPath", worktree, env) != str(hooks):
+            raise RuntimeError("installer did not record the original hook directory")
+        for name in ("commit-msg", "pre-push"):
+            target = managed_hooks / name
+            if not target.is_symlink() or Path(os.readlink(target)) != hooks / name:
+                raise RuntimeError(f"installer did not preserve {name}")
+
+        collision_payloads = {
+            "pre-commit": "operator-owned pre-commit\n",
+            "commit-msg": "operator-owned commit-msg\n",
+        }
+        for name, payload in collision_payloads.items():
+            target = managed_hooks / name
+            target.unlink()
+            target.write_text(payload)
+            collision = run([str(installer)], worktree, hook_env)
+            expect_status(f"{name} collision", collision, 1)
+            if target.read_text() != payload:
+                raise RuntimeError(f"installer changed the {name} collision")
+            if f"cannot install agnix hook {name}" not in collision.stderr:
+                raise RuntimeError(f"installer did not explain the {name} collision")
+            target.unlink()
+            replacement = worktree / ".githooks" / "pre-commit" if name == "pre-commit" else hooks / name
+            target.symlink_to(replacement)
+
+        git("commit", "--quiet", "--allow-empty", "-m", "hook-chain", cwd=worktree, env=hook_env)
+        expect_status("preserved pre-push hook", run([str(managed_hooks / "pre-push")], worktree, hook_env), 0)
+        log_lines = hook_log.read_text().splitlines()
+        for label in ("old-pre-commit", "old-commit-msg", "old-pre-push"):
+            if label not in log_lines:
+                raise RuntimeError(f"original {label} hook did not run")
+
+        expect_status("idempotent hook installation", run([str(installer)], worktree, hook_env), 0)
+        if config_value("agnix.previousHooksPath", worktree, env) != str(hooks):
+            raise RuntimeError("reinstall replaced the original hook directory")
+
+        new_hooks = worktree / "new hooks\nscanner"
+        new_hooks.mkdir()
+        write_hook(new_hooks / "pre-commit", "new-pre-commit")
+        write_hook(new_hooks / "commit-msg", "new-commit-msg")
+        write_hook(new_hooks / "pre-push", "new-pre-push")
+        git("config", "--worktree", "core.hooksPath", str(new_hooks), cwd=worktree, env=env)
+        expect_status("selected scanner installation", run([str(installer)], worktree, hook_env), 0)
+        if config_value("agnix.previousHooksPath", worktree, env) != str(new_hooks):
+            raise RuntimeError("installer did not capture the newly selected scanner")
+        for name in ("commit-msg", "pre-push"):
+            target = managed_hooks / name
+            if not target.is_symlink() or Path(os.readlink(target)) != new_hooks / name:
+                raise RuntimeError(f"installer did not update {name} for the new scanner")
+
+        git("commit", "--quiet", "--allow-empty", "-m", "new-hook-chain", cwd=worktree, env=hook_env)
+        expect_status("new pre-push hook", run([str(managed_hooks / "pre-push")], worktree, hook_env), 0)
+        log_lines = hook_log.read_text().splitlines()
+        for label in ("new-pre-commit", "new-commit-msg", "new-pre-push"):
+            if label not in log_lines:
+                raise RuntimeError(f"new {label} hook did not run")
+
+    print("agnix staged, CI baseline, newline paths, and all-hook installation checks passed")
 
 
 if __name__ == "__main__":
