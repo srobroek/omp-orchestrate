@@ -37,6 +37,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { AgentRegistry, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { type BdBead, bdListChecked, bdRun, metadataString } from "./bd";
 import type { ClaimState } from "./claim-state";
 import { sessionRole } from "./identity";
@@ -244,9 +245,24 @@ export interface LeadLeaseRenewal {
 /** The lead's renewal: `run-state.ts` owns the marker and the epic, this module the cadence. */
 export type LeadLeaseRenew = (cwd: string, sessionId: string, now: number) => Promise<LeadLeaseRenewal>;
 
-/** The registry rows the timer reads: which spawned agents are parked. `AgentRegistry.global()` answers it. */
+/**
+ * The registry rows the timer reads: which spawned agents are parked, and whether a parked
+ * one can be revived. `AgentRegistry.global()` lists them; `AgentLifecycleManager.global()`
+ * adopts every keep-alive child it may revive and never an isolated one, whose clone OMP
+ * deleted when it parked. A parked child nobody can revive holds a claim nobody will
+ * resume, and renewing it would only keep the reaper off a dead claim.
+ */
 export interface ParkedRegistry {
  list(): ReadonlyArray<{ id: string; kind: string; status: string }>;
+ revivable(id: string): boolean;
+}
+
+/** The live registry and lifecycle manager as one {@link ParkedRegistry}. */
+function liveRegistry(): ParkedRegistry {
+ return {
+  list: () => AgentRegistry.global().list(),
+  revivable: id => AgentLifecycleManager.global().has(id),
+ };
 }
 
 /** The lead lease is one per session, keyed apart from any bead id. */
@@ -266,7 +282,7 @@ export function createLeaseRenewer(
  pi: ExtensionAPI,
  claims: ClaimState,
  renewLead: LeadLeaseRenew,
- registry: ParkedRegistry = AgentRegistry.global(),
+ registry: ParkedRegistry = liveRegistry(),
 ): LeaseRenewer {
  const last = new Map<string, number>();
  let leadsRun = false;
@@ -315,10 +331,15 @@ export function createLeaseRenewer(
   return pending;
  };
 
- /** The claims of every parked child, renewed under each child's own actor, once per cadence per child. */
+ /** The claims of every revivable parked child, renewed under each child's own actor, once per cadence per child. */
  const renewParked = async (ctx: ExtensionContext, now: number): Promise<void> => {
   for (const ref of registry.list()) {
-   if (ref.kind !== "sub" || ref.status !== "parked" || !due(`\u0000parked:${ref.id}`, now)) continue;
+   if (ref.kind !== "sub" || ref.status !== "parked") continue;
+   if (!registry.revivable(ref.id)) {
+    pi.logger.info("orchestrate parked child cannot be revived; leases not renewed", { child: ref.id });
+    continue;
+   }
+   if (!due(`\u0000parked:${ref.id}`, now)) continue;
    const held = await bdListChecked(["list", "--include-infra", "--assignee", ref.id, "--status", "in_progress", "--limit", "0", "--json"], undefined, ctx.cwd);
    if (held === null) {
     pi.logger.info("orchestrate parked child's claims unread; leases not renewed", { child: ref.id });

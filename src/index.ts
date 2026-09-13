@@ -124,7 +124,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
      return { block: true, reason: adoptionRefusalNotice(adoption.reason) };
     }
 
-    const ownership = gateWorktrunkOwnership(input);
+    const ownership = gateWorktrunkOwnership(input, ctx);
     if (ownership) return ownership;
     // G7 after G3: a push or a Worktrunk checkout from the wrong seat is refused here. It
     // parses first and reads the marker, then the epic, only once a command is known to push.

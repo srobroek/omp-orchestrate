@@ -16,6 +16,7 @@ import {
 	commentVerbNotice,
 	fallbackIdentity,
 	gateBdDiscipline,
+	pushRefFor,
 } from "../src/gates/bd";
 import { type BdInvocation, bdInvocations } from "../src/shell";
 
@@ -689,12 +690,12 @@ describe("G6 inside a run", () => {
 		const handled = installActorNoticeArbiter();
 		try {
 			const write = await gateBdDiscipline(pi, ctx, { command: "bd update orc-1 --claim" }, "claim-7", createClaimState());
-			expect(write).toEqual({ input: { command: "bd update orc-1 --claim", env: { BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7" } } });
+			expect(write).toEqual({ input: { command: "bd update orc-1 --claim", env: { BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7", ORC_PUSH_REF: "omp/task/impl-7" } } });
 			expect(handled.has("claim-7")).toBe(true);
 			expect(sent).toEqual([]);
 
 			const compound = await gateBdDiscipline(pi, ctx, { command: "cd dir && ./claim orc-2", env: { FOO: "1" } }, "helper-7", createClaimState());
-			expect(compound).toEqual({ input: { command: "cd dir && ./claim orc-2", env: { FOO: "1", BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7" } } });
+			expect(compound).toEqual({ input: { command: "cd dir && ./claim orc-2", env: { FOO: "1", BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7", ORC_PUSH_REF: "omp/task/impl-7" } } });
 			expect(handled.has("helper-7")).toBe(false);
 		} finally {
 			unregister();
@@ -707,18 +708,49 @@ describe("G6 inside a run", () => {
 			const claims = createClaimState();
 			claims.recordClaim({ actor: "worker actor", beadIds: ["orc-1"] });
 			const result = await gateBdDiscipline(pi, ctx, { command: "bd comments add orc-1 'REPORTED done'" }, "observed-comment", claims);
-			expect(result).toEqual({ input: { command: "bd comments add orc-1 'REPORTED done'", env: { BEADS_ACTOR: "worker actor", BD_ACTOR: "worker actor" } } });
+			// The push ref stays the registry id: the capture is named after the agent, not after the claim's actor.
+			expect(result).toEqual({ input: { command: "bd comments add orc-1 'REPORTED done'", env: { BEADS_ACTOR: "worker actor", BD_ACTOR: "worker actor", ORC_PUSH_REF: "omp/task/impl-7" } } });
 			expect(sent).toEqual([]);
 		} finally {
 			unregister();
 		}
 	});
 
-	test("leaves a call whose env already names an actor alone", async () => {
+	test("leaves a caller-named actor alone but still supplies, and overwrites, the push ref", async () => {
 		const { ctx, unregister } = registeredSession();
 		try {
-			expect(await gateBdDiscipline(pi, ctx, { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen" } }, "env-actor")).toBeUndefined();
+			expect(await gateBdDiscipline(pi, ctx, { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen" } }, "env-actor"))
+				.toEqual({ input: { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen", ORC_PUSH_REF: "omp/task/impl-7" } } });
+			expect(await gateBdDiscipline(pi, ctx, { command: "git push origin HEAD:$ORC_PUSH_REF", env: { ORC_PUSH_REF: "main" } }, "env-ref"))
+				.toEqual({ input: { command: "git push origin HEAD:$ORC_PUSH_REF", env: { ORC_PUSH_REF: "omp/task/impl-7", BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7" } } });
+			expect(await gateBdDiscipline(pi, ctx, { command: "git status", env: { BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7", ORC_PUSH_REF: "omp/task/impl-7" } }, "settled")).toBeUndefined();
 			expect(sent).toEqual([]);
+		} finally {
+			unregister();
+		}
+	});
+
+	test("pushRefFor names OMP's capture branch for the agent", () => {
+		expect(pushRefFor("impl-7")).toBe("omp/task/impl-7");
+	});
+
+	test.each([
+		["an inline assignment", "ORC_PUSH_REF=main git push origin HEAD:$ORC_PUSH_REF"],
+		["an export", "export ORC_PUSH_REF=main; git push origin HEAD:$ORC_PUSH_REF"],
+		["an env prefix", "env ORC_PUSH_REF=main git push origin HEAD:$ORC_PUSH_REF"],
+		["an unset", "unset ORC_PUSH_REF; git push origin HEAD:main"],
+		["an env -u removal", "env -u ORC_PUSH_REF git push origin HEAD:main"],
+		["a wrapper shell", "sh -c 'ORC_PUSH_REF=main git push origin HEAD:$ORC_PUSH_REF'"],
+	])("refuses %s of the push-ref variable in every seat", async (_label, command) => {
+		const { ctx, unregister } = registeredSession();
+		try {
+			for (const seat of [ctx, ctxAt(inRun)]) {
+				const result = await gateBdDiscipline(pi, seat, { command }, "ref-edit");
+				expect(result?.block).toBe(true);
+				expect(result?.reason).toContain("ORC_PUSH_REF is set by the plugin");
+			}
+			// Reading it is not editing it.
+			expect((await gateBdDiscipline(pi, ctx, { command: "echo $ORC_PUSH_REF && git push origin HEAD:$ORC_PUSH_REF" }, "ref-read"))?.block).toBeUndefined();
 		} finally {
 			unregister();
 		}

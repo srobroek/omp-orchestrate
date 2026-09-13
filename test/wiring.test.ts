@@ -318,6 +318,23 @@ describe("gate dispatcher wiring", () => {
   expect(sent).toEqual([]);
  });
 
+ test("a role session in a pinned run is refused git worktree add with the operator-only wording", async () => {
+  await pinnedRun(dir);
+  const { pi, handlers, errors } = runtimeApi();
+  ompOrchestrate(pi);
+
+  const results = await dispatchAll(
+   handlers,
+   { toolName: "bash", input: { command: "git worktree add ../scratch" } },
+   { cwd: dir, role: "implementer" },
+  );
+
+  expect(errors).toEqual([]);
+  const refusal = results.find(result => result?.block === true);
+  expect(refusal?.reason).toContain("Worktrunk is the operator's");
+  expect(refusal?.reason).not.toContain("wt switch");
+ });
+
  test("an isolated copy finds the run through the marker it carries", async () => {
   const isolated = await fs.mkdtemp(path.join(os.tmpdir(), "orc-wiring-isolated-"));
   try {

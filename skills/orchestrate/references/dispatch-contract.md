@@ -103,6 +103,12 @@ of every bash call; never set them yourself. A claim under no identity is refuse
 claim as the git user.name that unattributed writes fall back to, and so is a write
 attributed to anyone but you.
 
+A role session's environment also carries ORC_PUSH_REF, the origin branch
+omp/task/<your id> that your capture is pushed to. Before you yield, commit and run
+git push origin HEAD:$ORC_PUSH_REF, then report pushed=<ref>@<sha>. Your isolated copy is
+deleted when you finish, so origin is the only place your commits survive. The variable
+is the plugin's: a command that assigns or unsets it is refused.
+
 Exit. Follow your role's evidence and disposition contract, not another role's report
 shape. Implementers report head_sha for git before yield; their parent-side branch
 capture is verified only after successful task completion. Non-git work needs output_ref.
