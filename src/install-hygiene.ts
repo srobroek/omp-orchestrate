@@ -23,10 +23,20 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-/** Paths, relative to the install root, that a marketplace copy may carry and a package never holds. */
+/**
+ * Paths, relative to the install root, that a marketplace copy may carry and a package never
+ * holds. Under bd 1.2.2 the Dolt archive directory is `.beads/backup` (singular: measured on
+ * this checkout's store, 10 MB of `.darc` chunks); earlier releases of this list named only
+ * the plural and swept nothing, so both spellings are listed. The server log and lock and
+ * `last-touched` are bd's per-checkout runtime files, untracked beside the store.
+ */
 export const STRAY_PATHS: readonly string[] = [
 	".beads/embeddeddolt",
+	".beads/backup",
 	".beads/backups",
+	".beads/dolt-server.log",
+	".beads/dolt-server.lock",
+	".beads/last-touched",
 	".beads/interactions.jsonl",
 	".orchestration",
 	"scratch",

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -15,7 +15,15 @@ const SIBLING = "srobroek-omp___build___1.2.3";
 async function populate(root: string): Promise<void> {
 	await mkdir(join(root, ".beads", "embeddeddolt", "noms"), { recursive: true });
 	await writeFile(join(root, ".beads", "embeddeddolt", "noms", "manifest"), "dolt");
+	// The layout bd 1.2.2 leaves beside the store: the `backup` archive directory (rt-ts D1
+	// found 10 MB of it in every local-path install while the sweep named `backups`), the
+	// server log and lock, and `last-touched`. The plural is populated too, so both are swept.
+	await mkdir(join(root, ".beads", "backup"), { recursive: true });
+	await writeFile(join(root, ".beads", "backup", "0gh2rm7ftft86jg15c16nbchdl9jckih.darc"), "darc");
 	await mkdir(join(root, ".beads", "backups", "2026-09-13"), { recursive: true });
+	await writeFile(join(root, ".beads", "dolt-server.log"), "");
+	await writeFile(join(root, ".beads", "dolt-server.lock"), "");
+	await writeFile(join(root, ".beads", "last-touched"), "2026-09-13T11:53:55Z");
 	await writeFile(join(root, ".beads", "interactions.jsonl"), "{}\n");
 	await writeFile(join(root, ".beads", "config.yaml"), "issue-prefix: omp-orchestrate\n");
 	await mkdir(join(root, ".orchestration"), { recursive: true });
@@ -55,6 +63,9 @@ describe("install hygiene", () => {
 
 		expect(removed).toEqual([...STRAY_PATHS]);
 		for (const stray of STRAY_PATHS) expect(await exists(join(root, stray))).toBe(false);
+		// Named independently of the list: what a bd 1.2.2 checkout leaves untracked in
+		// `.beads/` is gone, and only the tracked file remains.
+		expect((await readdir(join(root, ".beads"))).sort()).toEqual(["config.yaml"]);
 		// The package's own files, tracked `.beads/config.yaml` included, stay.
 		expect(await exists(join(root, ".beads", "config.yaml"))).toBe(true);
 		expect(await exists(join(root, "src", "index.ts"))).toBe(true);

@@ -69,9 +69,10 @@ install. Use it to work on the plugin. Run the plugin from a marketplace install
 
 Never point `omp plugin marketplace add` at a local checkout. OMP copies the whole directory
 into `~/.omp/plugins/cache/plugins/`, untracked files included: the checkout's
-`.beads/embeddeddolt` store, `.beads/backups`, `.beads/interactions.jsonl`, `.orchestration/`
-and `scratch/`. The plugin deletes those five paths from its own cache entry at activation and
-logs the removal once; the GitHub install above ships tracked files only.
+`.beads/embeddeddolt` store, its `.beads/backup` archives, server log and lock,
+`.beads/last-touched`, `.beads/interactions.jsonl`, `.orchestration/` and `scratch/`. The
+plugin deletes those paths (`STRAY_PATHS` in `src/install-hygiene.ts`) from its own cache
+entry at activation and logs the removal once; the GitHub install above ships tracked files only.
 
 ## Configure
 
