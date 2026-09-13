@@ -63,7 +63,7 @@
   },
   "escape": {
     "state": "blocked",
-    "require": "comment.verb in [FAILED, BLOCKED, ASK] and assignee cleared and origin.branch == head_sha",
+    "require": "comment.verb in [FAILED, BLOCKED, ASK] and assignee cleared and origin.branch == head_sha and clone.work on origin.branch",
     "recovery": "a park has two steps after the BLOCKED or ASK comment: push the feature branch and stamp head_sha with the pushed commit, then release the epic (`bd update <epic> --claim --assignee \"\"`) so a fresh architect can claim it; the clone is deleted at yield. An open escalation does not pause an architect: it parks this way, and the run's next architect resumes from origin"
   },
   "bounce": {

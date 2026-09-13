@@ -62,7 +62,8 @@
   },
   "escape": {
     "state": "blocked",
-    "require": "comment.verb in [FAILED, BLOCKED, ASK]"
+    "require": "comment.verb in [FAILED, BLOCKED, ASK] and clone.work on origin.pushed",
+    "recovery": "a blocked exit deletes your clone like any other: commits past the base must be pushed (`git push origin HEAD:$ORC_PUSH_REF`) and reported as pushed=<ref>@<sha>, and an uncommitted change committed and pushed or discarded, before you yield"
   },
   "pause": [
     "open-escalation-wisp-linked-to-node"

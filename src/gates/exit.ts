@@ -40,7 +40,8 @@ import {
 } from "../bd";
 import { type ClaimObservation, type ClaimState } from "../claim-state";
 import { beadRouting, orcRole } from "../identity";
-import { type OriginHead, originHead } from "../origin";
+import { fenceRefused } from "../lease";
+import { type OriginHead, localState, originHead } from "../origin";
 import { runScope } from "../run-scope";
 
 import architect from "../contracts/architect.json";
@@ -185,6 +186,8 @@ export interface Evidence {
  pushed?: { ref: string; sha: string };
  /** Origin's answer for the role's ref; read only when a predicate under judgement asks. */
  origin?: OriginProof;
+ /** Whether the clone's own work is on origin or absent; read only when a predicate asks. */
+ cloneWork?: OriginProof;
 }
 
 const SUPPORTED_KINDS: Record<string, readonly string[]> = {
@@ -306,10 +309,30 @@ const ORIGIN_PREDICATES: Record<string, "pushed" | "branch"> = {
  "origin.branch == head_sha": "branch",
 };
 
+/**
+ * The predicates that read the clone itself: its `HEAD` against the bead's base, and its
+ * tree. Work that exists on the clone -- a commit past the base, or an uncommitted change
+ * -- must be on origin at `HEAD` (or discarded) before any exit, a park included, because
+ * the clone is deleted either way. The ref asked about is the same one the role pushes to.
+ */
+const CLONE_PREDICATES: Record<string, "pushed" | "branch"> = {
+ "clone.work on origin.pushed": "pushed",
+ "clone.work on origin.branch": "branch",
+};
+
 /** Whether a `require` clause, alternatives included, needs origin read. */
 export function asksOrigin(predicate: string): "pushed" | "branch" | undefined {
  for (const clause of predicate.split(/\s+(?:or|and)\s+/)) {
   const source = ORIGIN_PREDICATES[clause.trim()];
+  if (source !== undefined) return source;
+ }
+ return undefined;
+}
+
+/** Whether a `require` clause, alternatives included, needs the clone read. */
+export function asksClone(predicate: string): "pushed" | "branch" | undefined {
+ for (const clause of predicate.split(/\s+(?:or|and)\s+/)) {
+  const source = CLONE_PREDICATES[clause.trim()];
   if (source !== undefined) return source;
  }
  return undefined;
@@ -332,6 +355,7 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
  if (conjuncts.length > 1) return conjuncts.every(conjunct => satisfies(conjunct, evidence));
 
  if (ORIGIN_PREDICATES[trimmed] !== undefined) return evidence.origin?.matched === true;
+ if (CLONE_PREDICATES[trimmed] !== undefined) return evidence.cloneWork?.matched === true;
 
  const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
  if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
@@ -543,6 +567,36 @@ export async function proveOrigin(source: "pushed" | "branch", evidence: Evidenc
  }
 }
 
+/**
+ * Ask whether the clone holds work origin does not: a `HEAD` past the bead's base (its own
+ * `base_sha`, else the run epic's), or an uncommitted change. A clean tree at the base has
+ * nothing to lose and passes. Anything else must be on origin at `HEAD`, at the ref the
+ * role pushes to; a dirty tree is refused outright, because nothing can prove it. An
+ * unknown base, or a clone git cannot describe, is judged as work present.
+ */
+export async function proveCloneWork(source: "pushed" | "branch", evidence: Evidence, cwd: string, runEpic?: string): Promise<OriginProof> {
+ const local = await localState(cwd);
+ if (local === undefined) return { matched: false, detail: "the clone's HEAD and tree could not be read; commit and push, or discard, before yielding" };
+ if (local.dirty) return { matched: false, detail: `the clone has uncommitted changes at HEAD ${local.head.slice(0, 7)}; commit and push (\`git push origin HEAD:$ORC_PUSH_REF\`), or discard them, before yielding` };
+ let base = evidence.baseSha;
+ if (base === undefined && runEpic !== undefined) base = metadataString(await bdShow(runEpic), "base_sha");
+ if (base !== undefined && sameCommit(local.head, base)) return { matched: true, detail: `the clone is at its base ${base.slice(0, 7)} with a clean tree; nothing to lose` };
+ const ref = source === "pushed" ? evidence.pushed?.ref : metadataString(evidence.bead, "branch");
+ if (ref === undefined) {
+  return { matched: false, detail: `the clone has commits at HEAD ${local.head.slice(0, 7)} that origin does not hold; push them (\`git push origin HEAD:$ORC_PUSH_REF\`) and report pushed=<ref>@${local.head.slice(0, 7)} before yielding` };
+ }
+ const answer = await originHead(cwd, ref);
+ switch (answer.kind) {
+  case "at":
+   if (sameCommit(answer.sha, local.head)) return { matched: true, ref, observed: answer.sha, detail: `origin ${ref} is at the clone's HEAD ${answer.sha}` };
+   return { matched: false, ref, observed: answer.sha, detail: `origin ${ref} is at ${answer.sha}, not the clone's HEAD ${local.head}; push HEAD (\`git push origin HEAD:${ref}\`) before yielding` };
+  case "missing":
+   return { matched: false, ref, detail: `origin has no ${ref}; push HEAD (\`git push origin HEAD:${ref}\`) before yielding, the clone is deleted at yield` };
+  case "unreachable":
+   return { matched: false, ref, detail: `origin unreachable (${answer.cause}); retry \`git push\` and REPORTED, the worker stays alive until proven` };
+ }
+}
+
 interface ExitGuardState {
  unclaimedReminded: boolean;
  refusalClaim: ClaimObservation | undefined;
@@ -690,10 +744,9 @@ async function gateClaimedExit(
   if (require === undefined) return undefined;
   const asks = asksOrigin(require);
   if (asks !== undefined) evidence.origin = await proveOrigin(asks, evidence, ctx.cwd);
-  if (satisfies(require, evidence)) {
-   await recordPushed(bead, claim, evidence.origin);
-   return undefined;
-  }
+  const clone = asksClone(require);
+  if (clone !== undefined) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
+  if (satisfies(require, evidence)) return await recordPushed(bead, claim, evidence);
   escapeFailure = { check: "escape", detail: unsatisfied(require, evidence), recovery: contract.escape.recovery };
  }
 
@@ -711,6 +764,8 @@ async function gateClaimedExit(
   // inapplicable check spends no network read.
   const asks = asksOrigin(check.require);
   if (asks !== undefined && evidence.origin === undefined) evidence.origin = await proveOrigin(asks, evidence, ctx.cwd);
+  const clone = asksClone(check.require);
+  if (clone !== undefined && evidence.cloneWork === undefined) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
   if (!satisfies(check.require, evidence)) {
    failures.push({ check: check.check, detail: unsatisfied(check.require, evidence), recovery: check.recovery });
   }
@@ -741,10 +796,7 @@ async function gateClaimedExit(
   }
  }
 
- if (failures.length === 0) {
-  await recordPushed(bead, claim, evidence.origin);
-  return undefined;
- }
+ if (failures.length === 0) return await recordPushed(bead, claim, evidence);
  if (escapeFailure !== undefined) failures.unshift(escapeFailure);
 
  // Refusals belong to this activation, not to mutable shared bead metadata.
@@ -771,33 +823,48 @@ async function gateClaimedExit(
  };
 }
 
-/** `unsatisfied: <require>`, with origin's answer when the predicate asked and it said no. */
+/** `unsatisfied: <require>`, with origin's or the clone's answer when the predicate asked and it said no. */
 function unsatisfied(require: string, evidence: Evidence): string {
- const origin = evidence.origin;
- const cause = asksOrigin(require) !== undefined && origin !== undefined && !origin.matched ? ` -- ${origin.detail}` : "";
- return `unsatisfied: ${require}${cause}`;
+ const causes: string[] = [];
+ if (asksOrigin(require) !== undefined && evidence.origin !== undefined && !evidence.origin.matched) causes.push(evidence.origin.detail);
+ if (asksClone(require) !== undefined && evidence.cloneWork !== undefined && !evidence.cloneWork.matched) causes.push(evidence.cloneWork.detail);
+ return `unsatisfied: ${require}${causes.length === 0 ? "" : ` -- ${causes.join("; ")}`}`;
 }
 
 /**
- * Record the commit origin was observed to hold, once the proof has passed and the yield
- * is about to be allowed.
+ * Record the commit origin was observed to hold, once every check has passed, and let the
+ * yield proceed only when that record landed on the bead this session still owns.
  *
  * `metadata.push` and `metadata.branch` are targets a role stamps before pushing, so a
  * worker that died between the stamp and the push leaves them looking complete.
- * `pushed_sha` is the plugin's own word that it saw the head on origin, written under the
- * yielding session's identity like every other write from its seat. A failed write is
- * logged, not refused: the proof already holds, and the sha is a record for offline
- * readers rather than a condition of the exit.
+ * `pushed_sha` is the plugin's own word that it saw the head on origin. The contract has
+ * the worker release before it yields, so by now the bead is unassigned and a successor
+ * may already have claimed it; a plain update would land this session's stamp on that
+ * successor's claim. The write is therefore fenced: `--claim` as the yielding actor wins an
+ * unassigned bead (or its own), `--assignee ""` releases it again in the same write, and
+ * the status is restated so a park stays parked. A fence refusal means another actor
+ * holds the bead: nothing is written there, and the exit is refused with the holder named.
+ * Any other failure is logged and the exit allowed: the proof holds, and the sha is a
+ * record for offline readers rather than a condition of the exit.
  */
-async function recordPushed(bead: BdBead, claim: ClaimObservation, origin: OriginProof | undefined): Promise<void> {
- if (origin === undefined || !origin.matched || origin.observed === undefined) return;
- if (metadataString(bead, "pushed_sha") === origin.observed) return;
- const written = await bdRun(["update", bead.id, "--set-metadata", `pushed_sha=${origin.observed}`, "--actor", claim.actor]);
- if (written === null || written.code !== 0) {
-  logger.warn("orchestrate exit contract: pushed_sha not recorded", {
-   bead: bead.id,
-   sha: origin.observed,
-   cause: written === null ? lastBdFailure() : written.stderr.trim() || `bd exited ${written.code}`,
-  });
+async function recordPushed(bead: BdBead, claim: ClaimObservation, evidence: Evidence): Promise<ToolCallEventResult | undefined> {
+ const proof = [evidence.origin, evidence.cloneWork].find(candidate => candidate?.matched === true && candidate.observed !== undefined);
+ if (proof?.observed === undefined) return undefined;
+ if (metadataString(bead, "pushed_sha") === proof.observed) return undefined;
+ const args = ["update", bead.id, "--actor", claim.actor, "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${proof.observed}`];
+ if (typeof bead.status === "string" && bead.status.length > 0) args.push("--status", bead.status);
+ const written = await bdRun(args);
+ if (written !== null && written.code === 0) return undefined;
+ if (written !== null && fenceRefused(written)) {
+  return {
+   block: true,
+   reason: `${bead.id} is now claimed by another actor (${(written.stderr || written.stdout).trim()}); your pushed head ${proof.observed} is on origin but this exit cannot be recorded on a bead you no longer hold. Write nothing more to it and yield NO_WORK`,
+  };
  }
+ logger.warn("orchestrate exit contract: pushed_sha not recorded", {
+  bead: bead.id,
+  sha: proof.observed,
+  cause: written === null ? lastBdFailure() : written.stderr.trim() || `bd exited ${written.code}`,
+ });
+ return undefined;
 }

@@ -60,3 +60,31 @@ export async function originHead(cwd: string, branch: string): Promise<OriginHea
 		return { kind: "unreachable", cause };
 	}
 }
+
+/** The clone's `HEAD` and whether its tree carries uncommitted changes. */
+export interface LocalState {
+	head: string;
+	dirty: boolean;
+}
+
+/**
+ * The clone at `cwd`: its `HEAD` commit and whether `git status --porcelain` prints
+ * anything. `undefined` when git did not answer, which the exit contract treats like an
+ * unreachable origin: work that cannot be shown to be safe is not.
+ */
+export async function localState(cwd: string): Promise<LocalState | undefined> {
+	const env = { ...process.env };
+	for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
+	try {
+		const options = { env, timeout: LS_REMOTE_TIMEOUT_MS, maxBuffer: 1024 * 1024 };
+		const [{ stdout: head }, { stdout: status }] = await Promise.all([
+			execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], options),
+			execFileAsync("git", ["-C", cwd, "status", "--porcelain"], options),
+		]);
+		const sha = head.trim();
+		if (!FULL_SHA.test(sha)) return undefined;
+		return { head: sha, dirty: status.trim().length > 0 };
+	} catch {
+		return undefined;
+	}
+}
