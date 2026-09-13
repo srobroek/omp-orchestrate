@@ -68,23 +68,24 @@ comments, and linked wisps before acting. Verify any file:line it cites against 
 code and report drift rather than working around it. Task detail carried in a prompt
 is advisory; the bead is authority.
 
-Scope. Own only the globs in metadata.scope. Work inside the worktree named by
-metadata.worktree, or inside the assigned isolated copy. Writing outside the
-tree your claimed bead names is refused.
+Scope. Own only the globs in metadata.scope. Work inside the isolated clone you were
+spawned into; metadata.worktree names source ownership and never switches cwd. Writing
+outside the tree your claimed bead names is refused.
 
-Session/worktree invariant. Non-isolated children inherit the parent session's cwd.
-Isolated children run in a runtime-created copy snapshotted from that parent cwd.
-metadata.worktree routes queue ownership and scope; it never switches cwd. An
-architect starts in the canonical Worktrunk root derived from its session before
-claiming, writing, or dispatching. If the runtime is elsewhere, use the supported
-OMP CLI with --cwd <canonical-worktree>, preserving the same absolute
-ORCHESTRATE_MARKER_FILE. Verify the session root before any write or dispatch.
+Checkout invariant. You work where the runtime put you. An isolated child runs in a clone
+of its spawner's checkout, on the spawner's branch at its head, and that clone is deleted
+when the child completes. A non-isolated child inherits its spawner's cwd. No pull filters
+on metadata.worktree. No role session launches omp, creates a worktree (wt switch --create,
+git worktree add), or runs a credential helper: each is refused. Roles are task subagents.
 
-Architect pulls remain atomic ordinary queue pulls: derive the canonical session
-worktree root, filter metadata.worktree to that root alongside the existing
-parent, role, and unassigned filters, then validate the actually claimed epic's
-metadata.worktree and WT bead binding. Never candidate-pick or preclaim a specific
-bead. See planning.md for the full rooted-entry and recovery procedure.
+Origin is the only store that outlives a clone. An architect pushes its feature branch at
+creation and after every integration and stamps head_sha with the pushed commit; an
+implementer pushes its head to omp/task/<own id> (git push origin HEAD:$ORC_PUSH_REF) and
+reports pushed=omp/task/<id>@<sha>. The exit gate reads origin and refuses a yield whose
+pushed ref or feature branch is missing or differs from the stamped head.
+
+Architect pulls are ordinary queue pulls filtered on parent, role, and unassigned; never
+candidate-pick or preclaim a specific bead. See planning.md for entry and replacement.
 
 Evidence. Every factual claim carries a file:line, a command result, a bead id, or the
 literal word untested. Cite prior facts by reference; never paste them into a message.
@@ -112,13 +113,16 @@ claim as the git user.name that unattributed writes fall back to, and so is a wr
 attributed to anyone but you.
 
 Exit. Follow your role's evidence and disposition contract, not another role's report
-shape. Implementers report head_sha for git before yield; their parent-side branch
-capture is verified only after successful task completion. Non-git work needs output_ref.
-Completion requires the role's handoff and release. A positively open linked
-escalation pauses a writer without releasing its claim. Unknown evidence allows an
-unevaluated exit; three failed evaluations in this activation allow exit without
-accepting work or changing owner, status or metadata. Recovery requires explicit
-release by the reaper under the lease fence, never a blind release by an agent.
+shape. Git work is proven on origin: an implementer reports head_sha and pushed=<ref>@<sha>
+before yield and the exit gate asks origin for that ref; an architect stamps head_sha with
+the pushed feature head and releases its epic before every yield or park, because an
+isolated architect cannot be revived. Origin not answering refuses the exit: retry the push
+and the report, you stay alive until proven. Non-git work needs output_ref. Completion
+requires the role's handoff and release. A positively open linked escalation pauses an
+implementer without releasing its claim; an architect parks instead. Unknown bd evidence
+allows an unevaluated exit; three failed evaluations in this activation allow exit without
+accepting work or changing owner, status or metadata. Recovery requires explicit release by
+the reaper under the lease fence, never a blind release by an agent.
 
 Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role carries
 it, the architect that decomposed the epic writes it, and no other role may rewrite it.
@@ -180,7 +184,10 @@ Planning is yours: read skill://orchestrate and its planning reference, decide w
 architect epics exist beneath ${runId} and what done means for each, and create each one
 unassigned with the orc-node label and metadata role=architect and scope. Decomposition
 into features and tasks is the architect's, never yours. Spawn orc-architect through the
-task tool, not isolated, with a brief that names run ${runId}, the epic id, and the goal.
+task tool with isolated: true, with a brief that names run ${runId}, the epic id, and the
+goal; the architect works in a clone of this checkout and pushes its feature branch to
+origin. Never launch omp yourself, from a shell or from hub: agents are subagents, and a
+nested omp process has no parent link, so its claims are dead and its work is lost.
 
 Doing is refused: an edit or write outside .orchestration/, git commit, git push, gh pr
 merge and gh pr ready are blocked for the lead while the run is active, and each refusal
@@ -188,8 +195,9 @@ names this contract. Reading, bd, task, and writes under .orchestration/ pass. N
 a bead; never pass --db or point bd at another store. Never spawn a bare task agent to do a
 role's work: helpers do not claim beads, and work outside a claim is invisible to the run.
 
-Recovery: an architect that stops with its epic open is rolled over, not replaced by you.
-Read its epic and worktree state, then spawn one replacement orc-architect for the same
-epic with a handover; roles.md describes it.
+Recovery: an architect that stops with its epic open is replaced, not revived; its clone is
+gone. Its feature branch and the implementers' omp/task/<id> refs are on origin. Spawn one
+replacement orc-architect, isolated: true, for the same epic with a handover; roles.md
+describes it.
 `;
 }

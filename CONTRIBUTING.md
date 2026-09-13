@@ -157,9 +157,8 @@ turning an actionable review-bot round into a fix bead under `orc_review_round_p
 
 ## Gates
 
-The extension registers a single `tool_call` handler with seven numbered checks, one runtime
-database check, and one assignment notice. They catch protocol mistakes. They cannot
-enforce transactional isolation.
+The extension registers a single `tool_call` handler with ten numbered checks. They catch
+protocol mistakes. They cannot enforce transactional isolation.
 
 Every refusal rests on evidence. When `bd` cannot answer, the check that needed it logs the
 cause and lets the call run. A check refuses only what it read and can prove:
@@ -175,6 +174,7 @@ cause and lets the call run. A check refuses only what it read and can prove:
 - **G4 (`yield`):** refuses exits when workers do not meet their contracts.
   A worker with a role but no claim receives one refusal.
   This refusal does not repeat, so revived sessions can exit.
+  Git work is proven on origin, the one store that outlives a worker's clone. An implementer's `REPORTED` must carry `pushed=<ref>@<sha>`; G4 runs `git ls-remote origin refs/heads/<ref>` and refuses unless that ref is at `head_sha`. An architect's yield or park is refused unless `refs/heads/<metadata.branch>` is at its `head_sha` and the epic is released. A missing ref, another commit, or an origin that does not answer all refuse: the refusal says `origin unreachable; retry git push and REPORTED, the worker stays alive until proven`. When the proof holds, G4 stamps `metadata.pushed_sha` with the observed commit before the yield proceeds.
 - **G5 (`bash`):** judges claims and the writes that shape them. It refuses:
   - a queue pull that names no role, or another role's queue
   - a named claim of a bead routed to another role
@@ -195,16 +195,19 @@ cause and lets the call run. A check refuses only what it read and can prove:
   - writes without actors: the identity is the assignee your claim report printed
   - comments without protocol verbs
   - bug beads unreachable from queues
-  - a role started as a nested `omp` process: `omp -p`, `--print`, `--prompt`, `--cwd`, `--agent` or `--session-dir` from a shell. `--config` on the same command exempts it
-- **G7 (`bash`):** within a marked run, from every session but the lead (the one the marker's `session_id` names), it refuses:
+  - a role started as a nested `omp` process (moved to G10, which refuses it)
+- **G7 (`bash`):** within a marked run it refuses:
   - `git push` to the run's primary branch (`metadata.primary_branch` on the run epic, `main` when unset): named as a destination, deleted, or pushed bare from a checkout on that branch. G7 reads that checkout's branch with `git symbolic-ref`, at the directory a `-C` names
   - a bare push, a `HEAD` destination, or a `<src>:` with no destination, once the line runs `cd` or `pushd` or the push carries `--git-dir` or `--work-tree`. G7 cannot read the branch git pushes from there. The refusal names the explicit form, `git -C <dir> push origin <src>:<dst>`
   - `git push --force`, `-f`, `--force-with-lease`, or a `+refspec`, to any branch
   - `git push --all`, `--branches`, or `--mirror`
-  - `wt switch --create` from a generic helper: a role-less session that does not lead the run works in the tree the lead gave it
+  - a destination the shell fills in: a variable other than `$ORC_PUSH_REF`, a substitution, or a glob. `$ORC_PUSH_REF` is resolved from the call's `env` only, where G6 sets it to the session's capture ref (`omp/task/<id>`); the command text is never read
+  - `wt switch --create` from every session but the lead. Worktrunk is the operator's: a role works in the isolated clone it was spawned into, a helper in the tree it was given
 
-  A push to `omp/task/<id>`, to a branch the session made, or to any other branch by name passes. A detached or unreadable `HEAD` refuses nothing. An unreadable run epic means `main`.
+  The lead's own `git push` never reaches G7: G9 refuses it first. A push to `omp/task/<id>`, to `HEAD:$ORC_PUSH_REF`, to a branch the session made, or to any other branch by name passes. A detached or unreadable `HEAD` refuses nothing. An unreadable run epic means `main`.
 - **G8 (every tool, notice):** in a worker session, compares the agent's `ORC-ROLE` and live model against the core contract once. On a mismatch it sends one notice naming the expected model, the live model, and the parking commands. G8 accepts a model that OMP moved the session onto through retry fallback. When G8 cannot read the model, it logs the cause and stays silent.
+- **G9 (`bash`, `edit`, `write`):** the lead plans and never edits or merges. From the lead of an active run it refuses `git commit`, `git push`, `gh pr merge`, `gh pr ready`, and an `edit` or `write` of a product file (any file inside a git working tree, except under `.orchestration/`). Every refusal names the recovery: spawn `orc-architect` with the run id.
+- **G10 (`bash`):** agents are subagents, and credentials never enter a transcript. Within a marked run, from every seat, it refuses an `omp` launch (bare, by path, through `bunx`, `bun x`, `npx`, or `mise exec ... --`; `omp --version` and `omp --help` pass), a credential helper (`isengardcli credentials`, `aws sts`, `aws configure export-credentials`, `aws configure ... credential_process`), and a credential print (a read of `~/.aws/credentials`, a bare `printenv` or `env`, `printenv` of an `AWS_*` secret, an expansion of one). The `task` gate beside it refuses an `orc-architect` or `orc-implementer` spawned without `isolated: true`.
 
 ### Spelling and scan bounds
 
@@ -234,7 +237,7 @@ and continues. In both modes a rule fires one time per session (`repeatMode: onc
 The `bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
 harmless (an empty queue, a doomed process) and the reminder arrives with the result.
 `orc-no-nested-omp` reads `hub start` arguments only. The shell form (`omp -p` from `bash`)
-is a G6 notice, so it fires only inside a run scope.
+is refused by G10, so it fires only inside a run scope.
 
 The host has a separate regex engine. Python accepting a pattern does not prove the host
 accepts it. After editing a rule, run `sh scripts/validate-rules.sh`. It feeds
