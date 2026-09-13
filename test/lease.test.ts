@@ -153,7 +153,7 @@ describe("createLeaseRenewer", () => {
 			leadRenewals.push(now);
 			return { outcome: leadOutcome, actor: "lead:s1", run: "orc-epic" };
 		});
-		const renewer = createLeaseRenewer(pi, claims, renewLead, options.registry ?? { list: () => [] });
+		const renewer = createLeaseRenewer(pi, claims, renewLead, options.registry ?? { list: () => [], revivable: () => true });
 		return { renewer, ctx, claims, messages, leadRenewals, setLeadOutcome: (outcome: LeadLeaseRenewal["outcome"]) => { leadOutcome = outcome; } };
 	}
 
@@ -240,18 +240,24 @@ describe("createLeaseRenewer", () => {
 			expect(await renewer.tick(ctx, T0 + 5 * MINUTE)).toEqual({ leadsRun: false });
 		});
 
-		test("the lead's timer renews a parked child's claims under the child's actor, once per cadence", async () => {
+		test("the lead's timer renews a revivable parked child's claims under the child's actor, once per cadence, and never an isolated one's", async () => {
 			const listed: string[][] = [];
 			const listSpy = spyOn(bd, "bdListChecked").mockImplementation(async (args) => {
 				listed.push(args);
 				return [{ id: "orc-3" }, { id: "orc-4" }];
 			});
 			try {
-				const registry: ParkedRegistry = { list: () => [
-					{ id: "parked-9", kind: "sub", status: "parked" },
-					{ id: "idle-2", kind: "sub", status: "idle" },
-					{ id: "Main", kind: "main", status: "running" },
-				] };
+				// `parked-9` is a keep-alive child the lifecycle manager adopted; `iso-5` finished
+				// isolated, so it parked without adoption and its clone is gone.
+				const registry: ParkedRegistry = {
+					list: () => [
+						{ id: "parked-9", kind: "sub", status: "parked" },
+						{ id: "iso-5", kind: "sub", status: "parked" },
+						{ id: "idle-2", kind: "sub", status: "idle" },
+						{ id: "Main", kind: "main", status: "running" },
+					],
+					revivable: id => id === "parked-9",
+				};
 				const { renewer, ctx } = rig("lead", { registry });
 				await renewer.tick(ctx, T0);
 				await renewer.tick(ctx, T0 + MINUTE);
@@ -263,7 +269,7 @@ describe("createLeaseRenewer", () => {
 		});
 
 		test("a worker's tick never reads the registry or the lead lease", async () => {
-			const registry: ParkedRegistry = { list: () => { throw new Error("read"); } };
+			const registry: ParkedRegistry = { list: () => { throw new Error("read"); }, revivable: () => true };
 			const { renewer, ctx, claims, leadRenewals } = rig("worker", { registry });
 			claims.recordClaim({ actor: "impl-7", beadIds: ["orc-1"] });
 			expect(await renewer.tick(ctx, T0)).toEqual({ leadsRun: false });

@@ -17,7 +17,7 @@
   "verbs": [
     {
       "verb": "REPORTED",
-      "meaning": "Evidence delivered, next role's label added, assignee cleared -- the node's exit contract is met.",
+      "meaning": "Evidence delivered, next role's label added, assignee cleared -- the node's exit contract is met. Git evidence carries `head_sha=<sha>` and, for an implementer, `pushed=<ref>@<sha>` naming the origin ref its head was pushed to (`omp/task/<own id>`); the exit gate verifies that ref on origin.",
       "writers": ["architect", "implementer", "researcher", "unlisted"],
       "terminal": true,
       "source": { "kind": "contract", "where": "architect.json, implementer.json, researcher.json, generic.json: completion.reported" }

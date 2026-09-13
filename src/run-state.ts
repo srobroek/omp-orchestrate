@@ -38,6 +38,7 @@ import { type LandingRecord, recordLandingCapabilities } from "./landing";
 import { type LeadLeaseRenewal, fenceRefused, leaseExpired, leaseState, leaseUntil, releaseDeadClaim } from "./lease";
 import { runScope } from "./run-scope";
 import { probeStore, type StoreProbe } from "./store-probe";
+import { commandNotice, type NoticeLevel } from "./tools/notice";
 
 /** The marker shape this plugin writes; a marker stamped with a higher number is refused. */
 export const MARKER_SCHEMA = 1;
@@ -937,7 +938,7 @@ export type Wake = (to: string, body: string) => Promise<{ outcome: string; erro
 export type AnswerHold =
 	| { kind: "woken"; holder: string; outcome: string }
 	| { kind: "wake-failed"; holder: string; error: string }
-	| { kind: "requeued"; holder: string | undefined; gates: string[] }
+	| { kind: "requeued"; holder: string | undefined; /** `metadata.role`: who the requeued bead is offered to. */ next: string | undefined; gates: string[] }
 	| { kind: "requeue-refused"; holder: string; reason: string }
 	| { kind: "kept"; reason: string };
 
@@ -975,16 +976,19 @@ async function underRun(bead: BdBead, runId: string, cwd: string): Promise<boole
  * (`scratch/audit/e2e/operator-fuzz.ledger.md`, row 2.10); a bead outside the run, or one
  * whose ancestry cannot be read, is refused before anything is written.
  *
- * A holder this process knows as a live or parked agent is woken through the IRC bus
- * -- an architect parked on its epic revives and reads the answer off the bead. A
- * holder absent from the registry has exited (workers yield after `ASK`/`FAILED`), so a
- * `blocked` bead whose last hold verb is one of those is requeued: assignee cleared,
- * status opened, and any open human gate blocking it resolved, so `bd ready --claim`
- * offers it to the next worker, answer in hand. The release is unfenced by necessity and
- * safe by construction: bd's `--claim` fence applies to `in_progress` beads only
- * (measured on 1.2.2: "not claimable: status blocked"), and a blocked bead is one no
- * successor can have claimed in the meantime. A bead in any other state keeps the note
- * and nothing else.
+ * A holder this process knows as a live agent (`running` or `idle`) is woken through the
+ * IRC bus and reads the answer off the bead. A parked holder is not: an architect runs in
+ * an isolated clone that OMP deletes when it completes, so a parked architect has no tree
+ * to resume in, and reviving it replays the failure. A parked or absent holder's bead is
+ * requeued instead, answer in hand. A bead still `in_progress` under that holder is
+ * released fenced, as the holder and attributed to the lead ({@link releaseDeadClaim}),
+ * so a successor that claimed meanwhile is never displaced. A `blocked` bead whose last
+ * hold verb is `ASK`, `ESCALATED` or `FAILED` is opened and unassigned, and any open human
+ * gate blocking it resolved, so `bd ready --claim` offers it to the next worker. That
+ * release is unfenced by necessity and safe by construction: bd's `--claim` fence applies
+ * to `in_progress` beads only (measured on 1.2.2: "not claimable: status blocked"), and a
+ * blocked bead is one no successor can have claimed in the meantime. A bead in any other
+ * state keeps the note and nothing else.
  */
 export async function answerBead(cwd: string, sessionId: string, beadId: string, text: string, deps: AnswerDeps): Promise<AnswerHold> {
 	if (!RUN_ID_RE.test(beadId)) throw new Error(`bead id must be a Beads identifier, got ${JSON.stringify(beadId)}`);
@@ -1005,11 +1009,18 @@ export async function answerBead(cwd: string, sessionId: string, beadId: string,
 
 	const holder = epicHolder(bead);
 	const state = holder === undefined ? undefined : deps.registry.get(holder)?.status;
-	if (holder !== undefined && state !== undefined && state !== "aborted") {
+	const next = metadataString(bead, "role");
+	if (holder !== undefined && (state === "running" || state === "idle")) {
 		const receipt = await deps.wake(holder, `ANSWER recorded on ${beadId}; read \`bd comments ${beadId}\` and resume`);
 		return receipt.outcome === "failed"
 			? { kind: "wake-failed", holder, error: receipt.error ?? "delivery failed" }
 			: { kind: "woken", holder, outcome: receipt.outcome };
+	}
+	if (holder !== undefined && bead.status === "in_progress") {
+		const cause = state === "parked" ? "answered while parked; an isolated holder's clone is gone once it parks" : "answered; the holder is no longer registered";
+		const released = await releaseDeadClaim(beadId, holder, { cause, recoveredBy: actor }, cwd);
+		if (released === "released" || released === "comment-failed") return { kind: "requeued", holder, next, gates: [] };
+		return { kind: "requeue-refused", holder, reason: released === "held-by-other" ? "a successor already holds it" : "bd did not answer or refused the fenced release" };
 	}
 	if (comments === null) return { kind: "kept", reason: `comments on ${beadId} could not be read, so the hold is unknown; nothing requeued` };
 	const hold = comments.findLast(comment => HOLD_VERBS[commentVerb(comment.text)] === true);
@@ -1029,7 +1040,7 @@ export async function answerBead(cwd: string, sessionId: string, beadId: string,
 		const resolved = await bdRun(["gate", "resolve", gate.id, "--reason", `ANSWER by ${actor} on ${beadId}`, "--actor", actor], EPIC_WRITE_TIMEOUT_MS, cwd);
 		if (resolved?.code === 0) gates.push(gate.id);
 	}
-	return { kind: "requeued", holder, gates };
+	return { kind: "requeued", holder, next, gates };
 }
 
 // ============================================================================
@@ -1154,11 +1165,7 @@ export async function runStatusReport(cwd: string, now = Date.now()): Promise<Ru
 // ============================================================================
 
 /** Notification level; `warning` wins over `info`, `error` over both. */
-type Level = "info" | "warning" | "error";
-
-function notify(ctx: ExtensionCommandContext, lines: string[], level: Level): void {
-	ctx.ui.notify(lines.join("\n"), level);
-}
+type Level = NoticeLevel;
 
 function reason(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -1231,6 +1238,8 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 	// exists, and a test's fake stands in for the whole of it.
 	const answerDeps: AnswerDeps = { registry: deps.registry ?? { get: id => AgentRegistry.global().get(id) }, wake: deps.wake ?? ircWake };
 
+	const notify = (ctx: ExtensionCommandContext, lines: string[], level: Level): void => commandNotice(pi, ctx, lines.join("\n"), level);
+
 	/** The run is active by now, whatever the hook does; a failing readiness check must not read as a failed start. */
 	const activate = async (cwd: string, lines: string[]): Promise<Level> => {
 		try {
@@ -1247,7 +1256,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 		handler: async (args, ctx) => {
 			const request = startRequest(args);
 			if (typeof request === "string") {
-				ctx.ui.notify(request, "error");
+				notify(ctx, [request], "error");
 				return;
 			}
 			const cwd = await commandRoot(ctx);
@@ -1255,7 +1264,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			try {
 				started = await startRun(cwd, ctx.sessionManager.getSessionId(), request.target, request.options);
 			} catch (error) {
-				ctx.ui.notify(reason(error), "error");
+				notify(ctx, [reason(error)], "error");
 				return;
 			}
 			let level: Level = "info";
@@ -1298,10 +1307,10 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			switch (outcome.kind) {
 				case "no-run":
 				case "refused":
-					ctx.ui.notify(outcome.reason, "error");
+					notify(ctx, [outcome.reason], "error");
 					return;
 				case "held-by-other":
-					ctx.ui.notify(`resume refused: ${outcome.reason}`, "error");
+					notify(ctx, [`resume refused: ${outcome.reason}`], "error");
 					return;
 				case "resumed":
 					break;
@@ -1333,7 +1342,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 		description: "Active run: marker binding, run epic liveness, lead lease, and what needs attention",
 		handler: async (_args, ctx) => {
 			const report = await runStatusReport(await commandRoot(ctx));
-			ctx.ui.notify(report.lines.join("\n"), report.healthy ? "info" : "warning");
+			notify(ctx, report.lines, report.healthy ? "info" : "warning");
 		},
 	});
 
@@ -1345,14 +1354,14 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 			const beadId = split === -1 ? trimmed : trimmed.slice(0, split);
 			const text = split === -1 ? "" : trimmed.slice(split).trim();
 			if (beadId.length === 0 || text.length === 0) {
-				ctx.ui.notify("usage: /orchestrate-answer <bead> <text>", "error");
+				notify(ctx, ["usage: /orchestrate-answer <bead> <text>"], "error");
 				return;
 			}
 			let hold: AnswerHold;
 			try {
 				hold = await answerBead(await commandRoot(ctx), ctx.sessionManager.getSessionId(), beadId, text, answerDeps);
 			} catch (error) {
-				ctx.ui.notify(reason(error), "error");
+				notify(ctx, [reason(error)], "error");
 				return;
 			}
 			const noted = `answer recorded on ${beadId}`;
@@ -1360,7 +1369,7 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 				case "woken": notify(ctx, [noted, `${hold.holder} ${hold.outcome}`], "info"); return;
 				case "wake-failed": notify(ctx, [noted, `${hold.holder} could not be woken: ${hold.error}; its claim stands`], "warning"); return;
 				case "requeued":
-					notify(ctx, [noted, `${beadId} requeued${hold.holder === undefined ? "" : ` (released from ${hold.holder})`}${hold.gates.length === 0 ? "" : `; human gate${hold.gates.length === 1 ? "" : "s"} ${hold.gates.join(", ")} resolved`}`], "info");
+					notify(ctx, [noted, `${beadId} requeued${hold.next === undefined ? "" : ` for a new ${hold.next}`}${hold.holder === undefined ? "" : ` (released from ${hold.holder})`}${hold.gates.length === 0 ? "" : `; human gate${hold.gates.length === 1 ? "" : "s"} ${hold.gates.join(", ")} resolved`}`], "info");
 					return;
 				case "requeue-refused": notify(ctx, [noted, `${beadId} not requeued: ${hold.reason}`], "warning"); return;
 				case "kept": notify(ctx, [noted, hold.reason], "info"); return;
@@ -1373,14 +1382,14 @@ export function registerRunCommands(pi: ExtensionAPI, onActivate?: (cwd: string)
 		handler: async (args, ctx) => {
 			const parts = words(args);
 			if (parts.some(word => word !== "--force")) {
-				ctx.ui.notify("usage: /orchestrate-stop [--force]", "error");
+				notify(ctx, ["usage: /orchestrate-stop [--force]"], "error");
 				return;
 			}
 			let stopped: StopResult;
 			try {
 				stopped = await stopRun(await commandRoot(ctx), ctx.sessionManager.getSessionId(), { force: parts.length > 0 });
 			} catch (error) {
-				ctx.ui.notify(reason(error), "error");
+				notify(ctx, [reason(error)], "error");
 				return;
 			}
 			const lines = [`orchestrate run ${stopped.run} stopped; marker removed`];

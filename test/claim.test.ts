@@ -1085,6 +1085,90 @@ describe("G5 run-epic governance", () => {
 });
 
 /**
+ * The architect runs in an isolated clone that is deleted when it completes, so its epic
+ * is claimed bare -- no `worktree` filter on the pull, no `worktree` on the bead -- and
+ * the claim's first write records where the work is.
+ */
+describe("G5 architect location stamp", () => {
+ const architect = () => ctxFor("architect", runRoot);
+ const STAMP =
+  "bd update orc-feature --set-metadata branch=feat/a --set-metadata base_sha=64df1c1 " +
+  "--set-metadata push=origin/feat/a --set-metadata worktree=/Users/x/.omp/wt/t1/m";
+
+ test("a queue pull with no worktree filter is allowed and looks up no bead", async () => {
+  expect(await gateClaimEligibility(claims, architect(), {
+   command: "bd ready --parent orc-run --metadata-field role=architect --unassigned --claim --json",
+  })).toBeUndefined();
+  expect(shown).toEqual([]);
+ });
+
+ test("a named claim on an epic that carries no worktree yet is allowed", async () => {
+  beads["orc-feature"] = bead("orc-feature", { issue_type: "epic", metadata: { role: "architect" } });
+  expect(await gateClaimEligibility(claims, architect(), { command: "bd update orc-feature --claim --json" })).toBeUndefined();
+ });
+
+ describe("with the epic claimed and unstamped", () => {
+  beforeEach(() => {
+   claims.recordClaim({ actor: "arch-1", beadIds: ["orc-feature"] });
+   beads["orc-feature"] = bead("orc-feature", { issue_type: "epic", status: "in_progress", assignee: "arch-1", metadata: { role: "architect" } });
+  });
+
+  test.each([
+   ["a comment", 'bd comment orc-feature "NOTE starting"'],
+   ["a scope", "bd update orc-feature --set-metadata scope=src/**"],
+   ["a partial stamp", "bd update orc-feature --set-metadata branch=feat/a --set-metadata push=origin/feat/a"],
+   ["a release", 'bd update orc-feature --assignee ""'],
+   ["a label", "bd label add orc-feature agent:reviewer"],
+  ])("refuses %s, naming the four keys and the missing ones", async (_label, command) => {
+   const result = await gateClaimEligibility(claims, architect(), { command });
+   expect(result?.block).toBe(true);
+   for (const key of ["branch", "base_sha", "push", "worktree"]) expect(result?.reason).toContain(key);
+   expect(result?.reason).toContain("missing: ");
+   expect(result?.reason).toContain("orc-feature");
+  });
+
+  test("a partial stamp names only what it leaves out", async () => {
+   const result = await gateClaimEligibility(claims, architect(), { command: "bd update orc-feature --set-metadata branch=feat/a --set-metadata push=origin/feat/a" });
+   expect(result?.reason).toContain("missing: base_sha, worktree");
+  });
+
+  test.each([
+   ["the full stamp", STAMP],
+   ["the full stamp as JSON", `bd update orc-feature --metadata '{"branch":"feat/a","base_sha":"64df1c1","push":"origin/feat/a","worktree":"/tmp/clone"}'`],
+   ["a same-bead claim retry", "bd update orc-feature --claim --json"],
+   ["a read", "bd show orc-feature --json"],
+   ["a write on another bead", 'bd create "task" --parent orc-feature --metadata \'{"role":"implementer"}\''],
+  ])("allows %s", async (_label, command) => {
+   expect(await gateClaimEligibility(claims, architect(), { command })).toBeUndefined();
+  });
+
+  test("an implementer holding an unstamped bead is not held to the architect's stamp", async () => {
+   expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: 'bd comment orc-feature "NOTE hi"' })).toBeUndefined();
+  });
+
+  test("an unreadable epic proves nothing: the write runs and the cause is logged", async () => {
+   delete beads["orc-feature"];
+   expect(await gateClaimEligibility(claims, architect(), { command: 'bd comment orc-feature "NOTE hi"' })).toBeUndefined();
+   expect(warned.map(entry => entry.data?.bead)).toEqual(["orc-feature"]);
+  });
+ });
+
+ test("once stamped, ordinary writes pass; a replacement architect completes a predecessor's set by re-stamping worktree", async () => {
+  claims.recordClaim({ actor: "arch-2", beadIds: ["orc-feature"] });
+  beads["orc-feature"] = bead("orc-feature", {
+   issue_type: "epic", status: "in_progress", assignee: "arch-2",
+   metadata: { role: "architect", branch: "feat/a", base_sha: "64df1c1", push: "origin/feat/a" },
+  });
+  expect((await gateClaimEligibility(claims, architect(), { command: 'bd comment orc-feature "NOTE resumed"' }))?.reason).toContain("missing: worktree");
+  expect(await gateClaimEligibility(claims, architect(), { command: "bd update orc-feature --set-metadata worktree=/tmp/clone-2" })).toBeUndefined();
+  beads["orc-feature"]!.metadata = { ...(beads["orc-feature"]!.metadata as Record<string, unknown>), worktree: "/tmp/clone-2" };
+  expect(await gateClaimEligibility(claims, architect(), { command: 'bd comment orc-feature "NOTE resumed"' })).toBeUndefined();
+  // Clearing a location key reopens the requirement.
+  expect((await gateClaimEligibility(claims, architect(), { command: "bd update orc-feature --unset-metadata push" }))?.reason).toContain("missing: push");
+ });
+});
+
+/**
  * A node is closed by the landing sweep, or by the lead. Found by a run in which an
  * architect closed two tasks `--reason merged` with no reviewer, no PR, and main unchanged.
  */

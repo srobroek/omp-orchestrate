@@ -325,8 +325,8 @@ describe("inside a run scope the same paths arm", () => {
 		expect(refusal("sandboxEscape")?.reason).toContain("BD_READONLY=1 is the read-only sandbox");
 		expect(revision("helperShell")?.input).toEqual({ command: "echo ok", env: { BD_READONLY: "1" } });
 		expect(refusal("roleYield")?.reason).toContain("without ever claiming a bead");
-		// G6's nested-omp notice, and the protocol for the contract-bound worker only.
-		expect(lead.sent.some(message => message.customType === BD_NOTICE_MESSAGE && message.content?.includes("WARN nested omp: 'omp -p'"))).toBe(true);
+		// G10's refusal of the lead's nested omp, and the protocol for the contract-bound worker only.
+		expect(refusal("nestedOmp")?.reason).toContain("omp is refused for a session inside run");
 		expect(role.sent.some(message => message.customType === "com.srobroek.omp-orchestrate.contract")).toBe(true);
 		expect(worker.sent.some(message => message.customType === "com.srobroek.omp-orchestrate.contract")).toBe(false);
 		// W2's ledger and W1's sweep, the two watchers that used to run in every repository.

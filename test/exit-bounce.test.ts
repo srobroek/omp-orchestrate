@@ -6,11 +6,14 @@ import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead, BdComment } from "../src/bd";
 import * as actualBd from "../src/bd";
+import * as origin from "../src/origin";
 import { createClaimState } from "../src/claim-state";
 import { createExitGuard } from "../src/gates/exit";
 import { markerPath } from "../src/run-state";
 
 const BEAD = "orc-42";
+/** The `REPORTED` token naming where a worker pushed its head, as the fixture worker spells it. */
+function pushed(sha: string): string { return `pushed=omp/task/A@${sha}`; }
 /** The run epic's recorded base: the commit every worker's head is compared against. */
 const BASE = "72c609ac23fba9be420212169d05f8a9c2f49911";
 const CTX = { getSystemPrompt: () => ["ORC-ROLE: implementer"] } as unknown as ExtensionContext;
@@ -24,6 +27,12 @@ let epic: BdBead | null;
 let issued: string[][];
 let shown: string[];
 let warned: Record<string, unknown>[];
+/** What origin answers for any ref; `undefined` mirrors the bead's own `head_sha`, the pushed case. */
+let remote: origin.OriginHead | undefined;
+let asked: string[];
+/** The clone as git describes it; `undefined` mirrors the bead's head with a clean tree. */
+let local: origin.LocalState | undefined;
+let unreadableClone = false;
 let fixture: string;
 let claims = createClaimState();
 let gateExitContract: ReturnType<typeof createExitGuard>;
@@ -53,6 +62,18 @@ const spies = [
   shown.push(id);
   return id === "orc-run" ? epic : null;
  }),
+ spyOn(origin, "originHead").mockImplementation(async (_cwd, ref) => {
+  asked.push(ref);
+  if (remote !== undefined) return remote;
+  const head = bead?.metadata?.head_sha;
+  return typeof head === "string" ? { kind: "at", sha: head } : { kind: "missing" };
+ }),
+ spyOn(origin, "localState").mockImplementation(async () => {
+  if (unreadableClone) return undefined;
+  if (local !== undefined) return local;
+  const head = bead?.metadata?.head_sha;
+  return { head: typeof head === "string" ? head : BASE, dirty: false };
+ }),
  spyOn(logger, "warn").mockImplementation(((_message: string, data?: Record<string, unknown>) => {
   warned.push(data ?? {});
  }) as typeof logger.warn),
@@ -68,7 +89,11 @@ beforeEach(async () => {
  issued = [];
  shown = [];
  warned = [];
- bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git" } };
+ remote = undefined;
+ asked = [];
+ local = undefined;
+ unreadableClone = false;
+ bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
  comments = [];
  linked = [];
  linkedBead = null;
@@ -96,7 +121,7 @@ test("a released shepherd exit with a BLOCKED wait mutates nothing it inherited"
 test("a held bead is a valid exit: status blocked plus ASK, claim retained", async () => {
  // The human hold has one carrier. Without ASK in the escape clause the worker that
  // parked its bead correctly would be refused for lacking REPORTED.
- bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git" } };
+ bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
  comments = [{ text: `ASK ${BEAD} question: which API?` }];
  expect(await gateExitContract(CTX)).toBeUndefined();
  comments = [{ text: `NOTE ${BEAD} leaning towards the old API` }];
@@ -134,7 +159,7 @@ describe("G4 activation refusal budget", () => {
   expect(bead!.status).toBe("closed");
  });
  test("completion of the first bead does not conceal another unfinished claim", async () => {
-  bead = { id: BEAD, status: "blocked", assignee: "A" };
+  bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { base_sha: BASE } };
   comments = [{ text: "BLOCKED awaiting prerequisite" }];
   linkedBead = { id: "second", assignee: "A", metadata: { execution_kind: "git" } };
   claims.recordClaim({ actor: "A", beadIds: [BEAD, "second"] });
@@ -180,12 +205,116 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(shepherd)).toBeUndefined();
   expect(issued).toEqual([]);
  });
- test("a git implementer can report and release before host branch capture", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc123" } };
-  comments = [{ text: "REPORTED src/api.ts committed abc123" }];
+ test("a git implementer whose pushed ref is at its head can report and release", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
   expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(asked).toEqual(["omp/task/A"]);
+  // The plugin's own word that the head was seen on origin, written before the yield proceeds.
+  expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
   delete bead.metadata!.head_sha;
   expect((await gateExitContract(CTX))?.block).toBe(true);
+ });
+ test("a completed report with its pushed head on origin is still refused while the tree is dirty", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
+  local = { head: "abc1234abc1234abc1234abc1234abc1234abc12", dirty: true };
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
+  expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["pushed"]);
+  expect(verdict.failed_checks[0]!.detail).toContain("commit and push (`git push origin HEAD:$ORC_PUSH_REF`), or discard them, before yielding");
+  expect(issued).toEqual([]);
+  local = { head: "abc1234abc1234abc1234abc1234abc1234abc12", dirty: false };
+  remote = { kind: "at", sha: "abc1234abc1234abc1234abc1234abc1234abc12" };
+  expect(await gateExitContract(CTX)).toBeUndefined();
+ });
+ test("a REPORTED without a pushed token is refused before origin is asked", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: "REPORTED src/api.ts committed abc1234" }];
+  const verdict: { failed_checks: { check: string; detail: string; recovery?: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
+  expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["pushed"]);
+  expect(verdict.failed_checks[0]!.detail).toContain("names no pushed=<ref>@<sha>");
+  expect(verdict.failed_checks[0]!.recovery).toContain("git push origin HEAD:$ORC_PUSH_REF");
+  expect(asked).toEqual([]);
+  expect(issued).toEqual([]);
+ });
+ test.each([
+  ["origin holds another commit", { kind: "at", sha: "0000000" } as origin.OriginHead, "is at 0000000, not head_sha abc1234"],
+  ["origin has no such ref", { kind: "missing" } as origin.OriginHead, "origin has no omp/task/A"],
+  ["origin does not answer", { kind: "unreachable", cause: "Could not resolve host" } as origin.OriginHead, "origin unreachable (Could not resolve host); retry `git push` and REPORTED, the worker stays alive until proven"],
+ ])("an implementer whose pushed ref is not proven is refused: %s", async (_label, answer, text) => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
+  remote = answer;
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
+  expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["pushed"]);
+  expect(verdict.failed_checks[0]!.detail).toContain(text);
+  expect(issued).toEqual([]);
+ });
+ test("a pushed token contradicting head_sha is refused without asking origin", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts ${pushed("fedcba9")}` }];
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("but head_sha is abc1234");
+  expect(asked).toEqual([]);
+ });
+ test("an implementer paused on an open escalation asks origin nothing", async () => {
+  linked = ["question"];
+  linkedBead = { id: "question", ephemeral: true, wisp_type: "escalation", status: "open" };
+  expect(await gateExitContract(CTX)).toBeUndefined();
+  expect(asked).toEqual([]);
+ });
+ describe("an architect's exit is judged against origin and its own release", () => {
+  const ARCH = { getSystemPrompt: () => ["ORC-ROLE: architect"] } as unknown as ExtensionContext;
+  const FEATURE = "feat/login";
+  function feature(overrides: Partial<BdBead> = {}): BdBead {
+   return {
+    id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"],
+    metadata: { role: "architect", execution_kind: "git", branch: FEATURE, push: `origin/${FEATURE}`, head_sha: "abc1234" },
+    ...overrides,
+   };
+  }
+  test("released, reported, feature head on origin: allowed, and the observed head is stamped", async () => {
+   bead = feature();
+   comments = [{ text: `REPORTED ${BEAD} integrated 3 tasks; head_sha=abc1234` }];
+   expect(await gateExitContract(ARCH)).toBeUndefined();
+   expect(asked).toEqual([FEATURE]);
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
+  });
+  test("a feature head origin does not hold is refused, naming the push", async () => {
+   bead = feature();
+   comments = [{ text: `REPORTED ${BEAD} integrated; head_sha=abc1234` }];
+   remote = { kind: "at", sha: "1111111" };
+   const verdict: { failed_checks: { check: string; detail: string; recovery?: string }[] } = JSON.parse((await gateExitContract(ARCH))!.reason!);
+   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["push_head"]);
+   expect(verdict.failed_checks[0]!.detail).toContain("origin feat/login is at 1111111, not head_sha abc1234");
+   expect(verdict.failed_checks[0]!.recovery).toContain("git push origin <branch>");
+   expect(issued).toEqual([]);
+  });
+  test("an epic still held by the architect is refused: an isolated architect cannot be revived", async () => {
+   bead = feature({ assignee: "A" });
+   comments = [{ text: `REPORTED ${BEAD} integrated; head_sha=abc1234` }];
+   const verdict: { failed_checks: { check: string; recovery?: string }[] } = JSON.parse((await gateExitContract(ARCH))!.reason!);
+   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["unclaimed"]);
+   expect(verdict.failed_checks[0]!.recovery).toContain('bd update <epic> --claim --assignee ""');
+  });
+  test("a park needs the comment, the release and the pushed head; the refusal names the two steps", async () => {
+   bead = feature({ status: "blocked", assignee: "A" });
+   comments = [{ text: `BLOCKED ${BEAD} design question on the token format` }];
+   const verdict: { failed_checks: { check: string; detail: string; recovery?: string }[] } = JSON.parse((await gateExitContract(ARCH))!.reason!);
+   expect(verdict.failed_checks[0]!.check).toBe("escape");
+   expect(verdict.failed_checks[0]!.recovery).toContain("push the feature branch");
+   expect(verdict.failed_checks[0]!.recovery).toContain("then release the epic");
+   bead.assignee = "";
+   remote = { kind: "missing" };
+   expect(JSON.parse((await gateExitContract(ARCH))!.reason!).failed_checks[0].detail).toContain("origin has no feat/login");
+   remote = undefined;
+   expect(await gateExitContract(ARCH)).toBeUndefined();
+  });
+  test("an open escalation does not pause an architect: it parks or completes", async () => {
+   bead = feature({ assignee: "A" });
+   linked = ["question"];
+   linkedBead = { id: "question", ephemeral: true, wisp_type: "escalation", status: "open" };
+   expect((await gateExitContract(ARCH))?.block).toBe(true);
+  });
  });
  test.each(["artifact", "comment", "external"])("%s writer completion requires handoff and release", async kind => {
   bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: kind, artifacts_dir: path.join(fixture, "artifacts"), output_ref: path.join(fixture, "artifacts/result") } };
@@ -251,6 +380,65 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(issued).toEqual([]);
  });
+ describe("a blocked exit deletes the clone like any other, so its work must be on origin or absent", () => {
+  const HEAD = "abc1234abc1234abc1234abc1234abc1234abc12";
+  beforeEach(() => {
+   bead!.status = "blocked";
+   comments = [{ text: "BLOCKED missing prerequisite" }];
+  });
+  test("clean tree at the base: nothing to lose, allowed as before", async () => {
+   expect(await gateExitContract(CTX)).toBeUndefined();
+   expect(asked).toEqual([]);
+   expect(issued).toEqual([]);
+  });
+  test("commits past the base without a pushed token are refused", async () => {
+   local = { head: HEAD, dirty: false };
+   const verdict: { failed_checks: { check: string; detail: string; recovery?: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
+   expect(verdict.failed_checks[0]!.check).toBe("escape");
+   expect(verdict.failed_checks[0]!.detail).toContain(`the clone has commits at HEAD ${HEAD.slice(0, 7)} that origin does not hold`);
+   expect(verdict.failed_checks[0]!.recovery).toContain("a blocked exit deletes your clone like any other");
+  });
+  test("an uncommitted change is refused, whatever origin holds", async () => {
+   local = { head: BASE, dirty: true };
+   expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("commit and push (`git push origin HEAD:$ORC_PUSH_REF`), or discard them, before yielding");
+   expect(asked).toEqual([]);
+  });
+  test("commits past the base with the pushed ref at HEAD are allowed, and the head is stamped in the fenced release", async () => {
+   local = { head: HEAD, dirty: false };
+   comments = [{ text: "BLOCKED missing prerequisite" }, { text: `REPORTED partial: src/x.ts ${pushed(HEAD.slice(0, 7))}` }];
+   remote = { kind: "at", sha: HEAD };
+   expect(await gateExitContract(CTX)).toBeUndefined();
+   expect(asked).toEqual(["omp/task/A"]);
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "blocked"]]);
+  });
+  test("a clone git cannot read is judged as work present", async () => {
+   unreadableClone = true;
+
+   expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("could not be read");
+  });
+ });
+ test("a successor's claim in the release-to-yield gap refuses the exit and stamps nothing on its bead", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
+  const run = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+   issued.push(args);
+   return { code: 1, stdout: "", stderr: `Error claiming ${BEAD}: issue already claimed by B` };
+  });
+  try {
+   const result = await gateExitContract(CTX);
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("is now claimed by another actor");
+   expect(result?.reason).toContain("already claimed by B");
+   // The one write attempted was the fenced one; nothing else touched the bead.
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
+  } finally {
+   run.mockRestore();
+   spies[3] = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+    issued.push(args);
+    return { code: 0, stdout: "", stderr: "" };
+   });
+  }
+ });
 });
 
 /**
@@ -294,7 +482,7 @@ describe("G4 zero-work report", () => {
 
  test("a head equal to the run epic's base with no changed path is refused on both counts", async () => {
   bead = released(BASE);
-  comments = [{ text: `REPORTED ${BEAD} head_sha=${BASE.slice(0, 7)}` }];
+  comments = [{ text: `REPORTED ${BEAD} head_sha=${BASE.slice(0, 7)} ${pushed(BASE.slice(0, 7))}` }];
   expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["work", "changed_paths"]);
   // The base came from the run epic, read once through the marker's run id.
   expect(shown).toEqual(["orc-run"]);
@@ -302,21 +490,21 @@ describe("G4 zero-work report", () => {
 
  test("a moved head naming a changed path passes", async () => {
   bead = released(HEAD);
-  comments = [{ text: `REPORTED docs/faq.md changed; head_sha ${HEAD.slice(0, 7)}` }];
+  comments = [{ text: `REPORTED docs/faq.md changed; head_sha ${HEAD.slice(0, 7)} ${pushed(HEAD.slice(0, 7))}` }];
   expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
  });
 
  test("the bead's own base_sha wins, and costs no epic read", async () => {
   bead = released(HEAD, HEAD.slice(0, 7));
-  comments = [{ text: "REPORTED src/x.ts" }];
+  comments = [{ text: `REPORTED src/x.ts ${pushed(HEAD)}` }];
   expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["work"]);
   expect(shown).toEqual([]);
  });
 
  test.each([
-  ["a path in a key=value list", "REPORTED files=src/a.ts,src/b.ts head_sha=abc"],
-  ["a backticked file name", "REPORTED updated `README.md`"],
-  ["a bracketed path", "REPORTED [docs/guide/install.md] rewritten"],
+  ["a path in a key=value list", `REPORTED files=src/a.ts,src/b.ts head_sha=abc ${pushed(HEAD)}`],
+  ["a backticked file name", `REPORTED updated \`README.md\` ${pushed(HEAD)}`],
+  ["a bracketed path", `REPORTED [docs/guide/install.md] rewritten ${pushed(HEAD)}`],
  ])("%s counts as a changed path", async (_label, text) => {
   bead = released(HEAD);
   comments = [{ text }];
@@ -324,9 +512,9 @@ describe("G4 zero-work report", () => {
  });
 
  test.each([
-  ["a sha and a count", "REPORTED 3 files, head_sha=abc1234, tests green"],
-  ["a URL alone", "REPORTED see https://example.com/pr/2"],
-  ["a version number", "REPORTED bumped to 1.2.3"],
+  ["a sha and a count", `REPORTED 3 files, head_sha=abc1234, tests green ${pushed(HEAD)}`],
+  ["a URL alone", `REPORTED see https://example.com/pr/2 ${pushed(HEAD)}`],
+  ["a version number", `REPORTED bumped to 1.2.3 ${pushed(HEAD)}`],
  ])("%s is not a changed path", async (_label, text) => {
   bead = released(HEAD);
   comments = [{ text }];
@@ -339,7 +527,7 @@ describe("G4 zero-work report", () => {
   `- **NOTE** no-change: verified in place`,
  ])("an explicit no-change note waives both checks: %s", async note => {
   bead = released(BASE);
-  comments = [{ text: note }, { text: `REPORTED ${BEAD} nothing changed` }];
+  comments = [{ text: note }, { text: `REPORTED ${BEAD} nothing changed ${pushed(BASE)}` }];
   expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
  });
 
@@ -347,7 +535,7 @@ describe("G4 zero-work report", () => {
   "a note that states no reason, or buries the marker, waives nothing: %s",
   async note => {
    bead = released(BASE);
-   comments = [{ text: note }, { text: `REPORTED ${BEAD} done` }];
+   comments = [{ text: note }, { text: `REPORTED ${BEAD} done ${pushed(BASE)}` }];
    expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["work", "changed_paths"]);
   },
  );
@@ -355,21 +543,21 @@ describe("G4 zero-work report", () => {
  test("no recorded base anywhere leaves the head comparison unknown", async () => {
   epic = { id: "orc-run", status: "in_progress" };
   bead = released(BASE);
-  comments = [{ text: "REPORTED src/x.ts" }];
+  comments = [{ text: `REPORTED src/x.ts ${pushed(BASE)}` }];
   expect(await gateExitContract(ctxIn(runRoot))).toBeUndefined();
  });
 
  test("an unreadable run epic fails the comparison open, says why, and still judges the rest", async () => {
   epic = null;
   bead = released(BASE);
-  comments = [{ text: `REPORTED ${BEAD} done` }];
+  comments = [{ text: `REPORTED ${BEAD} done ${pushed(BASE)}` }];
   expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["changed_paths"]);
   expect(warned.map(entry => entry.epic)).toEqual(["orc-run"]);
  });
 
  test("outside a bound run there is no epic to read", async () => {
   bead = released(BASE);
-  comments = [{ text: "REPORTED src/x.ts" }];
+  comments = [{ text: `REPORTED src/x.ts ${pushed(BASE)}` }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(shown).toEqual([]);
  });
@@ -377,7 +565,7 @@ describe("G4 zero-work report", () => {
  test("a bead without a head spends no epic read: delivery already speaks", async () => {
   bead = released(HEAD);
   delete bead.metadata!.head_sha;
-  comments = [{ text: "REPORTED src/x.ts" }];
+  comments = [{ text: `REPORTED src/x.ts ${pushed(HEAD)}` }];
   expect(checks(await gateExitContract(ctxIn(runRoot)))).toEqual(["delivery"]);
   expect(shown).toEqual([]);
  });

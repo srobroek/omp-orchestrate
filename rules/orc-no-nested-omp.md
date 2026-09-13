@@ -7,27 +7,18 @@ scope: "tool:hub"
 interruptMode: "never"
 ---
 
-Roles in an orchestrate run are spawned with `task` (or `agent()` in eval), never as a
-nested `omp` process through `hub start` or a shell. A nested process has no parent
-link: it does not inherit `BEADS_ACTOR`, its claims are dead claims, its receipts never
-reach the wave barrier, and stopping and restarting it only replays the same failure.
-One profiled run spent 27 of its 40 minutes in `hub start`/`wait`/`stop` cycles on
-nested `omp` processes after its `task` workers were cancelled.
+Roles in an orchestrate run are spawned with `task` and `isolated: true`, never as a nested
+`omp` process. The enforcement is G10 (`src/gates/nested.ts`): inside a run it refuses every
+`omp` launch from `bash`, bare, by path, through `bunx`, `bun x`, `npx` or `mise exec`, and
+every credential helper or credential print. This rule is the `hub start` remainder, which
+no `tool_call` gate sees: a reminder, not a boundary.
 
-Recover instead:
-
-1. Read the cancelled worker's transcript (`history://<name>`) for the refusal it hit
-   (`BEADS_ACTOR` unset, a scope conflict from the friction guard, a missing tool).
-2. Fix the cause on the bead (disjoint `metadata.scope`, the routing envelope, the
-   actor export) and re-dispatch with `task` and `isolated: true`.
-3. When the cause is outside the run, write the escalation wisp and stop the wave.
+A nested process has no parent link: it does not inherit `BEADS_ACTOR`, its claims are dead
+claims, and its receipts never reach the wave barrier. Recover with `task` instead: read the
+cancelled worker's transcript (`history://<name>`) for the refusal it hit, fix the cause on
+the bead, and re-dispatch `isolated: true`. When the cause is outside the run, write the
+escalation wisp and stop the wave.
 
 Both conditions read the `hub start` arguments. The second looks for an `omp` word in an
 `args` element that opens within 300 characters of the array's `[`. Unbounded, every
 `"args"` in a stream that never closed its array started a scan to the end of the buffer.
-
-The shell form (`omp -p`, `--print`, `--cwd`, `--session-dir` from `bash`) is a G6 notice
-in `src/gates/bd.ts`: a rule cannot see whether a run is active, and this one fired on
-`omp -p` probes in sessions no run ever touched. The notice inherits G6's run gate and
-exempts `--config <plugin-root>/config/orchestrate.overlay.yml`, the lead's rooted
-re-entry documented in `planning.md`.

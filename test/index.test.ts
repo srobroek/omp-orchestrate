@@ -324,7 +324,7 @@ describe("the injected identity keeps claim gates active", () => {
 				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-pass" },
 				ctxFor(root),
 			);
-			expect(result).toEqual({ input: { command: "bd update orc-claim --claim", env: { BEADS_ACTOR: "worker-1", BD_ACTOR: "worker-1" } } });
+			expect(result).toEqual({ input: { command: "bd update orc-claim --claim", env: { BEADS_ACTOR: "worker-1", BD_ACTOR: "worker-1", ORC_PUSH_REF: "omp/task/worker-1" } } });
 		} finally {
 			show.mockRestore();
 			AgentRegistry.global().unregister("worker-1");
