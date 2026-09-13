@@ -30,6 +30,8 @@ let warned: Record<string, unknown>[];
 /** What origin answers for any ref; `undefined` mirrors the bead's own `head_sha`, the pushed case. */
 let remote: origin.OriginHead | undefined;
 let asked: string[];
+/** The clone as git describes it; `undefined` models a clone git cannot read. */
+let local: origin.LocalState | undefined;
 let fixture: string;
 let claims = createClaimState();
 let gateExitContract: ReturnType<typeof createExitGuard>;
@@ -65,6 +67,7 @@ const spies = [
   const head = bead?.metadata?.head_sha;
   return typeof head === "string" ? { kind: "at", sha: head } : { kind: "missing" };
  }),
+ spyOn(origin, "localState").mockImplementation(async () => local),
  spyOn(logger, "warn").mockImplementation(((_message: string, data?: Record<string, unknown>) => {
   warned.push(data ?? {});
  }) as typeof logger.warn),
@@ -82,7 +85,8 @@ beforeEach(async () => {
  warned = [];
  remote = undefined;
  asked = [];
- bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git" } };
+ local = { head: BASE, dirty: false };
+ bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
  comments = [];
  linked = [];
  linkedBead = null;
@@ -110,7 +114,7 @@ test("a released shepherd exit with a BLOCKED wait mutates nothing it inherited"
 test("a held bead is a valid exit: status blocked plus ASK, claim retained", async () => {
  // The human hold has one carrier. Without ASK in the escape clause the worker that
  // parked its bead correctly would be refused for lacking REPORTED.
- bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git" } };
+ bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
  comments = [{ text: `ASK ${BEAD} question: which API?` }];
  expect(await gateExitContract(CTX)).toBeUndefined();
  comments = [{ text: `NOTE ${BEAD} leaning towards the old API` }];
@@ -148,7 +152,7 @@ describe("G4 activation refusal budget", () => {
   expect(bead!.status).toBe("closed");
  });
  test("completion of the first bead does not conceal another unfinished claim", async () => {
-  bead = { id: BEAD, status: "blocked", assignee: "A" };
+  bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { base_sha: BASE } };
   comments = [{ text: "BLOCKED awaiting prerequisite" }];
   linkedBead = { id: "second", assignee: "A", metadata: { execution_kind: "git" } };
   claims.recordClaim({ actor: "A", beadIds: [BEAD, "second"] });
@@ -200,7 +204,7 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(asked).toEqual(["omp/task/A"]);
   // The plugin's own word that the head was seen on origin, written before the yield proceeds.
-  expect(issued).toEqual([["update", BEAD, "--set-metadata", "pushed_sha=abc1234", "--actor", "A"]]);
+  expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
   delete bead.metadata!.head_sha;
   expect((await gateExitContract(CTX))?.block).toBe(true);
  });
@@ -254,7 +258,7 @@ describe("G4 checked evidence", () => {
    comments = [{ text: `REPORTED ${BEAD} integrated 3 tasks; head_sha=abc1234` }];
    expect(await gateExitContract(ARCH)).toBeUndefined();
    expect(asked).toEqual([FEATURE]);
-   expect(issued).toEqual([["update", BEAD, "--set-metadata", "pushed_sha=abc1234", "--actor", "A"]]);
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
   });
   test("a feature head origin does not hold is refused, naming the push", async () => {
    bead = feature();
@@ -356,6 +360,64 @@ describe("G4 checked evidence", () => {
   comments = [{ text: "BLOCKED missing prerequisite" }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(issued).toEqual([]);
+ });
+ describe("a blocked exit deletes the clone like any other, so its work must be on origin or absent", () => {
+  const HEAD = "abc1234abc1234abc1234abc1234abc1234abc12";
+  beforeEach(() => {
+   bead!.status = "blocked";
+   comments = [{ text: "BLOCKED missing prerequisite" }];
+  });
+  test("clean tree at the base: nothing to lose, allowed as before", async () => {
+   expect(await gateExitContract(CTX)).toBeUndefined();
+   expect(asked).toEqual([]);
+   expect(issued).toEqual([]);
+  });
+  test("commits past the base without a pushed token are refused", async () => {
+   local = { head: HEAD, dirty: false };
+   const verdict: { failed_checks: { check: string; detail: string; recovery?: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
+   expect(verdict.failed_checks[0]!.check).toBe("escape");
+   expect(verdict.failed_checks[0]!.detail).toContain(`the clone has commits at HEAD ${HEAD.slice(0, 7)} that origin does not hold`);
+   expect(verdict.failed_checks[0]!.recovery).toContain("a blocked exit deletes your clone like any other");
+  });
+  test("an uncommitted change is refused, whatever origin holds", async () => {
+   local = { head: BASE, dirty: true };
+   expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("commit and push (`git push origin HEAD:$ORC_PUSH_REF`), or discard them, before yielding");
+   expect(asked).toEqual([]);
+  });
+  test("commits past the base with the pushed ref at HEAD are allowed, and the head is stamped in the fenced release", async () => {
+   local = { head: HEAD, dirty: false };
+   comments = [{ text: "BLOCKED missing prerequisite" }, { text: `REPORTED partial: src/x.ts ${pushed(HEAD.slice(0, 7))}` }];
+   remote = { kind: "at", sha: HEAD };
+   expect(await gateExitContract(CTX)).toBeUndefined();
+   expect(asked).toEqual(["omp/task/A"]);
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "blocked"]]);
+  });
+  test("a clone git cannot read is judged as work present", async () => {
+   local = undefined;
+   expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("could not be read");
+  });
+ });
+ test("a successor's claim in the release-to-yield gap refuses the exit and stamps nothing on its bead", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
+  const run = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+   issued.push(args);
+   return { code: 1, stdout: "", stderr: `Error claiming ${BEAD}: issue already claimed by B` };
+  });
+  try {
+   const result = await gateExitContract(CTX);
+   expect(result?.block).toBe(true);
+   expect(result?.reason).toContain("is now claimed by another actor");
+   expect(result?.reason).toContain("already claimed by B");
+   // The one write attempted was the fenced one; nothing else touched the bead.
+   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
+  } finally {
+   run.mockRestore();
+   spies[3] = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
+    issued.push(args);
+    return { code: 0, stdout: "", stderr: "" };
+   });
+  }
  });
 });
 

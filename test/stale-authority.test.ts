@@ -445,7 +445,7 @@ describe("G4 replay of an earlier round's verdict", () => {
 
   expect(verdicts).toEqual([undefined, undefined, undefined]);
   // The one write is the plugin's own: the head it saw on origin, stamped before each allowed yield.
-  expect(issued).toEqual(Array(3).fill(["update", NODE, "--set-metadata", `pushed_sha=${DELIVERED_SHA}`, "--actor", "orc-impl-1"]));
+  expect(issued).toEqual(Array(3).fill(["update", NODE, "--actor", "orc-impl-1", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${DELIVERED_SHA}`, "--status", "in_progress"]));
  });
 
  test("unknown and malformed predicates cannot satisfy a completion contract", () => {
