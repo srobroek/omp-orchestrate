@@ -8,6 +8,16 @@
  * `{"decision":"block","reason":...}` had.
  *
  * The seven role contracts move across as data; only the evaluator changes language.
+ *
+ * One predicate reads outside bd. Every role's checkout is an isolated clone that OMP
+ * deletes when the agent completes, so origin is the only copy of its work that survives
+ * the yield this gate judges. `origin.pushed == head_sha` (implementer) and
+ * `origin.branch == head_sha` (architect) ask origin with one `git ls-remote`
+ * (`src/origin.ts`) whether the recorded head is there. Unlike every bd read, an
+ * unanswered origin is a refusal, not an unevaluated exit: the clone is gone the moment
+ * the yield is allowed, so "unknown" and "lost" are the same outcome. When the proof
+ * holds, the plugin stamps `metadata.pushed_sha` with the observed commit before the
+ * yield proceeds, so an offline reader can tell a push target from a landed push.
  */
 
 import { realpath } from "node:fs/promises";
@@ -19,6 +29,7 @@ import {
  type BdBead,
  bdCommentsChecked,
  bdLinkedChecked,
+ bdRun,
  bdShow,
  bdShowMany,
  commentVerb,
@@ -29,6 +40,7 @@ import {
 } from "../bd";
 import { type ClaimObservation, type ClaimState } from "../claim-state";
 import { beadRouting, orcRole } from "../identity";
+import { type OriginHead, originHead } from "../origin";
 import { runScope } from "../run-scope";
 
 import architect from "../contracts/architect.json";
@@ -42,13 +54,15 @@ interface CompletionCheck {
  check: string;
  require: string;
  when?: string | string[];
+ /** What to do about an unsatisfied check, quoted in the refusal beside the predicate. */
+ recovery?: string;
 }
 
 interface Contract {
  agent?: string;
  completion?: CompletionCheck[];
  authority?: { deny_states?: string[]; deny_metadata?: string[] };
- escape?: { state?: string; require?: string };
+ escape?: { state?: string; require?: string; recovery?: string };
  pause?: string[];
  bounce?: { max_attempts?: number };
 }
@@ -102,6 +116,7 @@ const ORCHESTRATOR_ANCHORS: Record<string, true> = {
  origin: true,
  origin_actor: true,
  origin_bead: true,
+ pushed_sha: true,
  run_epic: true,
  runtime_context: true,
  runtime_handle: true,
@@ -112,6 +127,7 @@ const ORCHESTRATOR_ANCHORS: Record<string, true> = {
 interface Failure {
  check: string;
  detail: string;
+ recovery?: string;
 }
 
 /**
@@ -137,6 +153,21 @@ export function applies(check: CompletionCheck, kind: string | undefined): boole
  return kind !== undefined && wanted.includes(kind);
 }
 
+/**
+ * Whether origin holds the head a role recorded, and where the question was put.
+ *
+ * `ref` is the branch asked about: the `pushed=<ref>@<sha>` token of an implementer's
+ * `REPORTED`, or `metadata.branch` for an architect. `matched` is the one outcome that
+ * satisfies; `detail` says why the others did not, in the words the refusal quotes.
+ */
+export interface OriginProof {
+ matched: boolean;
+ ref?: string;
+ /** The commit origin holds at `ref`, when it answered with one. */
+ observed?: string;
+ detail: string;
+}
+
 /** State a predicate may need, fetched once per evaluation. */
 export interface Evidence {
  bead: BdBead;
@@ -150,6 +181,10 @@ export interface Evidence {
  reportedPath?: boolean;
  /** The worker wrote `NOTE no-change: <reason>`: the task needed no edit, and says so. */
  noChangeNoted?: boolean;
+ /** The `pushed=<ref>@<sha>` token of the bead's `REPORTED` comments, when one names it. */
+ pushed?: { ref: string; sha: string };
+ /** Origin's answer for the role's ref; read only when a predicate under judgement asks. */
+ origin?: OriginProof;
 }
 
 const SUPPORTED_KINDS: Record<string, readonly string[]> = {
@@ -218,6 +253,8 @@ export function namesPath(text: string): boolean {
  for (const raw of text.split(/\s+/)) {
   let token = raw.replace(TOKEN_TRIM, "");
   const cut = token.indexOf("=");
+  // `pushed=omp/task/<id>@<sha>` spells a ref, not a file the worker changed.
+  if (cut !== -1 && token.slice(0, cut) === "pushed") continue;
   if (cut !== -1) token = token.slice(cut + 1);
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) continue;
   if (token.split(",").some(entry => PATH_TOKEN.test(entry))) return true;
@@ -240,10 +277,50 @@ export function noChangeNote(comment: string, beadId: string): boolean {
 }
 
 /**
+ * The `pushed=<ref>@<sha>` token of a `REPORTED` comment: where the worker says its head
+ * landed on origin. The ref is a branch name as `git push origin HEAD:<ref>` spells it
+ * (`omp/task/<id>`), the sha the commit it pushed. Decoration is stripped like a path
+ * token; a `refs/heads/` prefix is folded away so both spellings name the same branch.
+ * The last token wins, so a re-push after a bounce supersedes the first report.
+ */
+export function pushedToken(comments: readonly string[]): { ref: string; sha: string } | undefined {
+ let found: { ref: string; sha: string } | undefined;
+ for (const comment of comments) {
+  if (commentVerb(comment) !== "REPORTED") continue;
+  for (const raw of comment.split(/\s+/)) {
+   const token = raw.replace(TOKEN_TRIM, "");
+   if (!token.startsWith("pushed=")) continue;
+   const at = token.lastIndexOf("@");
+   if (at <= "pushed=".length) continue;
+   const ref = token.slice("pushed=".length, at).replace(/^refs\/heads\//, "");
+   const sha = token.slice(at + 1).toLowerCase();
+   if (ref.length > 0 && COMMIT_SHA.test(sha)) found = { ref, sha };
+  }
+ }
+ return found;
+}
+
+/** The predicates that read origin, and the ref each one asks about. */
+const ORIGIN_PREDICATES: Record<string, "pushed" | "branch"> = {
+ "origin.pushed == head_sha": "pushed",
+ "origin.branch == head_sha": "branch",
+};
+
+/** Whether a `require` clause, alternatives included, needs origin read. */
+export function asksOrigin(predicate: string): "pushed" | "branch" | undefined {
+ for (const clause of predicate.split(/\s+(?:or|and)\s+/)) {
+  const source = ORIGIN_PREDICATES[clause.trim()];
+  if (source !== undefined) return source;
+ }
+ return undefined;
+}
+
+/**
  * Evaluate one supported `require` predicate; unknown predicates fail closed.
  *
- * `A or B` is either predicate; no supported predicate contains the word ` or `, so the
- * split is safe at the top level and a `label ~` pattern must not spell it.
+ * `A or B` is either predicate and `A and B` is both, `and` binding tighter as usual; no
+ * supported predicate contains either word, so the splits are safe at the top level and
+ * a `label ~` pattern must not spell them.
  */
 export function satisfies(predicate: string, evidence: Evidence): boolean {
  const { bead, verbs, linkedVerbs } = evidence;
@@ -251,6 +328,10 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
 
  const alternatives = trimmed.split(/\s+or\s+/);
  if (alternatives.length > 1) return alternatives.some(alternative => satisfies(alternative, evidence));
+ const conjuncts = trimmed.split(/\s+and\s+/);
+ if (conjuncts.length > 1) return conjuncts.every(conjunct => satisfies(conjunct, evidence));
+
+ if (ORIGIN_PREDICATES[trimmed] !== undefined) return evidence.origin?.matched === true;
 
  const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
  if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
@@ -349,6 +430,7 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
  const verbs = comments.map(comment => commentVerb(comment.text));
  const reportedPath = comments.some((comment, index) => verbs[index] === "REPORTED" && namesPath(comment.text));
  const noChangeNoted = comments.some(comment => noChangeNote(comment.text, bead.id));
+ const pushed = pushedToken(comments.map(comment => comment.text));
  let baseSha = metadataString(bead, "base_sha");
  if (baseSha === undefined && needs.base && runEpic !== undefined && metadataString(bead, "head_sha") !== undefined) {
   const epic = await bdShow(runEpic);
@@ -420,7 +502,45 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
    }
   }
  }
- return { bead, verbs, linkedVerbs, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted };
+ return { bead, verbs, linkedVerbs, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted, pushed };
+}
+
+/**
+ * Ask origin whether the role's recorded head is there, at the ref `source` names.
+ *
+ * `pushed`: the `REPORTED` token's ref, the sha it claims checked against `head_sha` first
+ * so a report that contradicts the stamp is refused without a network read. `branch`:
+ * `metadata.branch`. A bead that stamps no `head_sha` has recorded nothing origin could
+ * hold, so it passes here and the head check speaks; a stamped head with no ref to ask
+ * about is a refusal, because it names a commit nobody can find.
+ *
+ * Origin not answering is a refusal too, and says so: the worker is alive until proven,
+ * and a retry of the push and the report costs nothing that a lost unit would not.
+ */
+export async function proveOrigin(source: "pushed" | "branch", evidence: Evidence, cwd: string): Promise<OriginProof> {
+ const head = metadataString(evidence.bead, "head_sha");
+ if (head === undefined) return { matched: true, detail: "no head_sha recorded, so nothing to find on origin" };
+ let ref: string | undefined;
+ if (source === "pushed") {
+  if (evidence.pushed === undefined) return { matched: false, detail: "REPORTED names no pushed=<ref>@<sha>; push your head (`git push origin HEAD:$ORC_PUSH_REF`) and report where it landed" };
+  if (!sameCommit(evidence.pushed.sha, head)) {
+   return { matched: false, ref: evidence.pushed.ref, detail: `REPORTED says pushed=${evidence.pushed.ref}@${evidence.pushed.sha} but head_sha is ${head}; push the head you stamped and report that sha` };
+  }
+  ref = evidence.pushed.ref;
+ } else {
+  ref = metadataString(evidence.bead, "branch");
+  if (ref === undefined) return { matched: false, detail: `head_sha ${head} is recorded but metadata.branch names no branch to find it on` };
+ }
+ const answer: OriginHead = await originHead(cwd, ref);
+ switch (answer.kind) {
+  case "at":
+   if (sameCommit(answer.sha, head)) return { matched: true, ref, observed: answer.sha, detail: `origin ${ref} is at ${answer.sha}` };
+   return { matched: false, ref, observed: answer.sha, detail: `origin ${ref} is at ${answer.sha}, not head_sha ${head}; push the head you stamped (\`git push origin HEAD:${ref}\`)` };
+  case "missing":
+   return { matched: false, ref, detail: `origin has no ${ref}; push it (\`git push origin HEAD:${ref}\`) before yielding, the clone is deleted at yield` };
+  case "unreachable":
+   return { matched: false, ref, detail: `origin unreachable (${answer.cause}); retry \`git push\` and REPORTED, the worker stays alive until proven` };
+ }
 }
 
 interface ExitGuardState {
@@ -560,11 +680,21 @@ async function gateClaimedExit(
  const status = (bead.status ?? "").toLowerCase();
 
  // Escape first: a genuine failure declared as such is a valid exit, not a
- // contract breach.
+ // contract breach. A declared state whose clause is unmet is still judged by the
+ // completion checks, as before; the unmet clause is then the first failure named, so a
+ // worker that parked its bead reads why the park was refused, not only what a
+ // completed exit would have needed.
+ let escapeFailure: Failure | undefined;
  if (contract.escape?.state !== undefined && status === contract.escape.state) {
-  if (contract.escape.require === undefined || satisfies(contract.escape.require, evidence)) {
+  const require = contract.escape.require;
+  if (require === undefined) return undefined;
+  const asks = asksOrigin(require);
+  if (asks !== undefined) evidence.origin = await proveOrigin(asks, evidence, ctx.cwd);
+  if (satisfies(require, evidence)) {
+   await recordPushed(bead, claim, evidence.origin);
    return undefined;
   }
+  escapeFailure = { check: "escape", detail: unsatisfied(require, evidence), recovery: contract.escape.recovery };
  }
 
  const kind = resourceKind(bead);
@@ -577,8 +707,12 @@ async function gateClaimedExit(
  for (const check of contract.completion ?? []) {
   if (paused) continue;
   if (!applies(check, kind)) continue;
+  // Origin is asked once, and only for a check that is actually judged: a paused or
+  // inapplicable check spends no network read.
+  const asks = asksOrigin(check.require);
+  if (asks !== undefined && evidence.origin === undefined) evidence.origin = await proveOrigin(asks, evidence, ctx.cwd);
   if (!satisfies(check.require, evidence)) {
-   failures.push({ check: check.check, detail: `unsatisfied: ${check.require}` });
+   failures.push({ check: check.check, detail: unsatisfied(check.require, evidence), recovery: check.recovery });
   }
  }
 
@@ -607,7 +741,11 @@ async function gateClaimedExit(
   }
  }
 
- if (failures.length === 0) return undefined;
+ if (failures.length === 0) {
+  await recordPushed(bead, claim, evidence.origin);
+  return undefined;
+ }
+ if (escapeFailure !== undefined) failures.unshift(escapeFailure);
 
  // Refusals belong to this activation, not to mutable shared bead metadata.
  if (state.refusalClaim !== claim) {
@@ -631,4 +769,35 @@ async function gateClaimedExit(
    failed_checks: failures,
   }),
  };
+}
+
+/** `unsatisfied: <require>`, with origin's answer when the predicate asked and it said no. */
+function unsatisfied(require: string, evidence: Evidence): string {
+ const origin = evidence.origin;
+ const cause = asksOrigin(require) !== undefined && origin !== undefined && !origin.matched ? ` -- ${origin.detail}` : "";
+ return `unsatisfied: ${require}${cause}`;
+}
+
+/**
+ * Record the commit origin was observed to hold, once the proof has passed and the yield
+ * is about to be allowed.
+ *
+ * `metadata.push` and `metadata.branch` are targets a role stamps before pushing, so a
+ * worker that died between the stamp and the push leaves them looking complete.
+ * `pushed_sha` is the plugin's own word that it saw the head on origin, written under the
+ * yielding session's identity like every other write from its seat. A failed write is
+ * logged, not refused: the proof already holds, and the sha is a record for offline
+ * readers rather than a condition of the exit.
+ */
+async function recordPushed(bead: BdBead, claim: ClaimObservation, origin: OriginProof | undefined): Promise<void> {
+ if (origin === undefined || !origin.matched || origin.observed === undefined) return;
+ if (metadataString(bead, "pushed_sha") === origin.observed) return;
+ const written = await bdRun(["update", bead.id, "--set-metadata", `pushed_sha=${origin.observed}`, "--actor", claim.actor]);
+ if (written === null || written.code !== 0) {
+  logger.warn("orchestrate exit contract: pushed_sha not recorded", {
+   bead: bead.id,
+   sha: origin.observed,
+   cause: written === null ? lastBdFailure() : written.stderr.trim() || `bd exited ${written.code}`,
+  });
+ }
 }

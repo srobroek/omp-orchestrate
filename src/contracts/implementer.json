@@ -1,12 +1,18 @@
 {
   "agent": "implementer",
   "tier": "T1",
-  "_comment": "Pre-yield git evidence is the local final head_sha; host branch capture follows a successful child result. All completion modes require REPORTED, reviewer handoff, and release. An open linked escalation pauses completion without changing ownership; the architect reconciles durable work after the escalation closes. Routing is enforced at the write seam, while handoff uses the agent:reviewer label. Git work is judged as work, not as presence: the head must have moved off the bead's base (metadata.base_sha, else the run epic's) and REPORTED must name a changed path, unless the worker wrote NOTE no-change: <reason> to say the task needed no edit. A base nobody recorded leaves the head comparison unknown, which fails open.",
+  "_comment": "Pre-yield git evidence is the local final head_sha and the origin ref it was pushed to: an implementer's clone is deleted when it yields, so before REPORTED it runs `git push origin HEAD:$ORC_PUSH_REF` (the plugin sets ORC_PUSH_REF to omp/task/<own id>) and writes `pushed=<ref>@<sha>` in the REPORTED comment. The exit gate asks origin with `git ls-remote` and refuses the yield unless that ref is at head_sha; a missing ref, another commit, or an origin that does not answer all refuse, because an unverified push can lose the unit. All completion modes require REPORTED, reviewer handoff, and release. An open linked escalation pauses completion without changing ownership; the architect reconciles durable work after the escalation closes. Routing is enforced at the write seam, while handoff uses the agent:reviewer label. Git work is judged as work, not as presence: the head must have moved off the bead's base (metadata.base_sha, else the run epic's) and REPORTED must name a changed path, unless the worker wrote NOTE no-change: <reason> to say the task needed no edit. A base nobody recorded leaves the head comparison unknown, which fails open.",
   "completion": [
     {
       "check": "delivery",
       "require": "metadata.head_sha",
       "when": "git"
+    },
+    {
+      "check": "pushed",
+      "require": "origin.pushed == head_sha",
+      "when": "git",
+      "recovery": "commit, run `git push origin HEAD:$ORC_PUSH_REF`, then write REPORTED with head_sha=<sha> and pushed=$ORC_PUSH_REF@<sha>; the clone is deleted at yield and origin is the only copy of your work"
     },
     {
       "check": "work",

@@ -22,9 +22,10 @@ import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { gateLeadContract } from "./gates/lead";
 import { createLeadExitWatch } from "./gates/lead-exit";
+import { gateNestedInvocation } from "./gates/nested";
 import { gatePush } from "./gates/push";
 import { gateBeadWriteFree, rebuildBashInput } from "./gates/readonly";
-import { gateImplementerIsolation } from "./gates/spawn";
+import { gateRoleIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
 import { orcRole, sessionRole } from "./identity";
@@ -89,7 +90,8 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   if (GATED_TOOLS[event.toolName] !== true) return undefined;
 
   try {
-   if ((await runScope(ctx)) === null) return undefined;
+   const scope = await runScope(ctx);
+   if (scope === null) return undefined;
    resetReadBudget();
    let input = event.input as Record<string, unknown>;
    let inputRevised = false;
@@ -100,7 +102,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
    if (lead) return lead;
 
    if (event.toolName === "yield") return await gateExitContract(ctx, input);
-   if (event.toolName === "task") return gateImplementerIsolation(input);
+   if (event.toolName === "task") return gateRoleIsolation(input);
 
    // Whether this call claims a bead, whatever else it does. Read after G6, whose
    // actor prefix moves no `--claim`.
@@ -118,21 +120,26 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
 
     const ownership = gateWorktrunkOwnership(input);
     if (ownership) return ownership;
-    // G7 after G3: a push or a Worktrunk checkout from the wrong seat is refused here. It
-    // parses first and reads the marker, then the epic, only once a command is known to push.
-    const push = await gatePush(ctx, input);
-    if (push) return push;
-    // G6 before G5: it is a parse plus one marker read where G5 shells out to
-    // `bd show` and `bd list`. It takes `pi` because most of its findings are
-    // notices, which leave through `sendMessage`; a refusal (a routed sync from a
-    // worker, a named database) comes back as a block, and otherwise the return
-    // value carries only the actor-prefixed command.
+    // G10 after G3: a nested `omp` or a credential act is refused on the parse alone,
+    // before G6 sends any notice about a command that will not run.
+    const nested = gateNestedInvocation(ctx, scope, input);
+    if (nested) return nested;
+    // G6 before G7 and G5: it is a parse plus one marker read where G5 shells out to
+    // `bd show` and `bd list`, and its revised `env` is what G7 reads `$ORC_PUSH_REF`
+    // from. It takes `pi` because most of its findings are notices, which leave through
+    // `sendMessage`; a refusal (a routed sync from a worker, a named database) comes back
+    // as a block, and otherwise the return value carries only the identity-bearing env.
     const discipline = await gateBdDiscipline(pi, ctx, input, event.toolCallId, claims);
     if (discipline?.block) return discipline;
     if (discipline?.input !== undefined) {
      input = discipline.input as Record<string, unknown>;
      inputRevised = true;
     }
+    // G7 on the revised input: a push to the primary, a destination the shell fills in,
+    // or a Worktrunk checkout from the wrong seat. It parses first and reads the marker,
+    // then the epic, only once a command is known to push.
+    const push = await gatePush(ctx, input);
+    if (push) return push;
 
     const command = input.command;
     claiming = typeof command === "string" && command.length > 0 &&
