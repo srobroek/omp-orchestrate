@@ -169,11 +169,15 @@ function fakeBd(beads: Record<string, BdBead>, blocked: string[] = []): FakeStor
 				store.writes.push(args);
 				text = `${store.nextId}\n`;
 				break;
-			case "comment":
-			case "close":
-				store.writes.push(args);
-				text = "";
-				break;
+   case "comment":
+    store.writes.push(args);
+    text = "";
+    break;
+   case "close":
+    store.writes.push(args);
+    if (store.beads[args[1]!] !== undefined) store.beads[args[1]!]!.status = "closed";
+    text = "";
+    break;
 			default:
 				code = 1;
 		}

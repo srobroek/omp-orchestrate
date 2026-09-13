@@ -28,33 +28,42 @@
  *
  * Terminals: a `DIRTY`/`BEHIND` PR gets a `merge-tree` precheck in a throwaway bare
  * clone; a clean merge is committed with plumbing and fast-forward pushed to the PR
- * branch (the reviewed diff against the base is unchanged, so the new head is re-stamped
- * without a review round); conflicts become an implementer fix bead, or an architect
- * one when a conflicting path leaves the origin's scope. A failing check is rerun once
- * per head (`gh run rerun --failed`), then becomes an implementer fix bead. Every fix
- * bead `blocks` the merge bead, which is what keeps the sweep off it until the fix lands
- * and the architect re-stamps the reviewed head. Every terminal writes one verb comment
- * on the merge bead: `LANDED <sha>` or `BOUNCED reason=<cause>`.
+ * branch (the reviewed diff against the base is unchanged, so the new head is
+ * re-stamped without a review round); conflicts become an implementer fix bead, or an
+ * architect one when a conflicting path leaves the origin's scope. A failing check is
+ * rerun once per head (`gh run rerun --failed`), then becomes an implementer fix bead.
+ * Every terminal writes one verb comment on the merge bead: `LANDED <sha>` or
+ * `BOUNCED reason=<cause>`.
  *
  * State lives on the merge bead's metadata, one carrier: `landing_state`, `armed_head`,
- * `ci_rerun_head`, `ci_reruns`, `landing_fix`, `landing_notice`. Attention states
- * (`BLOCKED ...`) are written once per cause through `landing_notice`, so a sweep that
- * finds the same cause every minute says it once.
+ * `ci_rerun_head`, `ci_reruns`, `landing_fix`, `landing_notice`, and `close_attempts`.
+ * `landed` means the merge proof and comments were written; this sweep owns the
+ * subsequent merge-bead, node, and feature close-out.
+ * State table: `LANDED` stamps the merge bead and its origin, closes the merge bead only
+ * after a fresh `status=closed` read-back, then closes contained nodes with accepted
+ * feature or override coverage; a feature closes with `--reason merged` only after all
+ * of its `orc-node` children are closed. Epics are never closed by this sweep.
+ * Attention states (`BLOCKED ...`) are written once per cause through `landing_notice`,
+ * so a sweep that finds the same cause every minute says it once.
  *
  * Nothing here throws out of the sweep. Every subprocess goes through the injectable
  * {@link Exec} seam, so tests drive `gh` and `git` from transcripts and never touch a
  * real PR.
  */
 
+import { beadAcceptanceHash, nodesToken, overrideToken, tokenValue } from "./acceptance";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
  type BdBead,
  bdBlockedChecked,
+ bdCommentsChecked,
  bdListChecked,
  bdRun,
  bdShow,
+ commentVerb,
  metadataRecord,
  metadataString,
  resetReadBudget,
@@ -66,7 +75,6 @@ import { mergeTreeArgv, mergeTreeOid, parseMergeTreeOutput } from "./tools/confl
 // ============================================================================
 // Capabilities
 // ============================================================================
-
 export type LandingMode = "auto" | "direct";
 
 /** What one repository lets the plugin do, recorded on the run epic as `metadata.landing`. */
@@ -580,10 +588,11 @@ async function bounce(io: Io, unit: MergeUnit, spec: FixSpec, summary: string): 
 // Terminals
 // ============================================================================
 
-/** Per-PR sweep outcome. `armed`, `merged`, `dirty`, `unstable`, `blocked`, `draft` act or wait; the rest observe. */
+/** Per-PR sweep outcome. `repaired` is a landed merge bead retried on a later pass. */
 export type Outcome =
  | "armed"
  | "merged"
+ | "repaired"
  | "refreshed"
  | "dirty"
  | "unstable"
@@ -594,6 +603,225 @@ export type Outcome =
  | "closed"
  | "skipped";
 
+const CLOSE_RETRY_LIMIT = 5;
+
+function statusClosed(bead: BdBead | null): boolean {
+ return bead?.status === "closed";
+}
+
+function closeAttempts(bead: BdBead): number {
+ const value = metadataRecord(bead.metadata)?.close_attempts;
+ if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
+ if (typeof value === "string") {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+ }
+ return 0;
+}
+
+/** Close a bead only after its evidence is written, then verify bd's state from a fresh read. */
+async function closeReadBack(io: Io, bead: BdBead, reason: string): Promise<boolean> {
+ const result = await bdRun(["close", bead.id, "--reason", reason], BD_WRITE_TIMEOUT_MS, io.cwd);
+ const after = await bdShow(bead.id, undefined, io.cwd, { fresh: true });
+ if (statusClosed(after)) return true;
+
+ const attempts = closeAttempts(bead) + 1;
+ const detail = result === null ? "bd did not answer" : result.stderr.trim() || `bd exited ${result.code}`;
+ const metadata = { ...(metadataRecord(bead.metadata) ?? {}), close_attempts: attempts };
+ await stamp(io, bead.id, { close_attempts: attempts });
+ logger.warn("orchestrate landing close read-back failed", { bead: bead.id, attempts, reason: detail });
+ if (attempts >= CLOSE_RETRY_LIMIT) {
+  await notice(io, { ...bead, metadata }, `close:${bead.id}`, `BLOCKED landing: close of ${bead.id} failed: ${detail}`);
+ }
+ return false;
+}
+
+function isNode(bead: BdBead): boolean {
+	return (bead.labels ?? []).includes("orc-node");
+}
+
+function isOverrideWisp(bead: BdBead, node: string): boolean {
+ const metadata = metadataRecord(bead.metadata);
+ return bead.status !== "closed"
+  && metadata?.role === "reviewer"
+  && metadata?.dimension === "override"
+  && metadata?.origin_bead === node;
+}
+
+function descendantOf(bead: BdBead, root: string, byId: Map<string, BdBead>): boolean {
+ const seen = new Set<string>();
+ let parent = typeof bead.parent === "string" ? bead.parent : undefined;
+ while (parent !== undefined && !seen.has(parent)) {
+  if (parent === root) return true;
+  seen.add(parent);
+  const nextParent = byId.get(parent)?.parent;
+  parent = typeof nextParent === "string" ? nextParent : undefined;
+  if (typeof parent !== "string") parent = undefined;
+ }
+ return false;
+}
+
+/** Resolve a merge origin task to its feature, while deliberately refusing an epic. */
+async function originFeature(io: Io, originId: string): Promise<BdBead | null> {
+ let current = await bdShow(originId, undefined, io.cwd);
+ const seen = new Set<string>();
+ while (current !== null && !seen.has(current.id)) {
+  seen.add(current.id);
+  if (current.issue_type === "feature") return current;
+  if (current.issue_type === "epic") return null;
+  const parent = typeof current.parent === "string" && current.parent.length > 0 ? current.parent : undefined;
+  if (parent === undefined) return null;
+  current = await bdShow(parent, undefined, io.cwd);
+ }
+ return null;
+}
+
+function approvedAt(text: string, head: string): boolean {
+ return commentVerb(text) === "REVIEW" && tokenValue(text, "verdict") === "approve" && tokenValue(text, "head_sha") === head;
+}
+
+function featureCoverage(comments: readonly { text: string }[], node: BdBead, head: string): boolean {
+ const hash = beadAcceptanceHash(node);
+ if (hash === undefined) return false;
+ return comments.some(comment => {
+  if (!approvedAt(comment.text, head)) return false;
+  const coverage = nodesToken(comment.text);
+  return coverage?.some(entry => entry.id === node.id && entry.hash === hash && entry.disposition === "met") === true;
+ });
+}
+
+function overrideCoverage(comments: readonly { text: string }[], node: BdBead): boolean {
+ const hash = beadAcceptanceHash(node);
+ if (hash === undefined) return false;
+ return comments.some(comment =>
+  commentVerb(comment.text) === "REVIEW"
+  && tokenValue(comment.text, "verdict") === "approve"
+  && overrideToken(comment.text) === hash,
+ );
+}
+
+async function createOverrideWisp(io: Io, node: BdBead, hash: string, existing: readonly BdBead[]): Promise<void> {
+ const key = `override:${node.id}:${hash}`;
+ const open = existing.some(bead => isOverrideWisp(bead, node.id));
+ if (open) {
+  if (metadataString(node, "landing_notice") !== key) await stamp(io, node.id, { landing_notice: key });
+  return;
+ }
+ if (metadataString(node, "landing_notice") === key) return;
+	const result = await bdRun([
+		"create", `Review override for ${node.id}`,
+		"--type", "task",
+		"--parent", node.id,
+		"--ephemeral",
+		"--metadata", JSON.stringify({ role: "reviewer", dimension: "override", origin_bead: node.id }),
+		"--silent",
+	], BD_WRITE_TIMEOUT_MS, io.cwd);
+ if (result?.code === 0) await stamp(io, node.id, { landing_notice: key });
+}
+
+interface LandingClone {
+	tmp: string;
+	clone: string;
+	remote: string;
+}
+
+/**
+ * One throwaway bare clone for every containment check of a close-out, shared with the
+ * lead's checkout so its objects (including any local `omp/task/*` capture) come for free.
+ */
+async function landingClone(io: Io, unit: MergeUnit): Promise<LandingClone | undefined> {
+	const remote = await git(io, ["remote", "get-url", "origin"], io.cwd);
+	const url = remote?.code === 0 ? remote.stdout.trim() : "";
+	if (repoOfRemote(url) !== unit.repo.toLowerCase()) return undefined;
+	const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "orc-landing-closeout-"));
+	const clone = path.join(tmp, "repo.git");
+	const cloned = await git(io, ["clone", "--quiet", "--bare", "--shared", io.cwd, clone], io.cwd);
+	if (cloned?.code !== 0) {
+		await fs.rm(tmp, { recursive: true, force: true }).catch(() => { });
+		return undefined;
+	}
+	return { tmp, clone, remote: url };
+}
+
+/**
+ * A task's pushed patch is contained in the reviewed head when `git cherry` finds no
+ * unmatched patch. The reviewed head is reached through `refs/pull/<n>/head`, which GitHub
+ * keeps after the branch is deleted; the task's commits through `omp/task/<node>`. Both are
+ * fetched into named refs and the validated shas are compared directly, so a multi-ref
+ * fetch's `FETCH_HEAD` never decides the answer. Any read that does not answer is "not
+ * verifiable", which the caller treats as not contained: it writes nothing.
+ */
+async function contained(io: Io, landing: LandingClone, pushed: string, head: string, node: string, pr: number): Promise<boolean> {
+	if (!HEAD_RE.test(pushed) || !HEAD_RE.test(head)) return false;
+	const fetched = await git(io, [
+		"fetch", "--quiet", landing.remote,
+		`+refs/pull/${pr}/head:refs/orc/pr/${pr}`,
+		`+refs/heads/omp/task/${node}:refs/orc/task/${node}`,
+	], landing.clone, GIT_FETCH_TIMEOUT_MS);
+	if (fetched?.code !== 0) return false;
+	const present = await git(io, ["cat-file", "-e", `${head}^{commit}`], landing.clone);
+	if (present?.code !== 0) return false;
+	const cherry = await git(io, ["cherry", head, pushed], landing.clone);
+	if (cherry?.code !== 0) return false;
+	return cherry.stdout.split("\n").every(line => !line.startsWith("+"));
+}
+
+async function closeout(io: Io, unit: MergeUnit, pr: PrView, sha: string): Promise<void> {
+ if (unit.origin === undefined) return;
+ const feature = await originFeature(io, unit.origin);
+ if (feature === null) return;
+ const rows = await bdListChecked(["list", "--status", "all", "--include-infra", "--limit", "0", "--json"], undefined, io.cwd);
+ if (rows === null) {
+  logger.warn("orchestrate landing close-out skipped: descendants could not be listed", { feature: feature.id });
+  return;
+ }
+ const all = rows.filter(isNode);
+ const byId = new Map(rows.map(bead => [bead.id, bead]));
+ const descendants = all.filter(bead => bead.id !== feature.id && descendantOf(bead, feature.id, byId) && bead.status !== "closed");
+ const featureComments = await bdCommentsChecked(feature.id);
+ if (featureComments === null) {
+  logger.warn("orchestrate landing close-out skipped: feature comments could not be read", { feature: feature.id });
+  return;
+ }
+ const wisps = rows.filter(bead => metadataRecord(bead.metadata)?.role === "reviewer");
+ const candidates: Array<{ node: BdBead; comments: Array<{ text: string }>; covered: boolean }> = [];
+ for (const node of descendants) {
+  const comments = await bdCommentsChecked(node.id);
+  if (comments === null) continue;
+  const hash = beadAcceptanceHash(node);
+  if (comments.some(comment => /^\W*NOTE\s+override requested\s*:/i.test(comment.text)) && hash !== undefined) {
+   await createOverrideWisp(io, node, hash, wisps);
+  }
+  candidates.push({ node, comments, covered: featureCoverage(featureComments, node, unit.head) || overrideCoverage(comments, node) });
+ }
+
+	const clone = await landingClone(io, unit);
+ if (clone !== undefined) {
+  try {
+   for (const candidate of candidates) {
+    const pushed = metadataString(candidate.node, "pushed_sha") ?? metadataString(candidate.node, "head_sha");
+				if (pushed === undefined || !(await contained(io, clone, pushed, unit.head, candidate.node.id, unit.pr))) continue;
+    if (!candidate.covered) {
+     await notice(io, candidate.node, `uncovered:${unit.bead.id}:${unit.head}`, `NOTE landed uncovered: merge=${unit.bead.id} head=${unit.head}`);
+     continue;
+    }
+    const landedText = `LANDED ${sha} merge=${unit.bead.id}`;
+    if (!candidate.comments.some(comment => comment.text.trim() === landedText)) await comment(io, candidate.node.id, landedText);
+    if (await closeReadBack(io, candidate.node, "merged")) candidate.node.status = "closed";
+   }
+  } finally {
+   await fs.rm(clone.tmp, { recursive: true, force: true }).catch(() => { });
+  }
+ }
+
+ const children = all.filter(bead => bead.parent === feature.id);
+ if (feature.status !== "closed" && children.length > 0 && children.every(child => child.status === "closed")) {
+  const landedText = `LANDED ${sha} merge=${unit.bead.id}`;
+  if (!featureComments.some(comment => comment.text.trim() === landedText)) await comment(io, feature.id, landedText);
+  if (await closeReadBack(io, feature, "merged")) feature.status = "closed";
+ }
+}
+
 async function landed(io: Io, unit: MergeUnit, pr: PrView, sha: string): Promise<Outcome> {
  const guarded = pr.headRefOid === unit.head;
  await stamp(io, unit.bead.id, { landing_state: "landed", merge_sha: sha, landed_head: pr.headRefOid });
@@ -601,8 +829,18 @@ async function landed(io: Io, unit: MergeUnit, pr: PrView, sha: string): Promise
  if (!guarded && unit.origin !== undefined) {
   await comment(io, unit.origin, `NOTE landing: PR #${unit.pr} merged at ${short(pr.headRefOid)}, not the reviewed head ${short(unit.head)}; review the landed diff`);
  }
- await bdRun(["close", unit.bead.id, "--reason", `LANDED ${sha}`], BD_WRITE_TIMEOUT_MS, io.cwd);
+ await closeReadBack(io, unit.bead, `LANDED ${sha}`);
+ await closeout(io, unit, pr, sha);
  return "merged";
+}
+
+async function repairLanded(io: Io, unit: MergeUnit, pr: PrView): Promise<Outcome> {
+ const sha = metadataString(unit.bead, "merge_sha") ?? pr.mergeCommit;
+ if (sha !== undefined) {
+  await closeReadBack(io, unit.bead, `LANDED ${sha}`);
+  await closeout(io, unit, pr, sha);
+ }
+ return "repaired";
 }
 
 async function closedUnmerged(io: Io, unit: MergeUnit): Promise<Outcome> {
@@ -816,6 +1054,7 @@ async function ciFailure(io: Io, unit: MergeUnit, pr: PrView, verdict: CheckVerd
 
 /** Decide and act on one merge bead against its observed PR. */
 async function sweepUnit(io: Io, unit: MergeUnit, pr: PrView, caps: LandingCapabilities): Promise<Outcome> {
+ if (metadataString(unit.bead, "landing_state") === "landed" && unit.bead.status !== "closed") return await repairLanded(io, unit, pr);
  // A merged PR always carries its merge commit; one that does not yet is read again next sweep.
  if (pr.state === "MERGED") return pr.mergeCommit === undefined ? "unknown" : await landed(io, unit, pr, pr.mergeCommit);
  if (pr.state === "CLOSED") return await closedUnmerged(io, unit);
@@ -912,7 +1151,8 @@ async function sweepOnce(options: SweepOptions): Promise<SweepEntry[]> {
  const entries: SweepEntry[] = [];
  const units = new Map<string, MergeUnit[]>();
  for (const bead of beads) {
-  if (blocked.includes(bead.id) || metadataString(bead, "landing_state") === "landed") {
+  const repair = metadataString(bead, "landing_state") === "landed" && bead.status !== "closed";
+  if (blocked.includes(bead.id) && !repair) {
    entries.push({ bead: bead.id, outcome: "skipped" });
    continue;
   }
