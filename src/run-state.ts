@@ -1063,8 +1063,11 @@ async function storeAttention(cwd: string, run: string, now: number): Promise<st
 	const beads = await bdListChecked(STORE_LIST, undefined, cwd);
 	if (beads === null) return ["- beads unreadable: lapsed leases, landings and open questions are unknown"];
 	const items: string[] = [];
+	// A released bead -- assignee cleared, `in_progress` awaiting review -- has no holder
+	// and so no lease to lapse, whatever `lease_until` still says.
 	for (const bead of inFlightDescendants(beads, run)) {
-		if (leaseExpired(bead, now)) items.push(`- lease lapsed: ${bead.id} held by ${epicHolder(bead) ?? "nobody"}, ${leaseState(bead, now)}`);
+		const holder = epicHolder(bead);
+		if (holder !== undefined && leaseExpired(bead, now)) items.push(`- lease lapsed: ${bead.id} held by ${holder}, ${leaseState(bead, now)}`);
 	}
 	for (const bead of beads) {
 		if (bead.status === "closed") continue;

@@ -1047,11 +1047,15 @@ describe("runStatusReport", () => {
 			expect(probeCalls).toEqual([]);
 		});
 
-		test("in-flight claims whose lease lapsed, with their holder; live ones are silent", async () => {
+		test("in-flight claims whose lease lapsed, with their holder; live and released ones are silent", async () => {
+			// rt-ts D5: a REPORTED bead is `in_progress` with its assignee cleared. Nobody holds
+			// it, so its stale `lease_until` is not a lapsed lease and is not attention.
 			store = [
 				{ id: "orc-7.1", status: "open", parent: "orc-7" },
 				{ id: "orc-7.1.1", status: "in_progress", parent: "orc-7.1", assignee: "impl-dead", updated_at: LAPSED_AT, metadata: { lease_until: LAPSED_AT } },
 				{ id: "orc-7.1.2", status: "in_progress", parent: "orc-7.1", assignee: "impl-live", metadata: LIVE },
+				{ id: "orc-7.1.3", status: "in_progress", parent: "orc-7.1", assignee: "", updated_at: LAPSED_AT, metadata: { lease_until: LAPSED_AT } },
+				{ id: "orc-7.1.4", status: "in_progress", parent: "orc-7.1", updated_at: LAPSED_AT, metadata: { lease_until: LAPSED_AT } },
 				{ id: "orc-9.1", status: "in_progress", parent: "orc-9", assignee: "other-run", updated_at: LAPSED_AT },
 			];
 			expect(await attention()).toEqual(["attention:", "- lease lapsed: orc-7.1.1 held by impl-dead, lease lapsed at 2020-01-01T00:15:00.000Z"]);
