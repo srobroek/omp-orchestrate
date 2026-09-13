@@ -21,7 +21,6 @@ const REQUIRED = [
 	"config/orchestrate.overlay.yml",
 	"agents",
 	"skills",
-	"rules",
 	"src",
 ];
 

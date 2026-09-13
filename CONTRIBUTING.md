@@ -48,7 +48,7 @@ An `ORC-ROLE` declaration, a claim made by hand, and an observed claim create no
 Outside a run scope the plugin spawns no process beyond that one `git` query and writes no
 file. It sends no message and refuses no tool call. A plain session in a repository that
 has this plugin installed sees the slash commands, the `orc_*` tools, the agents, the
-skill and three rules, and nothing else.
+skill, and nothing else.
 
 The marker is JSON: `schema_version`, `run_id`, `beads_dir`, `session_id`
 (`src/run-state.ts`). A writer holds the sibling lock `.orchestration/.active-run.lock`
@@ -214,33 +214,11 @@ cause and lets the call run. A check refuses only what it read and can prove:
 - **Role marker.** `orcRole` reads `ORC-ROLE:` from the system-prompt element OMP builds for the spawned agent, the one that opens with `§ Role`. A marker in a repository context file (`CLAUDE.md`, `.cursor/rules`) sets no role, whichever side of the agent body OMP renders it on. A prompt without that element is scanned whole. `test/identity.test.ts` pins the heading against the installed template.
 - **Program spelling.** The shell parser folds the program word's basename to lower case before every lookup: `bd`, `env`, the runner prefixes, the wrapper shells, `eval`, and the `git`/`gh` head. APFS and NTFS resolve `PATH` case-insensitively, so `BD update` runs bd there. Subcommands and flags keep their case.
 - **Path spelling.** G2 compares paths in the filesystem's own spelling. After the component walk, the longest existing prefix of a cwd or target passes through `fs.realpath`. On a case-insensitive volume `SRC/new.ts` compares as `src/new.ts`; on a case-sensitive volume it stays a distinct path. There is no platform branch.
-- **Rule scan bounds.** Each same-line span in the `bd ready` rules and the `args` window in `orc-no-nested-omp` read at most 300 characters (`{0,300}`, not `*`). Unbounded, one `test` over a 100k buffer of repeated `bd ready` cost 480 ms, and past 50k the engine hit its match limit and reported no match. `test/rules.test.ts` times every condition on a 100k buffer.
+- **Command parsing.** Structured gates inspect parsed command slots and bounded argument arrays, so quoted mentions are ignored and malformed input fails closed or remains advisory as documented by the gate tests.
 
 ## Rules
 
-Three TTSR rules in `rules/` watch tool arguments as the model streams them and inject a
-reminder on a protocol slip. None is a security boundary.
-
-The host matches the raw tool-argument JSON as the model streams it
-(`session/ttsr-coordinator.ts`, `export/ttsr.ts` in the pinned `@oh-my-pi/pi-coding-agent`).
-Consequences for rule authors:
-
-- Each `toolcall_delta` appends the provider's `partial_json` to a per-call buffer. Every condition runs against the whole buffer again.
-- Only `edit` and `write` expose a `matcherDigest` with the file content. `bash`, `eval`, `task`, and `hub` match the argument JSON itself.
-- A bash rule therefore sees `{"command":"bd ready …"}`. `bd` follows `"`. A shell newline is the two characters `\n`. A quote is `\"`. `^` never precedes a command.
-- Anchor on `\b` or on the `\n`/`\t` escape. "Same line" ends at the next `\n` escape or the closing `"`, and reads at most 300 characters: `{0,300}`, never `*`. Every `bd ready` on a line starts its own scan, so an unbounded span is quadratic.
-
-`interruptMode` sets the cost of a match. `never` lets the call run and folds the rule text
-into its result. `tool-only` aborts the assistant message, discards it, injects the rule,
-and continues. In both modes a rule fires one time per session (`repeatMode: once`).
-
-The `bd ready` rules and `orc-no-nested-omp` use `never`, because the flagged command is
-harmless (an empty queue, a doomed process) and the reminder arrives with the result.
-`orc-no-nested-omp` reads `hub start` arguments only. The shell form (`omp -p` from `bash`)
-is refused by G10, so it fires only inside a run scope.
-
-The host has a separate regex engine. Python accepting a pattern does not prove the host
-accepts it. After editing a rule, run `sh scripts/validate-rules.sh`. It feeds
-`omp ttsr test` the shape the host matches: bash snippets wrapped as `{"command":"…"}`,
-`task` and `hub` argument objects verbatim. This local check needs an installed `omp`, so CI
-does not run it.
+The plugin's deterministic protocol checks are structured notices in the run-aware extension gate.
+The gate parses command slots, so quoted mentions are ignored, and it runs only while a
+valid active-run marker is present. Keep deterministic protocol checks in the gate rather
+than adding session-wide regex rules.

@@ -88,16 +88,16 @@ describe("extension factory", () => {
 		expect(registered.filter(event => !known.includes(event))).toEqual([]);
 	});
 
-	test("registers the seven commands and six schema-visible tools", () => {
-		const { pi, seen } = recordingApi();
-		ompOrchestrate(pi);
-		expect(seen.commands.sort()).toEqual(
-			["orchestrate-answer", "orchestrate-doctor", "orchestrate-resume", "orchestrate-roster", "orchestrate-start", "orchestrate-status", "orchestrate-stop"].sort(),
-		);
-		expect(seen.tools.sort()).toEqual(
-			["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_doctor", "orc_review_round_policy", "orc_run_status"].sort(),
-		);
-	});
+ test("registers the seven commands and seven schema-visible tools", () => {
+  const { pi, seen } = recordingApi();
+  ompOrchestrate(pi);
+  expect(seen.commands.sort()).toEqual(
+   ["orchestrate-answer", "orchestrate-doctor", "orchestrate-resume", "orchestrate-roster", "orchestrate-start", "orchestrate-status", "orchestrate-stop"].sort(),
+  );
+  expect(seen.tools.sort()).toEqual(
+   ["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_doctor", "orc_review_round_policy", "orc_run_status", "worktree_sweep"].sort(),
+  );
+ });
 	test("keeps claim and exit state private to reused factory bindings", async () => {
 		const beads = new Map<string, BdBead>([
 			["orc-parent-1", { id: "orc-parent-1", status: "in_progress", assignee: "parent" }],

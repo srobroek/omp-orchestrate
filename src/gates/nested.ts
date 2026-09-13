@@ -7,8 +7,8 @@
  * rooted in a Worktrunk tree. The launches died on the operator's `omp` shim and on a
  * `credential_process` that could not detect its shell; architects then ran
  * `isengardcli credentials` by hand and printed live STS credentials into session logs. A
- * nested process claimed with no `BEADS_ACTOR`, a dead claim, and the `orc-no-nested-omp`
- * rule never fired because it watched `hub` arguments only.
+ * nested process claimed with no `BEADS_ACTOR`, so its claim was dead and its receipts
+ * never reached the wave barrier.
  *
  * The architect is now an isolated `task` child like every other role (`spawn.ts`), so no
  * session in a run has a reason to start `omp`, and none has a reason to mint or print a
@@ -156,12 +156,30 @@ export function gateNestedInvocation(ctx: ExtensionContext, scope: RunScope, inp
 			reason: `${act} is refused inside run ${scope.runId}: it mints or prints a credential into a session transcript. No role reads, exports or prints AWS credentials; the run's tools carry the identity they need`,
 		};
 	}
-	if (opensOmpSession(command)) {
-		const seat = orcRole(ctx) ?? "a session";
-		return {
-			block: true,
-			reason: `omp is refused for ${seat} inside run ${scope.runId}: agents are subagents, and the lead spawns roles with task (isolated: true). A nested omp process has no parent link: its claims are dead claims, its receipts never reach the wave barrier, and stopping and restarting it replays the same failure`,
-		};
-	}
+	if (opensOmpSession(command)) return nestedOmpRefusal(ctx, scope);
 	return undefined;
+}
+
+function nestedOmpRefusal(ctx: ExtensionContext, scope: RunScope): ToolCallEventResult {
+	const seat = orcRole(ctx) ?? "a session";
+	return {
+		block: true,
+		reason: `omp is refused for ${seat} inside run ${scope.runId}: agents are subagents, and the lead spawns roles with task (isolated: true). A nested omp process has no parent link: its claims are dead claims, its receipts never reach the wave barrier, and stopping and restarting it replays the same failure`,
+	};
+}
+
+/** Refuse the same nested process policy when a structured hub call starts it. */
+export function gateNestedHubInvocation(
+	ctx: ExtensionContext,
+	scope: RunScope,
+	input: Record<string, unknown>,
+): ToolCallEventResult | undefined {
+	if (input.op !== "start" || !Array.isArray(input.args) || !input.args.every(value => typeof value === "string")) return undefined;
+	const args = input.args as string[];
+	const application = typeof input.application === "string" ? programName(input.application) : "";
+	if (application === "omp") return ompOpensSession(args) ? nestedOmpRefusal(ctx, scope) : undefined;
+	if (application !== "sh" && application !== "bash" && application !== "zsh") return undefined;
+	const commandIndex = args.findIndex(token => token === "-c" || token === "--command");
+	const command = commandIndex >= 0 ? args[commandIndex + 1] : undefined;
+	return typeof command === "string" ? gateNestedInvocation(ctx, scope, { command }) : undefined;
 }

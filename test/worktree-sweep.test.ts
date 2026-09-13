@@ -6,6 +6,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { executeWorktreeSweep, worktreeSweepArgs } from "../src/tools/worktree-sweep";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,12 +167,12 @@ describe("sweeping one registered worktree", () => {
 		expect(result.stderr).toContain("not registered with Worktrunk");
 	});
 
-	test("a payload that is neither shape is fatal", async () => {
-		const worktree = dir("registered");
-		const result = await sweep(worktree, { schema: 2 });
-		expect(result.code).toBe(2);
-		expect(result.stderr).toContain("invalid inventory");
-	});
+ test("a malformed inventory item is skipped and reported without aborting", async () => {
+  const worktree = dir("registered");
+  const result = await sweep(worktree, { schema: 2, items: [1, { worktree: { path: worktree, main: false } }] });
+  expect(result.code).toBe(0);
+  expect(result.stderr).toContain("inventory item 0");
+ });
 
 	test("a failing wt list is fatal", async () => {
 		const worktree = dir("registered");
@@ -325,17 +326,15 @@ describe("flattenInventory", () => {
 		]);
 	});
 
-	test.each([
-		[{ schema: 2 }, "no items array"],
-		[{ schema: 2, items: [1] }, "non-object item"],
-		["rows", "not an array"],
-		[[{ path: 7 }], "path is not a string"],
-		[[null], "non-object item"],
-	])("%j is invalid: %s", (payload, reason) => {
-		const result = flattenInventory(payload);
-		if (!("invalid" in result)) throw new Error(`accepted ${JSON.stringify(payload)}`);
-		expect(result.invalid).toContain(reason);
-	});
+ test("malformed rows are skipped and reported", () => {
+  const result = flattenInventory([{ path: 7 }, null, { path: "/ok", is_main: 1 }]);
+  if ("invalid" in result) throw new Error(`rejected inventory: ${result.invalid}`);
+  expect(result).toEqual([{ path: "/ok", is_main: true }]);
+  expect(result.issues).toEqual([
+   "inventory item 0 path is not a string; skipped",
+   "inventory item 1 is not an object; skipped",
+  ]);
+ });
 });
 
 describe("classifyPath", () => {
@@ -347,4 +346,24 @@ describe("classifyPath", () => {
 		expect(classifyPath([{ path: real }], alias)).toBe("linked");
 		expect(classifyPath([{ path: join(root, "other") }], real)).toBeUndefined();
 	});
+});
+
+describe("worktree_sweep tool wrapper", () => {
+ test("maps prune and discard arguments to CLI argv", () => {
+  expect(worktreeSweepArgs({ path: "/repo/worktree" })).toEqual(["/repo/worktree"]);
+  expect(worktreeSweepArgs({ path: "/repo/worktree", discardBranch: true })).toEqual(["--discard-branch", "/repo/worktree"]);
+  expect(worktreeSweepArgs({ path: "/repo", prune: true })).toEqual(["--prune", "/repo"]);
+ });
+
+ test("returns stdout, stderr, and exit status from the shared implementation", () => {
+  const seen: readonly string[][] = [];
+  const result = executeWorktreeSweep({ path: "/repo/worktree", discardBranch: true }, args => {
+   (seen as string[][]).push([...args]);
+   return { code: 7, stdout: "out\n", stderr: "err\n" };
+  });
+  expect(seen).toEqual([["--discard-branch", "/repo/worktree"]]);
+  expect(result.isError).toBe(true);
+  expect(result.details).toEqual({ code: 7, stdout: "out\n", stderr: "err\n" });
+  expect(result.content).toEqual([{ type: "text", text: "out\n\nerr\n" }]);
+ });
 });

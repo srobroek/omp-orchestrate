@@ -24,7 +24,7 @@ import { gateClaimEligibility } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { gateLeadContract } from "./gates/lead";
 import { createLeadExitWatch } from "./gates/lead-exit";
-import { gateNestedInvocation } from "./gates/nested";
+import { gateNestedHubInvocation, gateNestedInvocation } from "./gates/nested";
 import { gatePush } from "./gates/push";
 import { gateBeadWriteFree, rebuildBashInput } from "./gates/readonly";
 import { gateRoleIsolation } from "./gates/spawn";
@@ -44,11 +44,10 @@ import { registerDoctor } from "./tools/doctor";
 import { commandNotice } from "./tools/notice";
 import { registerRunStatus } from "./tools/run-status";
 import { registerReviewRoundPolicy } from "./tools/review-round-policy";
+import { registerWorktreeSweep } from "./tools/worktree-sweep";
 import { preflightSettings, registerWatchers } from "./watchers";
 
-/** Tools any gate inspects. Everything else returns before doing work. */
-const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true, task: true };
-
+const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true, yield: true, task: true, hub: true };
 export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claims = createClaimState();
  const claimInFlight = createClaimInFlight();
@@ -73,6 +72,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  registerBotReviewProbe(pi);
  registerBotReviewRequest(pi);
  registerReviewRoundPolicy(pi);
+ registerWorktreeSweep(pi);
  // S1 reaper + W1-W4 watchers: deterministic supervision on the lifecycle bus. The
  // reaper takes the claim state so a release is attributed to this session's identity.
  registerSupervision(pi, isBoundRunActive, claims);
@@ -102,8 +102,13 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
   try {
    const scope = await runScope(ctx);
    if (scope === null) return undefined;
-   resetReadBudget();
    let input = event.input as Record<string, unknown>;
+   if (event.toolName === "hub") {
+    const nested = gateNestedHubInvocation(ctx, scope, input);
+    if (nested) return nested;
+    return undefined;
+   }
+   resetReadBudget();
    let inputRevised = false;
 
    // G9 first: the lead's refusals are on the act itself, and must win over every rewrite
