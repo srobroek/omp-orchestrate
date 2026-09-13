@@ -444,6 +444,12 @@ export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  * epic is bound. Absent `needs`, everything is read, which is what a caller judging an
  * unknown contract must do.
  *
+ * A wisp's parent is one of its links. The documented shape hangs a review or escalation
+ * wisp off its node with `bd create --parent <node> --ephemeral`, and bd refuses a
+ * `relates-to` from a child to its own parent (`already a child ... would create a
+ * deadlock`, measured on 1.2.2), so the parent edge is the only link that wisp can have to
+ * the node its verdict is written on. The hydrated bead already names it; no read is spent.
+ *
  * An unreadable run epic is logged and leaves the base unknown rather than voiding the
  * evidence: the rest of the contract is still judged, and the one predicate that wanted
  * the base fails open on its own.
@@ -475,6 +481,7 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
  const wantEscalation = needs.escalation && direction === "up";
  if (needs.verbs || wantEscalation) {
   const linkedIds: string[] = [];
+  if (direction === "down" && typeof bead.parent === "string" && bead.parent.length > 0) linkedIds.push(bead.parent);
   for (const type of ["relates-to", "replies-to"]) {
    const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
    if (linked === null) return null;

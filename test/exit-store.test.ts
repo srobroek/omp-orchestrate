@@ -1,11 +1,13 @@
 /**
  * G4 against a store the installed `bd` built.
  *
- * The unit tests mock `bdRun`, and a release defect shipped through that seam: bd 1.2.2
+ * The unit tests mock `bdRun`, and two release defects shipped through that seam. bd 1.2.2
  * refuses `--claim` on the released `in_progress` bead every contract leaves behind, so the
- * fenced `pushed_sha` stamp never landed. Origin stays a stand-in -- the defect is the
- * store's -- but every bead, claim, comment and refusal here is the real binary's. Skipped
- * where `bd` is not installed (CI).
+ * fenced `pushed_sha` stamp never landed; and it refuses a `relates-to` from a review wisp
+ * to the parent it hangs off, so a reviewer's verdict on the node was never linked
+ * evidence. Origin stays a stand-in -- these defects are the store's -- but every bead,
+ * claim, comment and refusal here is the real binary's. Skipped where `bd` is not installed
+ * (CI).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -184,6 +186,34 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 			expect(after.metadata?.pushed_sha).toBeUndefined();
 			expect(after.assignee).toBe("impl-B");
 			expect(after.status).toBe("in_progress");
+		}, YIELD_MS);
+	});
+
+	describe("a reviewer's verdict on the wisp's parent", () => {
+		test("the documented review wisp passes on the node's REVIEW and is refused without it", async () => {
+			const node = await create("node under review", "--labels", "orc-node", "--metadata", JSON.stringify({ role: "implementer", execution_kind: "git", head_sha: HEAD }));
+			// The shape lifecycle.md documents and the architect ran: a child wisp, no other edge.
+			const wisp = await create(`Review ${node}`, "--parent", node, "--ephemeral", "-t", "task", "-p", "1", "--labels", "orc-node",
+				"--metadata", JSON.stringify({ role: "reviewer", head_sha: HEAD, review_round: 1, origin_bead: node }));
+			// The refusal the release re-test observed: the edge G4 used to read cannot be added.
+			const related = await bd("dep", "add", wisp, node, "--type", "relates-to");
+			expect(related.code).toBe(1);
+			expect(related.stderr).toContain("already a child");
+			await write("update", wisp, "--actor", "rev-A", "--claim");
+			claims.recordClaim({ actor: "rev-A", beadIds: [wisp] });
+
+			const refused = await gate(ctx(root, "reviewer"));
+			expect(refused?.block).toBe(true);
+			const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse(refused!.reason!);
+			expect(verdict.failed_checks).toEqual([{ check: "verdict", detail: "unsatisfied: linked.comment.verb in [REVIEW, BLOCKED]" }]);
+
+			// The reviewer's exit as its definition spells it: the verdict on the node at this
+			// head and round, then the wisp closed and released.
+			await write("comments", "add", node, `REVIEW ${node} dimension=behavior verdict=approve head_sha=${HEAD} review_round=1`, "--actor", "rev-A");
+			await write("close", wisp, "--actor", "rev-A", "--reason", "approved");
+			await write("update", wisp, "--actor", "rev-A", "--assignee", "");
+
+			expect(await gate(ctx(root, "reviewer"))).toBeUndefined();
 		}, YIELD_MS);
 	});
 });

@@ -186,6 +186,20 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(reviewer)).toBeUndefined();
   expect(issued).toEqual([]);
  });
+ test("a review wisp linked to its node by the parent edge alone is judged on the node's verdict", async () => {
+  // The documented shape: `bd create --parent <node> --ephemeral`, and bd refuses a
+  // relates-to from a child to its parent, so no dep list answers with the node.
+  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1 } };
+  linked = [];
+  linkedBead = { id: "node", metadata: { head_sha: "abc1234" } };
+  linkedComments = [{ text: "REPORTED node src/api.ts" }];
+  const reviewer = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(reviewer))!.reason!);
+  expect(verdict.failed_checks).toEqual([{ check: "verdict", detail: "unsatisfied: linked.comment.verb in [REVIEW, BLOCKED]" }]);
+  linkedComments.push({ text: "REVIEW node dimension=behavior verdict=approve head_sha=abc1234 review_round=1" });
+  expect(await gateExitContract(reviewer)).toBeUndefined();
+  expect(issued).toEqual([]);
+ });
  test("an implementer's contract never reads linked comments, so their absence cannot excuse its exit", async () => {
   // The implementer contract reads linked beads only for an open escalation; with
   // none open, the unreported bead is judged and refused rather than waved through.
