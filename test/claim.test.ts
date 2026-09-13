@@ -1137,7 +1137,7 @@ describe("G5 architect location stamp", () => {
    ["the full stamp as JSON", `bd update orc-feature --metadata '{"branch":"feat/a","base_sha":"64df1c1","push":"origin/feat/a","worktree":"/tmp/clone"}'`],
    ["a same-bead claim retry", "bd update orc-feature --claim --json"],
    ["a read", "bd show orc-feature --json"],
-   ["a write on another bead", 'bd create "task" --parent orc-feature --metadata \'{"role":"implementer"}\''],
+   ["a write on another bead", 'bd create "task" --parent orc-feature --metadata \'{"role":"implementer"}\' --acceptance "done"'],
   ])("allows %s", async (_label, command) => {
    expect(await gateClaimEligibility(claims, architect(), { command })).toBeUndefined();
   });
@@ -1181,16 +1181,16 @@ describe("G5 close authority", () => {
  const commentsSpy = spyOn(actualBd, "bdCommentsChecked").mockImplementation(async (id: string) => comments[id] ?? null);
  afterAll(() => commentsSpy.mockRestore());
  beforeEach(() => {
-  comments = { "orc-t": [{ text: "REPORTED docs/faq.md changed; head_sha abc1234" }] };
+  comments = { "orc-t": [{ text: "REPORTED docs/faq.md changed; head_sha=abc1234" }, { text: "REVIEW verdict=approve head_sha=abc1234" }] };
   beads["orc-t"] = task();
  });
 
  test.each([
   ["architect", "bd close orc-t --reason merged"],
-  ["implementer", "bd close orc-t"],
-  ["shepherd", "bd -C /run/repo update orc-t --status closed"],
+  ["implementer", "bd close orc-t --reason merged"],
+  ["shepherd", "bd -C /run/repo update orc-t --status closed --reason merged"],
   ["architect", "bd update orc-t -s closed --reason merged"],
-  ["architect", "bd update orc-t --status=closed"],
+  ["architect", "bd update orc-t --status=closed --reason merged"],
  ])("refuses a %s closing a task nothing landed: %s", async (role, command) => {
   const result = await gateClaimEligibility(claims, ctxFor(role, runRoot), { command });
   expect(result?.block).toBe(true);
@@ -1198,10 +1198,22 @@ describe("G5 close authority", () => {
   expect(result?.reason).toContain("no landing evidence");
   expect(result?.reason).toContain(role);
  });
+ test("rejects a close reason outside the allowlist", async () => {
+  const result = await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason arbitrary" });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("--reason");
+ });
 
  test("a feature is a node too", async () => {
   beads["orc-t"] = task({ issue_type: "feature", metadata: { role: "architect" } });
-  expect((await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t" }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" }))?.block).toBe(true);
+ });
+ test("refuses a feature while an orc-node child is open", async () => {
+  beads["orc-t"] = task({ issue_type: "feature", metadata: { role: "architect" } });
+  inFlight.push(bead("orc-child", { issue_type: "task", status: "open", labels: ["orc-node"] }));
+  const result = await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason override:emergency" });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("orc-child");
  });
 
  test.each([
@@ -1212,9 +1224,13 @@ describe("G5 close authority", () => {
   expect(await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" })).toBeUndefined();
  });
 
- test("the lead may close by hand", async () => {
-  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd close orc-t --reason merged" })).toBeUndefined();
-  expect(shown).toEqual([]);
+ test("roleless helper is outside run-scoped lead tightening", async () => {
+  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd close orc-t" }, { helper: true })).toBeUndefined();
+ });
+
+ test("the lead needs landing evidence unless it uses override", async () => {
+  expect((await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd close orc-t --reason merged" }))?.block).toBe(true);
+  expect(await gateClaimEligibility(claims, ctxFor(undefined, runRoot), { command: "bd close orc-t --reason=override:emergency" })).toBeUndefined();
  });
 
  test.each([
@@ -1229,16 +1245,17 @@ describe("G5 close authority", () => {
 
  test("a node whose kind is undeclared is judged as git work", async () => {
   beads["orc-t"] = task({ metadata: { role: "implementer" } });
-  expect((await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t" }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" }))?.block).toBe(true);
  });
 
  test.each([
   ["the bead", () => { delete beads["orc-t"]; }, "orc-t"],
   ["its comments", () => { delete comments["orc-t"]; }, "orc-t"],
- ])("fails open, and says why, when %s cannot be read", async (_label, arrange, warnedBead) => {
+ ])("fails closed inside a run when %s cannot be read", async (_label, arrange, _warnedBead) => {
   arrange();
-  expect(await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t" })).toBeUndefined();
-  expect(warned.map(entry => entry.data?.bead)).toEqual([warnedBead]);
+  const result = await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("unreadable");
  });
 
  test.each(["implementer", "architect", "reviewer", "researcher"])("%s may not stamp merge_sha, on any bead", async role => {
@@ -1248,20 +1265,19 @@ describe("G5 close authority", () => {
   expect(await gateClaimEligibility(claims, ctxFor("shepherd", runRoot), { command: "bd update orc-t --set-metadata merge_sha=c86067b" })).toBeUndefined();
  });
 });
-
 /**
  * A closed feature takes no new children from a role that does not decompose. Found by a
  * run in which an implementer filed a task under a closed feature and pulled it from the
  * queue.
  */
 describe("G5 closed parent", () => {
- const FILE = `bd create "t" --parent orc-closed --labels orc-node --metadata '{"role":"implementer","scope":["src/x/**"]}'`;
+ const FILE = `bd create "t" --parent orc-closed --labels orc-node --metadata '{"role":"implementer","scope":["src/x/**"]}' --acceptance "done"`;
  beforeEach(() => {
   beads["orc-closed"] = bead("orc-closed", { issue_type: "feature", status: "closed" });
   beads["orc-open"] = bead("orc-open", { issue_type: "feature", status: "in_progress" });
  });
 
- test.each(["implementer", "shepherd", "researcher"])("refuses a %s filing under a closed bead, naming it", async role => {
+ test.each(["implementer", "architect", "shepherd", "researcher"])("refuses a %s filing under a closed bead, naming it", async role => {
   const result = await gateClaimEligibility(claims, ctxFor(role, runRoot), { command: FILE });
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("orc-closed");
@@ -1269,10 +1285,9 @@ describe("G5 closed parent", () => {
  });
 
  test.each([
-  ["the architect", () => ctxFor("architect", runRoot), FILE],
   ["the lead", () => ctxFor(undefined, runRoot), FILE],
   ["an open parent", () => ctxFor("implementer", runRoot), FILE.replace("orc-closed", "orc-open")],
-  ["no parent", () => ctxFor("implementer", runRoot), `bd create "bug" --type bug --metadata '{"role":"implementer"}'`],
+  ["no parent", () => ctxFor("implementer", runRoot), `bd create "bug" --type bug --metadata '{"role":"implementer"}' --acceptance "done"`],
  ])("leaves %s alone", async (_label, ctx, command) => {
   expect(await gateClaimEligibility(claims, ctx(), { command })).toBeUndefined();
  });
@@ -1289,6 +1304,25 @@ describe("G5 closed parent", () => {
   expect(result?.block).toBe(true);
   expect(result?.reason).toContain("'<epic>' was parsed as a redirection");
   expect(result?.reason).toContain("role=implementer");
+ });
+});
+
+describe("G5 acceptance filing seam", () => {
+ test("refuses routed create without --acceptance", async () => {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer", runRoot), {
+   command: `bd create "task" --parent orc-open --metadata '{"role":"implementer"}'`,
+  });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("--acceptance");
+ });
+
+ test("only architect writes acceptance, and only while unassigned", async () => {
+  beads["orc-a"] = bead("orc-a", { assignee: "", metadata: { role: "implementer" } });
+  expect(await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd update orc-a --acceptance done" })).toBeUndefined();
+  expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: "bd update orc-a --acceptance changed" }))?.reason).toContain("architect");
+  beads["orc-a"] = bead("orc-a", { assignee: "impl-1", metadata: { role: "implementer" } });
+  const assigned = await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd update orc-a --acceptance changed" });
+  expect(assigned?.reason).toContain("impl-1");
  });
 });
 
@@ -1361,12 +1395,12 @@ describe("G5 decomposition scope", () => {
 
  test.each([
   ["the bead being re-scoped", "bd update orc-ghost --set-metadata scope=src/api/**", "orc-ghost"],
-  ["the parent of a new bead", `bd create "t2" --parent orc-ghost --metadata '{"scope":["src/api/**"]}'`, undefined],
+  ["the parent of a new bead", `bd create "t2" --parent orc-ghost --metadata '{"scope":["src/api/**"]}'`, "orc-ghost"],
  ])("fails open, and says why, when %s cannot be read", async (_label, command, warnedBead) => {
   expect(await gateClaimEligibility(claims, architect, { command })).toBeUndefined();
   // One warning per unresolved overlap; each names the subject and the cause.
   expect(warned.length).toBeGreaterThan(0);
-  expect(warned.every(entry => entry.data?.bead === warnedBead && typeof entry.data?.cause === "string")).toBe(true);
+  expect(warned.every(entry => typeof entry.data?.cause === "string" && (entry.data?.bead === warnedBead || entry.data?.bead === undefined))).toBe(true);
  });
 
  test("fails open, and says why, when the live list cannot be read", async () => {

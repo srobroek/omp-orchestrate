@@ -50,6 +50,7 @@ import { scopeOf, scopesOverlap } from "../scope";
 import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments, splitFlag } from "../shell";
 import { writesBeads } from "./bd";
 import { resourceKind } from "./exit";
+import { acceptanceText, beadAcceptanceHash, planHashOf, planToken } from "../acceptance";
 
 /** A queue filter on a `bd ready`, resolved to the role it pulls for. */
 interface QueueFilter {
@@ -615,22 +616,164 @@ function parentFlag(invocation: BdInvocation): string | undefined {
  return undefined;
 }
 
-/** Subcommands that file a new bead, and so may name a `--parent`. */
-const FILING_SUBCOMMANDS: Record<string, true> = { create: true, new: true };
+const ACCEPTANCE_ROLES: Record<string, true> = { implementer: true, researcher: true };
+
+/** `--acceptance` operands written on a filing command, preserving opacity. */
+function acceptanceWrites(invocation: BdInvocation): { operand: string | undefined; spelling: string }[] {
+ const writes: { operand: string | undefined; spelling: string }[] = [];
+ for (let index = 0; index < invocation.rest.length; index++) {
+  const { flag, inline } = splitFlag(invocation.rest[index] as string);
+  if (flag !== "--acceptance") continue;
+  const next = invocation.rest[index + 1];
+  const operand = inline ?? (typeof next === "string" && !next.startsWith("-") ? next : undefined);
+  writes.push({ operand, spelling: operand === undefined ? flag : `${flag} ${operand}` });
+ }
+ return writes;
+}
+
+/** Metadata route writes that cannot be inspected without letting the shell execute. */
+function routedMetadataWrite(invocation: BdInvocation): { role?: string; opaque?: string }[] {
+ const writes: { role?: string; opaque?: string }[] = [];
+ if (SCOPE_WRITERS[invocation.subcommand] !== true) return writes;
+ for (const { flag, operand } of metadataWrites(invocation)) {
+  if (flag === "--unset-metadata") continue;
+  if (operand === undefined || operand.startsWith("@")) {
+   writes.push({ opaque: operand === undefined ? flag : `${flag} ${operand}` });
+   continue;
+  }
+  if (operand.trimStart().startsWith("{")) {
+   const record = metadataRecord(operand);
+   if (record === undefined) {
+    writes.push({ opaque: `${flag} ${operand}` });
+    continue;
+   }
+   if (!Object.hasOwn(record, ROUTING_KEY)) continue;
+   const role = record[ROUTING_KEY];
+   if (typeof role !== "string" || SHELL_EXPANSION.test(role)) writes.push({ opaque: `${flag} ${operand}` });
+   else writes.push({ role });
+   continue;
+  }
+  const cut = operand.indexOf("=");
+  if (cut === -1 || SHELL_EXPANSION.test(operand.slice(0, cut))) {
+   writes.push({ opaque: `${flag} ${operand}` });
+   continue;
+  }
+  if (operand.slice(0, cut) !== ROUTING_KEY) continue;
+  const role = operand.slice(cut + 1);
+  writes.push(SHELL_EXPANSION.test(role) ? { opaque: `${flag} ${operand}` } : { role });
+ }
+ return writes;
+}
 
 /**
- * Refuse a node filed under a closed parent by a role that does not decompose.
+ * Routed implementer/researcher filings carry their definition of done at creation time.
+ * An opaque metadata operand is refused because it may hide a routed role; a literal update
+ * may rely on the bead's existing acceptance text. Store reads fail open, like other filing
+ * checks, because an unavailable database cannot prove a missing field.
+ */
+async function acceptanceFilingDenial(invocation: BdInvocation, inRun: boolean): Promise<ToolCallEventResult | undefined> {
+ if (!inRun) return undefined;
+ if (SCOPE_WRITERS[invocation.subcommand] !== true) return undefined;
+ const routed = routedMetadataWrite(invocation);
+ for (const entry of routed) {
+  if (entry.opaque !== undefined) {
+   return {
+    block: true,
+    reason:
+     `'${entry.opaque}' is not a literal: metadata.${ROUTING_KEY} may route an implementer or researcher, ` +
+     `so the filing gate cannot verify its --acceptance. Write metadata and --acceptance inline.`,
+   };
+  }
+  if (entry.role === undefined || ACCEPTANCE_ROLES[entry.role] !== true) continue;
+  const acceptance = acceptanceWrites(invocation);
+  const opaque = acceptance.find(({ operand }) => operand === undefined || operand.startsWith("@") || SHELL_EXPANSION.test(operand));
+  if (opaque !== undefined) {
+   return {
+    block: true,
+    reason: `'${opaque.spelling}' is not a literal: --acceptance must be readable at the filing seam; write a literal acceptance text.`,
+   };
+  }
+  if (acceptance.some(({ operand }) => typeof operand === "string" && operand.trim().length > 0)) continue;
+  if (invocation.subcommand === "update") {
+   const targets = claimTargets(invocation);
+   if (targets.length > 0) {
+    let unreadable = false;
+    for (const id of targets) {
+     const bead = await bdShow(id);
+     if (bead === null) {
+      unreadable = true;
+      logger.warn("orchestrate G5: routed bead could not be read; acceptance filing check skipped", {
+       bead: id,
+       cause: bdFailureText(lastBdFailure()),
+      });
+      continue;
+     }
+     if (acceptanceText(bead) !== undefined) continue;
+     return {
+      block: true,
+      reason: `metadata.${ROUTING_KEY}=${entry.role} requires a non-empty --acceptance; add the --acceptance flag to this update.`,
+     };
+    }
+    if (unreadable) continue;
+   }
+  }
+  return {
+   block: true,
+   reason: `metadata.${ROUTING_KEY}=${entry.role} requires a non-empty --acceptance; add the --acceptance flag to this filing.`,
+  };
+ }
+ return undefined;
+}
+
+/**
+ * Once a run is active, acceptance edits belong to the architect or lead and only before a
+ * bead has a holder. A worker cannot rewrite the definition of done after claiming it.
+ */
+async function acceptanceWriteAuthorityDenial(
+ invocation: BdInvocation,
+ sessionRoleName: string | undefined,
+ inRun: boolean,
+): Promise<ToolCallEventResult | undefined> {
+ if (!inRun || invocation.subcommand !== "update" || acceptanceWrites(invocation).length === 0) return undefined;
+ if (sessionRoleName !== undefined && sessionRoleName !== "architect") {
+  return { block: true, reason: `--acceptance is a plan field; only the architect or lead may write it inside a run, not ${sessionRoleName}` };
+ }
+ for (const id of claimTargets(invocation)) {
+  const bead = await bdShow(id);
+  if (bead === null) {
+   logger.warn("orchestrate G5: acceptance authority bead could not be read; authority check skipped", {
+    bead: id,
+    cause: bdFailureText(lastBdFailure()),
+   });
+   continue;
+  }
+  const holder = typeof bead.assignee === "string" ? bead.assignee.trim() : "";
+  if (holder.length > 0) {
+   return {
+    block: true,
+    reason: `--acceptance may only be written while '${id}' is unassigned; it is held by '${holder}'. Release the bead before the architect edits its plan.`,
+   };
+  }
+ }
+ return undefined;
+}
+
+ /** Subcommands that file a new bead, and so may name a `--parent`. */
+ const FILING_SUBCOMMANDS: Record<string, true> = { create: true, new: true };
+
+/**
+ * Refuse any routed filing under a closed parent, including architect decomposition.
  *
- * A closed feature is finished work; a task filed beneath it reaches the ready queue and
- * is pulled as if the feature were live, with no architect having planned it. The
- * architect may reopen or re-parent, so its filings pass. Fails open, and says why, when
- * the parent cannot be read.
+ * A closed feature is finished work; a task filed beneath it reaches the ready queue as if
+ * the parent were live, with nobody having planned it. Reopening the parent is explicit so
+ * the architect's plan and the queue state cannot silently diverge. Fails open, and says why,
+ * when the parent cannot be read.
  */
 async function closedParentDenial(
  invocation: BdInvocation,
  sessionRoleName: string | undefined,
 ): Promise<ToolCallEventResult | undefined> {
- if (sessionRoleName === undefined || ROUTING_WRITERS[sessionRoleName] === true) return undefined;
+ if (sessionRoleName === undefined) return undefined;
  if (FILING_SUBCOMMANDS[invocation.subcommand] !== true) return undefined;
  const parent = parentFlag(invocation);
  if (parent === undefined) return undefined;
@@ -646,9 +789,9 @@ async function closedParentDenial(
  return {
   block: true,
   reason:
-   `'${parent}' is closed, and ${sessionRoleName} may not file work under a closed bead: a child there ` +
-   `reaches the ready queue as if the parent were live, with nobody having planned it. File under the ` +
-   `open epic or feature you work in, or raise an escalation wisp for the architect to re-plan.`,
+   `'${parent}' is closed, and ${sessionRoleName} may not file work under a closed bead. ` +
+   `Run 'bd reopen ${parent}' first, then re-plan and file the child; otherwise file under an open ` +
+   `epic or feature.`,
  };
 }
 
@@ -693,48 +836,113 @@ function closedTargets(invocation: BdInvocation): string[] {
  return [];
 }
 
+/** The reason prefixes a close may carry; every close is explicit and reviewable. */
+const CLOSE_REASON_PREFIXES = ["merged", "dismissed", "duplicate of", "superseded by", "override:"] as const;
+
+/** The `--reason` value, or `undefined` when close has no explicit reason. */
+function closeReason(invocation: BdInvocation): string | undefined {
+ for (let index = 0; index < invocation.rest.length; index++) {
+  const { flag, inline } = splitFlag(invocation.rest[index] as string);
+  if (flag !== "--reason") continue;
+  const value = inline ?? invocation.rest[index + 1];
+  return typeof value === "string" && !value.startsWith("-") ? value.trim() : undefined;
+ }
+ return undefined;
+}
+
+function allowedCloseReason(reason: string | undefined): boolean {
+ const normalized = reason?.toLowerCase();
+ return normalized !== undefined && CLOSE_REASON_PREFIXES.some(prefix => normalized.startsWith(prefix));
+}
+
+function approvedReviewAtHead(comments: readonly { text: string }[], head: string): boolean {
+ return comments.some(comment => {
+  if (commentVerb(comment.text) !== "REVIEW" || !/\bverdict=approve\b/i.test(comment.text)) return false;
+  return new RegExp(`(?:^|\\s)head_sha=${head}(?:\\s|$)`, "i").test(comment.text);
+ });
+}
+
+/** A feature cannot close while any routed child remains live. */
+async function openFeatureChildDenial(bead: BdBead): Promise<ToolCallEventResult | undefined> {
+ if (bead.issue_type !== "feature") return undefined;
+ const children = await bdList(["list", "--parent", bead.id, "--label", "orc-node", "--limit", "0", "--json"]);
+ if (children.length === 0 && lastBdFailure() !== undefined) {
+  logger.warn("orchestrate G5: feature children could not be listed; child-close check skipped", {
+   bead: bead.id,
+   cause: bdFailureText(lastBdFailure()),
+  });
+  return undefined;
+ }
+ const open = children.find(child => (child.status ?? "").toLowerCase() !== "closed");
+ if (open === undefined) return undefined;
+ return {
+  block: true,
+  reason: `feature '${bead.id}' has non-closed orc-node child '${open.id}' (${open.status ?? "unknown"}); close every child before closing the feature.`,
+ };
+}
+
 /**
- * Refuse a role closing a node that nothing landed.
- *
- * Found by a run in which an architect closed two tasks `--reason merged` with no
- * reviewer, no PR, and main unchanged. A node is closed by the landing sweep when its
- * merge lands, or by the lead by hand; a role closes it only once the bead itself carries
- * the landing: `metadata.merge_sha`, or a `LANDED` comment. The sweep writes both on the
- * merge bead and `LANDED` on the origin feature. Fails open, and says why, when the bead
- * or its comments cannot be read.
+ * Enforce close reasons, review-backed dismissal, child completion, and landing evidence.
+ * Role sessions are governed everywhere; the role-less lead is governed only in a bound run.
+ * Inside a run an unreadable bead or comment is closed-deny; outside a run it retains the
+ * historical fail-open behavior.
  */
 async function closeDenial(
  invocation: BdInvocation,
  sessionRoleName: string | undefined,
+ inRun: boolean,
 ): Promise<ToolCallEventResult | undefined> {
- if (sessionRoleName === undefined) return undefined;
- for (const id of closedTargets(invocation)) {
+ if (sessionRoleName === undefined && !inRun) return undefined;
+ const targets = closedTargets(invocation);
+ if (targets.length === 0) return undefined;
+ const reason = closeReason(invocation);
+ if (!allowedCloseReason(reason)) {
+  return {
+   block: true,
+   reason: "closing a bead requires --reason starting with merged, dismissed, duplicate of, superseded by, or override:; add an explicit recovery reason",
+  };
+ }
+ const leadOverride = sessionRoleName === undefined && reason!.toLowerCase().startsWith("override:");
+ for (const id of targets) {
   const bead = await bdShow(id);
   if (bead === null) {
-   logger.warn("orchestrate G5: bead being closed could not be read; landing evidence check skipped", {
-    bead: id,
-    cause: bdFailureText(lastBdFailure()),
-   });
+   const cause = bdFailureText(lastBdFailure());
+   if (inRun) return { block: true, reason: `cannot close '${id}': bead is unreadable (${cause}); retry when bd can read it` };
+   logger.warn("orchestrate G5: bead being closed could not be read; landing evidence check skipped", { bead: id, cause });
    continue;
   }
-  if (!closeNeedsLandingEvidence(bead)) continue;
+  const childDenial = await openFeatureChildDenial(bead);
+  if (childDenial) return childDenial;
+  const node = typeof bead.issue_type === "string" && NODE_TYPES[bead.issue_type] === true;
+  const head = metadataString(bead, "head_sha");
+  const needsReview = reason!.toLowerCase().startsWith("dismissed") && node && head !== undefined;
+  const needsLanding = closeNeedsLandingEvidence(bead) && !leadOverride;
+  const commentsNeeded = (inRun && node) || needsReview || needsLanding;
+  let comments: { text: string }[] | null = null;
+  if (commentsNeeded) {
+   comments = await bdCommentsChecked(id);
+   if (comments === null) {
+    const cause = bdFailureText(lastBdFailure());
+    if (inRun) return { block: true, reason: `cannot close '${id}': comments are unreadable (${cause}); retry when bd can read them` };
+    logger.warn("orchestrate G5: comments of the bead being closed could not be read; landing evidence check skipped", { bead: id, cause });
+    continue;
+   }
+  }
+  if (needsReview && !approvedReviewAtHead(comments ?? [], head!)) {
+   return {
+    block: true,
+    reason: `node '${id}' may be dismissed only with REVIEW verdict=approve at current head_sha=${head}; add that review before closing`,
+   };
+  }
+  if (!needsLanding) continue;
   if (metadataString(bead, LANDED_KEY) !== undefined) continue;
-  const comments = await bdCommentsChecked(id);
-  if (comments === null) {
-   logger.warn("orchestrate G5: comments of the bead being closed could not be read; landing evidence check skipped", {
-    bead: id,
-    cause: bdFailureText(lastBdFailure()),
-   });
-   continue;
-  }
-  if (comments.some(comment => commentVerb(comment.text) === "LANDED")) continue;
+  if ((comments ?? []).some(comment => commentVerb(comment.text) === "LANDED")) continue;
   return {
    block: true,
    reason:
     `'${id}' (${bead.issue_type}) carries no landing evidence: neither metadata.${LANDED_KEY} nor a LANDED ` +
-    `comment, and ${sessionRoleName} may not close a node nothing landed. The landing sweep writes both ` +
-    `when the PR merges; a review alone does not close a node. Hand off with REPORTED and the next role's ` +
-    `agent: label, and leave the close to the sweep or the lead.`,
+    `comment, and ${sessionRoleName ?? "the lead"} may not close a node nothing landed. The landing sweep writes both ` +
+    `when the PR merges; use --reason override: only as the lead inside a run.`,
   };
  }
  return undefined;
@@ -1071,11 +1279,68 @@ function shepherdStateWrite(invocation: BdInvocation): boolean {
 /**
  * Refuse cross-role named claims and inspect named candidates for scope conflicts.
  * Queue claims are observed from their result and checked for conflicts before work.
+*/
+
+/** `verdict=approve` on a plan REVIEW, at the live decomposition hash. */
+async function planReviewDenial(
+ invocation: BdInvocation,
+ sessionRoleName: string | undefined,
+ inRun: boolean,
+): Promise<ToolCallEventResult | undefined> {
+ if (!inRun || sessionRoleName !== GOVERNED_ROLE || invocation.subcommand !== "ready" || !invocation.hasClaim) return undefined;
+ const epicId = parentFlag(invocation);
+ if (epicId === undefined || SHELL_EXPANSION.test(epicId) || epicId.startsWith("@")) {
+  if (epicId !== undefined) {
+   return { block: true, reason: `--parent '${epicId}' is opaque; the plan-review gate cannot read the epic before pulling` };
+  }
+  return undefined;
+ }
+ const epic = await bdShow(epicId);
+ if (epic === null) {
+  logger.warn("orchestrate G5: plan-review epic could not be read; plan gate failed open", {
+   epic: epicId,
+   cause: bdFailureText(lastBdFailure()),
+  });
+  return undefined;
+ }
+ if (metadataString(epic, "plan_review")?.toLowerCase() === "off") {
+  logger.warn("orchestrate G5: plan review disabled by epic metadata", { epic: epicId, escape: "plan_review=off" });
+  return undefined;
+ }
+ const currentHash = await planHashOf(epicId);
+ if (currentHash === undefined) {
+  logger.warn("orchestrate G5: plan children could not be read; plan gate failed open", {
+   epic: epicId,
+   cause: bdFailureText(lastBdFailure()),
+  });
+  return undefined;
+ }
+ const comments = await bdCommentsChecked(epicId);
+ if (comments === null) {
+  logger.warn("orchestrate G5: plan-review comments could not be read; plan gate failed open", {
+   epic: epicId,
+   cause: bdFailureText(lastBdFailure()),
+  });
+  return undefined;
+ }
+ const approved = comments.some(comment =>
+  commentVerb(comment.text) === "REVIEW" && /\bverdict=approve\b/i.test(comment.text) && planToken(comment.text) === currentHash,
+ );
+ if (approved) return undefined;
+ return {
+  block: true,
+  reason: `plan review missing for epic '${epicId}': require REVIEW verdict=approve plan=${currentHash} on the epic before an implementer pulls it`,
+ };
+}
+
+ /**
+  * Refuse cross-role named claims and inspect named candidates for scope conflicts.
  */
 export async function gateClaimEligibility(
- claims: ClaimState,
- ctx: ExtensionContext,
- input: Record<string, unknown>,
+	claims: ClaimState,
+	ctx: ExtensionContext,
+	input: Record<string, unknown>,
+	options: { helper?: boolean } = {},
 ): Promise<ToolCallEventResult | undefined> {
  const command = input.command;
  if (typeof command !== "string" || command.length === 0) return undefined;
@@ -1085,6 +1350,9 @@ export async function gateClaimEligibility(
 
  const sessionRoleName = orcRole(ctx);
  const cwd = typeof ctx.cwd === "string" && ctx.cwd.length > 0 ? ctx.cwd : undefined;
+	// A role-less session inside a run is the lead or a sandboxed helper. Only the lead is
+	// governed here: a helper's bd write is G1's refusal, and it must keep that message.
+	const inRun = cwd !== undefined && !(sessionRoleName === undefined && options.helper === true) && (await runScope(ctx)) !== null;
 
  // Write authority first, and across every invocation rather than the claiming ones: a
  // re-point, a re-scope, a governance rewrite or a close rides `bd update`, which carries
@@ -1097,6 +1365,8 @@ export async function gateClaimEligibility(
   }
   const denial = routingWriteDenial(invocation, sessionRoleName) ?? landingWriteDenial(invocation, sessionRoleName);
   if (denial) return denial;
+  const acceptanceAuthority = await acceptanceWriteAuthorityDenial(invocation, sessionRoleName, inRun);
+  if (acceptanceAuthority) return acceptanceAuthority;
   if (sessionRoleName === "architect") {
    const opaque = opaqueScopeDenial(invocation);
    if (opaque) return opaque;
@@ -1105,7 +1375,9 @@ export async function gateClaimEligibility(
   if (governance) return governance;
   const closedParent = await closedParentDenial(invocation, sessionRoleName);
   if (closedParent) return closedParent;
-  const close = await closeDenial(invocation, sessionRoleName);
+  const acceptanceFiling = await acceptanceFilingDenial(invocation, inRun);
+  if (acceptanceFiling) return acceptanceFiling;
+  const close = await closeDenial(invocation, sessionRoleName, inRun);
   if (close) return close;
   if (sessionRoleName === "architect") {
    const location = await locationStampDenial(invocation, claims);
@@ -1198,6 +1470,8 @@ export async function gateClaimEligibility(
      };
     }
    }
+   const planReview = await planReviewDenial(claim, sessionRoleName, inRun);
+   if (planReview) return planReview;
    if (sessionRoleName === GOVERNED_ROLE) {
     const capacity = await capacityRefusal(cwd, own, inFlight);
     if (capacity) return capacity;
