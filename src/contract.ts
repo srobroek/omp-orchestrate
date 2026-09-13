@@ -116,7 +116,7 @@ Exit. Follow your role's evidence and disposition contract, not another role's r
 shape. Git work is proven on origin: an implementer reports head_sha and pushed=<ref>@<sha>
 before yield and the exit gate asks origin for that ref; an architect stamps head_sha with
 the pushed feature head and releases its epic before every yield or park, because an
-isolated architect cannot be revived. A blocked exit deletes the clone like any other:
+isolated architect cannot be revived. Every exit deletes the clone, a blocked one included:
 commits past the base must be pushed and reported, an uncommitted change committed and
 pushed or discarded, before you yield. Origin not answering refuses the exit: retry the
 push and the report, you stay alive until proven. Non-git work needs output_ref. Completion

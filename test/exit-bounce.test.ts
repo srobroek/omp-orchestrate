@@ -30,8 +30,9 @@ let warned: Record<string, unknown>[];
 /** What origin answers for any ref; `undefined` mirrors the bead's own `head_sha`, the pushed case. */
 let remote: origin.OriginHead | undefined;
 let asked: string[];
-/** The clone as git describes it; `undefined` models a clone git cannot read. */
+/** The clone as git describes it; `undefined` mirrors the bead's head with a clean tree. */
 let local: origin.LocalState | undefined;
+let unreadableClone = false;
 let fixture: string;
 let claims = createClaimState();
 let gateExitContract: ReturnType<typeof createExitGuard>;
@@ -67,7 +68,12 @@ const spies = [
   const head = bead?.metadata?.head_sha;
   return typeof head === "string" ? { kind: "at", sha: head } : { kind: "missing" };
  }),
- spyOn(origin, "localState").mockImplementation(async () => local),
+ spyOn(origin, "localState").mockImplementation(async () => {
+  if (unreadableClone) return undefined;
+  if (local !== undefined) return local;
+  const head = bead?.metadata?.head_sha;
+  return { head: typeof head === "string" ? head : BASE, dirty: false };
+ }),
  spyOn(logger, "warn").mockImplementation(((_message: string, data?: Record<string, unknown>) => {
   warned.push(data ?? {});
  }) as typeof logger.warn),
@@ -85,7 +91,8 @@ beforeEach(async () => {
  warned = [];
  remote = undefined;
  asked = [];
- local = { head: BASE, dirty: false };
+ local = undefined;
+ unreadableClone = false;
  bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
  comments = [];
  linked = [];
@@ -207,6 +214,18 @@ describe("G4 checked evidence", () => {
   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", "pushed_sha=abc1234", "--status", "in_progress"]]);
   delete bead.metadata!.head_sha;
   expect((await gateExitContract(CTX))?.block).toBe(true);
+ });
+ test("a completed report with its pushed head on origin is still refused while the tree is dirty", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
+  local = { head: "abc1234abc1234abc1234abc1234abc1234abc12", dirty: true };
+  const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
+  expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["pushed"]);
+  expect(verdict.failed_checks[0]!.detail).toContain("commit and push (`git push origin HEAD:$ORC_PUSH_REF`), or discard them, before yielding");
+  expect(issued).toEqual([]);
+  local = { head: "abc1234abc1234abc1234abc1234abc1234abc12", dirty: false };
+  remote = { kind: "at", sha: "abc1234abc1234abc1234abc1234abc1234abc12" };
+  expect(await gateExitContract(CTX)).toBeUndefined();
  });
  test("a REPORTED without a pushed token is refused before origin is asked", async () => {
   bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
@@ -393,7 +412,8 @@ describe("G4 checked evidence", () => {
    expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${HEAD}`, "--status", "blocked"]]);
   });
   test("a clone git cannot read is judged as work present", async () => {
-   local = undefined;
+   unreadableClone = true;
+
    expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("could not be read");
   });
  });

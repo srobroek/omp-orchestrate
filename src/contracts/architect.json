@@ -20,7 +20,7 @@
     },
     {
       "check": "push_head",
-      "require": "origin.branch == head_sha",
+      "require": "origin.branch == head_sha and clone.work on origin.branch",
       "when": "git",
       "recovery": "push the feature branch (`git push origin <branch>`) and stamp head_sha with the pushed commit, then release the epic (`bd update <epic> --claim --assignee \"\"`); the clone is deleted at yield and origin is the only copy"
     },

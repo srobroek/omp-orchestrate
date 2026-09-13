@@ -585,7 +585,9 @@ export async function proveCloneWork(source: "pushed" | "branch", evidence: Evid
  if (ref === undefined) {
   return { matched: false, detail: `the clone has commits at HEAD ${local.head.slice(0, 7)} that origin does not hold; push them (\`git push origin HEAD:$ORC_PUSH_REF\`) and report pushed=<ref>@${local.head.slice(0, 7)} before yielding` };
  }
- const answer = await originHead(cwd, ref);
+ // Origin was already asked about this ref for the stamped head: one read serves both proofs.
+ const known = evidence.origin;
+ const answer: OriginHead = known?.matched === true && known.ref === ref && known.observed !== undefined ? { kind: "at", sha: known.observed } : await originHead(cwd, ref);
  switch (answer.kind) {
   case "at":
    if (sameCommit(answer.sha, local.head)) return { matched: true, ref, observed: answer.sha, detail: `origin ${ref} is at the clone's HEAD ${answer.sha}` };
@@ -745,7 +747,8 @@ async function gateClaimedExit(
   const asks = asksOrigin(require);
   if (asks !== undefined) evidence.origin = await proveOrigin(asks, evidence, ctx.cwd);
   const clone = asksClone(require);
-  if (clone !== undefined) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
+  // One refusal is enough: the clone is not read once origin has already said no.
+  if (clone !== undefined && evidence.origin?.matched !== false) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
   if (satisfies(require, evidence)) return await recordPushed(bead, claim, evidence);
   escapeFailure = { check: "escape", detail: unsatisfied(require, evidence), recovery: contract.escape.recovery };
  }
@@ -765,7 +768,13 @@ async function gateClaimedExit(
   const asks = asksOrigin(check.require);
   if (asks !== undefined && evidence.origin === undefined) evidence.origin = await proveOrigin(asks, evidence, ctx.cwd);
   const clone = asksClone(check.require);
-  if (clone !== undefined && evidence.cloneWork === undefined) evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
+  // Read once, and only when it can change the verdict: not after origin refused, and not
+  // for a bead with no head, where the delivery check already speaks and no epic read is owed.
+  if (clone !== undefined && evidence.cloneWork === undefined && metadataString(bead, "head_sha") === undefined) {
+   evidence.cloneWork = { matched: true, detail: "no head_sha recorded; the delivery check speaks" };
+  } else if (clone !== undefined && evidence.cloneWork === undefined && evidence.origin?.matched !== false) {
+   evidence.cloneWork = await proveCloneWork(clone, evidence, ctx.cwd, runEpic);
+  }
   if (!satisfies(check.require, evidence)) {
    failures.push({ check: check.check, detail: unsatisfied(check.require, evidence), recovery: check.recovery });
   }

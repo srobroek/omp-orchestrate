@@ -343,6 +343,10 @@ const bdSpies = [
   return { code: 0, stdout: "", stderr: "" };
  }),
  // Origin mirrors whatever head the bead stamps: the delivered control is a pushed one.
+ spyOn(origin, "localState").mockImplementation(async () => {
+  const head = reads.bead?.metadata?.head_sha;
+  return { head: typeof head === "string" ? head : DELIVERED_SHA, dirty: false };
+ }),
  spyOn(origin, "originHead").mockImplementation(async () => {
   const head = reads.bead?.metadata?.head_sha;
   return typeof head === "string" ? { kind: "at", sha: head } : { kind: "missing" };

@@ -10,7 +10,7 @@
     },
     {
       "check": "pushed",
-      "require": "origin.pushed == head_sha",
+      "require": "origin.pushed == head_sha and clone.work on origin.pushed",
       "when": "git",
       "recovery": "commit, run `git push origin HEAD:$ORC_PUSH_REF`, then write REPORTED with head_sha=<sha> and pushed=$ORC_PUSH_REF@<sha>; the clone is deleted at yield and origin is the only copy of your work"
     },
