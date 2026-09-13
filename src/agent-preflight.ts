@@ -35,10 +35,30 @@ export const PLUGIN_AGENTS_BY_PACKAGE: Readonly<Record<string, readonly string[]
  "@srobroek/quality": ["adversarial-challenger", "docs-guard", "lint-guard"],
 };
 
+/**
+ * Model roles this plugin's agents name that OMP does NOT ship.
+ *
+ * OMP's built-ins are exactly `default`, `smol`, `slow`, `vision`, `plan`, `designer`,
+ * `commit`, `tiny`, `task` and `advisor` (`config/model-roles.ts`). Anything else is a
+ * consumer prerequisite: `resolveExplicitModelRole` returns undefined for an unconfigured
+ * alias without warning, and OMP's spawn resolution passes the alias through as a literal
+ * model pattern (`model-resolver.ts`, `resolveConfiguredRolePattern`), so the child starts
+ * with no model and exits with "No model selected". There is no session-model fallback;
+ * the run must announce the missing role instead, and the spawn gate refuses the agent.
+ *
+ * `reviewer` gives the independent review agent its own model selection. Model-family
+ * separation is optional and requires an explicit model choice.
+ *
+ * `test/declared-surface.json` carries the same list and the suite asserts they agree.
+ */
+export const DECLARED_MODEL_ROLES: readonly string[] = ["reviewer"];
+
 export interface AgentDiscoveryFinding {
  agent: string;
  message: string;
  path?: string;
+ /** The `@alias` the live model registry could not resolve, when that is the finding. */
+ unresolvedAlias?: string;
 }
 
 function selectorSpecs(value: unknown): string[] | undefined {
@@ -82,6 +102,25 @@ export function coreContractForRole(role: string): CoreAgentContract | undefined
  return contract?.role === role ? contract : undefined;
 }
 
+/** The core agents whose contract alias is `@<role>`, in contract order. */
+export function coreAgentsForRole(role: string): string[] {
+ return Object.entries(CORE_AGENT_CONTRACTS)
+  .filter(([, contract]) => contract.modelAlias === `@${role}`)
+  .map(([name]) => name);
+}
+
+/**
+ * What an unresolved `@<role>` costs and where to repair it, worded once for the doctor's
+ * role row and the settings preflight. A declared role is set in the operator's own
+ * config, never in the shipped overlay: the overlay layers above that config and would
+ * override the choice.
+ */
+export function roleRepair(role: string, agents: readonly string[]): string {
+ const consequence = `${agents.join(", ")} cannot be spawned${role === "reviewer" ? " and every feature needs a review" : ""}`;
+ const where = DECLARED_MODEL_ROLES.includes(role) ? "to any model in your config; the overlay never sets it" : "in the overlay or your config";
+ return `${consequence}; set modelRoles.${role} ${where}`;
+}
+
 function validateCoreSelector(
  name: string,
  path: string | undefined,
@@ -108,7 +147,7 @@ function validateCoreSelector(
  for (const spec of specs) {
   const alias = modelAlias(spec);
   if (alias !== undefined && resolveModel !== undefined && resolveModel(spec) === undefined) {
-   findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path });
+   findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path, unresolvedAlias: alias });
   }
  }
 }
@@ -129,7 +168,17 @@ export function requestedAgentNames(input: unknown): string[] {
  return [...new Set(names)];
 }
 
-/** Validate the definitions that this run depends on without changing spawn policy. */
+/**
+ * Validate the definitions that this run depends on without changing spawn policy.
+ *
+ * A core agent's effective selector is its `task.agentModelOverrides` entry when one is
+ * set, else its frontmatter `model`; OMP's spawn resolution ranks them the same way.
+ * OMP loads every plugin-root agent with the frontmatter model dropped
+ * (`task/discovery.ts`, `ignoreModel`), so after a marketplace install the override is
+ * the only binding, and a core agent with neither is reported as such, naming the key.
+ * When both are present both must satisfy the contract: a stale frontmatter alias would
+ * otherwise bind a `omp plugin link` checkout to the wrong role unnoticed.
+ */
 export function agentDiscoveryFindings(
  agents: readonly AgentDefinition[],
  requested: readonly string[],
@@ -163,8 +212,15 @@ export function agentDiscoveryFindings(
 
   const hasOverride = Object.hasOwn(modelOverrides, name);
   if (contract !== undefined) {
-   validateCoreSelector(name, agent.filePath, agent.model, contract, findings, resolveModel);
    if (hasOverride) validateCoreSelector(name, agent.filePath, modelOverrides[name], contract, findings, resolveModel);
+   if (agent.model !== undefined) validateCoreSelector(name, agent.filePath, agent.model, contract, findings, resolveModel);
+   if (!hasOverride && agent.model === undefined) {
+    findings.push({
+     agent: name,
+     message: `effective model selector is missing: OMP ignores plugin-root agent model frontmatter; set task.agentModelOverrides[${JSON.stringify(name)}] (the shipped overlay does)`,
+     path: agent.filePath,
+    });
+   }
    continue;
   }
 
@@ -178,7 +234,7 @@ export function agentDiscoveryFindings(
   for (const spec of specs) {
    const alias = modelAlias(spec);
    if (alias !== undefined && resolveModel !== undefined && resolveModel(spec) === undefined) {
-    findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path: agent.filePath });
+    findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path: agent.filePath, unresolvedAlias: alias });
    }
   }
  }
@@ -195,4 +251,10 @@ export async function discoverAgentFindings(
  const resolveModel =
   typeof ctx.models?.resolve === "function" ? (spec: string) => ctx.models!.resolve(spec) : undefined;
  return agentDiscoveryFindings(agents, requested, resolveModel, modelOverrides);
+}
+
+/** The `task.agentModelOverrides` record from observed settings; anything else reads as no overrides. */
+export function agentModelOverrides(settings: Readonly<Record<string, unknown>> | null): Readonly<Record<string, unknown>> {
+ const raw = settings?.["task.agentModelOverrides"];
+ return raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 }

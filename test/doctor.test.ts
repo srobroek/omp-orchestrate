@@ -7,8 +7,9 @@ import { zod } from "@oh-my-pi/pi-coding-agent";
 import * as hostSettings from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as agentPreflight from "../src/agent-preflight";
-import { PLUGIN_AGENTS_BY_PACKAGE } from "../src/agent-preflight";
+import { agentDiscoveryFindings, agentModelOverrides, CORE_AGENT_CONTRACTS, PLUGIN_AGENTS_BY_PACKAGE } from "../src/agent-preflight";
 import * as beadsMode from "../src/beads-mode";
 import * as storeProbe from "../src/store-probe";
 import type { Exec, ExecResult } from "../src/tools/bot-review-probe";
@@ -141,6 +142,18 @@ describe("the shipped overlay", () => {
 		expect(settingsDeviations(observed!)).toEqual([]);
 	});
 
+	test("its agent model overrides carry every core agent through the preflight with the frontmatter model dropped", async () => {
+		stubbed = await Settings.loadReadOnly({ cwd, agentDir: join(cwd, "agent"), configFiles: [OVERLAY_FILE] });
+		const overrides = agentModelOverrides(readSettings());
+		// What OMP's loader hands the preflight for a marketplace-installed plugin root.
+		const agents = Object.entries(CORE_AGENT_CONTRACTS).map(([name, contract]) => {
+			const agent = parseAgent(`/p/${name}.md`, `---\nname: ${name}\ndescription: core\n---\nORC-ROLE: ${contract.role}\n`, "user");
+			agent.model = undefined;
+			return agent;
+		});
+		expect(agentDiscoveryFindings(agents, [], () => ({ id: "m" }), overrides)).toEqual([]);
+	});
+
 	test("without the overlay the same reader deviates on every required setting", async () => {
 		stubbed = await Settings.loadReadOnly({ cwd, agentDir: join(cwd, "agent") });
 		expect(settingsDeviations(readSettings()!).map(item => item.key)).toEqual([
@@ -215,36 +228,37 @@ describe("runDoctor", () => {
 		expect(report.ok).toBe(false);
 	});
 
-	test("one row per model role: reviewer warns when unset, plan/task/smol fail; unreadable settings warn rather than fail", async () => {
+	test("one row per model role: each of plan/task/smol/reviewer fails when unset, with its own repair; unreadable settings still fail the rows", async () => {
 		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: { plan: "p/plan", task: "p/task", smol: "p/smol" } });
 		const reviewerless = await doctor();
 		expect(reviewerless.checks.filter(check => check.name.startsWith("modelRoles.")).map(check => check.name)).toEqual(["modelRoles.plan", "modelRoles.task", "modelRoles.smol", "modelRoles.reviewer"]);
-		expectRow(reviewerless, "modelRoles.reviewer", "warn", "orc-reviewer falls back to the session model");
+		expectRow(reviewerless, "modelRoles.reviewer", "fail", "orc-reviewer cannot be spawned and every feature needs a review; set modelRoles.reviewer to any model in your config; the overlay never sets it");
 		expect(row(reviewerless, "core agents").status).toBe("pass");
-		expect(reviewerless.ok).toBe(true);
+		expect(reviewerless.ok).toBe(false);
 
 		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: { reviewer: "x/y" } });
 		const planless = await doctor();
-		expectRow(planless, "modelRoles.plan", "fail", "orc-architect cannot be spawned");
+		expectRow(planless, "modelRoles.plan", "fail", "orc-architect cannot be spawned; set modelRoles.plan in the overlay or your config");
 		expectRow(planless, "modelRoles.task", "fail", "orc-implementer, orc-shepherd cannot be spawned");
 		expectRow(planless, "modelRoles.smol", "fail", "orc-researcher cannot be spawned");
+		expect(row(planless, "modelRoles.reviewer").status).toBe("pass");
 		expect(planless.ok).toBe(false);
 
 		stubbed = undefined;
 		const unread = await doctor();
 		expectRow(unread, "settings", "warn", "could not be read");
-		expectRow(unread, "modelRoles.reviewer", "warn", "no model registry is live");
+		expectRow(unread, "modelRoles.reviewer", "fail", "no model registry is live");
 		expect(unread.ok).toBe(false);
 	});
 
 	test("with a live model registry, resolution decides each role row and the core agents row ignores the alias", async () => {
 		const resolve = (spec: string) => (spec === "@reviewer" ? undefined : { id: `model-for-${spec.slice(1)}` });
-		discoverSpy.mockImplementation(async () => [{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md" }]);
+		discoverSpy.mockImplementation(async () => [{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md", unresolvedAlias: "@reviewer" }]);
 		const report = await runDoctor({ cwd, models: { resolve } as never }, transcript(healthy()).exec);
 		expectRow(report, "modelRoles.plan", "pass", "@plan resolves to model-for-plan");
-		expectRow(report, "modelRoles.reviewer", "warn", "@reviewer does not resolve");
+		expectRow(report, "modelRoles.reviewer", "fail", "@reviewer does not resolve; orc-reviewer cannot be spawned and every feature needs a review");
 		expect(row(report, "core agents").status).toBe("pass");
-		expect(report.ok).toBe(true);
+		expect(report.ok).toBe(false);
 	});
 
 	test("a borrowed helper missing warns its package alone; a core agent finding fails", async () => {
@@ -263,9 +277,12 @@ describe("runDoctor", () => {
 		expect(core.detail).toBe("orc-reviewer: resolved override declares ORC-ROLE missing; expected reviewer (/p/orc-reviewer.md)");
 	});
 
-	test("the doctor asks discovery for exactly the borrowed names", async () => {
+	test("the doctor asks discovery for exactly the borrowed names and the effective agent model overrides", async () => {
+		const overrides = { "orc-architect": "@plan" };
+		stubbed = Settings.isolated({ ...COMPLIANT, "task.agentModelOverrides": overrides });
 		await doctor();
 		expect(discoverSpy.mock.calls.at(-1)?.[1]).toEqual(Object.values(PLUGIN_AGENTS_BY_PACKAGE).flat());
+		expect(discoverSpy.mock.calls.at(-1)?.[2]).toEqual(overrides);
 	});
 
 	test.each([

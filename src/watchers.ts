@@ -31,10 +31,14 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { findScopedSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
- coreContractForAgent,
  type AgentDiscoveryFinding,
+ agentModelOverrides,
+ coreAgentsForRole,
+ coreContractForAgent,
+ DECLARED_MODEL_ROLES,
  discoverAgentFindings,
  requestedAgentNames,
+ roleRepair,
 } from "./agent-preflight";
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
@@ -64,21 +68,6 @@ const LSP_STARTUP_CHANNEL = "lsp:startup";
 const GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
 const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
-
-/**
- * Model roles this plugin's agents name that OMP does NOT ship.
- *
- * OMP's built-ins are exactly `default`, `smol`, `slow`, `vision`, `plan`, `designer`,
- * `commit`, `tiny`, `task` and `advisor` (`config/model-roles.ts`). Anything else is a
- * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
- * unconfigured alias without warning -- so the run must announce it instead.
- *
- * `reviewer` gives the independent review agent its own configurable model selection.
- * Model-family separation is optional and requires an explicit model choice.
- *
- * `test/declared-surface.json` carries the same list and the suite asserts they agree.
- */
-export const DECLARED_MODEL_ROLES: readonly string[] = ["reviewer"];
 
 /**
  * Run id written before the run epic exists (`run-state.ts:37`). A marker still
@@ -602,12 +591,7 @@ export async function preflightAgents(
  reportedAgentFindings?: Set<string>,
 ): Promise<AgentDiscoveryFinding[]> {
  if (ctx.models === undefined) return [];
- const settings = readSettings() ?? {};
- const rawOverrides = settings["task.agentModelOverrides"];
- const modelOverrides =
-  rawOverrides !== null && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)
-   ? (rawOverrides as Record<string, unknown>)
-   : {};
+ const modelOverrides = agentModelOverrides(readSettings());
  let rejectTimeout: (reason: Error) => void = () => { };
  const timeout = new Promise<AgentDiscoveryFinding[]>((_, reject) => {
   rejectTimeout = reason => reject(reason);
@@ -977,9 +961,11 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
    lines.push(`${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
   }
 
-  // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
-  // may fall back to the session model or fail selection. Preflight checks that the
-  // selection exists, not whether author and reviewer use different model families.
+  // `@reviewer` is a role OMP does not ship, so `modelRoles.reviewer` is a run
+  // prerequisite like the built-in roles the other agents name: unset, OMP starts the
+  // child with no model and the spawn gate refuses it. This is the one role whose
+  // absence can be proven from the settings alone; the built-ins have defaults and are
+  // resolved by the agent preflight against the live registry instead.
   //
   // An UNREADABLE setting is skipped, matching this function's rule of warning only
   // about what it can prove. An empty object is not unreadable: it proves the role is
@@ -988,9 +974,7 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   if (typeof roles === "object" && roles !== null) {
    for (const role of DECLARED_MODEL_ROLES) {
     if (Object.hasOwn(roles, role)) continue;
-    lines.push(
-     `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
-    );
+    lines.push(`modelRoles.${role} is not configured, so @${role} does not resolve; ${roleRepair(role, coreAgentsForRole(role))}`);
    }
   }
  }
@@ -1145,7 +1129,9 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
 
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning
-  * dedupe never weakens the refusal: a known bad core request blocks every spawn.
+  * dedupe never weakens the refusal: a known bad core request blocks every spawn,
+  * an unresolved model alias included, since OMP would start that child with no
+  * model and fail it with "No model selected" rather than fall back.
   * Both wait for a run scope: spawning an `orc-*` agent outside a run gets no refusal
   * and costs no `omp config list`.
   */

@@ -173,7 +173,8 @@ one sized past the cap simply idles against it.
 
 The six required effective settings ship in the plugin's `config/orchestrate.overlay.yml`;
 the operator starts the lead session with `omp --config <plugin-root>/config/orchestrate.overlay.yml`.
-`modelRoles.reviewer` is optional and only warns when unset (`roles.md`).
+`modelRoles.reviewer` is required and lives in the operator's own config, never in the
+overlay; unset, the doctor fails its row and the spawn gate refuses `orc-reviewer` (`roles.md`).
 Before the first wave, preflight compares the effective values against it and reports a
 deviation as `WARN settings`. Preflight never rewrites config.
 

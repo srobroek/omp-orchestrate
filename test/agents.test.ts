@@ -11,6 +11,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
 import {
  CORE_AGENT_CONTRACTS,
+ DECLARED_MODEL_ROLES,
  agentDiscoveryFindings,
  coreContractForAgent,
  discoverAgentFindings,
@@ -195,10 +196,11 @@ describe("agent definitions", () => {
   expect(unresolved).toEqual([]);
  });
 
- test("every declared model role is named by an agent and is not already built in", () => {
+ test("every declared model role is named by an agent, is not already built in, and matches the preflight's list", () => {
   const named = new Set([...parsed.values()].map(roleOf));
   expect(declaredModelRoles.filter(role => !named.has(role))).toEqual([]);
   expect(declaredModelRoles.filter(role => (MODEL_ROLE_IDS as string[]).includes(role))).toEqual([]);
+  expect([...DECLARED_MODEL_ROLES].sort()).toEqual([...declaredModelRoles].sort());
  });
 
  /**
@@ -281,6 +283,18 @@ describe("runtime discovery preflight", () => {
    `---\nname: ${name}\ndescription: test agent\nmodel: "${model}"\n---\nORC-ROLE: ${role}\n`,
    "project",
   );
+
+ /** What OMP's loader hands back for a plugin-root agent: the frontmatter model dropped. */
+ const marketplaceDefinition = (name: string, role: string): AgentDefinition => {
+  const agent = definition(name, role);
+  agent.model = undefined;
+  return agent;
+ };
+ const marketplaceAgents = () => KNOWN_ROLES.map(role => marketplaceDefinition(`orc-${role}`, role));
+ const shippedOverrides = Object.fromEntries(
+  Object.entries(CORE_AGENT_CONTRACTS).map(([name, contract]) => [name, contract.modelAlias]),
+ );
+ const resolveAll = () => ({ provider: "test", id: "model" });
 
  test("reports missing requested agents and role overrides with source paths", () => {
   const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
@@ -386,18 +400,42 @@ describe("runtime discovery preflight", () => {
   );
  });
 
- test("rejects a core definition with no model selector", () => {
+ test("marketplace-loaded core agents pass on the overrides alone", () => {
+  expect(agentDiscoveryFindings(marketplaceAgents(), [], resolveAll, shippedOverrides)).toEqual([]);
+ });
+
+ test("a core agent with neither frontmatter model nor override gets one finding naming the overlay key", () => {
   const agents = KNOWN_ROLES.map(role => definition(`orc-${role}`, role));
-  const index = agents.findIndex(agent => agent.name === "orc-reviewer");
-  agents[index] = parseAgent(
-   "/tmp/orc-reviewer-missing-model.md",
-   "---\nname: orc-reviewer\ndescription: missing model\n---\nORC-ROLE: reviewer\n",
-   "project",
-  );
-  const findings = agentDiscoveryFindings(agents, [], () => ({ provider: "test", id: "model" }));
-  expect(findings).toContainEqual(
-   expect.objectContaining({ agent: "orc-reviewer", message: "effective model selector is missing or malformed" }),
-  );
+  agents[agents.findIndex(agent => agent.name === "orc-reviewer")] = marketplaceDefinition("orc-reviewer", "reviewer");
+  const findings = agentDiscoveryFindings(agents, [], resolveAll, {});
+  expect(findings).toEqual([
+   {
+    agent: "orc-reviewer",
+    message: 'effective model selector is missing: OMP ignores plugin-root agent model frontmatter; set task.agentModelOverrides["orc-reviewer"] (the shipped overlay does)',
+    path: "/tmp/orc-reviewer.md",
+   },
+  ]);
+ });
+
+ test("a wrong-alias override on a marketplace-loaded core agent is the alias finding, not the missing one", () => {
+  const findings = agentDiscoveryFindings(marketplaceAgents(), [], resolveAll, { ...shippedOverrides, "orc-architect": "@task" });
+  expect(findings).toEqual([
+   expect.objectContaining({ agent: "orc-architect", message: 'effective model must use @plan; received "@task"' }),
+  ]);
+ });
+
+ test.each([
+  ["a core agent", "orc-reviewer", "@reviewer"],
+  ["a helper", "pr-reviewer", "@reviewer"],
+ ])("an unresolved alias on %s is reported with the alias as data, which the doctor's core-agents row keys on", (_label, agent, alias) => {
+  const agents = [...KNOWN_ROLES.map(role => definition(`orc-${role}`, role)), definition("pr-reviewer", "helper", "@reviewer")];
+  const findings = agentDiscoveryFindings(agents, ["pr-reviewer"], spec => (spec === alias ? undefined : {}));
+  expect(findings.find(item => item.agent === agent)).toEqual({
+   agent,
+   message: `model alias "${alias}" does not resolve`,
+   path: `/tmp/${agent}.md`,
+   unresolvedAlias: alias,
+  });
  });
 
  test("keeps helper alias resolution checks and prototype-key inputs harmless", () => {

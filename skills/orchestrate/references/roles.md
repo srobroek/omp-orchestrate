@@ -4,10 +4,11 @@ Five agents ship: `orc-architect`, `orc-implementer`, `orc-reviewer`, `orc-resea
 `orc-shepherd`. Each names one OMP model role. Tune model selection through `modelRoles`,
 not raw provider selectors in agent files. Each role inherits its configured thinking level.
 
-`orc-reviewer` names `@reviewer`, which OMP does not ship. `modelRoles.reviewer` is the
-one optional setting: unset, the doctor and the preflight warn once and the reviewer falls
-back to the session model. The verdict still comes from a separate agent; model-family
-separation requires an explicit model choice.
+`orc-reviewer` names `@reviewer`, which OMP does not ship, so `modelRoles.reviewer` is a
+run prerequisite like the other three roles: the operator sets it to any model in their own
+config, never in the overlay. Unset, OMP starts the reviewer with no model and fails it; the
+doctor fails the `modelRoles.reviewer` row and the spawn gate refuses the agent. The verdict
+comes from a separate agent; model-family separation requires an explicit model choice.
 
 Escalation is per-spawn `effort`, not a second agent. There is no deep variant of any role.
 

@@ -62,10 +62,13 @@ After installing, restart the session. OMP loads a new extension module at start
 `/reload-plugins` does not find it. Claude Code reads the same catalog from
 `.claude-plugin/marketplace.json`. Upgrade between runs, never during one.
 
+`omp plugin link <checkout>` attaches a development checkout instead of a marketplace
+install. Use it to work on the plugin. Run the plugin from a marketplace install.
+
 ## Configure
 
-The plugin ships its six required OMP settings as one overlay,
-`config/orchestrate.overlay.yml`. Start the lead session with it:
+The plugin ships its six required OMP settings and the model binding for each core agent as
+one overlay, `config/orchestrate.overlay.yml`. Start the lead session with it:
 
 ```sh
 omp --config <plugin-root>/config/orchestrate.overlay.yml
@@ -87,19 +90,21 @@ error.
 | `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
 
 The five agents select their models through four `modelRoles` entries and inherit each
-role's thinking level. OMP ships the names `plan`, `task` and `smol` without a default
-model, so each one must resolve in your configuration before a run starts; `reviewer` is
-optional. `/orchestrate-doctor` prints one row per role:
+role's thinking level. Before a run starts, all four must resolve in your configuration.
+OMP ships the names `plan`, `task` and `smol` without a default model, and does not ship
+`reviewer` at all. An unresolved role does not fall back to the session model: OMP starts
+the agent with no model and fails it. `/orchestrate-doctor` prints one row per role:
 
 | Role | Agents | Unresolved |
 | --- | --- | --- |
 | `modelRoles.plan` | `orc-architect` | `fail`: the architect cannot be spawned |
 | `modelRoles.task` | `orc-implementer`, `orc-shepherd` | `fail`: neither agent can be spawned |
 | `modelRoles.smol` | `orc-researcher` | `fail`: the researcher cannot be spawned |
-| `modelRoles.reviewer` | `orc-reviewer` | `warn`: the reviewer falls back to the session model, and the preflight writes one `WARN` |
+| `modelRoles.reviewer` | `orc-reviewer` | `fail`: OMP cannot start the reviewer, and every feature needs a review |
 
-The overlay carries `modelRoles.reviewer` as a commented line; uncomment it and name the
-model you want independent review to use.
+Set `modelRoles.reviewer` to any model in your global or project `config.yml`. The overlay
+never sets it: an overlay layers above your config and would override your choice. A
+different model family from the implementer's is optional.
 
 | Agent | Model role | Edits code |
 | --- | --- | --- |
@@ -108,6 +113,12 @@ model you want independent review to use.
 | `orc-shepherd` | `@task` | no |
 | `orc-reviewer` | `@reviewer` | no |
 | `orc-researcher` | `@smol` | no |
+
+The overlay binds each agent to its role through `task.agentModelOverrides`. OMP loads a
+marketplace-installed plugin's agents without their `model` frontmatter, so without these
+entries `/orchestrate-doctor` fails the `core agents` row and the spawn gate refuses every
+core agent. A checkout attached with `omp plugin link` keeps the frontmatter, so it passes
+without them.
 
 The settings preflight compares the effective values at start and before each wave. It
 reports a deviation as a `WARN settings` message in the lead transcript and as a comment
