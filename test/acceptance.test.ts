@@ -10,9 +10,12 @@ describe("acceptance evidence", () => {
 		expect(acceptanceItems("1. one\n2) two\n3: three")).toEqual([1, 2, 3]);
 		expect(acceptanceItems("ship it")).toEqual([1]);
 	});
-	test("malformed coverage tokens invalidate the whole token", () => {
+	test("malformed coverage tokens invalidate the whole token, a duplicated entry included", () => {
 		expect(nodesToken("nodes=a:0123456789ab:met,bad")).toBeUndefined();
 		expect(dodToken("dod=0123456789ab:1:met,bad")).toBeUndefined();
+		// Named twice with two dispositions, the token could be read either way; it covers nothing.
+		expect(nodesToken("nodes=a:0123456789ab:met,a:0123456789ab:unmet")).toBeUndefined();
+		expect(dodToken("dod=0123456789ab:2:unmet,0123456789ab:2:met")).toBeUndefined();
 	});
 	test("itemsCovered rejects stale, missing, and unmet entries", () => {
 		const text = "1. one\n2. two";

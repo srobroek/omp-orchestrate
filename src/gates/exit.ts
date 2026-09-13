@@ -437,10 +437,10 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
 		}) === true;
 	}
 	if (trimmed === "linked.REVIEW covers plan") {
-		return evidence.planHash !== undefined && evidence.linkedReviewComments?.some(comment => planToken(comment) === evidence.planHash) === true;
+		return evidence.planHash !== undefined && evidence.linkedReviewComments?.some(comment => tokenValue(comment, "dimension") === "plan" && planToken(comment) === evidence.planHash) === true;
 	}
 	if (trimmed === "linked.REVIEW covers override") {
-		return evidence.linkedAcceptanceHash !== undefined && evidence.linkedReviewComments?.some(comment => overrideToken(comment) === evidence.linkedAcceptanceHash) === true;
+		return evidence.linkedAcceptanceHash !== undefined && evidence.linkedReviewComments?.some(comment => tokenValue(comment, "dimension") === "override" && overrideToken(comment) === evidence.linkedAcceptanceHash) === true;
 	}
 	if (trimmed === "linked.REVIEW covers integrated") {
 		if (evidence.integratedIds === undefined || evidence.integratedHashes === undefined) return false;

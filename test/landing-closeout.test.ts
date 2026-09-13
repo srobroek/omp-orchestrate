@@ -156,7 +156,7 @@ function execTranscript(): { exec: Exec; calls: string[][] } {
 			expect(argv).toEqual(["git", "fetch", "--quiet", "git@github.com:o/r.git", `+refs/pull/${pr().number}/head:refs/orc/pr/${pr().number}`, expect.stringMatching(/^\+refs\/heads\/omp\/task\/.+:refs\/orc\/task\/.+$/)]);
 			return out("");
 		}
-		if (argv[0] === "git" && argv[1] === "cat-file") return out("");
+		if (argv[0] === "git" && argv[1] === "rev-parse") return out(`${H}\n`);
 		if (argv[0] === "git" && argv[1] === "cherry") {
 			expect(argv.slice(2)).toEqual([H, PUSHED]);
 			return out(`- ${PUSHED}\n`);

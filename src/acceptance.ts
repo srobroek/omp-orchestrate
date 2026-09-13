@@ -119,6 +119,8 @@ export function nodesToken(text: string): NodeCoverage[] | undefined {
 		const [id, hash, verdict] = parts as [string, string, string];
 		const status = disposition(verdict);
 		if (id.length === 0 || !HASH_RE.test(hash) || status === undefined) return undefined;
+		// A node named twice is a token that could be read two ways; nothing is covered.
+		if (entries.some(entry => entry.id === id)) return undefined;
 		entries.push({ id, hash, disposition: status });
 	}
 	return entries;
@@ -142,6 +144,7 @@ export function dodToken(text: string): ItemCoverage[] | undefined {
 		const [hash, item, verdict] = parts as [string, string, string];
 		const status = disposition(verdict);
 		if (!HASH_RE.test(hash) || !/^\d+$/.test(item) || status === undefined) return undefined;
+		if (entries.some(entry => entry.item === Number(item))) return undefined;
 		entries.push({ hash, item: Number(item), disposition: status });
 	}
 	return entries;

@@ -16,10 +16,12 @@ describe("exit coverage predicates", () => {
 		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW verdict=approve nodes=node-a:${nodeHash}:met,node-b:0123456789ab:unmet`] })).toBe(false);
 		expect(satisfies("linked.REVIEW covers integrated", { ...base, linkedReviewComments: [`REVIEW verdict=changes nodes=node-a:${nodeHash}:met,node-b:0123456789ab:unmet`] })).toBe(true);
 	});
-	test("plan approval is version-bound and override uses live hash", () => {
-		expect(satisfies("linked.REVIEW covers plan", ev({ planHash: "0123456789ab", linkedReviewComments: ["REVIEW verdict=approve plan=0123456789ab"] }))).toBe(true);
-		expect(satisfies("linked.REVIEW covers plan", ev({ planHash: "0123456789ab", linkedReviewComments: ["REVIEW verdict=approve plan=abcdef012345"] }))).toBe(false);
-		expect(satisfies("linked.REVIEW covers override", ev({ linkedAcceptanceHash: nodeHash, linkedReviewComments: [`REVIEW verdict=approve override=${nodeHash}`] }))).toBe(true);
+	test("plan and override approvals are version-bound and must come from their own review dimension", () => {
+		expect(satisfies("linked.REVIEW covers plan", ev({ planHash: "0123456789ab", linkedReviewComments: ["REVIEW dimension=plan verdict=approve plan=0123456789ab"] }))).toBe(true);
+		expect(satisfies("linked.REVIEW covers plan", ev({ planHash: "0123456789ab", linkedReviewComments: ["REVIEW dimension=plan verdict=approve plan=abcdef012345"] }))).toBe(false);
+		expect(satisfies("linked.REVIEW covers plan", ev({ planHash: "0123456789ab", linkedReviewComments: ["REVIEW dimension=code verdict=approve plan=0123456789ab"] }))).toBe(false);
+		expect(satisfies("linked.REVIEW covers override", ev({ linkedAcceptanceHash: nodeHash, linkedReviewComments: [`REVIEW dimension=override verdict=approve override=${nodeHash}`] }))).toBe(true);
+		expect(satisfies("linked.REVIEW covers override", ev({ linkedAcceptanceHash: nodeHash, linkedReviewComments: [`REVIEW verdict=approve override=${nodeHash}`] }))).toBe(false);
 	});
 	test("REPORTED without DOD is refused with live hash and items available to recovery", () => {
 		const evidence = ev({ bead: { id: "node", acceptance_criteria: "1. ship\n2. test" }, beadComments: ["REPORTED node src/a.ts"] });

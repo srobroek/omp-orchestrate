@@ -759,8 +759,10 @@ async function contained(io: Io, landing: LandingClone, pushed: string, head: st
 		`+refs/heads/omp/task/${node}:refs/orc/task/${node}`,
 	], landing.clone, GIT_FETCH_TIMEOUT_MS);
 	if (fetched?.code !== 0) return false;
-	const present = await git(io, ["cat-file", "-e", `${head}^{commit}`], landing.clone);
-	if (present?.code !== 0) return false;
+	// The fetched PR head must be the reviewed head itself: a shared clone may already hold
+	// an older reviewed sha, and a force-pushed PR would otherwise be judged at the wrong head.
+	const fetchedHead = await git(io, ["rev-parse", "--verify", `refs/orc/pr/${pr}^{commit}`], landing.clone);
+	if (fetchedHead?.code !== 0 || fetchedHead.stdout.trim().toLowerCase() !== head.toLowerCase()) return false;
 	const cherry = await git(io, ["cherry", head, pushed], landing.clone);
 	if (cherry?.code !== 0) return false;
 	return cherry.stdout.split("\n").every(line => !line.startsWith("+"));
