@@ -577,8 +577,8 @@ export async function bdComments(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Pr
  return (await bdCommentsChecked(id, timeoutMs)) ?? [];
 }
 
-export async function bdCommentsChecked(id: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BdComment[] | null> {
- const payload = await readJson(["comments", id, "--json"], timeoutMs, undefined, generationFor(undefined));
+export async function bdCommentsChecked(id: string, timeoutMs = DEFAULT_TIMEOUT_MS, cwd?: string): Promise<BdComment[] | null> {
+ const payload = await readJson(["comments", id, "--json"], timeoutMs, cwd, generationFor(cwd));
  if (payload === undefined) return null;
  if (!Array.isArray(payload)) return fail("missing", null);
  const comments: BdComment[] = [];

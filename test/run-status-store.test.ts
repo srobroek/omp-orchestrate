@@ -6,6 +6,9 @@
  * review -- status kept listing the bead as `lease lapsed: <bead> held by nobody` once
  * its stale `lease_until` passed. The unit suite stands in for `bd`, so the shapes a
  * release leaves on a real bead are checked here.
+ *
+ * wsy: the epic's comments were read without the run's cwd, so a report requested from
+ * any other directory (the test process here) said the comments could not be read.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -83,5 +86,15 @@ describe.skipIf(!BD_AVAILABLE)("runStatusReport on a store bd built", () => {
 			expect.stringMatching(new RegExp(`^- lease lapsed: ${held.replaceAll(".", "\\.")} held by ${HELD_BY}, lease lapsed at 20\\d\\d-`)),
 		]);
 		expect(report.lines.filter(line => line.includes(released))).toEqual([]);
+	}, 30_000);
+
+	test("the epic's WARN reaches attention when the report runs from another directory", async () => {
+		await bd(LEAD, ["comment", epic, "WARN landing capabilities not recorded"]);
+		expect(process.cwd()).not.toBe(repo);
+
+		const report = await runStatusReport(repo, Date.now());
+
+		expect(report.lines).toContain("- WARN landing capabilities not recorded");
+		expect(report.lines).not.toContain(`- comments on ${epic} could not be read`);
 	}, 30_000);
 });
