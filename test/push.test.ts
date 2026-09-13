@@ -146,8 +146,7 @@ describe("G7 refuses a HEAD-dependent push once the line has moved the shell", (
 		expect((await gatePush(seat(task, { role: "implementer" }), { command: "cd /x && git push origin HEAD:main" }))?.reason).toContain("main");
 	});
 
-	test("the lead, and a checkout no run has marked, are not held to it", async () => {
-		expect(await gatePush(seat(primary, { session: LEAD }), { command: `cd ${primary} && git push` })).toBeUndefined();
+	test("a checkout no run has marked is not held to it", async () => {
 		expect(await gatePush(seat(unmarked, { role: "implementer" }), { command: "cd /x && git push" })).toBeUndefined();
 	});
 });
@@ -198,18 +197,68 @@ describe("G7 leaves a worker's own branches and every read alone", () => {
 	});
 });
 
-describe("G7 exempts the lead and sleeps outside a run", () => {
+describe("G7 resolves $ORC_PUSH_REF from the call's env and refuses every other shell-filled destination", () => {
+	const CAPTURE = "omp/task/worker-session";
+
 	test.each([
-		["a push to main", "git push origin HEAD:main"],
-		["a force push", "git push --force origin main"],
-		["a Worktrunk checkout", "wt switch --create fix/x --base origin/main --no-cd"],
-	])("the lead's %s passes", async (_label, command) => {
-		expect(await gatePush(seat(primary, { session: LEAD }), { command })).toBeUndefined();
+		["the plain spelling", "git push origin HEAD:$ORC_PUSH_REF"],
+		["the braced spelling", "git push origin HEAD:${ORC_PUSH_REF}"],
+		["with the upstream flag", "git push -u origin HEAD:$ORC_PUSH_REF"],
+		["after a commit in the same line", "git commit -am wip && git push origin HEAD:$ORC_PUSH_REF"],
+	])("allows a push to the capture ref, %s", async (_label, command) => {
+		expect(await gatePush(seat(task, { role: "implementer" }), { command, env: { ORC_PUSH_REF: CAPTURE } })).toBeUndefined();
+	});
+
+	test("the value judged is the env's: an ORC_PUSH_REF naming the primary is a push to the primary", async () => {
+		const result = await gatePush(seat(task, { role: "implementer" }), { command: "git push origin HEAD:$ORC_PUSH_REF", env: { ORC_PUSH_REF: "main" } });
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("pushing to main is refused inside a run");
+	});
+
+	test("an inline assignment in the command text is not read: only the env resolves the variable", async () => {
+		// G6 refuses the assignment itself; here it proves G7 never consults the text.
+		const result = await gatePush(seat(task, { role: "implementer" }), { command: "ORC_PUSH_REF=main git push origin HEAD:$ORC_PUSH_REF", env: { ORC_PUSH_REF: CAPTURE } });
+
+		expect(result).toBeUndefined();
+	});
+
+	test("$ORC_PUSH_REF with no value in the env is refused: this seat has no capture ref", async () => {
+		const result = await gatePush(seat(task), { command: "git push origin HEAD:$ORC_PUSH_REF" });
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("$ORC_PUSH_REF has no value in this call's env");
+	});
+
+	test.each([
+		["another variable", "git push origin HEAD:$OTHER"],
+		["a braced variable", "git push origin HEAD:${BRANCH}"],
+		["a lone variable refspec", "git push origin $BRANCH"],
+		["a glob over every branch", "git push origin 'refs/heads/*:refs/heads/*'"],
+	])("refuses %s as opaque, before any bead is read", async (_label, command) => {
+		const result = await gatePush(seat(task, { role: "implementer" }), { command, env: { ORC_PUSH_REF: CAPTURE } });
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("filled in by the shell");
+		expect(show).not.toHaveBeenCalled();
+	});
+
+	test("an opaque source with an explicit destination is judged by the destination", async () => {
+		expect(await gatePush(seat(task, { role: "implementer" }), { command: "git push origin $SRC:omp/task/t1" })).toBeUndefined();
+		expect((await gatePush(seat(task, { role: "implementer" }), { command: "git push origin $SRC:main" }))?.block).toBe(true);
+	});
+});
+
+describe("G7 leaves the lead's Worktrunk checkout alone and sleeps outside a run", () => {
+	// The lead's pushes never reach G7: G9 refuses them first (`wiring.test.ts`).
+	test("the lead's Worktrunk checkout passes", async () => {
+		expect(await gatePush(seat(primary, { session: LEAD }), { command: "wt switch --create fix/x --base origin/main --no-cd" })).toBeUndefined();
 	});
 
 	test.each([
 		["a force push to main", "git push --force origin HEAD:main"],
 		["a Worktrunk checkout", "wt switch --create fix/x"],
+		["a push to a variable", "git push origin HEAD:$BRANCH"],
 	])("%s in a checkout no run has marked is not this gate's business", async (_label, command) => {
 		expect(await gatePush(seat(unmarked), { command })).toBeUndefined();
 		expect(await gatePush(seat(unmarked, { role: "implementer" }), { command })).toBeUndefined();
@@ -235,19 +284,26 @@ describe("G7 reads the primary branch from the run epic", () => {
 	});
 });
 
-describe("G7 refuses a generic helper's Worktrunk checkout", () => {
+describe("G7 refuses a Worktrunk checkout from every seat but the lead's", () => {
 	test.each([
 		["--create", "wt switch --create fix/x --base origin/main --no-cd --no-hooks --format json"],
 		["-c", "wt switch -c fix/x"],
 		["-c in a cluster", "wt switch -yc fix/x"],
 		["--create after a global -C", `wt -C ${primary} switch --create fix/x`],
 		["--create past a base with an operand", "wt switch -b origin/main --create fix/x"],
-	])("refuses %s", async (_label, command) => {
+	])("refuses a generic helper's %s", async (_label, command) => {
 		const result = await gatePush(seat(task), { command });
 
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("generic helper");
+		expect(result?.reason).toContain("Worktrunk is the operator's");
 		expect(show).not.toHaveBeenCalled();
+	});
+
+	test.each(["implementer", "architect", "reviewer"])("refuses a %s's, which works in the clone it was spawned into", async role => {
+		const result = await gatePush(seat(task, { role }), { command: "wt switch --create fix/x --base origin/main --no-cd" });
+
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("isolated clone");
 	});
 
 	test.each([
@@ -257,9 +313,5 @@ describe("G7 refuses a generic helper's Worktrunk checkout", () => {
 		["a list", "wt list --format json"],
 	])("allows %s", async (_label, command) => {
 		expect(await gatePush(seat(task), { command })).toBeUndefined();
-	});
-
-	test.each(["implementer", "architect"])("a %s may create its worktree", async role => {
-		expect(await gatePush(seat(task, { role }), { command: "wt switch --create fix/x --base origin/main --no-cd" })).toBeUndefined();
 	});
 });

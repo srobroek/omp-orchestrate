@@ -569,7 +569,7 @@ export function effectiveSegments(command: string): string[][] {
  * reading it as bd refuses nothing that would have run. Subcommands and flags are not
  * folded; bd, git and gh are case-exact about their own grammar.
  */
-function programName(word: string): string {
+export function programName(word: string): string {
 	const cut = word.lastIndexOf("/");
 	return (cut === -1 ? word : word.slice(cut + 1)).toLowerCase();
 }

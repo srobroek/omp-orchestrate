@@ -19,6 +19,7 @@ import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { BdBead, BdComment } from "../src/bd";
 import * as actualBd from "../src/bd";
+import * as origin from "../src/origin";
 import { createClaimState } from "../src/claim-state";
 import architect from "../src/contracts/architect.json";
 import generic from "../src/contracts/generic.json";
@@ -341,6 +342,15 @@ const bdSpies = [
   issued.push(args);
   return { code: 0, stdout: "", stderr: "" };
  }),
+ // Origin mirrors whatever head the bead stamps: the delivered control is a pushed one.
+ spyOn(origin, "localState").mockImplementation(async () => {
+  const head = reads.bead?.metadata?.head_sha;
+  return { head: typeof head === "string" ? head : DELIVERED_SHA, dirty: false };
+ }),
+ spyOn(origin, "originHead").mockImplementation(async () => {
+  const head = reads.bead?.metadata?.head_sha;
+  return typeof head === "string" ? { kind: "at", sha: head } : { kind: "missing" };
+ }),
 ];
 
 afterAll(() => {
@@ -389,7 +399,7 @@ function checks(result: ToolCallEventResult | undefined): string[] {
 
 beforeEach(() => {
  issued = [];
- reads = { bead: delivered(), comments: { [NODE]: [{ text: "REPORTED: 3 files (src/api.ts), tests green" }] }, linked: [] };
+ reads = { bead: delivered(), comments: { [NODE]: [{ text: `REPORTED: 3 files (src/api.ts), tests green pushed=omp/task/orc-42@${DELIVERED_SHA}` }] }, linked: [] };
  freshSession();
  gateExitContract = createExitGuard(claims);
  claims.recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
@@ -438,7 +448,8 @@ describe("G4 replay of an earlier round's verdict", () => {
   }
 
   expect(verdicts).toEqual([undefined, undefined, undefined]);
-  expect(issued).toEqual([]);
+  // The one write is the plugin's own: the head it saw on origin, stamped before each allowed yield.
+  expect(issued).toEqual(Array(3).fill(["update", NODE, "--actor", "orc-impl-1", "--claim", "--assignee", "", "--set-metadata", `pushed_sha=${DELIVERED_SHA}`, "--status", "in_progress"]));
  });
 
  test("unknown and malformed predicates cannot satisfy a completion contract", () => {
@@ -460,16 +471,24 @@ describe("G4 replay of an earlier round's verdict", () => {
   expect(satisfies("comment.verb in [REPORTED]", evidence)).toBe(false);
  });
 
- test("FINDING: metadata presence is not provenance -- any string satisfies the delivery check", async () => {
-  // `metadata.<key>` is a presence test. The exit contract never checks that `head_sha`
-  // is a sha, that it is reachable from `metadata.branch`, or that this worker produced
-  // it. A worker can close its `delivery` check with the word "none".
-  for (const sha of ["none", "unknown", "see the branch", OLD_HEAD]) {
+ test("a head that is not a commit cannot be proven on origin, so the delivery check no longer passes on presence alone", async () => {
+  // `metadata.<key>` is still a presence test, but the `pushed` check compares the REPORTED
+  // token against `head_sha` as a commit: a word like "none" names nothing origin can hold.
+  // Two, not three: the third refusal of an activation is the bounce budget's, not the check's.
+  for (const sha of ["none", "see the branch"]) {
    reads.bead = delivered({ head_sha: sha });
-   expect(await gateExitContract(IMPLEMENTER)).toBeUndefined();
+   expect(checks(await gateExitContract(IMPLEMENTER))).toEqual(["pushed"]);
   }
+  // A real commit on origin, pushed as reported, passes: the stamped sha and the token agree.
+  reads.bead = delivered({ head_sha: OLD_HEAD });
+  reads.comments = { [NODE]: [{ text: `REPORTED: 3 files (src/api.ts), tests green pushed=omp/task/orc-42@${OLD_HEAD}` }] };
+  expect(await gateExitContract(IMPLEMENTER)).toBeUndefined();
 
-  // Absent, however, is refused: the check is live, it just cannot judge the value.
+  // Absent, however, is refused as delivery: the check is live, it just cannot judge the value.
+  // A fresh activation, so the two refusals above do not spend this one's bounce budget.
+  freshSession();
+  gateExitContract = createExitGuard(claims);
+  claims.recordClaim({ actor: "orc-impl-1", beadIds: [NODE] });
   reads.bead = delivered({ head_sha: undefined });
   expect(checks(await gateExitContract(IMPLEMENTER))).toEqual(["delivery"]);
  });

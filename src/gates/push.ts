@@ -1,5 +1,5 @@
 /**
- * G7 — The primary branch is the lead's.
+ * G7 — The primary branch is the lead's, and Worktrunk is the operator's.
  *
  * Measured in the end-to-end campaign (D-adversarial-01, D-adversarial-04): a generic
  * helper in an isolated copy made a Worktrunk worktree, committed there and ran
@@ -10,24 +10,32 @@
  * sweep's merges and nothing else, and a history rewrite on any remote branch discards
  * work other sessions build on.
  *
- * Inside a run scope, from every session but the lead (`isLeadSession`), this refuses:
+ * Inside a run scope this refuses:
  *
  * - a `git push` whose destination is the primary branch: `origin HEAD:main`, `origin main`,
  *   `origin :main`, `--delete origin main`, `refs/heads/main`, and a bare `git push` or
  *   `origin HEAD` from a checkout whose current branch is the primary;
  * - a `git push` that rewrites history: `--force`, `-f`, `--force-with-lease`, `+<refspec>`;
  * - `git push --all`, `--branches` or `--mirror`, which push the primary with everything else;
- * - `wt switch --create` from a generic helper (role-less, not the lead). A helper works in
- *   the tree it was given; G3 covers `git worktree add`, this covers the Worktrunk form.
+ * - a `git push` whose destination is a shell variable this plugin did not set: `$BRANCH`
+ *   expands to whatever the shell holds, the primary included, so it is opaque and refused.
+ *   `$ORC_PUSH_REF` is the one variable read: G6 sets it in the call's `env` to the
+ *   session's own capture ref (`omp/task/<id>`), so `git push origin HEAD:$ORC_PUSH_REF` is
+ *   judged by that value. It is read from the revised `env` only, never from the command
+ *   text, because the env is plugin-owned and the text is not;
+ * - `wt switch --create` from any session but the lead. Worktrunk is the operator's tool:
+ *   a role works in the isolated clone it was spawned into, a helper in the tree it was
+ *   given. G3 covers `git worktree add`; this covers the Worktrunk form.
  *
- * A push to `omp/task/<id>`, to the branch a session made, or to any other branch by name
- * passes, as does every read. Where the destination depends on `HEAD`, the branch is read
- * with one `git symbolic-ref` at the checkout the command addresses (`-C` honoured). After
- * a `cd` or `pushd` in the same line, or with `--git-dir`/`--work-tree`, that read would
- * name a tree git is not pushing from, so such a push is refused and the explicit-refspec
- * form is named. A detached or unreadable `HEAD` is no proof and passes, and git itself
- * fails such a push. The primary branch is read from the run epic; an unreadable epic, or
- * an unbound marker, means the default.
+ * The lead's own `git push` never reaches here: G9 refuses it first. A push to
+ * `omp/task/<id>`, to the branch a session made, or to any other branch by name passes,
+ * as does every read. Where the destination depends on `HEAD`, the branch is read with one
+ * `git symbolic-ref` at the checkout the command addresses (`-C` honoured). After a `cd`
+ * or `pushd` in the same line, or with `--git-dir`/`--work-tree`, that read would name a
+ * tree git is not pushing from, so such a push is refused and the explicit-refspec form is
+ * named. A detached or unreadable `HEAD` is no proof and passes, and git itself fails such
+ * a push. The primary branch is read from the run epic; an unreadable epic, or an unbound
+ * marker, means the default.
  *
  * Matching is on parsed argv (`src/shell.ts`), so a comment that mentions `git push` does
  * not trip the gate and `git log --grep push` is a read. Parsing costs nothing that spawns;
@@ -39,7 +47,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdShow, metadataString } from "../bd";
-import { orcRole } from "../identity";
 import { type RunScope, runScope } from "../run-scope";
 import { isLeadSession } from "../run-state";
 import { commandInvocations, type Invocation, splitFlag } from "../shell";
@@ -54,6 +61,15 @@ const PENDING_RUN = "pending";
 
 /** A bundle of short flags: `-fu`, `-nf`. Single-dash, letters only. */
 const SHORT_CLUSTER = /^-[A-Za-z]+$/;
+
+/** The one variable a refspec may carry: the session's capture ref, which G6 sets in the call's `env`. */
+const PUSH_REF_VARIABLE = /^\$(?:ORC_PUSH_REF|\{ORC_PUSH_REF\})$/;
+
+/**
+ * A destination the shell fills in at run time -- a variable, a `$(...)` or backtick
+ * substitution, a glob -- so the branch git will write is not in the command line.
+ */
+const SHELL_FILLED = /[$`*]/;
 
 /** `git push` options whose operand may be the next token, so that token is not the remote. */
 const PUSH_OPERAND_FLAGS: Record<string, true> = {
@@ -182,6 +198,12 @@ async function currentBranch(dir: string): Promise<string | undefined> {
 	}
 }
 
+/** The destination side of a refspec: the part after `:`, else the whole. */
+function destinationOf(refspec: string): string {
+	const colon = refspec.indexOf(":");
+	return colon === -1 ? refspec : refspec.slice(colon + 1);
+}
+
 /**
  * The branch names a push writes, in the remote's `refs/heads/`. A refspec's destination
  * is the part after `:`, else its source; `HEAD` is the current branch; `refs/heads/x` is
@@ -207,8 +229,7 @@ async function pushedBranches(push: Push, cwd: string): Promise<string[]> {
 
 	const branches: string[] = [];
 	for (const refspec of push.refspecs) {
-		const colon = refspec.indexOf(":");
-		const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
+		const destination = destinationOf(refspec);
 		if (destination.length === 0) continue;
 		if (destination === "HEAD") {
 			const branch = await resolveHead();
@@ -233,9 +254,8 @@ function dependsOnHead(push: Push): boolean {
 	if (push.tagsOnly || push.everyBranch) return false;
 	if (push.refspecs.length === 0) return true;
 	return push.refspecs.some(refspec => {
-		const colon = refspec.indexOf(":");
-		const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
-		return destination === "HEAD" || (colon !== -1 && destination.length === 0);
+		const destination = destinationOf(refspec);
+		return destination === "HEAD" || (refspec.includes(":") && destination.length === 0);
 	});
 }
 
@@ -260,7 +280,40 @@ async function primaryBranch(scope: RunScope): Promise<string> {
 	return metadataString(epic, "primary_branch") ?? DEFAULT_PRIMARY;
 }
 
-/** Refuse a push to the run's primary branch, a history rewrite, or a helper's own worktree. */
+/**
+ * The push with every `$ORC_PUSH_REF` destination replaced by the value G6 put in the
+ * call's `env`, or the reason to refuse a destination the shell would fill in.
+ *
+ * Only the env is consulted. The command text can spell `ORC_PUSH_REF=main git push ...`;
+ * G6 refuses that assignment, and this gate never reads it, so the value judged here is
+ * the plugin's. A `$ORC_PUSH_REF` with no value in the env is opaque like any other
+ * variable: G6 sets it for role sessions, so its absence means this seat has no capture
+ * ref to push to.
+ */
+function resolveDestinations(push: Push, env: unknown): Push | string {
+	const captureRef = env !== null && typeof env === "object" ? (env as Record<string, unknown>).ORC_PUSH_REF : undefined;
+	const refspecs: string[] = [];
+	for (const refspec of push.refspecs) {
+		const destination = destinationOf(refspec);
+		if (PUSH_REF_VARIABLE.test(destination)) {
+			if (typeof captureRef !== "string" || captureRef.length === 0) {
+				return "$ORC_PUSH_REF has no value in this call's env: the plugin sets it for a role session's capture ref (omp/task/<id>), and this session has none. Push to a branch named in the command line";
+			}
+			refspecs.push(`${refspec.slice(0, refspec.length - destination.length)}${captureRef}`);
+			continue;
+		}
+		if (SHELL_FILLED.test(destination)) {
+			return `destination '${destination}' is filled in by the shell, so the branch it names cannot be judged; push to a branch named in the command line, or to your capture ref with \`git push origin HEAD:$ORC_PUSH_REF\``;
+		}
+		refspecs.push(refspec);
+	}
+	return { ...push, refspecs };
+}
+
+/**
+ * Refuse a push to the run's primary branch, a history rewrite, a destination the shell
+ * fills in, or a Worktrunk checkout from any seat but the lead's.
+ */
 export async function gatePush(ctx: ExtensionContext, input: Record<string, unknown>): Promise<ToolCallEventResult | undefined> {
 	const command = input.command;
 	if (typeof command !== "string" || command.length === 0) return undefined;
@@ -270,12 +323,13 @@ export async function gatePush(ctx: ExtensionContext, input: Record<string, unkn
 	if (pushes.length === 0 && !creates) return undefined;
 	const scope = await runScope(ctx);
 	if (scope === null) return undefined;
-	if (await isLeadSession(ctx)) return undefined;
 
-	if (creates && orcRole(ctx) === undefined) {
+	// The lead's push never reaches this gate (G9 refuses it first), so the seat is read
+	// only for the one act the lead may still perform.
+	if (creates && !(await isLeadSession(ctx))) {
 		return {
 			block: true,
-			reason: "a generic helper creates no checkout; work in the tree you were given, or ask the lead for a role-bound task with its own worktree",
+			reason: "Worktrunk is the operator's: no session in a run creates a checkout. A role works in the isolated clone it was spawned into, a helper in the tree it was given; the lead spawns roles with task and isolated: true",
 		};
 	}
 
@@ -301,8 +355,15 @@ export async function gatePush(ctx: ExtensionContext, input: Record<string, unkn
 		}
 	}
 
-	const primary = await primaryBranch(scope);
+	const resolved: Push[] = [];
 	for (const push of pushes) {
+		const outcome = resolveDestinations(push, input.env);
+		if (typeof outcome === "string") return { block: true, reason: outcome };
+		resolved.push(outcome);
+	}
+
+	const primary = await primaryBranch(scope);
+	for (const push of resolved) {
 		if (push.everyBranch) {
 			return {
 				block: true,
@@ -312,7 +373,7 @@ export async function gatePush(ctx: ExtensionContext, input: Record<string, unkn
 		if ((await pushedBranches(push, ctx.cwd)).includes(primary)) {
 			return {
 				block: true,
-				reason: `pushing to ${primary} is the lead's landing step; push your work to omp/task/<id> or your task branch and let the landing sweep merge it`,
+				reason: `pushing to ${primary} is refused inside a run; the plugin's landing module merges the feature branch. Push your work to omp/task/<id> or your task branch`,
 			};
 		}
 	}
