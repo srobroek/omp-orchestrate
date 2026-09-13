@@ -62,10 +62,13 @@ After installing, restart the session. OMP loads a new extension module at start
 `/reload-plugins` does not find it. Claude Code reads the same catalog from
 `.claude-plugin/marketplace.json`. Upgrade between runs, never during one.
 
+`omp plugin link <checkout>` attaches a development checkout instead of a marketplace
+install. Use it to work on the plugin. Run the plugin from a marketplace install.
+
 ## Configure
 
-The plugin ships its six required OMP settings as one overlay,
-`config/orchestrate.overlay.yml`. Start the lead session with it:
+The plugin ships its six required OMP settings and the model binding for each core agent as
+one overlay, `config/orchestrate.overlay.yml`. Start the lead session with it:
 
 ```sh
 omp --config <plugin-root>/config/orchestrate.overlay.yml
@@ -108,6 +111,12 @@ model you want independent review to use.
 | `orc-shepherd` | `@task` | no |
 | `orc-reviewer` | `@reviewer` | no |
 | `orc-researcher` | `@smol` | no |
+
+The overlay binds each agent to its role through `task.agentModelOverrides`. OMP loads a
+marketplace-installed plugin's agents without their `model` frontmatter, so without these
+entries `/orchestrate-doctor` fails the `core agents` row and the spawn gate refuses every
+core agent. A checkout attached with `omp plugin link` keeps the frontmatter, so it passes
+without them.
 
 The settings preflight compares the effective values at start and before each wave. It
 reports a deviation as a `WARN settings` message in the lead transcript and as a comment
