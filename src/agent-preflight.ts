@@ -40,11 +40,14 @@ export const PLUGIN_AGENTS_BY_PACKAGE: Readonly<Record<string, readonly string[]
  *
  * OMP's built-ins are exactly `default`, `smol`, `slow`, `vision`, `plan`, `designer`,
  * `commit`, `tiny`, `task` and `advisor` (`config/model-roles.ts`). Anything else is a
- * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
- * unconfigured alias without warning -- so the run must announce it instead.
+ * consumer prerequisite: `resolveExplicitModelRole` returns undefined for an unconfigured
+ * alias without warning, and OMP's spawn resolution passes the alias through as a literal
+ * model pattern (`model-resolver.ts`, `resolveConfiguredRolePattern`), so the child starts
+ * with no model and exits with "No model selected". There is no session-model fallback;
+ * the run must announce the missing role instead, and the spawn gate refuses the agent.
  *
- * `reviewer` gives the independent review agent its own configurable model selection.
- * Model-family separation is optional and requires an explicit model choice.
+ * `reviewer` gives the independent review agent its own model selection. Model-family
+ * separation is optional and requires an explicit model choice.
  *
  * `test/declared-surface.json` carries the same list and the suite asserts they agree.
  */
@@ -56,19 +59,6 @@ export interface AgentDiscoveryFinding {
  path?: string;
  /** The `@alias` the live model registry could not resolve, when that is the finding. */
  unresolvedAlias?: string;
-}
-
-/**
- * A core agent whose optional role alias does not resolve. OMP falls back to the session
- * model for it, so the spawn gate warns where the doctor's role row warns; every other
- * core finding refuses the spawn.
- */
-export function isOptionalRoleUnresolved(finding: AgentDiscoveryFinding): boolean {
- return (
-  coreContractForAgent(finding.agent) !== undefined &&
-  finding.unresolvedAlias !== undefined &&
-  DECLARED_MODEL_ROLES.includes(finding.unresolvedAlias.slice(1))
- );
 }
 
 function selectorSpecs(value: unknown): string[] | undefined {
@@ -110,6 +100,25 @@ export function coreContractForAgent(name: string): CoreAgentContract | undefine
 export function coreContractForRole(role: string): CoreAgentContract | undefined {
  const contract = coreContractForAgent(`orc-${role}`);
  return contract?.role === role ? contract : undefined;
+}
+
+/** The core agents whose contract alias is `@<role>`, in contract order. */
+export function coreAgentsForRole(role: string): string[] {
+ return Object.entries(CORE_AGENT_CONTRACTS)
+  .filter(([, contract]) => contract.modelAlias === `@${role}`)
+  .map(([name]) => name);
+}
+
+/**
+ * What an unresolved `@<role>` costs and where to repair it, worded once for the doctor's
+ * role row and the settings preflight. A declared role is set in the operator's own
+ * config, never in the shipped overlay: the overlay layers above that config and would
+ * override the choice.
+ */
+export function roleRepair(role: string, agents: readonly string[]): string {
+ const consequence = `${agents.join(", ")} cannot be spawned${role === "reviewer" ? " and every feature needs a review" : ""}`;
+ const where = DECLARED_MODEL_ROLES.includes(role) ? "to any model in your config; the overlay never sets it" : "in the overlay or your config";
+ return `${consequence}; set modelRoles.${role} ${where}`;
 }
 
 function validateCoreSelector(

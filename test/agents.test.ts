@@ -15,7 +15,6 @@ import {
  agentDiscoveryFindings,
  coreContractForAgent,
  discoverAgentFindings,
- isOptionalRoleUnresolved,
  requestedAgentNames,
 } from "../src/agent-preflight";
 import declared from "./declared-surface.json";
@@ -426,15 +425,17 @@ describe("runtime discovery preflight", () => {
  });
 
  test.each([
-  ["a core agent's unresolved optional alias is the gate's warning-only case", "orc-reviewer", "@reviewer", true],
-  ["a core agent's unresolved required alias still refuses", "orc-architect", "@plan", false],
-  ["a helper's unresolved optional alias is not a core exception", "pr-reviewer", "@reviewer", false],
- ])("%s", (_label, agent, alias, optional) => {
+  ["a core agent", "orc-reviewer", "@reviewer"],
+  ["a helper", "pr-reviewer", "@reviewer"],
+ ])("an unresolved alias on %s is reported with the alias as data, which the doctor's core-agents row keys on", (_label, agent, alias) => {
   const agents = [...KNOWN_ROLES.map(role => definition(`orc-${role}`, role)), definition("pr-reviewer", "helper", "@reviewer")];
   const findings = agentDiscoveryFindings(agents, ["pr-reviewer"], spec => (spec === alias ? undefined : {}));
-  const finding = findings.find(item => item.agent === agent);
-  expect(finding).toMatchObject({ agent, message: `model alias "${alias}" does not resolve`, unresolvedAlias: alias });
-  expect(isOptionalRoleUnresolved(finding!)).toBe(optional);
+  expect(findings.find(item => item.agent === agent)).toEqual({
+   agent,
+   message: `model alias "${alias}" does not resolve`,
+   path: `/tmp/${agent}.md`,
+   unresolvedAlias: alias,
+  });
  });
 
  test("keeps helper alias resolution checks and prototype-key inputs harmless", () => {

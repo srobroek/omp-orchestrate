@@ -46,9 +46,10 @@ bash:
     # A claim must finish in the foreground. A backgrounded claim's result bypasses the tool_result observer and the claim is never adopted.
     enabled: false
 
-# One setting is yours to choose: `orc-reviewer` selects its model through the
-# `reviewer` role. Left unset, the preflight warns once and review may fall back to the
-# session model. Uncomment and name one selector (bare family or provider/id):
-#
-# modelRoles:
-#   reviewer: claude-opus-5
+# Not in this file: `modelRoles.reviewer`. `orc-reviewer` selects its model through the
+# `reviewer` role, which OMP does not ship, so the run needs it set to a model of your
+# choice in your global or project config.yml (any model; a different family from the
+# implementer's is optional). Unset, OMP starts the reviewer with no model and fails it,
+# `/orchestrate-doctor` fails the `modelRoles.reviewer` row, and the spawn gate refuses
+# the agent. It stays out of the overlay because an overlay layers above your config and
+# would override your choice.

@@ -359,9 +359,10 @@ describe("W5 shared-database precondition", () => {
 	});
 
 	/**
-	 * `DECLARED_MODEL_ROLES` names roles OMP does not ship. An unconfigured alias resolves
-	 * to undefined with no warning and falls back to the session default, so the whole
-	 * value of declaring one is that its absence is announced.
+	 * `DECLARED_MODEL_ROLES` names roles OMP does not ship. An unconfigured alias is passed
+	 * to the child as a literal model pattern and the spawn fails with "No model selected",
+	 * so the whole value of declaring one is that its absence is announced before dispatch,
+	 * with the same consequence the doctor's role row names.
 	 */
 	test.each([
 		["an empty roles object", {}, true],
@@ -374,7 +375,7 @@ describe("W5 shared-database precondition", () => {
 		resetWatchers();
 		await preflightSettings(rig.pi, cwd);
 		const notice = rig.messages.map(message => String(message.content)).join("\n");
-		expect(notice.includes("modelRoles.reviewer is not configured")).toBe(wantWarning);
+		expect(notice.includes("modelRoles.reviewer is not configured, so @reviewer does not resolve; orc-reviewer cannot be spawned and every feature needs a review; set modelRoles.reviewer to any model in your config; the overlay never sets it")).toBe(wantWarning);
 	});
 
 	test("no live settings instance is reported as unverified, never as a deviation", async () => {
@@ -874,22 +875,20 @@ describe("assignment enforcement", () => {
 		expect(await helper.fire("tool_call", { toolName: "task", input: { agent: "orc-helper" } })).toEqual([undefined]);
 	});
 
-	test("an unresolved optional role alias warns and lets orc-reviewer spawn; an unresolved required alias refuses", async () => {
+	test("an unresolved @reviewer refuses orc-reviewer exactly as an unresolved @plan refuses the architect", async () => {
+		// OMP passes an unconfigured role alias through as a literal model pattern and the
+		// child dies with "No model selected"; the refusal is what stands between the
+		// operator and that error, so the reviewer's role is not a warning-only exception.
 		await coreFixture("orc-reviewer", "reviewer", "@reviewer");
 		await coreFixture("orc-architect", "architect", "@plan");
-		// `withModels` resolves nothing, so both aliases are unresolved; only the role decides.
-		const rig = harness(undefined, true);
+		const rig = harness(undefined, true); // `withModels` resolves nothing
 		registerFixture(rig);
 
-		expect(await rig.fire("tool_call", { toolName: "task", input: { agent: "orc-reviewer" } })).toEqual([undefined]);
-		const warned = rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight");
-		expect(warned).toHaveLength(1);
-		expect(String(warned[0]?.content)).toContain('orc-reviewer: model alias "@reviewer" does not resolve');
-
-		const result = await rig.fire("tool_call", { toolName: "task", input: { agent: "orc-architect" } });
-		expect(result[0]).toMatchObject({ block: true });
-		expect(String((result[0] as Record<string, unknown>).reason)).toContain('orc-architect: model alias "@plan" does not resolve');
-		expect(String((result[0] as Record<string, unknown>).reason)).not.toContain("orc-reviewer");
+		for (const [agent, alias] of [["orc-reviewer", "@reviewer"], ["orc-architect", "@plan"]]) {
+			const result = await rig.fire("tool_call", { toolName: "task", input: { agent } });
+			expect(result[0]).toMatchObject({ block: true });
+			expect(String((result[0] as Record<string, unknown>).reason)).toContain(`requested core assignment refused: ${agent}: model alias "${alias}" does not resolve`);
+		}
 	});
 
 	test("a model mismatch is one notice naming both models and the parking command, never a block", async () => {

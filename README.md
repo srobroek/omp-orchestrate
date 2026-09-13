@@ -90,19 +90,21 @@ error.
 | `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
 
 The five agents select their models through four `modelRoles` entries and inherit each
-role's thinking level. OMP ships the names `plan`, `task` and `smol` without a default
-model, so each one must resolve in your configuration before a run starts; `reviewer` is
-optional. `/orchestrate-doctor` prints one row per role:
+role's thinking level. Before a run starts, all four must resolve in your configuration.
+OMP ships the names `plan`, `task` and `smol` without a default model, and does not ship
+`reviewer` at all. An unresolved role does not fall back to the session model: OMP starts
+the agent with no model and fails it. `/orchestrate-doctor` prints one row per role:
 
 | Role | Agents | Unresolved |
 | --- | --- | --- |
 | `modelRoles.plan` | `orc-architect` | `fail`: the architect cannot be spawned |
 | `modelRoles.task` | `orc-implementer`, `orc-shepherd` | `fail`: neither agent can be spawned |
 | `modelRoles.smol` | `orc-researcher` | `fail`: the researcher cannot be spawned |
-| `modelRoles.reviewer` | `orc-reviewer` | `warn`: the reviewer falls back to the session model, and the preflight writes one `WARN` |
+| `modelRoles.reviewer` | `orc-reviewer` | `fail`: OMP cannot start the reviewer, and every feature needs a review |
 
-The overlay carries `modelRoles.reviewer` as a commented line; uncomment it and name the
-model you want independent review to use.
+Set `modelRoles.reviewer` to any model in your global or project `config.yml`. The overlay
+never sets it: an overlay layers above your config and would override your choice. A
+different model family from the implementer's is optional.
 
 | Agent | Model role | Edits code |
 | --- | --- | --- |

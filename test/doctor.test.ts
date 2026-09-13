@@ -228,25 +228,26 @@ describe("runDoctor", () => {
 		expect(report.ok).toBe(false);
 	});
 
-	test("one row per model role: reviewer warns when unset, plan/task/smol fail; unreadable settings warn rather than fail", async () => {
+	test("one row per model role: each of plan/task/smol/reviewer fails when unset, with its own repair; unreadable settings still fail the rows", async () => {
 		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: { plan: "p/plan", task: "p/task", smol: "p/smol" } });
 		const reviewerless = await doctor();
 		expect(reviewerless.checks.filter(check => check.name.startsWith("modelRoles.")).map(check => check.name)).toEqual(["modelRoles.plan", "modelRoles.task", "modelRoles.smol", "modelRoles.reviewer"]);
-		expectRow(reviewerless, "modelRoles.reviewer", "warn", "orc-reviewer falls back to the session model");
+		expectRow(reviewerless, "modelRoles.reviewer", "fail", "orc-reviewer cannot be spawned and every feature needs a review; set modelRoles.reviewer to any model in your config; the overlay never sets it");
 		expect(row(reviewerless, "core agents").status).toBe("pass");
-		expect(reviewerless.ok).toBe(true);
+		expect(reviewerless.ok).toBe(false);
 
 		stubbed = Settings.isolated({ ...COMPLIANT, modelRoles: { reviewer: "x/y" } });
 		const planless = await doctor();
-		expectRow(planless, "modelRoles.plan", "fail", "orc-architect cannot be spawned");
+		expectRow(planless, "modelRoles.plan", "fail", "orc-architect cannot be spawned; set modelRoles.plan in the overlay or your config");
 		expectRow(planless, "modelRoles.task", "fail", "orc-implementer, orc-shepherd cannot be spawned");
 		expectRow(planless, "modelRoles.smol", "fail", "orc-researcher cannot be spawned");
+		expect(row(planless, "modelRoles.reviewer").status).toBe("pass");
 		expect(planless.ok).toBe(false);
 
 		stubbed = undefined;
 		const unread = await doctor();
 		expectRow(unread, "settings", "warn", "could not be read");
-		expectRow(unread, "modelRoles.reviewer", "warn", "no model registry is live");
+		expectRow(unread, "modelRoles.reviewer", "fail", "no model registry is live");
 		expect(unread.ok).toBe(false);
 	});
 
@@ -255,9 +256,9 @@ describe("runDoctor", () => {
 		discoverSpy.mockImplementation(async () => [{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md", unresolvedAlias: "@reviewer" }]);
 		const report = await runDoctor({ cwd, models: { resolve } as never }, transcript(healthy()).exec);
 		expectRow(report, "modelRoles.plan", "pass", "@plan resolves to model-for-plan");
-		expectRow(report, "modelRoles.reviewer", "warn", "@reviewer does not resolve");
+		expectRow(report, "modelRoles.reviewer", "fail", "@reviewer does not resolve; orc-reviewer cannot be spawned and every feature needs a review");
 		expect(row(report, "core agents").status).toBe("pass");
-		expect(report.ok).toBe(true);
+		expect(report.ok).toBe(false);
 	});
 
 	test("a borrowed helper missing warns its package alone; a core agent finding fails", async () => {

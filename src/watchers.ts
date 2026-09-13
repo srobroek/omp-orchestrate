@@ -33,11 +33,12 @@ import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-sche
 import {
  type AgentDiscoveryFinding,
  agentModelOverrides,
+ coreAgentsForRole,
  coreContractForAgent,
  DECLARED_MODEL_ROLES,
  discoverAgentFindings,
- isOptionalRoleUnresolved,
  requestedAgentNames,
+ roleRepair,
 } from "./agent-preflight";
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
 import { sessionRole } from "./identity";
@@ -960,9 +961,11 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
    lines.push(`${deviation.key} is ${JSON.stringify(deviation.observed)}, needs ${deviation.want} -- ${deviation.consequence}`);
   }
 
-  // `orc-reviewer` requires an explicitly configured `@reviewer` alias. Missing aliases
-  // may fall back to the session model or fail selection. Preflight checks that the
-  // selection exists, not whether author and reviewer use different model families.
+  // `@reviewer` is a role OMP does not ship, so `modelRoles.reviewer` is a run
+  // prerequisite like the built-in roles the other agents name: unset, OMP starts the
+  // child with no model and the spawn gate refuses it. This is the one role whose
+  // absence can be proven from the settings alone; the built-ins have defaults and are
+  // resolved by the agent preflight against the live registry instead.
   //
   // An UNREADABLE setting is skipped, matching this function's rule of warning only
   // about what it can prove. An empty object is not unreadable: it proves the role is
@@ -971,9 +974,7 @@ export async function preflightSettings(pi: ExtensionAPI, cwd: string): Promise<
   if (typeof roles === "object" && roles !== null) {
    for (const role of DECLARED_MODEL_ROLES) {
     if (Object.hasOwn(roles, role)) continue;
-    lines.push(
-     `modelRoles.${role} is not configured; configure it before dispatch. An unresolved alias may fall back to the session model or fail selection. Independent review uses a separate agent; model-family separation is optional and requires an explicit model choice`,
-    );
+    lines.push(`modelRoles.${role} is not configured, so @${role} does not resolve; ${roleRepair(role, coreAgentsForRole(role))}`);
    }
   }
  }
@@ -1128,9 +1129,9 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
 
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning
-  * dedupe never weakens the refusal: a known bad core request blocks every spawn.
-  * One core finding is a warning only: an optional role alias that does not resolve,
-  * for which OMP falls back to the session model, as the doctor's role row promises.
+  * dedupe never weakens the refusal: a known bad core request blocks every spawn,
+  * an unresolved model alias included, since OMP would start that child with no
+  * model and fail it with "No model selected" rather than fall back.
   * Both wait for a run scope: spawning an `orc-*` agent outside a run gets no refusal
   * and costs no `omp config list`.
   */
@@ -1145,8 +1146,7 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
     preflightAgents(pi, ctx, requested, reportedAgentFindings),
    );
    const requestedCoreFindings = findings.filter(
-    finding =>
-     requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined && !isOptionalRoleUnresolved(finding),
+    finding => requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined,
    );
    await warnPreflight(ctx.cwd, Date.now());
    if (requestedCoreFindings.length > 0) {

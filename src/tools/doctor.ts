@@ -21,7 +21,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type AgentDiscoveryFinding, agentModelOverrides, CORE_AGENT_CONTRACTS, DECLARED_MODEL_ROLES, discoverAgentFindings, PLUGIN_AGENTS_BY_PACKAGE } from "../agent-preflight";
+import { type AgentDiscoveryFinding, agentModelOverrides, CORE_AGENT_CONTRACTS, coreAgentsForRole, discoverAgentFindings, PLUGIN_AGENTS_BY_PACKAGE, roleRepair } from "../agent-preflight";
 import { locateBeadsDir } from "../beads-mode";
 import { probeLandingCapabilities } from "../landing";
 import { probeStore } from "../store-probe";
@@ -142,33 +142,30 @@ function checkSettings(observed: Record<string, unknown> | null): DoctorCheck {
  * `plan` (architect), `task` (implementer, shepherd), `smol` (researcher), `reviewer`.
  *
  * A role that does not resolve fails the row, because the agent behind it cannot be
- * spawned; the roles in `DECLARED_MODEL_ROLES` are the documented optional ones, and warn
- * instead: the reviewer falls back to the session model. Resolution is asked of the live
- * model registry when the host hands one over; without it, the effective settings decide.
- * The campaign measured the old shape (`scratch/audit/e2e/normal-ts.ledger.md`, D-01/02):
- * a warn row for `reviewer` beside a `FAIL core agents` naming the same alias, and
- * `plan`/`task`/`smol` failing that row with no row of their own.
+ * spawned: OMP passes an unconfigured alias through as a literal model pattern and the
+ * child exits with "No model selected". `reviewer` is no exception; it is the one role
+ * OMP does not ship, so it is set in the operator's config and never in the overlay.
+ * Resolution is asked of the live model registry when the host hands one over; without
+ * it, the effective settings decide. The campaign measured the old shape
+ * (`scratch/audit/e2e/normal-ts.ledger.md`, D-01/02): a warn row for `reviewer` beside a
+ * `FAIL core agents` naming the same alias, and `plan`/`task`/`smol` failing that row
+ * with no row of their own.
  */
 function checkModelRoles(ctx: DoctorContext, observed: Record<string, unknown> | null): DoctorCheck[] {
-	const agentsByRole: Record<string, string[]> = {};
-	for (const [name, contract] of Object.entries(CORE_AGENT_CONTRACTS)) {
-		const role = contract.modelAlias.slice(1);
-		(agentsByRole[role] ??= []).push(name);
-	}
+	const roles = [...new Set(Object.values(CORE_AGENT_CONTRACTS).map(contract => contract.modelAlias.slice(1)))];
 	const settings = observed?.modelRoles;
 	const resolve = typeof ctx.models?.resolve === "function" ? (spec: string) => ctx.models!.resolve(spec) : undefined;
-	return Object.entries(agentsByRole).map(([role, agents]) => {
+	return roles.map(role => {
 		const name = `modelRoles.${role}`;
-		const unresolved: CheckStatus = DECLARED_MODEL_ROLES.includes(role) ? "warn" : "fail";
-		const consequence = unresolved === "fail" ? `${agents.join(", ")} cannot be spawned` : `${agents.join(", ")} falls back to the session model`;
+		const repair = roleRepair(role, coreAgentsForRole(role));
 		const configured = typeof settings === "object" && settings !== null && Object.hasOwn(settings, role) ? (settings as Record<string, unknown>)[role] : undefined;
 		if (resolve !== undefined) {
 			const model = resolve(`@${role}`);
-			if (model === undefined) return { name, status: unresolved, detail: `@${role} does not resolve; ${consequence}; set modelRoles.${role} in the overlay or your config` };
+			if (model === undefined) return { name, status: "fail", detail: `@${role} does not resolve; ${repair}` };
 			const id = typeof model === "object" && model !== null && "id" in model && typeof model.id === "string" ? model.id : JSON.stringify(model);
 			return { name, status: "pass", detail: `@${role} resolves to ${id}` };
 		}
-		if (configured === undefined) return { name, status: unresolved, detail: `not configured, and no model registry is live to resolve @${role}; ${consequence}; set modelRoles.${role} in the overlay or your config` };
+		if (configured === undefined) return { name, status: "fail", detail: `not configured, and no model registry is live to resolve @${role}; ${repair}` };
 		return { name, status: "pass", detail: typeof configured === "string" ? configured : JSON.stringify(configured) };
 	});
 }
@@ -184,10 +181,10 @@ async function checkOverlay(): Promise<DoctorCheck> {
 
 /**
  * Core agents fail the row; each borrowed package is its own warn row. A core agent's
- * model alias not resolving is the alias's row (`checkModelRoles`), not this one, so an
- * optional role stays the warning the README promises. The effective
- * `task.agentModelOverrides` go in with the definitions: after a marketplace install
- * they are the only model binding a core agent has.
+ * model alias not resolving is the alias's row (`checkModelRoles`), not this one, so one
+ * fact fails one row. The effective `task.agentModelOverrides` go in with the
+ * definitions: after a marketplace install they are the only model binding a core agent
+ * has.
  */
 async function checkAgents(ctx: DoctorContext, observed: Record<string, unknown> | null): Promise<DoctorCheck[]> {
 	const borrowed = Object.values(PLUGIN_AGENTS_BY_PACKAGE).flat();
@@ -300,7 +297,7 @@ export function renderDoctor(report: DoctorReport): string {
 const DESCRIPTION = [
 	"Report the run prerequisites with pass/warn/fail rows: bd (1.2 or newer), wt, git, gh and its",
 	"authentication, bun for the worktree sweep, the shipped settings overlay, the required task and",
-	"bash settings, one row per model role (plan, task, smol must resolve; reviewer warns), the core and borrowed agents, the beads store probe,",
+	"bash settings, one row per model role (plan, task, smol, reviewer must each resolve), the core and borrowed agents, the beads store probe,",
 	"and the repository's landing capabilities. Reads only; never writes a file, a bead, or a",
 	"setting. Call it before /orchestrate-start, or when a run misbehaves.",
 ].join(" ");
