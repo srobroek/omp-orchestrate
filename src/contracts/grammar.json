@@ -17,7 +17,7 @@
   "verbs": [
     {
       "verb": "REPORTED",
-      "meaning": "Evidence delivered, next role's label added -- the node's exit contract is met. An implementer or a completing architect writes it holding the claim and yields; the exit gate releases the claim in the fenced write that stamps the proven push. Other writers clear the assignee as their contract says. Git evidence carries `head_sha=<sha>` and, for an implementer, `pushed=<ref>@<sha>` naming the origin ref its head was pushed to (`omp/task/<own id>`); the exit gate verifies that ref on origin.",
+      "meaning": "Evidence delivered, next role's label added -- the node's exit contract is met. An implementer or a completing architect writes it holding the claim and yields; the exit gate releases the claim in the fenced write that stamps the proven push. Other writers clear the assignee as their contract says. Git evidence carries `head_sha=<sha>` and, for an implementer, `pushed=<ref>@<sha>` naming the origin ref its head was pushed to (`omp/task/<own id>`); the exit gate verifies that ref on origin. An implementer's report also carries `dod=<hash>:<n>:met|unmet` for the live acceptance hash and every numbered item; an unmet item is accompanied by the worker's explanation.",
       "writers": ["architect", "implementer", "researcher", "unlisted"],
       "terminal": true,
       "source": { "kind": "contract", "where": "architect.json, implementer.json, researcher.json, generic.json: completion.reported" }
@@ -38,10 +38,10 @@
     },
     {
       "verb": "REVIEW",
-      "meaning": "One reviewer's verdict, written on the node its review wisp links to. The review outcome a reader needs is this comment: approve or changes at a named head and round.",
+      "meaning": "One reviewer's verdict, written on the node its review wisp links to. The review outcome a reader needs is this comment: approve or changes at a named head and round. A plan review carries `dimension=plan plan=<hash>` for the live epic decomposition; an override carries `dimension=override override=<hash>` for the node's live acceptance; a feature code review carries `nodes=<id>:<hash>:met|unmet,...` for every integrated node at that head.",
       "writers": ["reviewer"],
       "terminal": true,
-      "source": { "kind": "contract", "where": "reviewer.json: completion.verdict" }
+      "source": { "kind": "contract", "where": "reviewer.json: completion.verdict, completion.coverage" }
     },
     {
       "verb": "LANDED",
@@ -73,10 +73,10 @@
     },
     {
       "verb": "NOTE",
-      "meaning": "A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's record of a claim it preserved and why, an implementer's `NOTE no-change: <reason>` when a git task turned out to need no edit.",
+      "meaning": "A durable observation without a state transition: a discovered bead's id, a bead-local default and its revisit trigger, a researcher's answer on the linked node, the reaper's record of a claim it preserved and why, an implementer's `NOTE no-change: <reason>` when a git task turned out to need no edit, `NOTE no-acceptance: released by gate` when a routed bead lacks criteria, `NOTE override requested: <reason>` to request a review override, or `NOTE landed uncovered: merge=<id> head=<sha>` when landing lacks acceptance coverage.",
       "writers": ["*"],
       "terminal": false,
-      "source": { "kind": "contract", "where": "researcher.json: completion.answer on the linked node; implementer.json: completion.work and completion.changed_paths accept `NOTE no-change: <reason>` in place of a moved head and a named path. Every other writer is prose: references/lifecycle.md incidental bug beads, references/beads-store.md bead-local defaults, src/supervision.ts reapBead (NOTE claim preserved)" }
+      "source": { "kind": "contract", "where": "researcher.json: completion.answer on the linked node; implementer.json: completion.work and completion.changed_paths accept `NOTE no-change: <reason>` in place of a moved head and a named path; G5 acceptance backstop; landing sweep override and uncovered notices. Every other writer is prose: references/lifecycle.md incidental bug beads, references/beads-store.md bead-local defaults, src/supervision.ts reapBead (NOTE claim preserved)" }
     },
     {
       "verb": "RECOVERED",

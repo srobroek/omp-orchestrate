@@ -20,6 +20,19 @@
  * yield proceeds, so an offline reader can tell a push target from a landed push.
  */
 
+import {
+	acceptanceHash,
+	acceptanceItems,
+	acceptanceText,
+	beadAcceptanceHash,
+	dodToken,
+	itemsCovered,
+	nodesToken,
+	overrideToken,
+	planHashOf,
+	planToken,
+	tokenValue,
+} from "../acceptance";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -52,21 +65,22 @@ import reviewer from "../contracts/reviewer.json";
 import shepherd from "../contracts/shepherd.json";
 
 interface CompletionCheck {
- check: string;
- require: string;
- when?: string | string[];
- /** What to do about an unsatisfied check, quoted in the refusal beside the predicate. */
- recovery?: string;
+	check: string;
+	require: string;
+	when?: string | string[] | { kind?: string | string[]; dimension?: string | string[] };
+	/** What to do about an unsatisfied check, quoted in the refusal beside the predicate. */
+	recovery?: string;
 }
 
 interface Contract {
- agent?: string;
- completion?: CompletionCheck[];
- authority?: { deny_states?: string[]; deny_metadata?: string[] };
- escape?: { state?: string; require?: string; recovery?: string };
- pause?: string[];
- bounce?: { max_attempts?: number };
+	agent?: string;
+	completion?: CompletionCheck[];
+	authority?: { deny_states?: string[]; deny_metadata?: string[] };
+	escape?: { state?: string; require?: string; recovery?: string };
+	pause?: string[];
+	bounce?: { max_attempts?: number };
 }
+
 
 const CONTRACTS: Record<string, Contract> = {
  architect,
@@ -145,20 +159,31 @@ interface Failure {
  * the derivation v19's evaluator added.
  */
 export function resourceKind(bead: BdBead): string | undefined {
- const declared = metadataString(bead, "execution_kind");
- if (declared !== undefined) return declared;
- if (bead.wisp_type === "escalation") return "escalation";
- if (bead.wisp_type === "review") return "review";
- if (metadataString(bead, "worktree") !== undefined) return "git";
- if (metadataString(bead, "artifacts_dir") !== undefined) return "artifact";
- return undefined;
+	const declared = metadataString(bead, "execution_kind");
+	if (declared !== undefined) return declared;
+	if (bead.wisp_type === "escalation") return "escalation";
+	if (bead.wisp_type === "review") return "review";
+	if (metadataString(bead, "worktree") !== undefined) return "git";
+	if (metadataString(bead, "artifacts_dir") !== undefined) return "artifact";
+	return undefined;
 }
 
-export function applies(check: CompletionCheck, kind: string | undefined): boolean {
- if (check.when === undefined) return true;
- const wanted = Array.isArray(check.when) ? check.when : [check.when];
- return kind !== undefined && wanted.includes(kind);
+/**
+ * Select a completion check by execution kind and, for reviewer checks, wisp dimension.
+ * Object `when` clauses add a dimension selector without changing existing kind strings.
+ */
+export function applies(check: CompletionCheck, kind: string | undefined, dimension?: string): boolean {
+	if (check.when === undefined) return true;
+	if (typeof check.when === "string" || Array.isArray(check.when)) {
+		const wanted = Array.isArray(check.when) ? check.when : [check.when];
+		return kind !== undefined && wanted.includes(kind);
+	}
+	const kinds = check.when.kind === undefined ? undefined : Array.isArray(check.when.kind) ? check.when.kind : [check.when.kind];
+	const dimensions = check.when.dimension === undefined ? undefined : Array.isArray(check.when.dimension) ? check.when.dimension : [check.when.dimension];
+	return (kinds === undefined || (kind !== undefined && kinds.includes(kind)))
+		&& (dimensions === undefined || (dimension !== undefined && dimensions.includes(dimension)));
 }
+
 
 /**
  * Whether origin holds the head a role recorded, and where the question was put.
@@ -168,11 +193,11 @@ export function applies(check: CompletionCheck, kind: string | undefined): boole
  * satisfies; `detail` says why the others did not, in the words the refusal quotes.
  */
 export interface OriginProof {
- matched: boolean;
- ref?: string;
- /** The commit origin holds at `ref`, when it answered with one. */
- observed?: string;
- detail: string;
+	matched: boolean;
+	ref?: string;
+	/** The commit origin holds at `ref`, when it answered with one. */
+	observed?: string;
+	detail: string;
 }
 
 /**
@@ -187,25 +212,39 @@ export interface UnstampedComment {
 
 /** State a predicate may need, fetched once per evaluation. */
 export interface Evidence {
- bead: BdBead;
- verbs: string[];
- linkedVerbs: string[];
- /** Linked-node comments at another head or round, so a refusal can say which token was missing or mismatched. */
- unstamped?: UnstampedComment[];
- openEscalation?: boolean;
- artifactContained?: boolean;
- /** The commit the bead's work started from: its own `base_sha`, else the run epic's. Absent when neither is known. */
- baseSha?: string;
- /** Some `REPORTED` comment on the bead names a changed path. */
- reportedPath?: boolean;
- /** The worker wrote `NOTE no-change: <reason>`: the task needed no edit, and says so. */
- noChangeNoted?: boolean;
- /** The `pushed=<ref>@<sha>` token of the bead's `REPORTED` comments, when one names it. */
- pushed?: { ref: string; sha: string };
- /** Origin's answer for the role's ref; read only when a predicate under judgement asks. */
- origin?: OriginProof;
- /** Whether the clone's own work is on origin or absent; read only when a predicate asks. */
- cloneWork?: OriginProof;
+	bead: BdBead;
+	verbs: string[];
+	linkedVerbs: string[];
+	/** Linked-node comments at another head or round, so a refusal can say which token was missing or mismatched. */
+	unstamped?: UnstampedComment[];
+	/** The bead's own comments, for predicates that read a token off a specific verb. */
+	beadComments?: string[];
+	/** The claimed wisp's `metadata.dimension`, which selects the coverage check that applies. */
+	dimension?: string;
+	linkedBead?: BdBead;
+	/** The linked node's live acceptance hash, recomputed from its `acceptance_criteria`. */
+	linkedAcceptanceHash?: string;
+	/** Linked-node `REVIEW` comments at the current version, as text, for the coverage tokens. */
+	linkedReviewComments?: string[];
+	/** The feature's `metadata.integrated` ids and each one's live acceptance hash. */
+	integratedIds?: string[];
+	integratedHashes?: Map<string, string | undefined>;
+	/** The linked epic's live plan hash. */
+	planHash?: string;
+	openEscalation?: boolean;
+	artifactContained?: boolean;
+	/** The commit the bead's work started from: its own `base_sha`, else the run epic's. Absent when neither is known. */
+	baseSha?: string;
+	/** Some `REPORTED` comment on the bead names a changed path. */
+	reportedPath?: boolean;
+	/** The worker wrote `NOTE no-change: <reason>`: the task needed no edit, and says so. */
+	noChangeNoted?: boolean;
+	/** The `pushed=<ref>@<sha>` token of the bead's `REPORTED` comments, when one names it. */
+	pushed?: { ref: string; sha: string };
+	/** Origin's answer for the role's ref; read only when a predicate under judgement asks. */
+	origin?: OriginProof;
+	/** Whether the clone's own work is on origin or absent; read only when a predicate asks. */
+	cloneWork?: OriginProof;
 }
 
 const SUPPORTED_KINDS: Record<string, readonly string[]> = {
@@ -364,59 +403,81 @@ export function asksClone(predicate: string): "pushed" | "branch" | undefined {
  * a `label ~` pattern must not spell them.
  */
 export function satisfies(predicate: string, evidence: Evidence): boolean {
- const { bead, verbs, linkedVerbs } = evidence;
- const trimmed = predicate.trim();
+	const { bead, verbs, linkedVerbs } = evidence;
+	const trimmed = predicate.trim();
 
- const alternatives = trimmed.split(/\s+or\s+/);
- if (alternatives.length > 1) return alternatives.some(alternative => satisfies(alternative, evidence));
- const conjuncts = trimmed.split(/\s+and\s+/);
- if (conjuncts.length > 1) return conjuncts.every(conjunct => satisfies(conjunct, evidence));
+	const alternatives = trimmed.split(/\s+or\s+/);
+	if (alternatives.length > 1) return alternatives.some(alternative => satisfies(alternative, evidence));
+	const conjuncts = trimmed.split(/\s+and\s+/);
+	if (conjuncts.length > 1) return conjuncts.every(conjunct => satisfies(conjunct, evidence));
 
- if (ORIGIN_PREDICATES[trimmed] !== undefined) return evidence.origin?.matched === true;
- if (CLONE_PREDICATES[trimmed] !== undefined) return evidence.cloneWork?.matched === true;
+	if (ORIGIN_PREDICATES[trimmed] !== undefined) return evidence.origin?.matched === true;
+	if (CLONE_PREDICATES[trimmed] !== undefined) return evidence.cloneWork?.matched === true;
 
- const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
- if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
+	const metadataKey = /^metadata\.([A-Za-z0-9_]+)$/.exec(trimmed);
+	if (metadataKey?.[1] !== undefined) return metadataString(bead, metadataKey[1]) !== undefined;
+	if (trimmed === "metadata.head_sha != base_sha") {
+		const head = metadataString(bead, "head_sha");
+		if (head === undefined || evidence.baseSha === undefined) return true;
+		return !sameCommit(head, evidence.baseSha);
+	}
+	if (trimmed === "comment.REPORTED names a path") return evidence.reportedPath === true;
+	if (trimmed === "comment.NOTE no-change") return evidence.noChangeNoted === true;
+	if (trimmed === "comment.REPORTED covers dod") {
+		// A bead with no acceptance text has nothing to cover. Presence is the filing seam's
+		// and the claim observer's to enforce (G5); this check judges coverage of what is
+		// there, so a bead that predates the acceptance requirement still yields.
+		const text = acceptanceText(bead);
+		if (text === undefined) return true;
+		const hash = acceptanceHash(text);
+		return evidence.beadComments?.some(comment => {
+			if (commentVerb(comment) !== "REPORTED") return false;
+			const coverage = dodToken(comment);
+			return coverage !== undefined && acceptanceItems(text).every(item => coverage.some(entry => entry.hash === hash && entry.item === item));
+		}) === true;
+	}
+	if (trimmed === "linked.REVIEW covers plan") {
+		return evidence.planHash !== undefined && evidence.linkedReviewComments?.some(comment => planToken(comment) === evidence.planHash) === true;
+	}
+	if (trimmed === "linked.REVIEW covers override") {
+		return evidence.linkedAcceptanceHash !== undefined && evidence.linkedReviewComments?.some(comment => overrideToken(comment) === evidence.linkedAcceptanceHash) === true;
+	}
+	if (trimmed === "linked.REVIEW covers integrated") {
+		if (evidence.integratedIds === undefined || evidence.integratedHashes === undefined) return false;
+		return evidence.linkedReviewComments?.some(comment => {
+			const coverage = nodesToken(comment);
+			if (coverage === undefined) return false;
+			const verdict = tokenValue(comment, "verdict");
+			return evidence.integratedIds!.every(id => {
+				const liveHash = evidence.integratedHashes!.get(id);
+				const entry = coverage.find(item => item.id === id && liveHash !== undefined && item.hash === liveHash);
+				return entry !== undefined && (verdict === "changes" || entry.disposition === "met");
+			});
+		}) === true;
+	}
+	if (trimmed === "assignee cleared") return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
+	if (trimmed === "artifact.output_ref contained") return evidence.artifactContained === true;
 
- if (trimmed === "metadata.head_sha != base_sha") {
-  // Proof only: with no head the delivery check speaks, and with no base there is
-  // nothing to compare against, so both are unknown rather than unmet.
-  const head = metadataString(bead, "head_sha");
-  if (head === undefined || evidence.baseSha === undefined) return true;
-  return !sameCommit(head, evidence.baseSha);
- }
+	const labelMatch = /^label\s*~\s*(.+)$/.exec(trimmed);
+	if (labelMatch?.[1] !== undefined) {
+		let pattern: RegExp;
+		try {
+			pattern = new RegExp(labelMatch[1].replace(/^["']|["']$/g, ""));
+		} catch {
+			// An uncompilable pattern counts as unmet, matching the Python's
+			// fail-closed handling for a malformed label regex.
+			return false;
+		}
+		return (bead.labels ?? []).some(label => pattern.test(label));
+	}
 
- if (trimmed === "comment.REPORTED names a path") return evidence.reportedPath === true;
- if (trimmed === "comment.NOTE no-change") return evidence.noChangeNoted === true;
+	const verbSet = verbPredicate(trimmed);
+	if (verbSet !== undefined) {
+		const pool = verbSet.linked ? linkedVerbs : verbs;
+		return pool.some(verb => verbSet.wanted.includes(verb));
+	}
 
- if (trimmed === "assignee cleared") {
-  return bead.assignee === undefined || bead.assignee === null || bead.assignee === "";
- }
-
- if (trimmed === "artifact.output_ref contained") {
-  return evidence.artifactContained === true;
- }
-
- const labelMatch = /^label\s*~\s*(.+)$/.exec(trimmed);
- if (labelMatch?.[1] !== undefined) {
-  let pattern: RegExp;
-  try {
-   pattern = new RegExp(labelMatch[1].replace(/^["']|["']$/g, ""));
-  } catch {
-   // An uncompilable pattern counts as unmet, matching the Python's
-   // fail-closed handling for a malformed label regex.
-   return false;
-  }
-  return (bead.labels ?? []).some(label => pattern.test(label));
- }
-
- const verbSet = verbPredicate(trimmed);
- if (verbSet !== undefined) {
-  const pool = verbSet.linked ? linkedVerbs : verbs;
-  return pool.some(verb => verbSet.wanted.includes(verb));
- }
-
- return false;
+	return false;
 }
 
 /**
@@ -446,21 +507,23 @@ function verbPredicate(predicate: string): { linked: boolean; wanted: string[] }
  * when the bead carries none of its own (implementer).
  */
 export interface LinkedEvidenceNeeds {
- verbs: boolean;
- escalation: boolean;
- base: boolean;
+	verbs: boolean;
+	escalation: boolean;
+	base: boolean;
+	coverage: boolean;
 }
 
-const ALL_LINKED_EVIDENCE: LinkedEvidenceNeeds = { verbs: true, escalation: true, base: true };
+const ALL_LINKED_EVIDENCE: LinkedEvidenceNeeds = { verbs: true, escalation: true, base: true, coverage: true };
 
 export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
- const requires = (contract.completion ?? []).map(check => check.require);
- if (contract.escape?.require !== undefined) requires.push(contract.escape.require);
- return {
-  verbs: requires.some(predicate => predicate.trim().startsWith("linked.")),
-  escalation: contract.pause?.includes("open-escalation-wisp-linked-to-node") === true,
-  base: requires.some(predicate => predicate.includes("base_sha")),
- };
+	const requires = (contract.completion ?? []).map(check => check.require);
+	if (contract.escape?.require !== undefined) requires.push(contract.escape.require);
+	return {
+		verbs: requires.some(predicate => predicate.trim().startsWith("linked.")),
+		escalation: contract.pause?.includes("open-escalation-wisp-linked-to-node") === true,
+		base: requires.some(predicate => predicate.includes("base_sha")),
+		coverage: requires.some(predicate => predicate.includes("REVIEW covers")),
+	};
 }
 
 /**
@@ -484,91 +547,129 @@ export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  * the base fails open on its own.
  */
 export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNeeds = ALL_LINKED_EVIDENCE, runEpic?: string): Promise<Evidence | null> {
- const comments = await bdCommentsChecked(bead.id);
- if (comments === null) return null;
- const verbs = comments.map(comment => commentVerb(comment.text));
- const reportedPath = comments.some((comment, index) => verbs[index] === "REPORTED" && namesPath(comment.text));
- const noChangeNoted = comments.some(comment => noChangeNote(comment.text, bead.id));
- const pushed = pushedToken(comments.map(comment => comment.text));
- let baseSha = metadataString(bead, "base_sha");
- if (baseSha === undefined && needs.base && runEpic !== undefined && metadataString(bead, "head_sha") !== undefined) {
-  const epic = await bdShow(runEpic);
-  if (epic === null) {
-   logger.warn("orchestrate exit contract: run epic could not be read; head-versus-base check skipped", {
-    bead: bead.id,
-    epic: runEpic,
-    cause: lastBdFailure(),
-   });
-  } else {
-   baseSha = metadataString(epic, "base_sha");
-  }
- }
- const linkedVerbs: string[] = [];
- const unstamped: UnstampedComment[] = [];
- let openEscalation = false;
- const direction = linkedEvidenceDirection(bead);
- // An escalation pauses the node it hangs off, so only outgoing links can carry one.
- const wantEscalation = needs.escalation && direction === "up";
- if (needs.verbs || wantEscalation) {
-  const linkedIds: string[] = [];
-  if (direction === "down" && typeof bead.parent === "string" && bead.parent.length > 0) linkedIds.push(bead.parent);
-  for (const type of ["relates-to", "replies-to"]) {
-   const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
-   if (linked === null) return null;
-   for (const linkedId of linked) {
-    if (!linkedIds.includes(linkedId)) linkedIds.push(linkedId);
-   }
-  }
-  const linkedBeads = linkedIds.length === 0 ? new Map<string, BdBead>() : await bdShowMany(linkedIds);
-  if (linkedBeads === null) return null;
-  for (const linkedId of linkedIds) {
-   const linkedBead = linkedBeads.get(linkedId);
-   if (linkedBead === undefined) return null;
-   if (wantEscalation) openEscalation ||= isOpenEscalation(linkedBead);
-   if (!needs.verbs) continue;
-   const linkedComments = await bdCommentsChecked(linkedId);
-   if (linkedComments === null) return null;
-   const version = ["head_sha", "review_round"].map(key => {
-    const value = bead.metadata?.[key] ?? linkedBead.metadata?.[key];
-    return { key, value: typeof value === "number" || typeof value === "string" ? String(value) : undefined };
-   });
-   for (const comment of linkedComments) {
-    const tokens = comment.text.split(/\s+/);
-    // Each version token the comment should carry and does not, with what it wrote instead.
-    const gaps = version.flatMap(({ key, value }) => {
-     if (value === undefined || tokens.includes(`${key}=${value}`)) return [];
-     return [{ key, expected: value, found: tokens.find(token => token.startsWith(`${key}=`))?.slice(key.length + 1) }];
-    });
-    const verb = commentVerb(comment.text);
-    if (gaps.length === 0) linkedVerbs.push(verb);
-    else unstamped.push({ verb, bead: linkedId, tokens: gaps });
-   }
-  }
- }
- let artifactContained = false;
- if (resourceKind(bead) === "artifact") {
-  const output = metadataString(bead, "output_ref");
-  const artifacts = metadataString(bead, "artifacts_dir");
-  const worktree = metadataString(bead, "worktree");
-  if (output !== undefined && artifacts !== undefined && path.isAbsolute(output) && path.isAbsolute(artifacts)) {
-   try {
-    const resolvedOutput = await realpath(output);
-    const resolvedArtifacts = await realpath(artifacts);
-    const relative = path.relative(resolvedArtifacts, resolvedOutput);
-    artifactContained = relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-    if (worktree !== undefined) {
-     const resolvedWorktree = await realpath(worktree);
-     const fromWorktree = path.relative(resolvedWorktree, resolvedOutput);
-     if (fromWorktree === "" || (fromWorktree !== ".." && !fromWorktree.startsWith(`..${path.sep}`) && !path.isAbsolute(fromWorktree))) {
-      artifactContained = false;
-     }
-    }
-   } catch {
-    artifactContained = false;
-   }
-  }
- }
- return { bead, verbs, linkedVerbs, unstamped, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted, pushed };
+	const comments = await bdCommentsChecked(bead.id);
+	if (comments === null) return null;
+	const verbs = comments.map(comment => commentVerb(comment.text));
+	const reportedPath = comments.some((comment, index) => verbs[index] === "REPORTED" && namesPath(comment.text));
+	const noChangeNoted = comments.some(comment => noChangeNote(comment.text, bead.id));
+	const pushed = pushedToken(comments.map(comment => comment.text));
+	const dimension = metadataString(bead, "dimension");
+	let baseSha = metadataString(bead, "base_sha");
+	if (baseSha === undefined && needs.base && runEpic !== undefined && metadataString(bead, "head_sha") !== undefined) {
+		const epic = await bdShow(runEpic);
+		if (epic === null) {
+			logger.warn("orchestrate exit contract: run epic could not be read; head-versus-base check skipped", {
+				bead: bead.id,
+				epic: runEpic,
+				cause: lastBdFailure(),
+			});
+		} else {
+			baseSha = metadataString(epic, "base_sha");
+		}
+	}
+	const linkedVerbs: string[] = [];
+	const unstamped: UnstampedComment[] = [];
+	const linkedReviewComments: string[] = [];
+	let linkedBead: BdBead | undefined;
+	let linkedAcceptanceHash: string | undefined;
+	let planHash: string | undefined;
+	let integratedIds: string[] | undefined;
+	let integratedHashes: Map<string, string | undefined> | undefined;
+	let openEscalation = false;
+	const direction = linkedEvidenceDirection(bead);
+	// An escalation pauses the node it hangs off, so only outgoing links can carry one.
+	const wantEscalation = needs.escalation && direction === "up";
+	const wantCoverage = needs.coverage;
+	if (needs.verbs || wantEscalation || wantCoverage) {
+		const linkedIds: string[] = [];
+		if (direction === "down" && typeof bead.parent === "string" && bead.parent.length > 0) linkedIds.push(bead.parent);
+		for (const type of ["relates-to", "replies-to"]) {
+			const linked = await bdLinkedChecked(bead.id, type, undefined, direction);
+			if (linked === null) return null;
+			for (const linkedId of linked) {
+				if (!linkedIds.includes(linkedId)) linkedIds.push(linkedId);
+			}
+		}
+		const linkedBeads = linkedIds.length === 0 ? new Map<string, BdBead>() : await bdShowMany(linkedIds);
+		if (linkedBeads === null) return null;
+		for (const linkedId of linkedIds) {
+			const candidate = linkedBeads.get(linkedId);
+			if (candidate === undefined) return null;
+			if (linkedBead === undefined) {
+				linkedBead = candidate;
+				linkedAcceptanceHash = beadAcceptanceHash(candidate);
+			}
+			if (wantEscalation) openEscalation ||= isOpenEscalation(candidate);
+			if (!needs.verbs && !wantCoverage) continue;
+			const linkedComments = await bdCommentsChecked(linkedId);
+			if (linkedComments === null) return null;
+			const version = ["head_sha", "review_round"].map(key => {
+				const value = bead.metadata?.[key] ?? candidate.metadata?.[key];
+				return { key, value: typeof value === "number" || typeof value === "string" ? String(value) : undefined };
+			});
+			for (const comment of linkedComments) {
+				const tokens = comment.text.split(/\s+/);
+				// Each version token the comment should carry and does not, with what it wrote instead.
+				const gaps = version.flatMap(({ key, value }) => {
+					if (value === undefined || tokens.includes(`${key}=${value}`)) return [];
+					return [{ key, expected: value, found: tokens.find(token => token.startsWith(`${key}=`))?.slice(key.length + 1) }];
+				});
+				const verb = commentVerb(comment.text);
+				if (gaps.length > 0) {
+					unstamped.push({ verb, bead: linkedId, tokens: gaps });
+					continue;
+				}
+				if (needs.verbs) linkedVerbs.push(verb);
+				if (wantCoverage && verb === "REVIEW") linkedReviewComments.push(comment.text);
+			}
+		}
+		if (wantCoverage && linkedBead !== undefined) {
+			if (dimension === "plan") planHash = await planHashOf(linkedBead.id);
+			const rawIntegrated = linkedBead.metadata?.integrated;
+			if (rawIntegrated === undefined) integratedIds = [];
+			else if (Array.isArray(rawIntegrated)) integratedIds = rawIntegrated.every(id => typeof id === "string") ? rawIntegrated : undefined;
+			else if (typeof rawIntegrated === "string") {
+				try {
+					const parsed: unknown = JSON.parse(rawIntegrated);
+					integratedIds = Array.isArray(parsed) && parsed.every(id => typeof id === "string") ? parsed : undefined;
+				} catch {
+					integratedIds = undefined;
+				}
+			} else integratedIds = undefined;
+			if (integratedIds !== undefined) {
+				integratedHashes = new Map<string, string | undefined>();
+				if (integratedIds.length > 0) {
+					const integratedBeads = await bdShowMany(integratedIds);
+					if (integratedBeads === null) return null;
+					for (const id of integratedIds) integratedHashes.set(id, beadAcceptanceHash(integratedBeads.get(id) ?? { id }));
+				}
+			}
+		}
+	}
+	let artifactContained = false;
+	if (resourceKind(bead) === "artifact") {
+		const output = metadataString(bead, "output_ref");
+		const artifacts = metadataString(bead, "artifacts_dir");
+		const worktree = metadataString(bead, "worktree");
+		if (output !== undefined && artifacts !== undefined && path.isAbsolute(output) && path.isAbsolute(artifacts)) {
+			try {
+				const resolvedOutput = await realpath(output);
+				const resolvedArtifacts = await realpath(artifacts);
+				const relative = path.relative(resolvedArtifacts, resolvedOutput);
+				artifactContained = relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+				if (worktree !== undefined) {
+					const resolvedWorktree = await realpath(worktree);
+					const fromWorktree = path.relative(resolvedWorktree, resolvedOutput);
+					if (fromWorktree === "" || (fromWorktree !== ".." && !fromWorktree.startsWith(`..${path.sep}`) && !path.isAbsolute(fromWorktree))) {
+						artifactContained = false;
+					}
+				}
+			} catch {
+				artifactContained = false;
+			}
+		}
+	}
+	return { bead, verbs, linkedVerbs, unstamped, beadComments: comments.map(comment => comment.text), dimension, linkedBead, linkedAcceptanceHash, linkedReviewComments, integratedIds, integratedHashes, planHash, openEscalation, artifactContained, baseSha, reportedPath, noChangeNoted, pushed };
 }
 
 /**
@@ -744,7 +845,6 @@ async function gateUnclaimedExit(
  * every check here hangs off a bead. Each fail-open is logged with the cause, because
  * an exit accepted unevaluated is otherwise indistinguishable from one that passed.
  */
-
 async function gateClaimedExit(
  state: ExitGuardState,
  ctx: ExtensionContext,
@@ -815,7 +915,7 @@ async function gateClaimedExit(
 
  for (const check of contract.completion ?? []) {
   if (paused) continue;
-  if (!applies(check, kind)) continue;
+	if (!applies(check, kind, evidence.dimension)) continue;
   // Origin is asked once, and only for a check that is actually judged: a paused or
   // inapplicable check spends no network read.
   const asks = asksOrigin(check.require);
@@ -915,20 +1015,31 @@ async function gateClaimedExit(
  * `head 73018a2` for `head_sha=73018a2…`, and the bare predicate gave it nothing to fix.
  */
 function unsatisfied(require: string, evidence: Evidence): string {
- const causes: string[] = [];
- if (asksOrigin(require) !== undefined && evidence.origin !== undefined && !evidence.origin.matched) causes.push(evidence.origin.detail);
- if (asksClone(require) !== undefined && evidence.cloneWork !== undefined && !evidence.cloneWork.matched) causes.push(evidence.cloneWork.detail);
- const verbSet = verbPredicate(require);
- if (verbSet?.linked === true) {
-  for (const dropped of evidence.unstamped ?? []) {
-   if (!verbSet.wanted.includes(dropped.verb)) continue;
-   const gaps = dropped.tokens.map(({ key, expected, found }) =>
-    found === undefined ? `lacks ${key}=${expected}` : `carries ${key}=${found}, expected ${key}=${expected}`);
-   const cause = `${dropped.verb} on ${dropped.bead} ${gaps.join(" and ")}; the expected values are the claimed bead's metadata, else the node's`;
-   if (!causes.includes(cause)) causes.push(cause);
-  }
- }
- return `unsatisfied: ${require}${causes.length === 0 ? "" : ` -- ${causes.join("; ")}`}`;
+	const causes: string[] = [];
+	if (asksOrigin(require) !== undefined && evidence.origin !== undefined && !evidence.origin.matched) causes.push(evidence.origin.detail);
+	if (asksClone(require) !== undefined && evidence.cloneWork !== undefined && !evidence.cloneWork.matched) causes.push(evidence.cloneWork.detail);
+	const verbSet = verbPredicate(require);
+	if (verbSet?.linked === true) {
+		for (const dropped of evidence.unstamped ?? []) {
+			if (!verbSet.wanted.includes(dropped.verb)) continue;
+			const gaps = dropped.tokens.map(({ key, expected, found }) =>
+				found === undefined ? `lacks ${key}=${expected}` : `carries ${key}=${found}, expected ${key}=${expected}`);
+			const cause = `${dropped.verb} on ${dropped.bead} ${gaps.join(" and ")}; the expected values are the claimed bead's metadata, else the node's`;
+			if (!causes.includes(cause)) causes.push(cause);
+		}
+	}
+	if (require === "linked.REVIEW covers plan") causes.push(`write REVIEW dimension=plan with plan=${evidence.planHash ?? "<current plan hash unavailable>"}`);
+	else if (require === "linked.REVIEW covers override") causes.push(`write REVIEW dimension=override with override=${evidence.linkedAcceptanceHash ?? "<current acceptance hash unavailable>"}`);
+	else if (require === "linked.REVIEW covers integrated") {
+		const expected = evidence.integratedIds?.map(id => `${id}:${evidence.integratedHashes?.get(id) ?? "<current acceptance hash unavailable>"}:met|unmet`).join(",") ?? "<integrated ids unavailable>";
+		causes.push(`write REVIEW dimension=code with nodes=${expected}`);
+	} else if (require === "comment.REPORTED covers dod") {
+		const text = acceptanceText(evidence.bead);
+		const hash = beadAcceptanceHash(evidence.bead);
+		const items = text === undefined || hash === undefined ? "<acceptance items unavailable>" : acceptanceItems(text).map(item => `${hash}:${item}:met|unmet`).join(",");
+		causes.push(`write REPORTED with dod=${items}`);
+	}
+	return `unsatisfied: ${require}${causes.length === 0 ? "" : ` -- ${causes.join("; ")}`}`;
 }
 
 /**

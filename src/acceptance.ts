@@ -21,9 +21,10 @@
  */
 
 import { createHash } from "node:crypto";
+import { bdListChecked, metadataRecord } from "./bd";
 import type { BdBead } from "./bd";
+import { scopeOf } from "./scope";
 
-/** Hex digits of a quoted hash. */
 export const HASH_LENGTH = 12;
 
 const HASH_RE = new RegExp(`^[0-9a-f]{${HASH_LENGTH}}$`);
@@ -194,4 +195,37 @@ export function planHash(children: readonly PlanChild[]): string {
 			acceptance: child.acceptanceHash ?? null,
 		}));
 	return digest(JSON.stringify(canonical));
+}
+
+/**
+ * Read an epic's live `orc-node` children and hash the decomposition the plan reviewer
+ * judged. A failed read is unknown rather than an empty plan: the claim and exit gates
+ * must not turn an unreadable store into a valid plan review.
+ */
+export async function planHashOf(epicId: string): Promise<string | undefined> {
+	const queue = [epicId];
+	const seen = new Set<string>();
+	const children: BdBead[] = [];
+	while (queue.length > 0) {
+		const parent = queue.shift() as string;
+		const rows = await bdListChecked(["list", "--parent", parent, "--label", "orc-node", "--limit", "0", "--json"]);
+		if (rows === null) return undefined;
+		for (const child of rows) {
+			if (seen.has(child.id)) continue;
+			seen.add(child.id);
+			children.push(child);
+			queue.push(child.id);
+		}
+	}
+	return planHash(children.map(child => {
+		const rawDependencies = (child as Record<string, unknown>).dependencies;
+		const dependsOn = Array.isArray(rawDependencies)
+			? rawDependencies.flatMap(entry => {
+				if (typeof entry === "string") return [entry];
+				if (entry !== null && typeof entry === "object" && typeof (entry as Record<string, unknown>).id === "string") return [(entry as Record<string, string>).id];
+				return [];
+			})
+			: [];
+		return { id: child.id, scope: scopeOf(metadataRecord(child.metadata)), dependsOn, acceptanceHash: beadAcceptanceHash(child) };
+	}));
 }

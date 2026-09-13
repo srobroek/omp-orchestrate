@@ -45,6 +45,10 @@
     {
       "check": "reported",
       "require": "comment.verb in [REPORTED]"
+    },
+    {
+      "check": "dod",
+      "require": "comment.REPORTED covers dod"
     }
   ],
   "authority": {
