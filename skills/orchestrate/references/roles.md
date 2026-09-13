@@ -15,38 +15,46 @@ Escalation is per-spawn `effort`, not a second agent. There is no deep variant o
 | Role | Agent | Model role | Lifetime | Works in | Claims |
 |---|---|---|---|---|---|
 | Lead | you (this session) | session model | whole run | the primary checkout | never claims anything |
-| Architect | `orc-architect` | `@plan` | long-lived, parked between waves, revivable | its Worktrunk feature worktree; **not** isolated | one epic, pulled |
-| Implementer | `orc-implementer` | `@task` | ephemeral, one bead | an isolated copy; commits captured on `omp/task/<id>` | one task bead, pulled |
+| Architect | `orc-architect` | `@plan` | one activation per claim, bounded by the subagent wall-clock cap; replaced from origin | an isolated clone of the primary checkout; its feature branch is pushed to origin at creation and after every integration | one epic, pulled |
+| Implementer | `orc-implementer` | `@task` | ephemeral, one bead | an isolated clone of the architect's clone; commits captured on `omp/task/<id>` and pushed to origin before yield | one task bead, pulled |
 | Reviewer | `orc-reviewer` | `@reviewer` | ephemeral, one verdict | inspects the captured branch or feature tree without editing code; dispatch determines checkout isolation | one review wisp, pulled |
 | Researcher | `orc-researcher` | `@smol` | ephemeral, one answer | reads assigned sources without editing code; dispatch determines checkout isolation | one escalation wisp or research bead, pulled |
 | Shepherd | `orc-shepherd` | `@task` | ephemeral, one pass over a bot round | PR review state only; no content edits, no merge | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
 | Helper | `scout`, or another non-claiming child its spawner's allowlist names | its loaded definition | ephemeral, inside its spawner's await | its spawner's checkout; mutation only when explicitly scoped and granted | nothing -- architect helpers are traced by a wisp; worker factual lookups return directly |
 
-The lead prepares and binds the unassigned architect epic before launching the native
-architect. The architect must start in its canonical owned Worktrunk feature worktree
-before it claims the epic or dispatches any child. Non-isolated children inherit their
-parent session's `cwd`; isolated children run in runtime-created copies snapshotted from
-that parent-session `cwd`. The detailed session-cwd prerequisite and supported CLI re-entry
-path are in `planning.md`.
+The lead spawns `orc-architect` with `isolated: true`; the spawn gate refuses a non-isolated
+architect as it refuses a non-isolated implementer. The architect's cwd is a clone of the
+primary checkout at its current branch. OMP deletes that clone when the architect completes,
+when the lead cancels it, or when it hits the wall-clock cap.
+
+Origin is the only store that outlives a clone. The architect claims its epic by role,
+creates the feature branch in the clone, and pushes it before any dispatch. Non-isolated
+children inherit the architect's cwd; isolated children run in a clone of that clone, on
+the feature branch at its head. `planning.md` holds the entry and replacement procedure.
 
 The reviewer uses the configured `@reviewer` role. The researcher uses `@smol` and
 escalates hard cases per spawn with `effort`.
 
-"Long-lived" does not mean one never-restarted process. An architect may be replaced
-mid-epic; the Worktrunk branch and the bead state are what carry the domain, so the
-replacement resumes the same tree.
+A replacement architect can take over mid-epic: the feature branch on origin, the pushed
+`omp/task/<id>` refs and the bead state carry the domain, so it fetches the branch and
+resumes.
 
 ## Architect rollover
 
-The global subagent wall-clock cap is 30 minutes. A timeout is a process boundary, not an epic failure. When an architect times out and its epic remains open, the lead reads the epic, feature worktree, latest durable comments, terminal receipts, captures, and unresolved claims. The lead then starts one replacement `orc-architect` for the same epic and worktree with a handover containing:
+The global subagent wall-clock cap is 30 minutes. A timeout is a process boundary, not an
+epic failure. It ends the architect's process, deletes its clone, and leaves an `aborted`
+frame. The reaper in the lead's session then releases the epic claim under the lease fence
+and writes `RECOVERED`.
 
-- the epic id and the run database the marker records (`beads_dir`);
-- the feature worktree and current head;
-- completed worker receipts and integrated captures;
-- unresolved claims, blockers, and recovery ownership;
-- the next safe action.
+The lead spawns one replacement `orc-architect`, `isolated: true`, naming the run epic and
+the role. The replacement pulls the epic by role and checks out the branch from origin at
+the stamped `head_sha`. It then integrates what the pushed `omp/task/<id>` refs hold that
+the branch does not (`planning.md`, Replacement).
 
-Do not relay stale chat history or infer missing state. If durable evidence is incomplete, enter lifecycle recovery before restart. Repeat rollover only while the epic remains actionable and each outgoing architect has recorded progress or a concrete blocker.
+Do not relay chat history or infer missing state: the bead, its comments and origin are the
+handover. Repeat rollover only while the epic remains actionable and each outgoing architect
+has recorded progress or a concrete blocker. A crash loses at most the integration the
+architect had not pushed.
 
 ## What replaced the scribe and continuous advisors
 
@@ -72,8 +80,8 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 | Role | Writes | Spawns | Notes |
 |---|---|---|---|
 | Lead | run epics, their metadata, wakes | architects | coordination and bounded factual inspection; delegates implementation and substantive domain investigation |
-| Architect | its feature tree, commits, draft PR, review requests, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-tree and PR-content mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures; never merges a PR |
-| Implementer | code inside `metadata.scope`, in its isolated copy | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
+| Architect | its feature branch in its clone, commits, pushes of that branch to origin, draft PR, review requests, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-branch and PR-content mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures and pushes after each; never merges a PR |
+| Implementer | code inside `metadata.scope`, in its isolated clone; one push of its head to `omp/task/<own id>` | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
 | Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree without editing code; dispatch determines checkout isolation |
 | Researcher | comments (`NOTE` answers), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
 | Shepherd | fix beads for an actionable bot round, `BOUNCED`/`ESCALATED`/`BLOCKED` | nothing | observes provider requests and reviews; never merges: the plugin's landing sweep merges, refreshes, reruns CI and files conflict and CI fix beads |
@@ -116,7 +124,7 @@ refused for depth. A bead-claiming role spawned by a worker stays a design error
 | Situation | Do this |
 |---|---|
 | The work deserves a bead, review, and a captured branch | create the task bead routed to `role=implementer` and dispatch a wave |
-| A bounded sweep or mechanical operation that saves substantial context/execution | optionally spawn an allowlisted helper only after the architect session is rooted in its canonical checkout; trace architect helpers with a wisp, and await the terminal result before resuming writes |
+| A bounded sweep or mechanical operation that saves substantial context/execution | optionally spawn an allowlisted helper; trace architect helpers with a wisp, and await the terminal result before resuming writes |
 | A design or debug question that needs judgment, not a factual lookup | route it to `role=researcher` rather than deciding it yourself |
 | A small repository or external-library fact | read it directly; use `scout` only for a substantial bounded lookup. Worker factual returns need no bead, wisp or consent; external briefs require package/version and primary-source citations |
 | A verdict on work that reported | create the review wisp with `role=reviewer`; never review what you wrote |

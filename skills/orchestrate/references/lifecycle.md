@@ -31,8 +31,8 @@ never stored as a bead state.
 |---|---|
 | `pending → ready` | `bd ready --parent <epic> --metadata-field role=<role> --unassigned` reports the bead, no gate is open, and its routing envelope is complete |
 | `ready → working` | a worker pulls it: `bd ready … --claim` returns the bead, atomically and first-wins, and the worker adopts what it was given |
-| `working → reported` | the worker stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED`, then releases with a single `bd update <id> --assignee ""`. The release comes last: it clears the ownership every other write on the bead is checked against, and only the terminal comment is admitted after it. Successful task completion then captures the parent-side branch; failed completion may leave no capture |
-| `reported → in_review` | the architect collects the successful terminal task result, verifies the captured branch and head, integrates it, then creates review-wisp shells. A pre-yield report alone is not capture proof |
+| `working → reported` | the worker pushes its head to `origin/omp/task/<own id>` (`git push origin HEAD:$ORC_PUSH_REF`), stamps pre-yield evidence (`head_sha` for git) and the handoff label, writes `REPORTED` carrying `pushed=omp/task/<id>@<sha>`, then releases with a single `bd update <id> --assignee ""`. The release comes last: it clears the ownership every other write on the bead is checked against, and only the terminal comment is admitted after it. G4 refuses the yield until `git ls-remote origin refs/heads/omp/task/<id>` shows `head_sha`. Successful task completion also captures the branch in the architect's clone |
+| `reported → in_review` | the architect collects the successful terminal task result, verifies the pushed ref and head, integrates it, pushes the feature branch, re-stamps the epic's `head_sha`, then creates review-wisp shells. A pre-yield report alone is not integration |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with a `NOTE` on the node |
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
 | `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead with `pr` and the reviewed `head_sha`; the plugin's landing sweep merges it at that head and writes `LANDED <sha>` |
@@ -57,9 +57,13 @@ Omit a token only when neither endpoint carries it.
 
 An answered escalation ends only after the researcher verifies both `NOTE` writes,
 closes and releases its wisp, then notifies the architect. The architect collects
-the paused worker's actual terminal result and any successful capture. Resuming
+the paused worker's actual terminal result and any pushed capture. Resuming
 unfinished work requires the reaper to release its retained claim under the lease;
 neither a ping nor wisp closure automatically requeues it.
+
+An architect's own escalation pauses differently. It releases its epic before yield and
+nobody resumes it; the `NOTE` reopens the epic for a fresh architect (`planning.md`,
+Replacement).
 
 ## Completion paths
 
@@ -87,10 +91,10 @@ commit, a placeholder branch, or a fake merge requirement.
 
 ### Review and merge handoff
 
-After verifying terminal capture and integrating branches, the architect creates all
-required review-wisp shells before dispatch and opens the PR as a draft. Choose dimensions
-for material risks and project policy, not a mandatory specialist roster. Reviewers remain
-independent.
+After verifying terminal capture, integrating branches and pushing the feature branch, the
+architect creates all required review-wisp shells before dispatch and opens the PR as a
+draft. Choose dimensions for material risks and project policy, not a mandatory specialist
+roster. Reviewers remain independent.
 
 Two edges hold the handoff:
 
@@ -211,14 +215,14 @@ those markers and probes every bot; the landing sweep lands the PR.
 | Class | Agents | Rule |
 |---|---|---|
 | Session | the lead | owns the run epics and the marker; restartable from bead state alone |
-| Domain | architect | one epic, one Worktrunk feature branch; replaceable mid-epic, because the tree and the beads carry the domain |
+| Domain | architect | one epic, one feature branch on origin; replaceable mid-epic, because origin and the beads carry the domain. It releases its epic before every yield and is never revived |
 | Landing | the plugin's landing sweep; the shepherd only for a bot round | one merge bead; the sweep is a 60 s timer in the lead session, the shepherd one ephemeral pass |
 | Task-scoped | implementer, reviewer, researcher | claim one bead or wisp, report there, release, exit. Respawn reads the bead, its comments, and its linked wisps |
 | Untracked | helper | runs inside its spawner's awaited job; architect outcomes are promoted to feature comments before trace compaction. A task receipt is not completion; the parent must collect the terminal result before mutating a shared checkout |
 
-An isolated worker gets no wake when it finishes: nobody sends to it, and a replacement pulls
-the bead instead. A non-isolated architect parks after `task.agentIdleTtlMs` and *is* revived
-by a `hub` send.
+An isolated agent gets no wake when it finishes: OMP deletes its clone at completion, nobody
+sends to it, and a replacement pulls the bead instead. The architect and the implementer are
+isolated; a reviewer, researcher or shepherd is isolated when its dispatch says so.
 
 An exit allowed after the local refusal budget is not accepted work and does not release
 the claim. Inspect the terminal result and durable evidence; the reaper releases a dead
@@ -259,34 +263,26 @@ implementer stamping `origin_actor` on a wisp it raises is writing that handle.
    epic's liveness, the lead lease (`lead_actor`, `lease_until`), and the Attention
    section; or `bd list --type epic --json`, matched on `metadata.run_id`.
 2. Read in-flight beads: `bd list --parent <epic> --status in_progress --json`. Each carries
-   the actor in `assignee`, the location in `metadata.worktree`/`branch`, its lease in
-   `metadata.lease_until`, and its last verb in `bd comments`. Confirm every stamped
-   checkout with `wt list --format=json`.
-3. If a stamped path is missing or the runtime root mismatches, execute `planning.md`'s
-   **Canonical checkout recovery**. Inventory the owning epic's stamped branch/path and WT
-   rows first; preserve an existing dirty resumed checkout, captures, terminal results, and
-   all evidence. Recreate only a missing checkout with `wt -C "<source-root>" switch
-   "<branch>" --no-cd --format=json`, use its returned JSON `path` as the canonical
-   worktree, and reject an unresolved or foreign WT bead binding. A missing Git object or
-   capture is a separate setup failure, not cwd repair.
-4. Stamp the updated `metadata.worktree` and WT `bead` binding for the exact owning epic,
-   read both back, and require equality before actor re-entry. Do not release a retained
-   claim merely to relocate; a mismatch preserves the claim, checkout, capture, terminal
-   result, and evidence. Re-enter only through the rooted `omp --cwd
-   "<canonical-worktree>" --config "<plugin-root>/config/orchestrate.overlay.yml"`
-   procedure in `planning.md`, with the same absolute `ORCHESTRATE_MARKER_FILE`.
-5. Find surviving code: `git branch --list 'omp/task/*'`, then `git cherry <feature-branch>
-   <task-branch>` per branch. A branch printing any `+` holds work that is not integrated,
-   whatever the bead says.
-6. Claims whose holder died with the old lead's process are the adopting lead's to release:
+   the actor in `assignee`, the branch in `metadata.branch`/`push`, its head in
+   `metadata.head_sha`, its lease in `metadata.lease_until`, and its last verb in
+   `bd comments`. Confirm every stamped branch on origin: `git ls-remote origin
+   refs/heads/<branch>`.
+3. A branch whose origin head differs from the stamped `head_sha` was pushed and stamped
+   out of step; the replacement architect reports it `BLOCKED` with both values
+   (`planning.md`, Replacement). No checkout is repaired: every agent's clone died with it,
+   and the replacement clones afresh. Never reset an origin branch.
+4. Find surviving code on origin: `git ls-remote origin 'refs/heads/omp/task/*'`, then per
+   ref `git fetch origin <ref> && git cherry <feature-branch> FETCH_HEAD`. A `+` line holds
+   work that is not integrated, whatever the bead says. A local `omp/task/*` branch in the
+   primary is a capture of the lead's own child and proves nothing about worker units.
+5. Claims whose holder died with the old lead's process are the adopting lead's to release:
    `/orchestrate-resume` takes over a lapsed lead lease, then reads every in-flight claim
    fresh and releases those whose lease has lapsed, on the lease alone, writing
    `RECOVERED` on each. A live lease is a live holder until it lapses; the command names it
    and leaves it alone. Never release a claim by hand.
 
 Live actors are not re-activated with a message: a claim already names its bead, and a
-replacement pulls the same bead atomically. A parked architect needs a wake, under the rules
-in `Wakes and messages` above.
+replacement pulls the same bead atomically.
 
 ## Supervision
 
@@ -310,11 +306,11 @@ exit gate uses* against live bead state:
 
 `completed` means successful task termination, not accepted work. Parent-side capture
 exists only after successful completion and can include uncommitted delta. Failed isolated
-runs may lose local commits and uncommitted work. The reaper never touches branches,
-worktrees, or captured refs. Each child is reaped once per session: a revived agent's
-follow-up turns re-emit the terminal frame, and a parked architect is not re-noticed on
-every wake. When the run's liveness cannot be read at a child's exit, the reaper skips and
-sends an `orchestrate-recovery` notice saying nothing was released.
+runs may lose local commits and uncommitted work; the pushed `omp/task/<id>` ref keeps what
+the worker pushed. The reaper never touches branches, clones, or pushed refs. Each child is
+reaped once per session: a revived agent's follow-up turns re-emit the terminal frame and
+are not re-noticed. When the run's liveness cannot be read at a child's exit, the reaper
+skips and sends an `orchestrate-recovery` notice saying nothing was released.
 
 **Leases** cover process death. Every claim carries `metadata.lease_until`, renewed by the
 plugin on the holder's tool activity (`bd update <bead> --actor <holder> --claim
@@ -354,11 +350,12 @@ its next renewal (one stray `RECOVERED`) or loses to a new claimant and is stopp
 worktree-scope gate's ownership check. Both are visible on the bead.
 
 What a release leaves behind: the bead `open` and unassigned, `metadata.recovered_by`,
-`metadata.recovered_branch` when the repository showed `omp/task/<holder>`, and a
-`RECOVERED <holder> <cause>` comment carrying the branch and contract evidence. Worktree,
-captured branch, artifacts, comments and external references are untouched. Requeue is
-implicit: the next `bd ready --claim` returns the bead, and the claimant inherits every
-preserved anchor including `recovered_branch`.
+`metadata.recovered_branch` when the spawner's repository showed `omp/task/<holder>`, and a
+`RECOVERED <holder> <cause>` comment carrying the branch and contract evidence. Pushed refs,
+artifacts, comments and external references are untouched. Requeue is implicit: the next
+`bd ready --claim` returns the bead, and the claimant inherits every preserved anchor
+including `recovered_branch`. Under isolation that branch lived in the dead spawner's clone;
+`origin/omp/task/<holder>` is the copy that survives.
 
 What the reaper leaves alone, and why:
 
@@ -368,8 +365,8 @@ What the reaper leaves alone, and why:
 - a holder absent from the registry: unknown
 
 Each gets a `NOTE claim preserved` or a notice naming the lease state; none gets a blind
-release. If checkout or runtime-root repair is needed before a replacement can work, run
-`planning.md`'s **Canonical checkout recovery** first.
+release. A replacement architect resumes from origin (`planning.md`, Replacement); no
+checkout is repaired.
 
 ## Failure propagation
 
@@ -381,11 +378,12 @@ release. If checkout or runtime-root repair is needed before a replacement can w
 
 ## Recycle runtime processes
 
-Every process is restartable because beads, wisps, captured branches, and GitHub are the
+Every process is restartable because beads, wisps, pushed branches, and GitHub are the
 source of truth.
 
-- **Architect:** replace it between waves, never mid-integration. The feature branch and the
-  bead state carry the domain.
+- **Architect:** replace it between waves, never mid-integration: a cancel deletes its clone
+  and loses the integration it had not pushed. The feature branch on origin, the pushed
+  `omp/task/<id>` refs and the bead state carry the domain.
 - **Shepherd:** one ephemeral pass over the ordinary merge bead. Restart from the merge
   bead; nothing else holds state for it.
 - **Workers:** replace only after the reaper releases their claim under the lease; a
@@ -575,8 +573,8 @@ The wake is content-free and last:
 - the bead is complete without the message, so a failed send changes nothing. Never retry it,
   and never block on it.
 - the message carries no instructions and no description of the bug. The bead is the brief.
-- it buys triage while the run is live rather than at close-out, plus the revival of an
-  architect parked past `task.agentIdleTtlMs`. One saved round trip, nothing more.
+- it buys triage while the run is live rather than at close-out. One saved round trip,
+  nothing more.
 
 When you parented under your own epic, send nothing: your exit is already the doorbell. The
 child terminal event resumes your architect, which then reads the reporting bead, its `NOTE`,
@@ -614,27 +612,29 @@ is not a third, ownerless disposition.
 
 ## Cleanup
 
-Three kinds of tree exist, and only one of them is swept:
+Three kinds of tree exist, and no agent sweeps any of them:
 
-- **Isolated worker copies** are runtime-owned. They are created and removed by OMP, and
-  nothing in this package touches them.
-- **Captured branches** (`omp/task/*`) are explicit cleanup candidates only after patch
-  containment and terminal state are established by the architect's scan above.
-- **Worktrunk feature worktrees** are inspected with `wt list` and removed with `wt remove`,
-  through `bun skill://orchestrate/scripts/worktree-sweep.ts <worktree-path>`
-  (`--discard-branch` deletes a disposable role branch with it). Raw `git worktree`
-  lifecycle commands are denied.
+- **Isolated clones**, the architect's and every worker's, are runtime-owned. OMP creates
+  and deletes them, and nothing in this package touches them.
+- **Pushed task refs** (`origin/omp/task/*`) are explicit cleanup candidates only after
+  patch containment and terminal state are established by the architect's scan above.
+- **Worktrunk worktrees** are the operator's. Worktrunk is optional and operator-only: the
+  operator's checkout of a repository may be a `wt` worktree, and `/orchestrate-doctor`
+  reports `wt` as information. No role session creates one: `wt switch --create`, `git
+  worktree add` and `gh pr checkout` are refused in a run. The operator inspects them with
+  `wt list` and removes them with `wt remove`, through
+  `bun skill://orchestrate/scripts/worktree-sweep.ts <worktree-path>` (`--discard-branch`
+  deletes a disposable branch with it).
 
-On an architect's death, its feature worktree is triaged through a `recovery` wisp rather
-than deleted: the tree may hold uncommitted work worth rescuing. On epic teardown, verify the
-Worktrunk state vars are cleared and the worktree is released.
+An architect's death deletes its clone. There is nothing to rescue from it: what it pushed is
+on origin, and what it did not push is gone.
 
-At run end, after every feature tree is reclaimed, run
-`bun skill://orchestrate/scripts/worktree-sweep.ts --prune <primary-repo-path>`. Exit 1
-means at least one dirty, valid-but-unregistered, unknown, or
-symlink path was refused: inspect those paths and keep the run open instead of forcing
-deletion. The dirty primary checkout, the artifacts directory, the beads database, and the
-shared build target are never swept.
+At run end the operator runs
+`bun skill://orchestrate/scripts/worktree-sweep.ts --prune <primary-repo-path>` over its own
+worktrees. Exit 1 means at least one dirty, valid-but-unregistered, unknown, or symlink path
+was refused: inspect those paths and keep the run open instead of forcing deletion. The dirty
+primary checkout, the artifacts directory, the beads database, and the shared build target
+are never swept.
 
 Stop repository watchers before removing run-local process state. `/orchestrate-stop`
 releases the lead lease and removes the active-run marker only after verifying no child

@@ -148,8 +148,8 @@ nowhere else:
 
 A queue pull (`bd ready … --claim`) names no bead, so nothing is compared there; the
 decomposition check is what keeps the queue's beads disjoint. No per-write check exists: G2
-confines a write to the claimed worktree and `metadata.scope`, and does not consult other
-claims. Friction catches the honest mistake. It is not a substitute for disjoint globs.
+confines a write to the claimant's own checkout and `metadata.scope`, and does not consult
+other claims. Friction catches the honest mistake. It is not a substitute for disjoint globs.
 
 A feature bead's scope may be the union of its tasks: a bead's own parent chain and children are exempt from the friction check, so an architect can hold the feature envelope while its workers hold task scopes. An unrelated architect's envelope still counts as friction. Architects never take a code-writing claim over task territory; their feature claim is for integration and coordination, not editing.
 
@@ -183,9 +183,12 @@ limitations. Claim foreground observation remains mandatory even if a settings w
 accepted. Each spawner also needs its explicit `spawns:` allowlist;
 `task.maxRecursionDepth` alone does not grant a helper.
 
-Architects use persistent Worktrunk feature trees, not isolated spawns. Worker entry:
+Every bead-claiming role is a `task` subagent, and the architect and implementer run
+isolated; the spawn gate refuses either without `isolated: true`. Architect entry, from the
+lead, and worker entry, from the architect:
 
 ```
+{ name: "<CamelCase>", agent: "orc-architect", task: "<run epic id + role, not the work>", isolated: true }
 { name: "<CamelCase>", agent: "orc-implementer", task: "<epic id + queue, not the work>", isolated: true }
 ```
 
@@ -194,96 +197,79 @@ with `schemaMode: "strict"` for shape checking; it does not prove semantic accep
 Collect terminal results, not job receipts, before consuming captures or resuming writes.
 MCP/LSP degradation is recorded as `WARN preflight` on the epic; it does not hold a wave.
 
-## Architect runtime entry and recovery
+## Architect entry, feature branch, and replacement
 
-Start the architect in the canonical Worktrunk root derived from the session before
-claiming or dispatching. Non-isolated children inherit the parent session's cwd;
-isolated children run in a runtime-created copy snapshotted from that cwd.
-`metadata.worktree` routes queue ownership and scope; it never switches cwd.
-Verify the architect session root matches before any write or dispatch.
+The architect's cwd is a clone of the primary checkout, taken at spawn. OMP deletes the
+clone when the architect completes, when the lead cancels it, or when it hits the 30-minute
+wall-clock cap; OMP 18.1.17 has no keep option. Nothing that exists only in a clone
+survives it. Origin is the durable store, so each entry step pushes before anything depends
+on it.
 
-When re-entry changes the discovery root, use the supported rooted lead CLI and
-preserve the loaded native agent's role and spawn policy. Run it through the Bash
-tool with the marker in the call's `env` field, never as an inline `NAME=value`
+Entry, after the claim (`bd ready --parent <run-epic> --metadata-field role=architect
+--unassigned --claim --json`; no path filter):
 
-```json
-{
-  "command": "omp --cwd \"<canonical-worktree>\" --config \"<plugin-root>/config/orchestrate.overlay.yml\" --print \"Lead: dispatch the loaded native orc-architect for the run epic; preserve its role and spawn policy; collect and return the actual terminal result.\" </dev/null",
-  "env": { "ORCHESTRATE_MARKER_FILE": "<absolute-marker-file>" }
-}
-```
-
-Pass `--config "<plugin-root>/config/orchestrate.overlay.yml"` when re-entry changes
-discovery root; otherwise retain the active run configuration. A supervised PTY is also
-valid for `--print`; closed stdin prevents a hanging process. Collect the actual result
-before replacement. The overlay carries the run's isolation settings; never write them
-into the user's project or global configuration.
-
-### Canonical checkout recovery
-
-Recovery is one ordered operation. Dead-claim release belongs to the reaper under the lease
-fence (`lifecycle.md`, Dead-claim recovery); checkout repair is the architect's, and it
-never releases a retained claim merely to relocate a session. First collect the prior
-actor's terminal result, capture, dirty delta, branch, comments, and audit evidence and
-preserve every one of those anchors throughout recovery.
-
-1. Inventory the exact owning epic's current metadata and every Worktrunk checkout:
+1. Create the feature branch and push it before any dispatch:
 
    ```sh
-   bd show "<epic>" --json
-   wt list --format=json
+   git switch -c "<branch>" && git push -u origin "<branch>"
    ```
 
-   Record the stamped `metadata.branch` and `metadata.worktree`, the owning epic id,
-   and the checkout's returned branch/path. Do not infer a path from a branch name or
-   accept a path from a different bead.
-2. If the stamped path exists, preserve it exactly, including an accepted dirty
-   resumed checkout; inspect its status and evidence, and never reset, clean, or
-   replace it merely to make recovery look fresh.
-3. If the stamped path is missing, keep the claim and evidence in place, verify the
-   branch and source-root Git object/capture independently, and recreate only the
-   missing checkout from the actual source root:
+2. Stamp the epic. `worktree` is informational: G2 confines writes to the isolation root
+   the runtime reports, and no queue pull filters on the path.
 
    ```sh
-   wt -C "<source-root>" switch "<branch>" --no-cd --format=json
+   bd update "<epic>" --metadata '{"branch":"<branch>","base_sha":"<sha>","push":"origin/<branch>","head_sha":"<sha>","worktree":"<clone root>"}'
    ```
 
-   Use the returned JSON `path` as `<canonical-worktree>` for every subsequent command.
-   Do not derive it from `<branch>`, reuse stale metadata, or treat a missing Git object
-   as a cwd problem.
-4. At that returned or preserved canonical path, read the WT bead binding:
+3. Dispatch implementers `isolated: true`. Each runs in a clone of your clone, on
+   `<branch>` at its head. Before yield it pushes its head to `origin/omp/task/<id>` and
+   reports `pushed=omp/task/<id>@<sha>`; G4 refuses its yield until
+   `git ls-remote origin refs/heads/omp/task/<id>` shows that head. At successful
+   completion OMP also captures `omp/task/<id>` in your clone; the two hold the same commits.
+4. Integrate serially, from the local capture or from `origin/omp/task/<id>`, then push
+   and re-stamp before the next integration:
 
    ```sh
-   wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
+   git push origin "<branch>"
+   bd update "<epic>" --set-metadata head_sha="$(git rev-parse HEAD)"
    ```
 
-   Reject an unresolved read or a binding naming another bead/epic (a foreign WT
-   binding). An absent binding is acceptable only for the newly recreated checkout
-   whose branch ownership was independently verified; it must be stamped before
-   re-entry.
-5. Stamp both sides of the binding for the exact owning epic, without changing its
-   assignee, status, claim, branch, or evidence:
+   G4 refuses your yield, terminal or paused, while
+   `git ls-remote origin refs/heads/<branch>` differs from `metadata.head_sha`.
+5. Release the epic claim as the last write before any yield: `bd update "<epic>" --claim
+   --assignee ""`. A yielded isolated architect is finished: its clone is gone and no wake
+   revives it. A pause writes `BLOCKED` (escalation wisp) or `ASK` first and sets the epic
+   `blocked`, then releases; G4 admits that exit only with the feature head on origin. The
+   escalation's `NOTE` or `/orchestrate-answer` reopens the epic for the fresh architect the
+   lead spawns.
+
+### Replacement
+
+A timeout or cancel ends the architect's process and deletes its clone; the reaper in
+the lead's session releases the epic claim under the lease fence and writes `RECOVERED`.
+A voluntary yield has already released it. Either way the lead spawns one replacement
+`orc-architect`, `isolated: true`, naming the run epic and the role. The replacement:
+
+1. Pulls the epic by role. The claimed epic carries `branch`, `push`, `head_sha`.
+2. Checks out the branch from origin and requires the stamped head:
 
    ```sh
-   bd update "<epic>" --metadata '{"worktree":"<canonical-worktree>","branch":"<branch>"}'
-   wt -C "<canonical-worktree>" config state vars set bead="<epic>" --branch "<branch>"
+   git fetch origin "<branch>" && git switch "<branch>" && test "$(git rev-parse HEAD)" = "<head_sha>"
    ```
 
-6. Read both authoritative records back and require exact equality before any actor
-   re-entry or dispatch:
+   A mismatch means the last push and the last stamp disagree: report `BLOCKED` quoting
+   both values. Never reset or force-push an origin branch.
+3. Finds unintegrated worker output from bead evidence, never from a clone. For each task
+   whose last verb is `REPORTED`, read `pushed=<ref>@<sha>`, then:
 
    ```sh
-   bd show "<epic>" --json
-   wt -C "<canonical-worktree>" step eval '{{ vars.bead }}' --format json
+   git fetch origin "<ref>" && git cherry "<branch>" FETCH_HEAD
    ```
 
-   The bead's `metadata.worktree` must equal the returned canonical path, its branch
-   must equal the inventoried branch, and the WT `bead` value must equal the owning
-   epic id. A mismatch, stale value, foreign binding, or unresolved read is BLOCKED;
-   retain the claim, checkout, captures, and terminal evidence for explicit recovery.
-7. Only after those equality checks pass, re-enter the loaded architect through the
-   rooted `omp --cwd "<canonical-worktree>" --config "<plugin-root>/config/orchestrate.overlay.yml"`
-   procedure above.
-   A missing Git object, missing commit/capture, or source-root failure remains a
-   separate setup failure and must be reported with its own evidence; cwd correction
-   never proves the object exists or that dispatch succeeded.
+   A `+` line is a commit the branch lacks. Integrate it, push, re-stamp `head_sha`.
+4. Leaves dead workers' claims to the reaper (`lifecycle.md`, Dead-claim recovery). A
+   `RECOVERED` comment's `recovered_branch` names a capture in the dead architect's clone;
+   read the origin ref instead.
+
+An architect crash loses at most the integration it had not pushed; a worker crash loses the
+unit it had not pushed. Nobody rescues a local tree, because none outlives its agent.
