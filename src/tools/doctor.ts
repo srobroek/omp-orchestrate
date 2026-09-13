@@ -21,11 +21,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs/promises";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type AgentDiscoveryFinding, agentModelOverrides, CORE_AGENT_CONTRACTS, discoverAgentFindings, PLUGIN_AGENTS_BY_PACKAGE } from "../agent-preflight";
+import { type AgentDiscoveryFinding, agentModelOverrides, CORE_AGENT_CONTRACTS, DECLARED_MODEL_ROLES, discoverAgentFindings, PLUGIN_AGENTS_BY_PACKAGE } from "../agent-preflight";
 import { locateBeadsDir } from "../beads-mode";
 import { probeLandingCapabilities } from "../landing";
 import { probeStore } from "../store-probe";
-import { DECLARED_MODEL_ROLES, OVERLAY_FILE, readSettings, settingsDeviations } from "../watchers";
+import { OVERLAY_FILE, readSettings, settingsDeviations } from "../watchers";
 import { type Exec, spawnExec } from "./bot-review-probe";
 
 export type CheckStatus = "pass" | "warn" | "fail";
@@ -199,7 +199,7 @@ async function checkAgents(ctx: DoctorContext, observed: Record<string, unknown>
 	}
 	const byAgent = new Map<string, string[]>();
 	for (const finding of findings) {
-		if (Object.hasOwn(CORE_AGENT_CONTRACTS, finding.agent) && /^model alias "@[^"]+" does not resolve$/.test(finding.message)) continue;
+		if (Object.hasOwn(CORE_AGENT_CONTRACTS, finding.agent) && finding.unresolvedAlias !== undefined) continue;
 		const list = byAgent.get(finding.agent) ?? [];
 		list.push(finding.path === undefined ? finding.message : `${finding.message} (${finding.path})`);
 		byAgent.set(finding.agent, list);

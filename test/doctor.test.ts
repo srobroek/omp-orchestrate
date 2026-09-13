@@ -252,7 +252,7 @@ describe("runDoctor", () => {
 
 	test("with a live model registry, resolution decides each role row and the core agents row ignores the alias", async () => {
 		const resolve = (spec: string) => (spec === "@reviewer" ? undefined : { id: `model-for-${spec.slice(1)}` });
-		discoverSpy.mockImplementation(async () => [{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md" }]);
+		discoverSpy.mockImplementation(async () => [{ agent: "orc-reviewer", message: 'model alias "@reviewer" does not resolve', path: "/p/orc-reviewer.md", unresolvedAlias: "@reviewer" }]);
 		const report = await runDoctor({ cwd, models: { resolve } as never }, transcript(healthy()).exec);
 		expectRow(report, "modelRoles.plan", "pass", "@plan resolves to model-for-plan");
 		expectRow(report, "modelRoles.reviewer", "warn", "@reviewer does not resolve");

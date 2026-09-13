@@ -34,7 +34,9 @@ import {
  type AgentDiscoveryFinding,
  agentModelOverrides,
  coreContractForAgent,
+ DECLARED_MODEL_ROLES,
  discoverAgentFindings,
+ isOptionalRoleUnresolved,
  requestedAgentNames,
 } from "./agent-preflight";
 import { type BdBead, bdList, bdRun, claimedBead, metadataString, resetReadBudget } from "./bd";
@@ -65,21 +67,6 @@ const LSP_STARTUP_CHANNEL = "lsp:startup";
 const GOAL_RELAY_MESSAGE = "com.srobroek.omp-orchestrate.goal-relay";
 const SETTINGS_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.settings-preflight";
 const AGENT_PREFLIGHT_MESSAGE = "com.srobroek.omp-orchestrate.agent-preflight";
-
-/**
- * Model roles this plugin's agents name that OMP does NOT ship.
- *
- * OMP's built-ins are exactly `default`, `smol`, `slow`, `vision`, `plan`, `designer`,
- * `commit`, `tiny`, `task` and `advisor` (`config/model-roles.ts`). Anything else is a
- * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
- * unconfigured alias without warning -- so the run must announce it instead.
- *
- * `reviewer` gives the independent review agent its own configurable model selection.
- * Model-family separation is optional and requires an explicit model choice.
- *
- * `test/declared-surface.json` carries the same list and the suite asserts they agree.
- */
-export const DECLARED_MODEL_ROLES: readonly string[] = ["reviewer"];
 
 /**
  * Run id written before the run epic exists (`run-state.ts:37`). A marker still
@@ -1142,6 +1129,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
  /**
   * W3, second half: G8's assignment notice, then the `task` preflight. Warning
   * dedupe never weakens the refusal: a known bad core request blocks every spawn.
+  * One core finding is a warning only: an optional role alias that does not resolve,
+  * for which OMP falls back to the session model, as the doctor's role row promises.
   * Both wait for a run scope: spawning an `orc-*` agent outside a run gets no refusal
   * and costs no `omp config list`.
   */
@@ -1156,7 +1145,8 @@ export function registerWatchers(pi: ExtensionAPI, claims: ClaimState = createCl
     preflightAgents(pi, ctx, requested, reportedAgentFindings),
    );
    const requestedCoreFindings = findings.filter(
-    finding => requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined,
+    finding =>
+     requested.includes(finding.agent) && coreContractForAgent(finding.agent) !== undefined && !isOptionalRoleUnresolved(finding),
    );
    await warnPreflight(ctx.cwd, Date.now());
    if (requestedCoreFindings.length > 0) {

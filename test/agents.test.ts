@@ -11,9 +11,11 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
 import {
  CORE_AGENT_CONTRACTS,
+ DECLARED_MODEL_ROLES,
  agentDiscoveryFindings,
  coreContractForAgent,
  discoverAgentFindings,
+ isOptionalRoleUnresolved,
  requestedAgentNames,
 } from "../src/agent-preflight";
 import declared from "./declared-surface.json";
@@ -195,10 +197,11 @@ describe("agent definitions", () => {
   expect(unresolved).toEqual([]);
  });
 
- test("every declared model role is named by an agent and is not already built in", () => {
+ test("every declared model role is named by an agent, is not already built in, and matches the preflight's list", () => {
   const named = new Set([...parsed.values()].map(roleOf));
   expect(declaredModelRoles.filter(role => !named.has(role))).toEqual([]);
   expect(declaredModelRoles.filter(role => (MODEL_ROLE_IDS as string[]).includes(role))).toEqual([]);
+  expect([...DECLARED_MODEL_ROLES].sort()).toEqual([...declaredModelRoles].sort());
  });
 
  /**
@@ -420,6 +423,18 @@ describe("runtime discovery preflight", () => {
   expect(findings).toEqual([
    expect.objectContaining({ agent: "orc-architect", message: 'effective model must use @plan; received "@task"' }),
   ]);
+ });
+
+ test.each([
+  ["a core agent's unresolved optional alias is the gate's warning-only case", "orc-reviewer", "@reviewer", true],
+  ["a core agent's unresolved required alias still refuses", "orc-architect", "@plan", false],
+  ["a helper's unresolved optional alias is not a core exception", "pr-reviewer", "@reviewer", false],
+ ])("%s", (_label, agent, alias, optional) => {
+  const agents = [...KNOWN_ROLES.map(role => definition(`orc-${role}`, role)), definition("pr-reviewer", "helper", "@reviewer")];
+  const findings = agentDiscoveryFindings(agents, ["pr-reviewer"], spec => (spec === alias ? undefined : {}));
+  const finding = findings.find(item => item.agent === agent);
+  expect(finding).toMatchObject({ agent, message: `model alias "${alias}" does not resolve`, unresolvedAlias: alias });
+  expect(isOptionalRoleUnresolved(finding!)).toBe(optional);
  });
 
  test("keeps helper alias resolution checks and prototype-key inputs harmless", () => {

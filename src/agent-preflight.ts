@@ -35,10 +35,40 @@ export const PLUGIN_AGENTS_BY_PACKAGE: Readonly<Record<string, readonly string[]
  "@srobroek/quality": ["adversarial-challenger", "docs-guard", "lint-guard"],
 };
 
+/**
+ * Model roles this plugin's agents name that OMP does NOT ship.
+ *
+ * OMP's built-ins are exactly `default`, `smol`, `slow`, `vision`, `plan`, `designer`,
+ * `commit`, `tiny`, `task` and `advisor` (`config/model-roles.ts`). Anything else is a
+ * consumer prerequisite, and `resolveExplicitModelRole` returns undefined for an
+ * unconfigured alias without warning -- so the run must announce it instead.
+ *
+ * `reviewer` gives the independent review agent its own configurable model selection.
+ * Model-family separation is optional and requires an explicit model choice.
+ *
+ * `test/declared-surface.json` carries the same list and the suite asserts they agree.
+ */
+export const DECLARED_MODEL_ROLES: readonly string[] = ["reviewer"];
+
 export interface AgentDiscoveryFinding {
  agent: string;
  message: string;
  path?: string;
+ /** The `@alias` the live model registry could not resolve, when that is the finding. */
+ unresolvedAlias?: string;
+}
+
+/**
+ * A core agent whose optional role alias does not resolve. OMP falls back to the session
+ * model for it, so the spawn gate warns where the doctor's role row warns; every other
+ * core finding refuses the spawn.
+ */
+export function isOptionalRoleUnresolved(finding: AgentDiscoveryFinding): boolean {
+ return (
+  coreContractForAgent(finding.agent) !== undefined &&
+  finding.unresolvedAlias !== undefined &&
+  DECLARED_MODEL_ROLES.includes(finding.unresolvedAlias.slice(1))
+ );
 }
 
 function selectorSpecs(value: unknown): string[] | undefined {
@@ -108,7 +138,7 @@ function validateCoreSelector(
  for (const spec of specs) {
   const alias = modelAlias(spec);
   if (alias !== undefined && resolveModel !== undefined && resolveModel(spec) === undefined) {
-   findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path });
+   findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path, unresolvedAlias: alias });
   }
  }
 }
@@ -195,7 +225,7 @@ export function agentDiscoveryFindings(
   for (const spec of specs) {
    const alias = modelAlias(spec);
    if (alias !== undefined && resolveModel !== undefined && resolveModel(spec) === undefined) {
-    findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path: agent.filePath });
+    findings.push({ agent: name, message: `model alias ${JSON.stringify(alias)} does not resolve`, path: agent.filePath, unresolvedAlias: alias });
    }
   }
  }

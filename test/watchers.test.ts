@@ -847,8 +847,12 @@ function assignmentNotices(rig: Harness): string[] {
 }
 
 describe("assignment enforcement", () => {
-	// G8 is a run-scoped notice: every seat below sits in a marked checkout.
-	beforeEach(() => marked());
+	// G8 is a run-scoped notice: every seat below sits in a marked checkout. The epic
+	// comment each finding writes goes to the fake: the real `bd` costs seconds per call.
+	beforeEach(async () => {
+		await marked();
+		await fakeBd();
+	});
 
 	test("refuses repeated requests for a malformed core assignment but leaves helpers available", async () => {
 		await coreFixture("orc-reviewer", "researcher", "@reviewer");
@@ -868,6 +872,24 @@ describe("assignment enforcement", () => {
 		const helper = harness(undefined, true);
 		registerFixture(helper);
 		expect(await helper.fire("tool_call", { toolName: "task", input: { agent: "orc-helper" } })).toEqual([undefined]);
+	});
+
+	test("an unresolved optional role alias warns and lets orc-reviewer spawn; an unresolved required alias refuses", async () => {
+		await coreFixture("orc-reviewer", "reviewer", "@reviewer");
+		await coreFixture("orc-architect", "architect", "@plan");
+		// `withModels` resolves nothing, so both aliases are unresolved; only the role decides.
+		const rig = harness(undefined, true);
+		registerFixture(rig);
+
+		expect(await rig.fire("tool_call", { toolName: "task", input: { agent: "orc-reviewer" } })).toEqual([undefined]);
+		const warned = rig.messages.filter(message => message.customType === "com.srobroek.omp-orchestrate.agent-preflight");
+		expect(warned).toHaveLength(1);
+		expect(String(warned[0]?.content)).toContain('orc-reviewer: model alias "@reviewer" does not resolve');
+
+		const result = await rig.fire("tool_call", { toolName: "task", input: { agent: "orc-architect" } });
+		expect(result[0]).toMatchObject({ block: true });
+		expect(String((result[0] as Record<string, unknown>).reason)).toContain('orc-architect: model alias "@plan" does not resolve');
+		expect(String((result[0] as Record<string, unknown>).reason)).not.toContain("orc-reviewer");
 	});
 
 	test("a model mismatch is one notice naming both models and the parking command, never a block", async () => {
