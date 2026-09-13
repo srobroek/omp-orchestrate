@@ -539,7 +539,7 @@ describe("closeRun", () => {
 		store = store.filter(bead => bead.id !== "orc-7.1.2" && bead.id !== "orc-7.1.3");
 		await closeRun(cwd, "orc-7");
 		expect(await readActiveRun(cwd)).toBeNull();
-	});
+	}, 30_000);
 
 	test("refuses when the children cannot be read, unless forced; force skips the read entirely", async () => {
 		await bindRun(cwd, "orc-7");

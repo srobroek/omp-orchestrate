@@ -17,6 +17,7 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead, BdFailure } from "../src/bd";
 import * as actualBd from "../src/bd";
+import { planHashOf } from "../src/acceptance";
 import { createClaimState } from "../src/claim-state";
 import { gateClaimEligibility } from "../src/gates/claim";
 import { markerPath } from "../src/run-state";
@@ -925,7 +926,9 @@ describe("G5 the lead never claims", () => {
  * The epic is found through the marker in the session checkout, so no pin is needed.
  */
 describe("G5 capacity governor", () => {
- const PULL = "bd ready --metadata-field role=implementer --unassigned --claim --json";
+	// The pull names its epic, as every implementer pull must; plan review is switched off on
+	// the run epic so these cases measure capacity alone.
+	const PULL = "bd ready --parent orc-run --metadata-field role=implementer --unassigned --claim --json";
  const AT_CAP = (held: number, cap: number) =>
   `run at capacity (${held}/${cap} implementer claims held; architect epic claims are not counted); retry`;
 
@@ -937,7 +940,7 @@ describe("G5 capacity governor", () => {
  }
 
  beforeEach(() => {
-  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: 2 } });
+  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: 2, plan_review: "off" } });
  });
 
  test("refuses a queue pull at the cap, naming the count and what it counts", async () => {
@@ -978,7 +981,7 @@ describe("G5 capacity governor", () => {
  test("at max_inflight=1 the architect's epic claim leaves the one slot to an implementer", async () => {
   // Counting the architect's epic deadlocked the run: no implementer could ever claim,
   // and the architect then raised the cap on the epic itself.
-  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: 1 } });
+  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: 1, plan_review: "off" } });
   inFlight = held(1, "architect");
   expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
   inFlight = [...inFlight, ...held(1)];
@@ -1006,7 +1009,7 @@ describe("G5 capacity governor", () => {
   ["not a number", { max_inflight: "many" }],
   ["zero", { max_inflight: 0 }],
  ])("defaults to eight when max_inflight is %s", async (_label, metadata) => {
-  beads["orc-run"] = bead("orc-run", { metadata });
+  beads["orc-run"] = bead("orc-run", { metadata: { ...metadata, plan_review: "off" } });
   inFlight = held(8);
   expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe(AT_CAP(8, 8));
   inFlight = held(7);
@@ -1014,7 +1017,7 @@ describe("G5 capacity governor", () => {
  });
 
  test("reads a cap stamped as a string", async () => {
-  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: "3" } });
+  beads["orc-run"] = bead("orc-run", { metadata: { max_inflight: "3", plan_review: "off" } });
   inFlight = held(3);
   expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toBe(AT_CAP(3, 3));
  });
@@ -1023,7 +1026,9 @@ describe("G5 capacity governor", () => {
   delete beads["orc-run"];
   inFlight = held(9);
   expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
-  expect(warned.map(entry => entry.data?.epic)).toEqual(["orc-run"]);
+  // The governor and the plan gate each read the epic and each say so.
+  expect(warned.length).toBeGreaterThan(0);
+  expect(warned.every(entry => entry.data?.epic === "orc-run")).toBe(true);
   expect(listed).toEqual([]);
  });
 
@@ -1034,7 +1039,7 @@ describe("G5 capacity governor", () => {
   } finally {
    failure.mockRestore();
   }
-  expect(warned.map(entry => entry.data?.cause)).toEqual(["this call's bd read budget is spent; retry"]);
+  expect(warned.map(entry => entry.data?.cause)).toContain("this call's bd read budget is spent; retry");
  });
 
  test.each([
@@ -1457,4 +1462,84 @@ describe("G5 decomposition scope", () => {
    expect(await gateClaimEligibility(claims, ctxFor(role), { command: `bd create "bug" --type bug --metadata "$M"` })).toBeUndefined();
   }
  });
+});
+
+/**
+ * An implementer pulls only from a plan an independent reviewer approved, at the hash of
+ * the plan as it stands now. The pull names the epic so the gate can read that approval;
+ * a pull that omits it would otherwise be the one way past plan review.
+ */
+describe("G5 plan review gate", () => {
+	const PULL = "bd ready --parent orc-epic --metadata-field role=implementer --unassigned --claim --json";
+	let comments: Record<string, { text: string }[]>;
+	let children: BdBead[];
+	let commentsSpy: ReturnType<typeof spyOn>;
+	let listCheckedSpy: ReturnType<typeof spyOn>;
+	beforeAll(() => {
+		commentsSpy = spyOn(actualBd, "bdCommentsChecked").mockImplementation(async (id: string) => comments[id] ?? null);
+		listCheckedSpy = spyOn(actualBd, "bdListChecked").mockImplementation((async (args: readonly string[]) => {
+			listed.push([...args]);
+			if (args[0] === "list" && args[1] === "--parent") return args[2] === "orc-epic" ? children : [];
+			return inFlight;
+		}) as typeof actualBd.bdListChecked);
+	});
+	afterAll(() => {
+		commentsSpy.mockRestore();
+		listCheckedSpy.mockRestore();
+	});
+	beforeEach(() => {
+		beads["orc-epic"] = bead("orc-epic", { issue_type: "epic", status: "in_progress" });
+		children = [
+			bead("orc-t1", { labels: ["orc-node"], parent: "orc-epic", metadata: { role: "implementer", scope: ["src/a/**"] }, acceptance_criteria: "1. a" } as Partial<BdBead>),
+			bead("orc-t2", { labels: ["orc-node"], parent: "orc-epic", metadata: { role: "implementer", scope: ["src/b/**"] }, acceptance_criteria: "1. b", dependencies: [{ id: "orc-t1", dependency_type: "blocks" }] } as Partial<BdBead>),
+		];
+		comments = { "orc-epic": [] };
+	});
+
+	async function liveHash(): Promise<string> {
+		const hash = await planHashOf("orc-epic");
+		if (hash === undefined) throw new Error("plan hash unavailable in fixture");
+		return hash;
+	}
+
+	test("refuses the pull while the epic carries no approve at the live hash, naming the hash to write", async () => {
+		const result = await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain(`plan=${await liveHash()}`);
+	});
+
+	test("admits the pull once a REVIEW approve quotes the live hash; an edit to a child stales it", async () => {
+		comments["orc-epic"] = [{ text: `REVIEW orc-epic dimension=plan verdict=approve plan=${await liveHash()} round=1` }];
+		expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
+		(children[1] as Record<string, unknown>).acceptance_criteria = "1. b\n2. and also c";
+		expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.reason).toContain("plan review missing");
+	});
+
+	test("a changes verdict at the live hash is not an approval", async () => {
+		comments["orc-epic"] = [{ text: `REVIEW orc-epic dimension=plan verdict=changes plan=${await liveHash()}` }];
+		expect((await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL }))?.block).toBe(true);
+	});
+
+	test("a pull without --parent is refused rather than let past the gate", async () => {
+		const result = await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: "bd ready --metadata-field role=implementer --unassigned --claim --json" });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("--parent <epic>");
+	});
+
+	test("plan_review=off on the epic is the recorded escape, and is logged", async () => {
+		beads["orc-epic"] = bead("orc-epic", { issue_type: "epic", metadata: { plan_review: "off" } });
+		expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
+		expect(warned.map(entry => entry.data?.escape)).toContain("plan_review=off");
+	});
+
+	test("fails open, and says why, when the epic cannot be read", async () => {
+		delete beads["orc-epic"];
+		expect(await gateClaimEligibility(claims, ctxFor("implementer", runRoot), { command: PULL })).toBeUndefined();
+		expect(warned.some(entry => entry.message.includes("plan gate failed open"))).toBe(true);
+	});
+
+	test("other roles and pulls outside a run are not gated", async () => {
+		expect(await gateClaimEligibility(claims, ctxFor("reviewer", runRoot), { command: "bd ready --include-ephemeral --parent orc-epic --metadata-field role=reviewer --unassigned --claim --json" })).toBeUndefined();
+		expect(await gateClaimEligibility(claims, ctxFor("implementer", plainRoot), { command: PULL })).toBeUndefined();
+	});
 });

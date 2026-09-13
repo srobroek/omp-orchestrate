@@ -1288,13 +1288,15 @@ async function planReviewDenial(
  inRun: boolean,
 ): Promise<ToolCallEventResult | undefined> {
  if (!inRun || sessionRoleName !== GOVERNED_ROLE || invocation.subcommand !== "ready" || !invocation.hasClaim) return undefined;
- const epicId = parentFlag(invocation);
- if (epicId === undefined || SHELL_EXPANSION.test(epicId) || epicId.startsWith("@")) {
-  if (epicId !== undefined) {
-   return { block: true, reason: `--parent '${epicId}' is opaque; the plan-review gate cannot read the epic before pulling` };
-  }
-  return undefined;
- }
+	const epicId = parentFlag(invocation);
+	if (epicId === undefined) {
+		// Without the epic the gate has nothing to read, and a pull that omits it would be
+		// the one way past plan review. The queue pull the definition prescribes names it.
+		return { block: true, reason: "an implementer pull names its epic: add --parent <epic> so the plan-review gate can read the plan approval before pulling" };
+	}
+	if (SHELL_EXPANSION.test(epicId) || epicId.startsWith("@")) {
+		return { block: true, reason: `--parent '${epicId}' is opaque; the plan-review gate cannot read the epic before pulling` };
+	}
  const epic = await bdShow(epicId);
  if (epic === null) {
   logger.warn("orchestrate G5: plan-review epic could not be read; plan gate failed open", {
