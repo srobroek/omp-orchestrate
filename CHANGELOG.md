@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.7](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.6...v0.4.7) (2026-09-14)
+
+
+### Bug Fixes
+
+* **status:** a clone rebinds to a child epic of the inherited run; leads keep their integrated tree for capture ([#162](https://github.com/srobroek/orchestrate-with-bd/issues/162)) ([9de167e](https://github.com/srobroek/orchestrate-with-bd/commit/9de167e29abccfaead54534e8c8067f8b629686b))
+
 ## [0.4.6](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.5...v0.4.6) (2026-09-14)
 
 
