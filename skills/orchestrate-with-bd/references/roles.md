@@ -8,7 +8,7 @@ Six agents ship with the plugin. Every model is a role name OMP resolves through
 | `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator | its epic, at bind |
 | `orc-planner` | `@plan` | no | none (`spawns: false`) | never |
 | `orc-implementer` | `@task` | yes | scout, operator | its task bead |
-| `orc-reviewer` | `@reviewer` | no | scout | its review bead |
+| `orc-reviewer` | `@reviewer` | no | scout, security-reviewer | its review bead |
 | `orc-researcher` | `@smol` | no | none | its research bead |
 | `orc-shepherd` | `@task` | no | none | its PR bead |
 
@@ -30,9 +30,10 @@ implementer → scout). Three tiers need 3 (root → epic lead → implementer �
 
 ## Helpers
 
-`scout` (ships with OMP) answers one bounded read-only question. `operator` (`build` plugin
-in the `srobroek-omp` marketplace) performs one exact mechanical operation in the caller's
-checkout. Neither claims a bead, commits, or touches a PR. Before writing where a helper
+Three helpers exist. `scout` (ships with OMP) answers one bounded read-only question.
+`operator` (`build` plugin, `srobroek-omp` marketplace) performs one exact mechanical
+operation in the caller's checkout. `security-reviewer` (ships with OMP) grades one security
+concern on a named diff. None of them claims a bead, commits, or touches a PR. Before writing where a helper
 worked, the caller awaits the helper's terminal result.
 
 ## Briefs

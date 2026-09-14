@@ -70,7 +70,7 @@ migration text on an embedded store because a clone would fork it.
 | `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator |
 | `orc-planner` | `@plan` | no | nothing |
 | `orc-implementer` | `@task` | yes | `scout`, `operator` |
-| `orc-reviewer` | `@reviewer` | no | `scout` |
+| `orc-reviewer` | `@reviewer` | no | `scout`, `security-reviewer` |
 | `orc-researcher` | `@smol` | no | nothing |
 | `orc-shepherd` | `@task` | no | nothing |
 
