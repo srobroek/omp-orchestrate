@@ -1,12 +1,18 @@
+import path from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdJson, bdShow } from "../bd";
 import { beadIds, descendants, readStoreMode, todoStrings } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
-/** What `index.ts` decided at `session_start`; the actor is not here because it is per call. */
-export interface LedgerContext {
-	/** Non-`null` when the store is not in server mode: every ledger tool returns it unchanged. */
-	refusal(): string | null;
+/**
+ * Why the ledger refuses to write at `root`, or `null` when the store is in server mode.
+ * Computed per call from the file alone (never from a `bd` call): subagents share one
+ * process, so a session-level flag would let one session's checkout gate another's.
+ */
+export function storeRefusal(root: string): string | null {
+	const store = readStoreMode(root);
+	if (store === null) return `${NO_STORE} (looked for ${path.join(root, ".beads", "metadata.json")})`;
+	return store.mode === "server" ? null : NOT_SERVER_MODE;
 }
 
 /**
@@ -59,7 +65,15 @@ function storeLabel(root: string): string {
 	return mode === null ? "no .beads/metadata.json" : `${mode.database ?? "?"} (${mode.mode || "?"})`;
 }
 
-export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
+/** Returned by every ledger tool while the store is not in server mode. */
+export const NOT_SERVER_MODE =
+	'Beads store is not in server mode; native isolation forks an embedded store. Migrate: bd export > issues.jsonl; bd backup init <dir> && bd backup sync; bd init --shared-server --reinit-local --skip-hooks --skip-agents --prefix <prefix>; set dolt_mode to "server" in .beads/metadata.json and add dolt.shared-server: true to .beads/config.yaml; bd backup restore --force <dir>';
+
+/** Returned when the checkout has no readable `.beads/metadata.json`; unknown is not server mode. */
+export const NO_STORE =
+	"No Beads store here: .beads/metadata.json is missing or unreadable. Run `bd init --shared-server --skip-hooks` for a new project or `bd bootstrap` for a clone";
+
+export function registerLedger(pi: ExtensionAPI): void {
 	const z = pi.zod;
 	// Named consts, not inline `z.object(...)` arguments: inlined, the generic no longer
 	// infers and `input` degrades to `unknown`.
@@ -80,19 +94,23 @@ export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
 		approval: "write",
 		parameters: claimParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<ClaimResult | undefined>> {
-			const refusal = ledger.refusal();
+			const refusal = storeRefusal(ctx.cwd);
 			if (refusal !== null) return refused(refusal);
 			const bead = input.bead.trim();
 			const actor = actorFor(ctx);
 			const env = { BEADS_ACTOR: actor };
-			await bdJson(["update", bead, "--claim", "--json"], ctx.cwd, env).catch(() => undefined);
+			// `bd update --claim` exits non-zero when another actor holds the bead; that is
+			// the race we read back, so the error is kept for the reason rather than thrown.
+			// Any other failure (server down, unknown bead) surfaces from the readback.
+			let claimError: string | undefined;
+			await bdJson(["update", bead, "--claim", "--json"], ctx.cwd, env).catch((error: unknown) => {
+				claimError = error instanceof Error ? error.message : String(error);
+			});
 			const observed = await bdShow(bead, ctx.cwd, env);
 			if (observed.assignee !== actor) {
 				const holder = observed.assignee ?? "(unassigned)";
-				return text<ClaimResult>(
-					{ claimed: false, bead: observed, reason: `held by ${holder}` },
-					`orc_claim ${bead}: not claimed, held by ${holder}`,
-				);
+				const reason = claimError === undefined ? `held by ${holder}` : `held by ${holder}; ${claimError}`;
+				return text<ClaimResult>({ claimed: false, bead: observed, reason }, `orc_claim ${bead}: not claimed, ${reason}`);
 			}
 			return text<ClaimResult>({ claimed: true, bead: observed }, `orc_claim ${bead}: claimed by ${actor}`);
 		},
@@ -106,7 +124,7 @@ export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
 		approval: "write",
 		parameters: finishParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<FinishResult | undefined>> {
-			const refusal = ledger.refusal();
+			const refusal = storeRefusal(ctx.cwd);
 			if (refusal !== null) return refused(refusal);
 			const bead = input.bead.trim();
 			const env = { BEADS_ACTOR: actorFor(ctx) };
@@ -127,7 +145,7 @@ export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
 		approval: "read",
 		parameters: statusParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<StatusResult | undefined>> {
-			const refusal = ledger.refusal();
+			const refusal = storeRefusal(ctx.cwd);
 			if (refusal !== null) return refused(refusal);
 			const root = ctx.cwd;
 			const store = storeLabel(root);

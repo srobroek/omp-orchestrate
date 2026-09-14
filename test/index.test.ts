@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import orchestrateWithBd, { NOT_SERVER_MODE, runHeader } from "../src/index";
+import orchestrateWithBd, { runHeader } from "../src/index";
 import { mentionsOrchestrate } from "../src/keyword";
 import { readLocator, writeLocator } from "../src/run";
+import { NO_STORE, NOT_SERVER_MODE, storeRefusal } from "../src/tools/ledger";
 
 type EventHandler = (event: unknown, ctx?: unknown) => unknown;
 
@@ -152,6 +153,15 @@ describe("mentionsOrchestrate", () => {
 		expect(mentionsOrchestrate("<brief>orchestrate this</brief>")).toBe(true);
 		expect(mentionsOrchestrate("```\norchestrate\n```")).toBe(false);
 		expect(mentionsOrchestrate("~~~sh\norchestrate\n~~~")).toBe(false);
+		// A closer is the same character, at least as long as the opener; an unclosed fence
+		// masks to the end of the text, exactly as OMP's maskNonProse does.
+		expect(mentionsOrchestrate("```\norchestrate\n`````")).toBe(false);
+		expect(mentionsOrchestrate("````\norchestrate\n```\n")).toBe(false);
+		expect(mentionsOrchestrate("```\norchestrate\n~~~\n")).toBe(false);
+		expect(mentionsOrchestrate("```\ncode\n```\norchestrate")).toBe(true);
+		// OMP's fence regex accepts a mixed 3-run as an opener; parity with OMP is the contract.
+		expect(mentionsOrchestrate("``~ opener\norchestrate")).toBe(false);
+		expect(mentionsOrchestrate("``orchestrate`` and `x`")).toBe(false);
 		expect(mentionsOrchestrate("run `orchestrate`")).toBe(false);
 		expect(mentionsOrchestrate("orchestrate()")).toBe(false);
 		expect(mentionsOrchestrate("src/orchestrate")).toBe(false);
@@ -179,8 +189,10 @@ describe("locator", () => {
 });
 
 describe("store mode refusal", () => {
-	test("the refusal text is the migration route and mentions no bd spawn", () => {
-		expect(NOT_SERVER_MODE).toContain("not in server mode");
+	test("server mode passes; embedded and a missing store refuse, from the file alone", () => {
+		expect(storeRefusal(fixture("server"))).toBeNull();
+		expect(storeRefusal(fixture("embedded"))).toBe(NOT_SERVER_MODE);
+		expect(storeRefusal(fixture(null))).toContain(NO_STORE);
 		expect(NOT_SERVER_MODE).toContain("bd init --shared-server --reinit-local");
 	});
 });

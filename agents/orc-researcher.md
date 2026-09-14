@@ -25,4 +25,4 @@ answer with its citations. A question that cannot be answered inside the scope i
 
 ## Output
 Begin with `VERDICT: ANSWERED|BLOCKED -- <reason>`. CAP 100w: bead id and the one-line
-answer. The full answer lives on the bead, not in the reply.
+answer. The full answer lives on the bead, not in the reply; never reprint sources or the question.

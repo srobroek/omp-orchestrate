@@ -35,4 +35,4 @@ where `comment` holds each provider's verdict at the head and the policy decisio
 
 ## Output
 Begin with `VERDICT: CLEAN|FIX|BLOCKED -- <reason>`. CAP 100w: PR, head SHA, per-provider
-verdict, fix bead id when created.
+verdict, fix bead id when created. Never reprint bot comments or the PR diff.

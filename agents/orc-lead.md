@@ -25,6 +25,8 @@ carries open children you did not dispatch.
 After each reviewer verdict, merge the accepted `omp/task/<id>` branch into your working tree
 and resolve conflicts here, never in a worker. Your final tree is captured as the epic branch.
 
-## Report
-When every task under the epic is closed or blocked, `orc_finish` the epic and return a
-receipt of at most 100 words: bead ids closed, bead ids blocked with reasons, epic branch name.
+## Output
+When every task under the epic is closed or blocked, `orc_finish` the epic. Begin your reply
+with `VERDICT: DONE|BLOCKED -- <reason>`, then a receipt of at most 100 words: bead ids
+closed, bead ids blocked with reasons, epic branch name.
+Never reprint worker output, diffs, or bead history.

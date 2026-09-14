@@ -25,5 +25,7 @@ beside them.
 - A contract two epics share (an interface, a schema, a file both touch) becomes a `decision`
   bead before either epic is dispatched: LOAD `skill://orchestrate-with-bd/references/decisions.md`.
 
-## Report
-Return a receipt of at most 100 words naming the epic id and every bead id you created.
+## Output
+Begin your reply with `VERDICT: PLANNED|BLOCKED -- <reason>`, then a receipt of at most 100
+words naming the epic id and every bead id you created.
+Never reprint bead descriptions or source you read.

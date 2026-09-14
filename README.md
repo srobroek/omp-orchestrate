@@ -15,9 +15,9 @@ which beads exist, who holds each one, and how each one ended.
 1. A run is one Beads epic. Its tasks are the beads under it.
 2. Typing `orchestrate` in a prompt injects a run header naming the store, the bound epic,
    and the lead contract. The lead dispatches workers through OMP's `task` tool.
-3. A worker calls `orc_claim` on the bead its brief names, works in the isolated clone OMP
-   gave it, and calls `orc_finish` with its evidence. Beads' atomic assignee is the only
-   lock.
+3. A worker calls `orc_claim` on the bead its brief names and `orc_finish` with its
+   evidence. Beads' atomic assignee is the only lock. Implementers edit in the isolated
+   clone OMP gave them; reviewers, researchers, and shepherds edit nothing.
 4. The lead's `todo` list is a view of `orc_status`: every entry is `<bead-id> <title>`. An
    entry with no bead behind it draws one advisory message.
 5. Every clone reaches the same database because the store runs on the machine's shared

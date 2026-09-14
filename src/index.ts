@@ -20,10 +20,6 @@ import { registerConflictProbe } from "./tools/conflict-probe";
 import { actorFor, registerLedger, statusBeadIds } from "./tools/ledger";
 import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 
-/** Returned by every ledger tool while the store is not in server mode; computed once per session from the file alone. */
-export const NOT_SERVER_MODE =
-	'Beads store is not in server mode; native isolation forks an embedded store. Migrate: bd export > issues.jsonl; bd backup init <dir> && bd backup sync; bd init --shared-server --reinit-local --skip-hooks --skip-agents --prefix <prefix>; set dolt_mode to "server" in .beads/metadata.json and add dolt.shared-server: true to .beads/config.yaml; bd backup restore --force <dir>';
-
 const CONTRACT = [
 	"- Read `skill://orchestrate-with-bd` before dispatching.",
 	"- Beads is the only source of truth for what work exists and what state it is in. The todo list is a per-turn view of `orc_status`, never an independent plan: every item is `<bead-id> <title>` copied from `orc_status.todo`, never invented. On any disagreement, re-read `orc_status` and rewrite the list from it. `orc_finish` makes progress real; `todo done` only redraws the view.",
@@ -57,17 +53,13 @@ export function runHeader(root: string, actor: string): string {
 export default function orchestrateWithBd(pi: ExtensionAPI): void {
 	pi.setLabel("Orchestrate with bd");
 
-	let refusal: string | null = null;
-
-	// The ledger tools carry their own per-call actor (`actorFor`). This process-wide
-	// export only serves `bd` commands the model runs through `bash`; with concurrent
-	// subagents in one process the last `session_start` wins there, which is why the
-	// ledger never reads it back.
+	// The ledger tools carry their own per-call actor (`actorFor`) and store check
+	// (`storeRefusal`). This process-wide export only serves `bd` commands the model runs
+	// through `bash`; with concurrent subagents in one process the last `session_start`
+	// wins there, which is why the ledger never reads process state back.
 	pi.on("session_start", async (_event, ctx) => {
 		process.env.BEADS_ACTOR = actorFor(ctx);
 		delete process.env.BD_ACTOR;
-		const store = readStoreMode(ctx.cwd);
-		refusal = store !== null && store.mode !== "server" ? NOT_SERVER_MODE : null;
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -98,7 +90,7 @@ export default function orchestrateWithBd(pi: ExtensionAPI): void {
 		);
 	});
 
-	registerLedger(pi, { refusal: () => refusal });
+	registerLedger(pi);
 	registerBotReviewProbe(pi);
 	registerBotReviewRequest(pi);
 	registerConflictProbe(pi);

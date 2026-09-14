@@ -25,12 +25,12 @@ disabled_validators = []
 paths = ["agents/*.md", "**/agents/*.md"]
 disabled_rules = ["CC-AG-003", "CC-AG-009", "CC-AG-010", "CC-AG-019"]
 
-# Literal CLI placeholders reported as unclosed XML by agnix 0.52.2.
+# Literal CLI placeholders (`<bead-id>`, `<prefix>`) reported as unclosed XML by agnix 0.52.2.
 [[overrides]]
 paths = [
-  "skills/orchestrate/references/dispatch-contract.md",
-  "skills/orchestrate/references/lifecycle.md",
-  "skills/orchestrate/references/planning.md",
+  "skills/orchestrate-with-bd/references/beads-store.md",
+  "skills/orchestrate-with-bd/references/planning.md",
+  "skills/orchestrate-with-bd/references/roles.md",
 ]
 disabled_rules = ["XML-001"]
 
