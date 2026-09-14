@@ -12,7 +12,7 @@
 #
 # Sync authority: the repository owner asked for the Dolt database itself to travel through
 # git, and `.beads/config.yaml` already carries the remote as
-# `sync.remote: git+https://github.com/srobroek/omp-orchestrate.git`, registered with Dolt
+# `sync.remote: git+https://github.com/srobroek/orchestrate-with-bd.git`, registered with Dolt
 # as `origin`. Recorded here because `bd dolt push` needs authority that is visible rather
 # than assumed.
 #
@@ -37,9 +37,8 @@
 # - no `post-switch` pull at all: a branch switch does not change which beads exist in a
 #   shared database, so the hook bought nothing and ran the most often;
 # - `post-commit` and `post-merge` sync only while no orchestrate run is active, read from the
-#   primary's `.orchestration/.active-run` (the marker `src/run-state.ts` writes). During a run
-#   the lead syncs once, at the barrier, after every agent has yielded; G6 refuses agent-side
-#   syncs and this guard keeps the hooks from being a second path around it.
+#   primary's `.orchestration/.active-run` (the locator `src/run.ts` writes). During a run
+#   the lead syncs once, after every agent has yielded.
 #
 # These remain human conveniences that usually run, never an invariant: a plain `git commit`
 # bypasses them, and `--no-hooks` skips them.

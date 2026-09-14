@@ -1,368 +1,67 @@
-# omp-orchestrate
+# orchestrate-with-bd
 
-An OMP plugin that runs a team of agents against one goal. The operator starts a run,
-answers the questions it raises, and stops it. Agents claim their own work from a
-[Beads](https://github.com/gastownhall/beads) graph; the plugin merges the approved PRs.
+An OMP plugin that keeps a [Beads](https://github.com/gastownhall/beads) ledger beside OMP's
+native `orchestrate` keyword. OMP runs the agents and lands the result. The plugin records
+which beads exist, who holds each one, and how each one ended.
 
 | | |
 | --- | --- |
 | Status | Prerelease. OMP reports the version it installs. |
-| Requires | the tools and plugins under [Prerequisites](#prerequisites) |
-| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md): gates, architecture, development |
+| Requires | OMP 18.1.19 or later, `bd` 1.2.2 or later in shared-server mode, `gh` 2.100 or later for the review tools |
+| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md): architecture, tests, development |
 
 ## How it works
 
-1. A run is one Beads epic. Each feature under it is an epic holding its tasks.
-2. Agents pull the next bead in their queue with `bd ready --claim`; nobody assigns work.
-3. Every agent that claims work edits in an isolated clone of the checkout. Before it
-   yields, it pushes its result to origin: a worker to `omp/task/<id>`, the architect to the
-   feature branch it integrates those refs into. One PR per feature. OMP deletes a clone
-   when its agent finishes; origin is the only store that outlives one.
-4. The landing sweep merges each approved PR at its reviewed head, writes `LANDED`, and closes covered nodes plus an all-closed feature. No agent merges.
-5. Ten tool-call gates hold every agent to its claim and run-scoped protocol. The operator's writes
-   are `start`, `answer`, and `stop`.
-
-## Prerequisites
-
-`/orchestrate-doctor` reports every row below except `omp`, which it runs inside, with a
-version and a pass, warn, or fail. A fail breaks a run started now; a warn degrades a later
-step and names it.
-
-| Tool | Version | Used by |
-| --- | --- | --- |
-| `omp` | current | the lead session; the settings preflight and the doctor read its effective settings in process |
-| `bd` (Beads) | 1.2 or later | every claim, comment, and status read. `bd` embeds the database, so no server runs |
-| `wt` (Worktrunk) | optional | the operator's own worktrees and `skills/orchestrate/scripts/worktree-sweep.ts`; no agent runs it, and the doctor reports it as information |
-| `gh` | 2.100 or later, signed in (`gh auth status`) | conflict and review probes, the landing capability probe, and the merges |
-| `git` | 2.x | every clone, push, capture, and integration step; agents need push access to origin |
-| `bun` | 1.3.14 or later, the runtime `omp` itself requires | `skills/orchestrate/scripts/worktree-sweep.ts` at run end |
-
-The architect and implementer may spawn seven helpers. `scout` and `security-reviewer`
-ship with OMP. The other five come from three plugins in the `srobroek-omp` marketplace:
-
-| Plugin | Agents |
-| --- | --- |
-| `build` | `operator` |
-| `delivery` | `pr-reviewer` |
-| `quality` | `adversarial-challenger`, `docs-guard`, `lint-guard` |
-
-A spawn that names an uninstalled agent fails with an unknown-agent error. Before that
-failure, agent discovery preflight reports the missing helper.
+1. A run is one Beads epic. Its tasks are the beads under it.
+2. Typing `orchestrate` in a prompt injects a run header naming the store, the bound epic,
+   and the lead contract. The lead dispatches workers through OMP's `task` tool.
+3. A worker calls `orc_claim` on the bead its brief names, works in the isolated clone OMP
+   gave it, and calls `orc_finish` with its evidence. Beads' atomic assignee is the only
+   lock.
+4. The lead's `todo` list is a view of `orc_status`: every entry is `<bead-id> <title>`. An
+   entry with no bead behind it draws one advisory message.
+5. Every clone reaches the same database because the store runs on the machine's shared
+   Dolt server, named by the tracked `.beads/metadata.json`.
 
 ## Install
 
 ```sh
-omp plugin marketplace add srobroek/omp-orchestrate
-omp plugin install orchestrate@omp-orchestrate
-omp plugin marketplace add srobroek/omp-plugins
-omp plugin install build@srobroek-omp
-omp plugin install delivery@srobroek-omp
-omp plugin install quality@srobroek-omp
+omp plugin marketplace add srobroek/orchestrate-with-bd
+omp plugin install orchestrate-with-bd@orchestrate-with-bd
 ```
 
-After installing, restart the session. OMP loads a new extension module at startup only, so
-`/reload-plugins` does not find it. Claude Code reads the same catalog from
-`.claude-plugin/marketplace.json`. Upgrade between runs, never during one.
+The `operator` helper the implementer may spawn comes from the `build` plugin in the
+`srobroek/omp-plugins` marketplace; `scout` and `security-reviewer` ship with OMP.
 
-`omp plugin link <checkout>` attaches a development checkout instead of a marketplace
-install. Use it to work on the plugin. Run the plugin from a marketplace install.
+## Store
 
-Never point `omp plugin marketplace add` at a local checkout. OMP copies the whole directory
-into `~/.omp/plugins/cache/plugins/`, untracked files included: the checkout's
-`.beads/embeddeddolt` store, its `.beads/backup` archives, server log and lock,
-`.beads/last-touched`, `.beads/interactions.jsonl`, `.orchestration/` and `scratch/`. The
-plugin deletes those paths (`STRAY_PATHS` in `src/install-hygiene.ts`) from its own cache
-entry at activation and logs the removal once; the GitHub install above ships tracked files only.
+The project's Beads store runs in shared-server mode: `.beads/metadata.json` pins
+`"dolt_mode": "server"` and `.beads/config.yaml` carries `dolt.shared-server: true`. A new
+project gets there with `bd init --shared-server`. An embedded project migrates with the
+route in `skills/orchestrate-with-bd/references/beads-store.md`. On an embedded store the
+ledger tools return that route and write nothing.
 
-## Configure
+## Tools
 
-The plugin ships its six required OMP settings and the model binding for each core agent as
-one overlay, `config/orchestrate.overlay.yml`. Start the lead session with it:
-
-```sh
-omp --config <plugin-root>/config/orchestrate.overlay.yml
-```
-
-`<plugin-root>` is `~/.omp/plugins/cache/plugins/omp-orchestrate___orchestrate___<version>`
-for a marketplace install, or the checkout you passed to `omp plugin link`.
-`/orchestrate-doctor` prints the resolved path and this command; `omp plugin list --json`
-exposes it as `entries[].installPath`. A missing or malformed overlay path is a startup
-error.
-
-| Setting | Value | Without it |
-| --- | --- | --- |
-| `task.isolation.enabled` | `true` | workers share the architect's tree, so two claims can edit one file |
-| `task.isolation.merge` | `branch` | commits replay as a patch, so no `omp/task/<id>` branch survives to integrate or to recover after a crash |
-| `task.isolation.apply` | `false` | OMP merges child work into the spawning tree, so the architect never owns integration |
-| `task.enableEffort` | `true` | OMP ignores the per-spawn effort, so every agent runs at the session default |
-| `task.maxRecursionDepth` | `3` | a worker's helper sits at depth 3, so at the default `2` no worker can spawn one |
-| `bash.autoBackground.enabled` | `false` | a slow claim can auto-background, so its result bypasses the observer and the claim is never adopted |
-
-The five agents select their models through four `modelRoles` entries and inherit each
-role's thinking level. Before a run starts, all four must resolve in your configuration.
-OMP ships the names `plan`, `task` and `smol` without a default model, and does not ship
-`reviewer` at all. An unresolved role does not fall back to the session model: OMP starts
-the agent with no model and fails it. `/orchestrate-doctor` prints one row per role:
-
-| Role | Agents | Unresolved |
-| --- | --- | --- |
-| `modelRoles.plan` | `orc-architect` | `fail`: the architect cannot be spawned |
-| `modelRoles.task` | `orc-implementer`, `orc-shepherd` | `fail`: neither agent can be spawned |
-| `modelRoles.smol` | `orc-researcher` | `fail`: the researcher cannot be spawned |
-| `modelRoles.reviewer` | `orc-reviewer` | `fail`: OMP cannot start the reviewer, and every feature needs a review |
-
-Set `modelRoles.reviewer` to any model in your global or project `config.yml`. The overlay
-never sets it: an overlay layers above your config and would override your choice. A
-different model family from the implementer's is optional.
-
-| Agent | Model role | Edits code |
-| --- | --- | --- |
-| `orc-architect` | `@plan` | yes |
-| `orc-implementer` | `@task` | yes |
-| `orc-shepherd` | `@task` | no |
-| `orc-reviewer` | `@reviewer` | no |
-| `orc-researcher` | `@smol` | no |
-
-The overlay binds each agent to its role through `task.agentModelOverrides`. OMP loads a
-marketplace-installed plugin's agents without their `model` frontmatter, so without these
-entries `/orchestrate-doctor` fails the `core agents` row and the spawn gate refuses every
-core agent. A checkout attached with `omp plugin link` keeps the frontmatter, so it passes
-without them.
-
-The settings preflight compares the effective values at start and before each wave. It
-reports a deviation as a `WARN settings` message in the lead transcript and as a comment
-on the run epic. It never rewrites your configuration.
-
-## Start
-
-Before the first run in a checkout:
-
-1. When no database exists, create one: `bd init --stealth --prefix orc`. It writes
-   `.git/info/exclude`, so `git status` stays clean.
-2. Add `.orchestration/` to `.gitignore`.
-
-Then, in the lead session started with the overlay:
-
-```text
-/orchestrate-start --new "<run title>"
-```
-
-Pass an epic id instead of `--new` to run an existing epic: `/orchestrate-start <epic-id>`.
-Add `--store <path>` to bind a `.beads` directory that is not the checkout's own.
-The command:
-
-- creates the run epic, or reads the epic you named and leaves its metadata as written.
-  A new epic gets `run_id`, `primary_branch`, `base_sha`, `origin_actor`, and an
-  `artifacts` directory under `.orchestration/<epic-id>/`
-- resolves the run's store and refuses one that a store selector in the process
-  environment named, unless `--store` names the same path
-- probes the store and refuses a `locked` or `corrupted` one
-- writes the marker `.orchestration/.active-run` naming the epic, the run's `.beads`, and
-  how that store was found (`checkout`, `common-dir`, `redirect`, or `explicit`)
-- stamps this session's lead lease on the epic
-- records the repository's landing capabilities on the epic as `metadata.landing`
-- arms the watchers
-- prints the lead's three obligations and sends the lead contract to the model
-
-When another session's run is active in the checkout, it refuses. One checkout hosts one
-run, and one session leads it. A second person joins by opening a session in the same
-checkout without starting a run. Every slash command finds the run through the marker at
-the checkout, or at the primary checkout of a linked worktree.
-
-Once the command reports the run, describe the goal to the lead. The lead plans the
-graph and spawns `orc-architect` with the run id and `isolated: true`; it never claims a
-work bead. While the run is active, the plugin refuses the lead's `git commit`, `git push`,
-`gh pr merge`, `gh pr ready`, and every `edit` or `write` of a file inside a git working
-tree outside `.orchestration/`. Each refusal names the recovery: spawn `orc-architect`.
-
-In a run, the plugin refuses three commands from every role session: launching `omp`,
-running a credential helper, and creating a worktree.
-
-## Watch
-
-| Command | Shows |
+| Tool | Does |
 | --- | --- |
-| `/orchestrate-status` | the run epic the marker names, its status or why its liveness check failed, the lead lease with its holder, the store the marker names (or a warning that it names none), then **Attention** |
-| `/orchestrate-roster` | ready-queue depth per role, wisps included |
-| `/orchestrate-doctor` | every prerequisite, the six required settings, one row per model role, the landing capabilities, and the store probe |
+| `orc_status` | reads every bead under the run epic; `todo` holds `<bead-id> <title>` for the open ones; binds the run when passed `epic` |
+| `orc_claim` | `bd update <bead> --claim`, then reads the assignee back |
+| `orc_finish` | writes the comment, then `bd close` or `bd update --status blocked` |
+| `orc_bot_review_probe` | classifies a PR's review-bot round at its exact head |
+| `orc_bot_review_request` | requests one allowlisted provider review at an exact head |
+| `orc_conflict_probe` | predicts merge conflicts and reads CI without touching a tree |
+| `orc_review_round_policy` | decides whether an actionable round bounces to a fix bead or escalates |
 
-**Attention** lists what needs you:
+## Agents
 
-- `ASK <bead> (<author>): <question>` for every open question on a run bead
-- `lead lease lapsed` and `lease lapsed: <bead> held by <holder>`
-- `landing BOUNCED: <merge> (fix <id>)` and `landing BLOCKED: <merge>`
-- `adoption refused`
-- `store locked by <holder>`
-- the last `WARN` from the settings or agent preflight
+- `orc-lead`, `orc-planner`
+- `orc-implementer`, `orc-reviewer`, `orc-researcher`, `orc-shepherd`
 
-With nothing open it prints `attention: none`.
-
-For one bead, `bd show <bead>` and `bd comments <bead>` hold its story. Every transition
-is one comment whose first word is a verb: `REPORTED`, `BLOCKED`, `ASK`, `LANDED`.
-
-## Answer
-
-```text
-/orchestrate-answer <bead> <text>
-```
-
-The bead must sit beneath the run epic, at any depth. A bead outside the run, or one
-whose parent chain cannot be read, is refused and nothing is written. Otherwise the
-command writes a `NOTE` comment prefixed `ANSWER` on the bead. Then it acts on the
-bead's state:
-
-- last verbs `FAILED` and `ASK` from an implementer, or `ASK` from an architect that has
-  yielded: it requeues the bead as `open` and unassigned, so the next worker or a fresh
-  architect pulls it with your answer
-- held by a live non-isolated agent: it wakes that agent
-
-## Stop
-
-```text
-/orchestrate-stop [--force]
-```
-
-The command reads the run from the marker. It refuses in two cases:
-
-- another session's lead lease is live: `run <epic> is leased to <holder> (lease live until
-  <time>); that lead stops it, or pass --force`
-- any bead beneath the run epic, at any depth, is `in_progress`
-
-`--force` skips both checks and writes `NOTE run stopped with --force` on the epic, naming
-the in-progress beads. On success the command releases this session's lead lease and
-removes the marker and its lock file `.orchestration/.active-run.lock`. The lead's close-out
-procedure in the skill comes first; stopping is the last step.
-
-## Resume
-
-When the lead session died or you open a new one, run `/orchestrate-resume` in a session
-in the same checkout, started with the overlay. The lease lasts 15 minutes without renewal
-(`ORC_LEASE_TTL_MS`). The command:
-
-- refuses while the previous lead lease is live, naming the holder and the deadline
-- refuses a marker whose schema is newer than the plugin's: `upgrade the plugin before
-  resuming`
-- rewrites an older marker as schema 1 and prints `marker migrated to schema 1`
-- takes over the run once the lease lapses
-- reads every `in_progress` bead beneath the epic and releases each one with a lapsed
-  lease, writing `RECOVERED` on it. It names a live lease in the summary and keeps it
-
-After adoption the lead dispatches again. A replacement worker pulls the same bead
-atomically, and a fresh architect resumes its epic from origin.
-
-## Troubleshooting
-
-### Store probe states
-
-`/orchestrate-start` and `/orchestrate-status` probe the run's embedded Dolt store.
-
-| State | Meaning | Do |
-| --- | --- | --- |
-| `free` | the writer lock is free and one read took under 2 s | nothing |
-| `slow` | one read took over 2 s; start continues | watch for a `locked` state on the next probe |
-| `locked` | another process holds `noms/LOCK`; the probe names the holder as `command[pid]` | wait for it to exit, or find why a second `bd` runs against this store. A `bd-container` or `perl` holder is the `bd` router taking the host lock around a routed command |
-| `corrupted` | opening the journal fails with `corrupted journal` or `invalid journal record`; the message quotes the file and offset | run `dolt fsck` in the store directory. The plugin never repairs, starts, stops, or kills a Dolt engine |
-
-### `/orchestrate-start` refuses
-
-- `a run is already active in this checkout: <epic>, started by session <sid>`: stop it from
-  that session. Once its lead lease lapses, `/orchestrate-resume` adopts it.
-- `no active Beads workspace was found`: run `bd init --stealth --prefix orc` in the
-  checkout.
-- `bd resolved its database to <dir> through a store selector in this process's
-  environment`: the session inherited a variable that points bd at another store. Unset
-  it, or pass `--store <dir>` to bind that store on purpose.
-- `run not started: the store at <dir> is locked by <holder>` or `is corrupted`: read
-  [Store probe states](#store-probe-states).
-
-### Refused adoption
-
-`/orchestrate-resume` prints one of three refusals:
-
-- `resume refused: run epic <id> is leased to <holder>; lease live until <time>`: the
-  previous lead still renews, or its lease has time left. Wait for the deadline or stop
-  that session. The epic also gets a `NOTE adoption refused` comment.
-- `another lead adopted <id> first`: two sessions resumed at once; the other one leads.
-- `run epic <id> could not be read`: `bd show <id>` fails. Check the store probe.
-
-### Lapsed lead lease
-
-`/orchestrate-status` shows `lease lapsed at <time>` when the lead missed renewal for
-longer than the TTL. Its watchers, landing sweep, and dispatch stopped with it. Run
-`/orchestrate-resume` from a live session in the checkout.
-
-### Landing `BOUNCED`
-
-The landing sweep writes `BOUNCED reason=<cause>` on the merge bead and its origin feature.
-
-| Reason | Cause | What happens next |
-| --- | --- | --- |
-| `conflict` | the base branch fails to merge cleanly into the PR branch | a fix bead blocks the merge bead: `role=implementer`, or `role=architect` when a conflicting path leaves the feature's scope |
-| `ci` | a required check failed twice at the same head; the sweep reran the first failure once with `gh run rerun --failed` | an implementer fix bead names the check and the run |
-| `closed` | someone closed the PR without merging | reopen the PR, or close the merge bead |
-| `bot` | a review bot posted an actionable round | the shepherd files one implementer fix bead |
-
-A `BLOCKED landing:` comment without a bounce means the sweep waits: GitHub disarmed
-auto-merge on the PR, or the merge bead names no `origin_bead` to file a fix under.
-
-### `WARN settings`
-
-You started the lead session without the overlay, or your global configuration overrides a
-row. Restart the session with `omp --config <plugin-root>/config/orchestrate.overlay.yml`.
-Accepting the warning leaves captured branches, deliberate integration, and cross-worker
-claim exclusion unavailable.
-
-### Slash commands under `omp -p`
-
-Print mode attaches no UI, so OMP drops every notification a command would show. The
-plugin prints each `/orchestrate-*` and `/orchestrate-doctor` result itself: to stdout
-under `omp -p`, and to stderr under `omp -p --mode json`, where stdout carries the event
-stream. A warning or error line starts with `warning:` or `error:`. Inside a spawned
-agent the same commands print nothing, because the lead's terminal is not theirs.
-
-### `INFO wt` in the doctor report
-
-`wt` (Worktrunk) is optional. No role uses it: the lead spawns roles with `task`,
-isolation clones the checkout, and captures reach `origin` by push. When `wt` is absent
-the row reads `Worktrunk not on PATH; optional, operator worktrees only`, and the
-verdict ignores it.
-
-### Unknown agent or a missing helper
-
-When `/agents` and task dispatch disagree, check the effective `extensions` roots. With
-the `claude-plugins` source disabled, list the installed package root in `extensions` so
-native discovery can load its agents. Files under `agents/` alone do not register them.
-
-### Dormancy
-
-Outside a run the plugin spawns no process, sends no message and refuses no tool call. Its
-one write is at activation: it removes stray copies of a checkout's `.beads` store,
-`.orchestration/` and `scratch/` from its own plugin-cache entry, which a local-path
-marketplace install copies in. A plain session sees the slash commands, the `worktree_sweep`
-and `orc_*` tools, the agents, and the skill. Protocol notices run only inside a valid run
-scope, which a marker `.orchestration/.active-run` makes readable at one of three places:
-
-- the checkout
-- an isolated copy of the checkout
-- the primary of a linked git worktree
-
-A marker left behind by a finished run keeps the plugin active: it injects the protocol
-into every `orc-*` session and sandboxes generic helpers. `/orchestrate-stop` removes it.
-A marker written by an older plugin version that names no epic reads the same way:
-`/orchestrate-start <epic-id>` adopts it, `/orchestrate-stop` removes it.
-
-### Isolated clones and the redirect
-
-OMP isolation clones the whole checkout, `.beads/` included, for the architect and for each
-worker. A worker's clone is a clone of the architect's. At an isolated agent's first turn the
-plugin writes `.beads/redirect` in the copy, naming the run's `.beads` from the marker, and
-removes the copied store. Every `bd` call from the copy reaches the run's database.
-`bd where --json` in a copy shows `redirected_from`.
-
-A copy whose target does not exist fails closed: `bd` reports `no beads database found`.
-A marker that names no database leaves each copy on a private store. The preflight reports
-it, and `/orchestrate-start <epic-id>` from the lead records the database.
+Implementers and epic leads run `isolated: true`. The skill
+`skill://orchestrate-with-bd` holds the procedure; `references/roles.md` holds the model,
+spawn, and depth table.
 
 ## License
 
-Apache-2.0 governs this repository. Read the full text in [LICENSE](LICENSE).
+Apache-2.0.
