@@ -22,10 +22,14 @@ OMP captures the lead's final tree as `omp/task/<lead-name>`, and the root merge
 branches. `maxRecursionDepth` is 2 for two tiers and 3 for three.
 
 A cross-epic review is a review bead placed directly under the run epic. bd refuses a
-task-to-epic dependency, so `orc_status.ready` gates it instead. While any child epic stays
-open, `ready` holds epics. Once the leads close every child epic, `ready` holds the run
-epic's own tasks. The root merges the epic branches first. Then it dispatches that review
-wave over the run's `merge-base..HEAD` diff.
+task-to-epic dependency, so `orc_status.ready` gates it instead:
+
+- While any child epic stays open, `ready` holds epics.
+- Once the leads close every child epic, `ready` holds the run epic's own `task` beads.
+- The root merges the epic branches first, then dispatches that review wave over the run's
+  `merge-base..HEAD` diff.
+- A `decision` bead under the run epic is never a wave item; the root closes it with
+  `orc_finish` once the leads have read it.
 
 `orc_status.shape` reports which shape the DAG implies. When a direct child of the run epic
 is itself an epic, the shape is `three-tier`; otherwise it is `two-tier`. No separate human

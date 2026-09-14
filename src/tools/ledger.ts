@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdJson, bdShow } from "../bd";
-import { beadIds, descendants, readStoreMode, readyWave, runShape, todoStrings } from "../dag";
+import { beadIds, DESCENDANT_LIMIT, descendants, readStoreMode, readyWave, runShape, todoStrings } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
 /**
@@ -42,7 +42,11 @@ export interface StatusResult {
 	epic?: BdBead;
 	/** `three-tier` when a direct child of the epic is an epic (one `orc-lead` each), else `two-tier`. */
 	shape?: "two-tier" | "three-tier";
-	/** The wave: `<bead-id> <title>` per unblocked, unassigned task (two-tier) or open child epic (three-tier). */
+	/**
+	 * The wave, as `<bead-id> <title>`. Two-tier: unblocked, unassigned tasks. Three-tier: ready
+	 * child epics while any is open; once all are closed with terminal subtrees, the run epic's
+	 * own ready tasks (the cross-epic review). Withheld when the walk was truncated.
+	 */
 	ready?: string[];
 	store: string;
 	beads: BdBead[];
@@ -142,7 +146,15 @@ export function registerLedger(pi: ExtensionAPI): void {
 				// it and dispatch a recovery lead.
 				const current = await bdShow(bead, ctx.cwd, env);
 				if (current.issue_type === "epic") {
-					const unfinished = (await descendants(bead, ctx.cwd)).beads.filter(child => child.status === "open" || child.status === "in_progress");
+					const walk = await descendants(bead, ctx.cwd);
+					if (walk.truncated) {
+						return text<FinishResult>(
+							{ state: "done", bead },
+							`orc_finish ${bead}: refused, the epic has more than ${DESCENDANT_LIMIT} descendants and the terminal check cannot see them all. Close its child epics individually.`,
+							true,
+						);
+					}
+					const unfinished = walk.beads.filter(child => child.status === "open" || child.status === "in_progress");
 					if (unfinished.length > 0) {
 						const list = unfinished.map(child => child.id).join(", ");
 						return text<FinishResult>(
@@ -204,9 +216,14 @@ export function registerLedger(pi: ExtensionAPI): void {
 			statusIdsBySession.set(ctx.sessionManager.getSessionId(), beadIds(walk.beads));
 			const todo = todoStrings(walk.beads);
 			const shape = runShape(epic, walk.beads);
-			const ready = todoStrings(await readyWave(epic, walk.beads, root));
+			// A truncated walk is not a basis for a wave: the epic tier's terminal check and the
+			// two-tier task list both read the snapshot, so `ready` is withheld instead of guessed.
+			const ready = walk.truncated ? [] : todoStrings(await readyWave(epic, walk.beads, root));
 			const result: StatusResult = { run: epic, epic: epicBead, shape, ready, store, beads: walk.beads, todo };
-			if (walk.truncated) result.truncated = true;
+			if (walk.truncated) {
+				result.truncated = true;
+				result.message = `subtree exceeds ${DESCENDANT_LIMIT} beads; ready is withheld. Orchestrate the child epics individually.`;
+			}
 			return text(
 				result,
 				`orc_status ${epic} (${epicBead.status ?? "?"}, ${shape}): ${walk.beads.length} beads, ${todo.length} open, ${ready.length} ready${walk.truncated ? " (truncated)" : ""}\nready:\n${ready.join("\n") || "(none)"}\ntodo:\n${todo.join("\n")}`,

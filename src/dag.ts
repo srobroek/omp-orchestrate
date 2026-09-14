@@ -137,9 +137,10 @@ async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<B
  * refuses an epic-to-decision dependency, so a decision gates an epic through its tasks; an
  * epic with no tasks at all stays in the wave, because its lead plans it.
  *
- * Three-tier, once every child epic is closed: the ready tasks that sit directly under the
- * run epic, which is where a cross-epic review lives. bd refuses a task-to-epic dependency,
- * so this is the only gate keeping that review out of the first wave.
+ * Three-tier, once every child epic is closed and nothing under them is open: the ready
+ * `task` beads that sit directly under the run epic, which is where a cross-epic review
+ * lives. bd refuses a task-to-epic dependency, so this is the only gate keeping that review
+ * out of the first wave. Root-level tasks are therefore the run's final wave by definition.
  */
 export async function readyWave(epic: string, beads: readonly BdBead[], cwd: string): Promise<BdBead[]> {
 	const epics = childEpics(epic, beads);
@@ -152,7 +153,9 @@ export async function readyWave(epic: string, beads: readonly BdBead[], cwd: str
 	for (const child of epics) for (const id of subtreeIds(child.id, beads)) epicSubtrees.add(id);
 	const unfinishedInside = beads.some(bead => epicSubtrees.has(bead.id) && (bead.status === "open" || bead.status === "in_progress"));
 	if (epics.every(bead => bead.status === "closed") && !unfinishedInside) {
-		const rootTasks = new Set(directChildren(epic, beads).filter(bead => bead.issue_type !== "epic").map(bead => bead.id));
+		// Only `task` beads: a `decision` left open under the run epic is the lead's to close,
+		// not a reviewer's to judge (observed: one was dispatched to orc-reviewer).
+		const rootTasks = new Set(directChildren(epic, beads).filter(bead => bead.issue_type === "task").map(bead => bead.id));
 		return (await readyUnder(epic, cwd)).filter(bead => rootTasks.has(bead.id));
 	}
 	const candidates = (await readyUnder(epic, cwd, "epic")).filter(bead => direct.has(bead.id));
