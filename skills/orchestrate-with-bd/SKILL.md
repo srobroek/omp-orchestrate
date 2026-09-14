@@ -42,11 +42,16 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
    Dispatch them in one `task` call, one `orc-reviewer` per review bead. Each reviewer judges
    its bead against the integrated `merge-base..HEAD` diff. Turn every `changes` finding into
    a fix bead for the following `ready`.
-6. Close. When every task is `closed` or `blocked`, `orc_finish` the epic.
+6. Cross-epic review (three-tier only). Once the leads close every child epic and you merge
+   every epic branch, `ready` turns to the tasks directly under the run epic. Dispatch that
+   review wave over the merged run; each reviewer judges the run's `merge-base..HEAD` diff.
+7. Close. When every task is `closed` or `blocked`, `orc_finish` the epic.
 
 ## Rules
 
 - MUST Dispatch all of `orc_status.ready` in one `task` call.
+- MUST Wait for the whole `task` call to return before treating a wave as landed. NOT Re-read
+  `orc_status` on the first result.
 - MUST Merge a landed wave before dispatching the review wave that follows it.
 - MUST Dispatch the review wave in one `task` call, one reviewer for each bead in it.
 - NOT Pair an implementer with an immediate reviewer.

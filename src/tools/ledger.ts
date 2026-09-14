@@ -125,7 +125,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_finish",
 		label: "Finish bead",
 		description:
-			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. An optional comment is written first so the evidence survives even if the transition fails.",
+			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. An epic closes only when every bead under it is closed or blocked; otherwise `done` is refused and the unfinished ids are listed. An optional comment is written first so the evidence survives even if the transition fails.",
 		approval: "write",
 		parameters: finishParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<FinishResult | undefined>> {
@@ -137,6 +137,21 @@ export function registerLedger(pi: ExtensionAPI): void {
 				await bdJson(["comment", bead, input.comment], ctx.cwd, env);
 			}
 			if (input.state === "done") {
+				// An epic closes only when its subtree is terminal. Observed 2026-09-14: an epic
+				// lead closed its epic with two review beads still open, and the root had to reopen
+				// it and dispatch a recovery lead.
+				const current = await bdShow(bead, ctx.cwd, env);
+				if (current.issue_type === "epic") {
+					const unfinished = (await descendants(bead, ctx.cwd)).beads.filter(child => child.status === "open" || child.status === "in_progress");
+					if (unfinished.length > 0) {
+						const list = unfinished.map(child => child.id).join(", ");
+						return text<FinishResult>(
+							{ state: "done", bead },
+							`orc_finish ${bead}: refused, epic has unfinished beads: ${list}. Finish or block them first.`,
+							true,
+						);
+					}
+				}
 				await bdJson(["close", bead, "--reason", input.reason, "--json"], ctx.cwd, env);
 			} else {
 				// `bd update` has no `--reason` (bd 1.2.2), so the reason is recorded as a

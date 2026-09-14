@@ -229,6 +229,43 @@ describe("orc_finish blocked", () => {
 	});
 });
 
+describe("orc_finish done on an epic", () => {
+	test("refuses while a descendant is open or in progress, closes when the subtree is terminal", async () => {
+		const root = fixture("server");
+		const { pi, seen } = recordingApi();
+		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }> }>();
+		(pi as unknown as { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }> }) => void }).registerTool = t => {
+			seen.tools.push(t.name);
+			tools.set(t.name, t);
+		};
+		orchestrateWithBd(pi);
+		let children = '[{"id":"E.1","status":"closed"},{"id":"E.2","status":"open"}]';
+		const argvs: string[][] = [];
+		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+			argvs.push(argv);
+			const args = argv.slice(1).join(" ");
+			let body = '{"id":"E","issue_type":"epic","status":"in_progress"}';
+			if (args.startsWith("list --parent E ")) body = children;
+			if (args.startsWith("list --parent E.")) body = "[]";
+			if (args.startsWith("close")) body = '{"id":"E","status":"closed"}';
+			return { stdout: new Response(body).body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+		}) as unknown as typeof Bun.spawn);
+		try {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" } };
+			const refused = await tools.get("orc_finish")?.execute("x", { bead: "E", state: "done", reason: "all done" }, undefined, undefined, ctx);
+			expect(refused?.isError).toBe(true);
+			expect(refused?.content[0]?.text).toContain("E.2");
+			expect(argvs.some(a => a[1] === "close")).toBe(false);
+			children = '[{"id":"E.1","status":"closed"},{"id":"E.2","status":"blocked"}]';
+			const closed = await tools.get("orc_finish")?.execute("x", { bead: "E", state: "done", reason: "all done" }, undefined, undefined, ctx);
+			expect(closed?.isError ?? false).toBe(false);
+			expect(argvs.some(a => a[1] === "close")).toBe(true);
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+});
+
 describe("store mode refusal", () => {
 	test("server mode passes; embedded and a missing store refuse, from the file alone", () => {
 		expect(storeRefusal(fixture("server"))).toBeNull();
