@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.10](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.9...v0.4.10) (2026-09-14)
+
+
+### Bug Fixes
+
+* **routing:** never reroute a helper; two-tier wave holds task beads only ([#170](https://github.com/srobroek/orchestrate-with-bd/issues/170)) ([588c4b9](https://github.com/srobroek/orchestrate-with-bd/commit/588c4b9868d3578d7f2f16f7aa6ea602c582c500))
+
 ## [0.4.9](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.8...v0.4.9) (2026-09-14)
 
 
