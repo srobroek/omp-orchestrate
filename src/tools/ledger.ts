@@ -4,6 +4,20 @@ import { type BdBead, bdJson, bdShow } from "../bd";
 import { beadIds, DESCENDANT_LIMIT, descendants, readStoreMode, readyWave, runShape, todoStrings } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
+/** Whether `epic` sits under `ancestor` through parent-child edges, walking at most four levels. */
+async function isDescendant(epic: string, ancestor: string, cwd: string): Promise<boolean> {
+	let current = epic;
+	for (let depth = 0; depth < 4; depth++) {
+		const bead = await bdShow(current, cwd);
+		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
+		const parent = deps.find(dep => dep !== null && typeof dep === "object" && "type" in dep && dep.type === "parent-child" && "depends_on_id" in dep);
+		if (parent === undefined || typeof parent.depends_on_id !== "string") return false;
+		if (parent.depends_on_id === ancestor) return true;
+		current = parent.depends_on_id;
+	}
+	return false;
+}
+
 /**
  * Why the ledger refuses to write at `root`, or `null` when the store is in server mode.
  * Computed per call from the file alone (never from a `bd` call): subagents share one
@@ -190,9 +204,16 @@ export function registerLedger(pi: ExtensionAPI): void {
 			const store = mode === null ? "no .beads/metadata.json" : `${mode.database ?? "?"} (${mode.mode || "?"})`;
 			const locator = readLocator(root);
 			const requested = input.epic?.trim() || undefined;
+			let bound = locator;
 			if (requested !== undefined && locator !== null && locator.run_id !== requested) {
-				const message = `run already bound to ${locator.run_id}; call orc_status without epic, or remove .orchestration/.active-run to rebind`;
-				return text<StatusResult>({ run: locator.run_id, store, beads: [], todo: [], message }, message, true);
+				// An isolated clone carries the root's locator. A sub-lead binding a child epic
+				// of that run is the intended three-tier case, so the descendant rebinds; any
+				// other epic is a different run and refuses.
+				if (!(await isDescendant(requested, locator.run_id, root))) {
+					const message = `run already bound to ${locator.run_id}; call orc_status without epic, or remove .orchestration/.active-run to rebind`;
+					return text<StatusResult>({ run: locator.run_id, store, beads: [], todo: [], message }, message, true);
+				}
+				bound = null;
 			}
 			const epic = requested ?? locator?.run_id;
 			if (epic === undefined) {
@@ -202,7 +223,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 			// The epic must exist before anything is bound: `bd list --parent <typo>` exits 0
 			// with `[]`, which would otherwise persist a typo as an empty successful run.
 			let epicBead = await bdShow(epic, root);
-			if (locator === null) {
+			if (bound === null) {
 				// Binding claims the epic: Beads' atomic assignee is the ownership record, so two
 				// leads cannot bind one epic, and `bd ready --unassigned` drops it for the root.
 				const actor = actorFor(ctx);
