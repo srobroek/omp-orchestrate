@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.8](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.7...v0.4.8) (2026-09-14)
+
+
+### Bug Fixes
+
+* **status:** read the parent from bd show's dependency shape so a clone rebinds to a child epic ([#164](https://github.com/srobroek/orchestrate-with-bd/issues/164)) ([a3fab6a](https://github.com/srobroek/orchestrate-with-bd/commit/a3fab6a861a6de5892732596a11e71821c0cf866))
+
 ## [0.4.7](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.6...v0.4.7) (2026-09-14)
 
 
