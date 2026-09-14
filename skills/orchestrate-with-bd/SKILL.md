@@ -56,8 +56,10 @@ the contract. This document is the procedure behind it.
 - MUST Set `maxRecursionDepth` to 2 for a single-epic run and 3 for a multi-epic run.
 - NOT Put the bare lowercase word `orchestrate` in a worker brief. Put it in an `orc-lead`
   brief.
-- NOT Pass `--db`, `BEADS_DIR`, or any store path to a child. `bd` resolves the shared
-  server from the tracked `.beads/metadata.json` in every clone.
+- NOT Pass `--db` or a store path to a child yourself. `bd` resolves the shared server
+  from the tracked `.beads/metadata.json` in every clone. The `beads` plugin pins
+  `BEADS_DIR` to the primary checkout's `.beads` on every bash call; that names the same
+  server database and is not a fork.
 
 ## Tools
 
