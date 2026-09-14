@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.5...v0.4.6) (2026-09-14)
+
+
+### Bug Fixes
+
+* refuse every bd command, .beads/ write, and dispatch in a session stopped on a non-server store ([#160](https://github.com/srobroek/orchestrate-with-bd/issues/160)) ([2818dd5](https://github.com/srobroek/orchestrate-with-bd/commit/2818dd535dce69c9b762f8bef090e0aef7f83615))
+
 ## [0.4.5](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.4...v0.4.5) (2026-09-14)
 
 
