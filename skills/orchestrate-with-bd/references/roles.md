@@ -104,7 +104,7 @@ worked, the caller awaits the helper's terminal result.
 A brief names the bead id, the role, and what the bead does not already say. Unless the
 agent is `orc-lead`, the brief never contains the word `orchestrate` in lowercase. OMP's own
 keyword notice reaches any dispatched agent that has `task` and a brief with that word. The
-six roles above are the whole surface. Nothing else in this plugin dispatches, claims, or
+agents above are the whole surface. Nothing else in this plugin dispatches, claims, or
 reviews.
 
 That is the whole table.

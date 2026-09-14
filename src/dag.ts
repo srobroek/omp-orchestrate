@@ -170,7 +170,7 @@ async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<B
  * The current wave for this tier, dependency-aware through `bd ready`, which honours
  * `blocks` edges and excludes `in_progress` issues.
  *
- * Two-tier: every task under `epic` that `bd ready` reports as unblocked and unassigned.
+ * Two-tier: every `task` bead under `epic` that `bd ready` reports as unblocked and unassigned.
  *
  * Three-tier, while a child epic is still open: the direct child epics that `bd ready`
  * reports as ready (epic-to-epic blockers honoured; an epic a lead has bound is
@@ -185,7 +185,9 @@ async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<B
  */
 export async function readyWave(epic: string, beads: readonly BdBead[], cwd: string): Promise<BdBead[]> {
 	const epics = childEpics(epic, beads);
-	if (epics.length === 0) return (await readyUnder(epic, cwd)).filter(bead => bead.issue_type !== "epic");
+	// Task beads only, as in the terminal three-tier branch: an open `decision` is recorded by
+	// the lead or a human, never dispatched, and would otherwise route to an implementer.
+	if (epics.length === 0) return (await readyUnder(epic, cwd)).filter(bead => bead.issue_type === "task");
 	const direct = new Set(epics.map(bead => bead.id));
 	// The run epic's own tasks (the cross-epic review) are the wave only once every child
 	// epic is closed AND nothing under any of them is still open: an epic's status alone is
