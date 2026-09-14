@@ -307,6 +307,42 @@ describe("orc_finish done on an epic", () => {
 	});
 });
 
+describe("orc_status rebind in an isolated clone", () => {
+	test("a child epic of the inherited run rebinds; an unrelated epic is refused", async () => {
+		const root = fixture("server");
+		writeLocator(root, "R");
+		const { pi, seen } = recordingApi();
+		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }> }>();
+		(pi as unknown as { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }> }) => void }).registerTool = t => {
+			seen.tools.push(t.name);
+			tools.set(t.name, t);
+		};
+		orchestrateWithBd(pi);
+		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+			const args = argv.slice(1).join(" ");
+			let body = "[]";
+			if (args.startsWith("show R.2 ")) body = '{"id":"R.2","issue_type":"epic","status":"open","assignee":"omp/me","dependencies":[{"depends_on_id":"R","type":"parent-child"}]}';
+			if (args.startsWith("show OTHER ")) body = '{"id":"OTHER","issue_type":"epic","status":"open","dependencies":[]}';
+			if (args.startsWith("update R.2 --claim")) body = '{"id":"R.2"}';
+			if (args.startsWith("ready")) body = "[]";
+			return { stdout: new Response(body).body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+		}) as unknown as typeof Bun.spawn);
+		try {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => "me" } };
+			const child = await tools.get("orc_status")?.execute("x", { epic: "R.2" }, undefined, undefined, ctx);
+			expect(child?.isError ?? false).toBe(false);
+			expect(readLocator(root)?.run_id).toBe("R.2");
+			writeLocator(root, "R");
+			const other = await tools.get("orc_status")?.execute("x", { epic: "OTHER" }, undefined, undefined, ctx);
+			expect(other?.isError).toBe(true);
+			expect(other?.content[0]?.text).toContain("already bound to R");
+			expect(readLocator(root)?.run_id).toBe("R");
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+});
+
 describe("orc_status bind claims the epic", () => {
 	test("refuses to bind an epic another actor holds and writes no locator", async () => {
 		const root = fixture("server");

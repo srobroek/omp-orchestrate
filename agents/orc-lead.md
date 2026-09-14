@@ -35,6 +35,9 @@ Your final tree is captured as `omp/task/<your name>` for the root to merge.
 
 
 ## Output
+Before you yield, leave your working tree checked out on the integrated result: OMP captures
+the tree you end on as `omp/task/<your name>`, and a tree left on the base branch captures
+nothing. Always return the receipt below; an empty final message loses the capture too.
 When every task under the epic is closed, `orc_finish` the epic `done`. When a task stays blocked, finish the epic `blocked`: bd refuses to close an epic over a blocked child. Begin your reply
 with `VERDICT: DONE|BLOCKED -- <reason>`, then a receipt of at most 100 words: bead ids
 closed, bead ids blocked with reasons, epic branch name.
