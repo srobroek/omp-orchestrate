@@ -23,6 +23,7 @@ beside them.
   scope (files and symbols) and numbered acceptance criteria an independent reviewer can check.
 - Every review bead depends on the task or tasks it reviews, so review beads surface as one wave after the tasks land. One per task fans out to one reviewer each; one spanning the wave gives a single reviewer.
 - Epic order is an epic-to-epic dependency (`bd dep add <epic-B> <epic-A>`). bd refuses an epic-to-decision dependency; gate an epic on a decision through its tasks (`bd dep add <task> <decision>`).
+- A multi-epic run gets one cross-epic review bead directly under the run epic (`--metadata role=reviewer`), with no dependency: `orc_status.ready` surfaces it only after every child epic is closed.
 - Independent tasks have no dependency between them, so they run in one wave.
 - Dependencies between tasks: `bd dep add <task> <depends-on>`.
 - A contract two epics share (an interface, a schema, a file both touch) becomes a `decision`

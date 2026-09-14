@@ -24,7 +24,8 @@ in-progress children you did not dispatch.
 - Apply these rules inside your epic exactly as written.
 
 ## Integrate
-When the wave lands, merge every captured `omp/task/<agent-name>` branch into your tree and resolve conflicts here, never in a worker.
+Wait for the whole `task` call to return before treating a wave as landed; never re-read `orc_status` on the first result.
+Then merge every captured `omp/task/<agent-name>` branch into your tree and resolve conflicts here, never in a worker.
 OMP names a captured branch `omp/task/<agent-name>` after the `task` call's name; a `.beads/interactions.jsonl` conflict is resolved by keeping both sides.
 Then call `orc_status` again: the review beads, which depend on the landed tasks, are now the `ready` wave.
 Dispatch them in one `task` call, one `orc-reviewer` per review bead, naming the review bead, the reviewed bead, and the `merge-base..HEAD` range in each brief.

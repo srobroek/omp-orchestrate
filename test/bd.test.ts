@@ -88,6 +88,40 @@ describe("readyWave", () => {
 		expect(argvs.slice(1).map(a => a[3])).toEqual(["R.1", "R.2"]);
 	});
 
+	test("three-tier, all child epics closed: the wave is the ready tasks directly under the run epic", async () => {
+		const argvs: string[][] = [];
+		spawn.mockImplementation(((argv: string[]) => {
+			argvs.push(argv);
+			// bd ready lists the root-level review and a stray ready task inside a closed epic.
+			return {
+				stdout: new Response('[{"id":"R.9","issue_type":"task","status":"open"},{"id":"R.1.7","issue_type":"task","status":"open"}]').body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => undefined,
+			};
+		}) as unknown as typeof Bun.spawn);
+		const child = (id: string, parent: string, type: string, status: string) => ({ id, issue_type: type, status, dependencies: [{ depends_on_id: parent, type: "parent-child" }] });
+		const beads = [child("R.1", "R", "epic", "closed"), child("R.2", "R", "epic", "closed"), child("R.9", "R", "task", "open"), child("R.1.7", "R.1", "task", "closed")];
+		const wave = await readyWave("R", beads, "/tmp");
+		expect(wave.map(bead => bead.id)).toEqual(["R.9"]);
+		// No epic-tier query: the epics are done, the wave is the run epic's own tasks.
+		expect(argvs.map(a => a.slice(1).join(" "))).toEqual(["ready --parent R --unassigned --limit 0 --json"]);
+	});
+
+	test("three-tier: a closed child epic with an open descendant keeps the run's own tasks out of the wave", async () => {
+		const argvs: string[][] = [];
+		spawn.mockImplementation(((argv: string[]) => {
+			argvs.push(argv);
+			return { stdout: new Response("[]").body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+		}) as unknown as typeof Bun.spawn);
+		const child = (id: string, parent: string, type: string, status: string) => ({ id, issue_type: type, status, dependencies: [{ depends_on_id: parent, type: "parent-child" }] });
+		const beads = [child("R.1", "R", "epic", "closed"), child("R.9", "R", "task", "open"), child("R.1.3", "R.1", "task", "open")];
+		const wave = await readyWave("R", beads, "/tmp");
+		expect(wave).toEqual([]);
+		// Still the epic tier: the query asked for epics, and none is ready.
+		expect(argvs[0]?.slice(1, 3)).toEqual(["ready", "--type"]);
+	});
+
 	test("two-tier: asks bd ready for unassigned descendants and drops epics", async () => {
 		const argvs: string[][] = [];
 		spawn.mockImplementation(((argv: string[]) => {

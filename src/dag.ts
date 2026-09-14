@@ -74,13 +74,17 @@ export function runShape(epic: string, beads: readonly BdBead[]): "two-tier" | "
 	return childEpics(epic, beads).length > 0 ? "three-tier" : "two-tier";
 }
 
-/** Direct child epics of `epic` (parent-child dependency on it), in the order given. */
-export function childEpics(epic: string, beads: readonly BdBead[]): BdBead[] {
+/** Direct children of `epic` (parent-child dependency on it), in the order given. */
+export function directChildren(epic: string, beads: readonly BdBead[]): BdBead[] {
 	return beads.filter(bead => {
-		if (bead.issue_type !== "epic") return false;
 		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
 		return deps.some(dep => dep !== null && typeof dep === "object" && "depends_on_id" in dep && dep.depends_on_id === epic && "type" in dep && dep.type === "parent-child");
 	});
+}
+
+/** Direct child epics of `epic`, in the order given. */
+export function childEpics(epic: string, beads: readonly BdBead[]): BdBead[] {
+	return directChildren(epic, beads).filter(bead => bead.issue_type === "epic");
 }
 
 /** Ids of every bead under `root` in `beads` (transitive parent-child), excluding `root`. */
@@ -127,16 +131,30 @@ async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<B
  *
  * Two-tier: every task under `epic` that `bd ready` reports as unblocked and unassigned.
  *
- * Three-tier: the direct child epics that `bd ready` reports as ready (epic-to-epic blockers
- * honoured; an epic a lead has bound is `in_progress` and drops out), minus any epic whose
- * open tasks are all blocked. bd 1.2.2 refuses an epic-to-decision dependency, so a decision
- * gates an epic through its tasks; an epic with no tasks at all stays in the wave, because
- * its lead plans it.
+ * Three-tier, while a child epic is still open: the direct child epics that `bd ready`
+ * reports as ready (epic-to-epic blockers honoured; an epic a lead has bound is
+ * `in_progress` and drops out), minus any epic whose open tasks are all blocked. bd 1.2.2
+ * refuses an epic-to-decision dependency, so a decision gates an epic through its tasks; an
+ * epic with no tasks at all stays in the wave, because its lead plans it.
+ *
+ * Three-tier, once every child epic is closed: the ready tasks that sit directly under the
+ * run epic, which is where a cross-epic review lives. bd refuses a task-to-epic dependency,
+ * so this is the only gate keeping that review out of the first wave.
  */
 export async function readyWave(epic: string, beads: readonly BdBead[], cwd: string): Promise<BdBead[]> {
 	const epics = childEpics(epic, beads);
 	if (epics.length === 0) return (await readyUnder(epic, cwd)).filter(bead => bead.issue_type !== "epic");
 	const direct = new Set(epics.map(bead => bead.id));
+	// The run epic's own tasks (the cross-epic review) are the wave only once every child
+	// epic is closed AND nothing under any of them is still open: an epic's status alone is
+	// a lead's claim, and a lead once closed its epic over two open review beads.
+	const epicSubtrees = new Set<string>();
+	for (const child of epics) for (const id of subtreeIds(child.id, beads)) epicSubtrees.add(id);
+	const unfinishedInside = beads.some(bead => epicSubtrees.has(bead.id) && (bead.status === "open" || bead.status === "in_progress"));
+	if (epics.every(bead => bead.status === "closed") && !unfinishedInside) {
+		const rootTasks = new Set(directChildren(epic, beads).filter(bead => bead.issue_type !== "epic").map(bead => bead.id));
+		return (await readyUnder(epic, cwd)).filter(bead => rootTasks.has(bead.id));
+	}
 	const candidates = (await readyUnder(epic, cwd, "epic")).filter(bead => direct.has(bead.id));
 	const wave: BdBead[] = [];
 	for (const candidate of candidates) {
