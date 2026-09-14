@@ -11,15 +11,15 @@ TRIGGER
   the prompt to receive the header, then `orc_status {}` reads the bound run.
 - One bounded task with no independent slices: execute it directly.
 
-You are the lead. OMP owns scheduling, isolation, capture, and landing. Beads records what
-work exists and what state it is in. The run header the plugin injected on your prompt is
-the contract. This document is the procedure behind it.
+You are the lead. OMP owns the agents and their workspaces. Beads records what work exists
+and what state it is in. The run header the plugin injected on your prompt is the contract.
+This document is the procedure behind it.
 
 ## Three facts nobody re-derives
 
-1. The native `orchestrate` notice reaches a dispatched agent whose brief contains the bare
-   lowercase word when that agent has the `task` tool. That is how `orc-lead` receives the
-   contract. It is also why a worker brief never contains the word.
+1. OMP sends its own notice to a dispatched agent that has `task` and reads `orchestrate`
+   in its brief. `orc-lead` receives the contract that way. A brief for any other agent
+   never contains the word.
 2. Workers have no `todo` list. OMP withholds the `todo` tool from every dispatched agent.
    A worker tracks nothing outside its bead, and `orc_finish` is its only progress record.
 3. Beads outranks both the plan and the `todo` list. A plan-mode plan names its beads in a
@@ -44,9 +44,9 @@ the contract. This document is the procedure behind it.
 4. Integrate. OMP captures each isolated agent's tree as `omp/task/<agent-name>` (the name
    you gave the `task` call, not the bead id; an epic lead's branch is `omp/task/<lead-name>`).
    Merge each accepted branch yourself after its review verdict and resolve conflicts in your
-   tree. A conflict in `.beads/interactions.jsonl` (bd's per-clone audit log) is resolved by
-   keeping both sides. Then `orc_status` again and redraw the `todo` list.
-5. Close. When every task is closed or blocked, `orc_finish` the epic.
+   tree. When `.beads/interactions.jsonl` (bd's per-clone audit log) conflicts, keep both
+   sides. Then `orc_status` again and redraw the `todo` list.
+5. Close. When every task is `closed` or `blocked`, `orc_finish` the epic.
 
 ## Rules
 

@@ -32,12 +32,15 @@ implementer → scout). Three tiers need 3 (root → epic lead → implementer �
 
 `scout` (ships with OMP) answers one bounded read-only question. `operator` (`build` plugin
 in the `srobroek-omp` marketplace) performs one exact mechanical operation in the caller's
-checkout. Neither claims a bead, commits, or touches a PR. The caller awaits a helper's
-terminal result before writing where it worked.
+checkout. Neither claims a bead, commits, or touches a PR. Before writing where a helper
+worked, the caller awaits the helper's terminal result.
 
 ## Briefs
 
-A brief names the bead id, the role, and what the bead does not already say. It never
-contains the bare lowercase word `orchestrate` unless the agent is `orc-lead`, because the
-native keyword notice reaches any dispatched agent that has `task` and its brief contains
-the word.
+A brief names the bead id, the role, and what the bead does not already say. Unless the
+agent is `orc-lead`, the brief never contains the word `orchestrate` in lowercase. OMP's own
+keyword notice reaches any dispatched agent that has `task` and a brief with that word. The
+six roles above are the whole surface. Nothing else in this plugin dispatches, claims, or
+reviews.
+
+That is the whole table.

@@ -31,7 +31,7 @@ omp plugin install orchestrate-with-bd@orchestrate-with-bd
 ```
 
 The `operator` helper the implementer may spawn comes from the `build` plugin in the
-`srobroek/omp-plugins` marketplace; `scout` and `security-reviewer` ship with OMP.
+`srobroek/omp-plugins` marketplace; `scout` ships with OMP.
 
 ## Store
 
