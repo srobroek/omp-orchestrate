@@ -78,7 +78,7 @@ columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
 | Rebind refusal | bound fixture | `Call orc_status with epic "<other>"` | `run already bound to <epic>` | WORKS |
 | Truncation | epic with 520 tasks | `Call orc_status with epic BIG` | `500 beads ... (truncated)`; `ready` withheld | WORKS |
 | Server outage | per-project server (`bd init --server`, never port 3308); `kill -STOP` the server mid-wave | `finish every task under it.` | every write fails closed with `i/o timeout` within seconds; no false success; run recovers after `kill -CONT` | WORKS |
-| Security review | task that executes user input in a shell; review bead saying so | `...act on every verdict...` | reviewer dispatches `security-reviewer`; exploitable finding → `changes` → fix bead → re-review → close | INCOMPLETE: `security-reviewer` dispatched on every security-relevant diff and its CWE-78 verdict drove the first bounce (WORKS); the run was stopped at 67 min and 15 beads because the reviewer then judged each fix against defects the bead never named, and every worker brief told the implementer to skip tests. Both fixed in the agents (0.5.0); rerun pending |
+| Security review | task that executes user input in a shell; review bead saying so | `...act on every verdict...` | reviewer dispatches `security-reviewer`; exploitable finding → `changes` → fix bead → re-review → close | INCOMPLETE: `security-reviewer` dispatched on every security-relevant diff and its CWE-78 verdict drove the first bounce (WORKS); the run was stopped at 67 min and 15 beads because the reviewer then judged each fix against defects the bead never named, and every worker brief told the implementer to skip tests. Both fixed in the agents (0.4.9); rerun pending |
 
 ### Store guards
 
@@ -87,7 +87,7 @@ columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
 | Embedded store | second repo with `bd init` (no server carrier: unset `BEADS_DOLT_SHARED_SERVER`, move `~/.config/bd/config.yaml` aside during init) | `orchestrate epic <id>: finish every task under it.` | STOP-only header; one sentence to the human; zero tool calls | FAIL on 0.4.5; WORKS on 0.4.6 (gate) |
 | Missing store | `git clone` the fixture, `rm -rf .beads` | `orchestrate: report the store line of your run header and stop.` | `store: no .beads/metadata.json`; STOP; no `bd init` | WORKS |
 | `bd init` gate (beads plugin) | empty dir | `Run exactly: bd init --skip-hooks ...` | refused with the mode text; `cd sub && bd init --shared-server --prefix <existing>` refused as a collision | WORKS |
-| Model-role preflight | server-mode fixture; `--config` overlay with `modelRoles.slow: nonexistent-provider/no-such-model` | `orchestrate epic <id>: finish everything under it and close it.` | STOP header naming `@slow (orc-implementer-max, orc-reviewer)` and `modelRoles.slow`; one sentence to the human; zero tool calls | WORKS (0.5.1) |
+| Model-role preflight | server-mode fixture; `--config` overlay with `modelRoles.slow: nonexistent-provider/no-such-model` | `orchestrate epic <id>: finish everything under it and close it.` | STOP header naming `@slow (orc-implementer-max, orc-reviewer)` and `modelRoles.slow`; one sentence to the human; zero tool calls | WORKS (0.4.9) |
 
 ### Planner and roles
 
@@ -97,7 +97,7 @@ columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
 | Mixed-role wave | as above | as above | first wave carries researcher and implementers in one call; the dependent task waits; answer lands as a bead comment | WORKS |
 | Implementer helpers | task spanning many files: "first dispatch `scout` to list call sites, then `operator` for the rename, quote both receipts" | `finish every task under it.` | implementer spawns `scout`, then `operator`; receipts in the `orc_finish` comment | WORKS (operator after malformed retries) |
 | Reviewer helper | review bead: "confirm by dispatching `scout` to grep for `X`" | same | reviewer spawns `scout`; receipt quoted | WORKS |
-| Implementer tiers | two tasks, `metadata.tier` `basic` and `deep`, one review bead depending on both | `finish everything under it, integrate into main, and close the run epic.` | `orc_status.wave` names `orc-implementer` and `orc-implementer-deep`; the child transcripts show those agents ran; reviewer over the merged diff | FAIL then WORKS on 0.5.1: the first run dispatched `orc-implementer` for the deep bead despite the wave (see defects); with the routing gate the deep child ran `orc-implementer-deep` |
+| Implementer tiers | two tasks, `metadata.tier` `basic` and `deep`, one review bead depending on both | `finish everything under it, integrate into main, and close the run epic.` | `orc_status.wave` names `orc-implementer` and `orc-implementer-deep`; the child transcripts show those agents ran; reviewer over the merged diff | FAIL then WORKS on 0.4.9: the first run dispatched `orc-implementer` for the deep bead despite the wave (see defects); with the routing gate the deep child ran `orc-implementer-deep` |
 | Shepherd (simulated bots) | PR bead with `pr`, `head_sha`, `bot_review_requests`; a `gh` shim first on `PATH` answering canned JSON per a `SCENARIO` file | `shepherd the PR bead, act on the outcome...` | actionable → policy `bounce` → fix bead with thread URLs → implementer → re-probe clean → closed; pending → request posted → `blocked` naming the provider | WORKS WITH DEVIATIONS (shim) |
 
 ### Three tier
@@ -114,7 +114,7 @@ columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
 
 - `orc-shepherd` against real review bots.
 - A security-review chain that converges: the one run was stopped (see the row above); rerun
-  on 0.5.0 is pending.
+  on 0.4.9 is pending.
 
 ## Defects the matrix found
 
@@ -128,7 +128,7 @@ columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
 | 0.4.4 | open root decision entered the review wave | final wave holds `task` beads only |
 | 0.4.7 | sub-lead yielded an empty result; OMP captured no branch | `orc-lead` ends on the integrated tree and always returns its receipt |
 | 0.4.7, 0.4.8 | sub-leads deleted the inherited locator by hand | a clone rebinds to a child epic of the inherited run; 0.4.8 reads `bd show`'s parent shape |
-| 0.5.0 | every worker brief told the implementer to skip tests (copied from OMP's `task` guidance about suites), so criteria went unverified and fix beads multiplied | header, skill, lead, implementer: the bead's own checks always run; only repository-wide suites and formatters are the lead's |
-| 0.5.0 | reviewer judged each fix against defects the bead never named, producing an unbounded review chain | reviewer: a defect outside the criteria is a note, not a verdict, unless it is an exploitable security finding |
-| 0.5.1 | lead read a wave naming `orc-implementer-deep` and dispatched `orc-implementer` | `tool_call` on `task` routes each item that names one wave bead to that entry's `agent` and `isolated` |
-| 0.5.1 | `orc-reviewer` named the custom alias `@reviewer`; on a machine without `modelRoles.reviewer` OMP runs it on the caller's model without notice | every shipped agent names a built-in role; the preflight resolves each alias through `ctx.models.resolve` and stops the session when one has no callable model |
+| 0.4.9 | every worker brief told the implementer to skip tests (copied from OMP's `task` guidance about suites), so criteria went unverified and fix beads multiplied | header, skill, lead, implementer: the bead's own checks always run; only repository-wide suites and formatters are the lead's |
+| 0.4.9 | reviewer judged each fix against defects the bead never named, producing an unbounded review chain | reviewer: a defect outside the criteria is a note, not a verdict, unless it is an exploitable security finding |
+| 0.4.9 | lead read a wave naming `orc-implementer-deep` and dispatched `orc-implementer` | `tool_call` on `task` routes each item that names one wave bead to that entry's `agent` and `isolated` |
+| 0.4.9 | `orc-reviewer` named the custom alias `@reviewer`; on a machine without `modelRoles.reviewer` OMP runs it on the caller's model without notice | every shipped agent names a built-in role; the preflight resolves each alias through `ctx.models.resolve` and stops the session when one has no callable model |
