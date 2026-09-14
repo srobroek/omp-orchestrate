@@ -35,7 +35,7 @@ Your final tree is captured as `omp/task/<your name>` for the root to merge.
 
 
 ## Output
-When every task under the epic is closed or blocked, `orc_finish` the epic. Begin your reply
+When every task under the epic is closed, `orc_finish` the epic `done`. When a task stays blocked, finish the epic `blocked`: bd refuses to close an epic over a blocked child. Begin your reply
 with `VERDICT: DONE|BLOCKED -- <reason>`, then a receipt of at most 100 words: bead ids
 closed, bead ids blocked with reasons, epic branch name.
 Never reprint worker output, diffs, or bead history.
