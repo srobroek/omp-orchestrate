@@ -24,8 +24,10 @@ in-progress children you did not dispatch.
 - Never dispatch another `orc-lead`.
 
 ## Integrate
-After each reviewer verdict, merge the accepted `omp/task/<id>` branch into your working tree
-and resolve conflicts here, never in a worker. Your final tree is captured as the epic branch.
+After each reviewer verdict, merge the accepted branch into your working tree and resolve
+conflicts here, never in a worker. OMP names a captured branch `omp/task/<agent-name>` after
+the `task` call's name; a `.beads/interactions.jsonl` conflict is resolved by keeping both
+sides. Your final tree is captured as `omp/task/<your name>` for the root to merge.
 
 ## Output
 When every task under the epic is closed or blocked, `orc_finish` the epic. Begin your reply

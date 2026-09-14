@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import orchestrateWithBd, { runHeader } from "../src/index";
 import { mentionsOrchestrate } from "../src/keyword";
@@ -150,6 +150,14 @@ describe("before_agent_start", () => {
 	test("names the missing run when no locator is bound", () => {
 		expect(runHeader(fixture("server"), "omp/x")).toContain("no run epic yet");
 	});
+
+	test("an embedded or missing store makes the header say STOP before the contract", () => {
+		const embedded = runHeader(fixture("embedded"), "omp/x");
+		expect(embedded).toContain("STOP.");
+		expect(embedded.indexOf("STOP.")).toBeLessThan(embedded.indexOf("Read `skill://orchestrate-with-bd`"));
+		expect(runHeader(fixture(null), "omp/x")).toContain("STOP.");
+		expect(runHeader(fixture("server"), "omp/x")).not.toContain("STOP.");
+	});
 });
 
 describe("mentionsOrchestrate", () => {
@@ -191,6 +199,31 @@ describe("locator", () => {
 		expect(readLocator(root)).toBeNull();
 		writeFileSync(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "" }));
 		expect(readLocator(root)).toBeNull();
+	});
+});
+
+describe("orc_finish blocked", () => {
+	test("records the reason as a comment and never passes --reason to bd update", async () => {
+		const root = fixture("server");
+		const { pi, seen } = recordingApi();
+		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+		(pi as unknown as { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => void }).registerTool = t => {
+			seen.tools.push(t.name);
+			tools.set(t.name, t);
+		};
+		orchestrateWithBd(pi);
+		const argvs: string[][] = [];
+		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+			argvs.push(argv);
+			return { stdout: new Response('{"id":"b-1"}').body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+		}) as unknown as typeof Bun.spawn);
+		try {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" } };
+			await tools.get("orc_finish")?.execute("x", { bead: "b-1", state: "blocked", reason: "needs round.ts" }, undefined, undefined, ctx);
+		} finally {
+			spawn.mockRestore();
+		}
+		expect(argvs.map(a => a.slice(1).join(" "))).toEqual(["comment b-1 blocked: needs round.ts", "update b-1 --status blocked --json"]);
 	});
 });
 

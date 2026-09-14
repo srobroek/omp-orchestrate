@@ -25,6 +25,8 @@ nobody reads.
 
 ## Migrate an embedded project
 
+A human runs this. A lead that finds an embedded store reports this route and ends its
+turn; it never runs the migration, edits `.beads/`, or dispatches an agent to do so.
 Run from the project root with `BEADS_ACTOR` set. `<dir>` is a backup directory outside the
 checkout; `<prefix>` is the id prefix of any existing bead.
 
@@ -56,6 +58,11 @@ checkout; `<prefix>` is the id prefix of any existing bead.
   `.beads/config.yaml` or to `origin`. The payload is the whole database: bead bodies,
   comments, and actor strings. `bd bootstrap` on a fresh clone pulls it and repairs a
   hand-edited `dolt_database` from the tracked `project_id`.
+- **Audit log churn.** bd appends every field change to `.beads/interactions.jsonl` in the
+  cwd's `.beads`, and bd tracks that file in git by default. Each isolated worker's captured
+  branch therefore carries its own appended lines, and the lead's second merge conflicts on
+  it. Resolve by keeping both sides, or untrack it in projects that run isolated workers:
+  `git rm --cached .beads/interactions.jsonl` and add `interactions.jsonl` to `.beads/.gitignore`.
 - **Convergence.** A `cp -R` copy, a linked worktree, and a fresh `git clone` on the same
   machine all reach the same server and database with no environment variable; a write in
   any of them is visible in all of them.

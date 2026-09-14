@@ -18,7 +18,8 @@ Your brief names a review bead. `orc_claim { bead: <review-bead> }` first; on
 ## Review
 1. Read the reviewed bead's description and its `orc_finish` comment: scope, numbered
    acceptance criteria, changed paths, head SHA.
-2. Check out or read the captured branch `omp/task/<id>` at that SHA. Verify every
+2. Check out or read the captured branch (`omp/task/<agent-name>`, named in the lead's
+   brief) at that SHA. Verify every
    criterion by running its stated check yourself; a claim without evidence is unmet.
 3. Read the diff for scope: a change outside the declared scope is a finding, however good.
 4. `security_scan` when the diff touches input handling, auth, secrets, or shell execution.
