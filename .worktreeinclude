@@ -2,19 +2,15 @@
 #
 # `.beads/` is deliberately NOT named here, and adding it would be a regression.
 #
-# Two measurements decide it. First, this file matches top-level entries only: `.beads/`,
-# `.beads` and `/.beads/` each resolve to `.beads (dir)` and copy the whole tree, while
-# `.beads/*`, `.beads/*.json` and `.beads/**` match nothing. So there is no way to copy the
-# connection files without also copying `.beads/dolt/`, which is 2.2MB of Dolt storage a
-# worktree must never serve from: if the port file goes stale, that store is exactly what a
-# worktree would start a second server on, holding data old enough to look real.
+# This file matches top-level entries only: `.beads/`, `.beads` and `/.beads/` each resolve
+# to `.beads (dir)` and copy the whole tree, while `.beads/*` and `.beads/**` match nothing.
+# So there is no way to copy selected files without also copying whatever runtime state the
+# directory holds.
 #
-# Second, no copy is needed. `bd` resolves its database from `BEADS_DIR`, and from a
-# directory holding no `.beads/` at all, `BEADS_DIR=<primary>/.beads bd list` listed this
-# run's beads. So `src/beads-mode.ts` resolves the primary checkout's `.beads` through
-# `git rev-parse --git-common-dir` and points the run at it. A worktree joins the run's
-# server and holds no copy of it.
+# No copy is needed. The store runs on the shared Dolt server, and `bd` finds it from the
+# tracked `.beads/metadata.json` and `.beads/config.yaml`, which every worktree and clone
+# already carries. A worktree joins the project's database and holds no copy of it.
 #
 # Nothing else in this repository needs copying: `bun install` is fast and its output is
-# reproducible from the lockfile, so a cold worktree costs a install rather than a
+# reproducible from the lockfile, so a cold worktree costs an install rather than a
 # divergent database.

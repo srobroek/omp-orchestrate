@@ -6,7 +6,9 @@ description: Durable Beads-backed orchestration on native OMP task dispatch. Use
 # Orchestrate with bd
 
 TRIGGER
-+ The prompt says `orchestrate`, or the checkout carries `.orchestration/.active-run`.
++ The prompt says `orchestrate`; the plugin's run header arrives on that word alone.
++ Resuming a run: the checkout carries `.orchestration/.active-run`; say `orchestrate` in
+  the prompt to receive the header, then `orc_status {}` reads the bound run.
 - One bounded task with no independent slices: execute it directly.
 
 You are the lead. OMP owns scheduling, isolation, capture, and landing. Beads records what
