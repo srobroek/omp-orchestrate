@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.4...v0.4.5) (2026-09-14)
+
+
+### Features
+
+* **status:** binding claims the epic; per-task review default; per-lead concurrency documented ([#158](https://github.com/srobroek/orchestrate-with-bd/issues/158)) ([e694109](https://github.com/srobroek/orchestrate-with-bd/commit/e694109d7e6788d522bca6da443324b416b23053))
+
 ## [0.4.4](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.3...v0.4.4) (2026-09-14)
 
 
