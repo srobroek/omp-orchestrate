@@ -78,6 +78,9 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
 - MUST Set `maxRecursionDepth` to 2 for a single-epic run and 3 for a multi-epic run.
 - NOT Put the bare lowercase word `orchestrate` in a worker brief. Put it in an `orc-lead`
   brief.
+- NOT Tell a worker to skip the checks its bead names. An implementer runs every criterion's
+  check and the tests it adds. Repository-wide suites and formatters wait for you, and that
+  is all OMP's skip guidance for `task` refers to.
 - NOT Pass `--db` or a store path to a child yourself. `bd` resolves the shared server
   from the tracked `.beads/metadata.json` in every clone. The `beads` plugin pins
   `BEADS_DIR` to the primary checkout's `.beads` on every bash call; that names the same

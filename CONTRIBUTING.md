@@ -70,7 +70,7 @@ migration text on an embedded store because a clone would fork it.
 | `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator |
 | `orc-planner` | `@plan` | no | nothing |
 | `orc-implementer` | `@task` | yes | `scout`, `operator` |
-| `orc-reviewer` | `@reviewer` | no | `scout` |
+| `orc-reviewer` | `@reviewer` | no | `scout`, `security-reviewer` |
 | `orc-researcher` | `@smol` | no | nothing |
 | `orc-shepherd` | `@task` | no | nothing |
 
@@ -79,6 +79,9 @@ list, so an epic lead cannot start another lead. Only the root session, which ha
 policy, dispatches epic leads.
 
 ## Tests
+
+End-to-end scenarios, the harness that runs them, and what each run showed are in
+[docs/testing.md](docs/testing.md).
 
 `bun test` runs `test/*.test.ts` with `test/preload.ts`. The preload moves the process into
 an empty temporary directory and clears `BEADS_DIR`. Suites that need a repository path use
