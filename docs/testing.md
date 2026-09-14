@@ -2,8 +2,9 @@
 
 Contributor reference: how each behaviour of the plugin is exercised end to end, and what each
 run showed. Every scenario is a headless OMP session against a disposable fixture on the
-shared Dolt server; the prompt names the epic and nothing else, so the run header and the
-skill are the only steering under test.
+shared Dolt server, except the server-outage scenario, which uses a per-project server so it
+can be frozen. Most prompts name the epic plus the scenario's own steering (the failure to
+provoke, the helper to use); the run header and the skill are the plugin steering under test.
 
 ## Harness
 
@@ -62,8 +63,8 @@ Never stop the shared server; another project's run may be writing to it.
 
 ## Scenarios
 
-Each row names the DAG to build, the prompt, and what the transcript must show. "Observed"
-columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
+Each row names its setup (the DAG where one applies), the prompt, and what the transcript must
+show. "Observed" columns record the 2026-09-14 runs on 0.4.2 to 0.4.10.
 
 ### Single tier
 
@@ -113,8 +114,9 @@ columns record the 2026-09-14 runs on 0.4.2 to 0.4.8.
 ### Not exercised
 
 - `orc-shepherd` against real review bots.
-- A security-review chain that converges: the one run was stopped (see the row above); rerun
-  on 0.4.9 is pending.
+- A security-review chain that converges: the one run was stopped (see the row above). The
+  0.4.9 reviewer-scope and acceptance-check fixes came from it, but no rerun has been made as
+  of 0.4.10.
 
 ## Defects the matrix found
 
