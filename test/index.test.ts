@@ -1,23 +1,21 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BdBead } from "../src/bd";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { AgentRegistry, type AgentSession, type ExtensionAPI, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import * as actualBd from "../src/bd";
-import ompOrchestrate from "../src/index";
+import { describe, expect, test } from "bun:test";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import orchestrateWithBd, { NOT_SERVER_MODE, runHeader } from "../src/index";
+import { mentionsOrchestrate } from "../src/keyword";
+import { readLocator, writeLocator } from "../src/run";
 
-
-type CommandHandler = Parameters<ExtensionAPI["registerCommand"]>[1]["handler"];
 type EventHandler = (event: unknown, ctx?: unknown) => unknown;
 
 interface Registered {
 	events: string[];
 	commands: string[];
 	tools: string[];
-	handlers: Map<string, CommandHandler>;
 	eventHandlers: Map<string, EventHandler[]>;
 	label?: string;
+	userMessages: string[];
 }
 
 /**
@@ -25,19 +23,14 @@ interface Registered {
  * `sendMessage` at load time throws `ExtensionRuntimeNotInitializedError`, so this
  * stub makes every runtime action explode and asserts the factory never reaches one.
  */
-function recordingApi(mode: "load" | "worker" = "load"): { pi: ExtensionAPI; seen: Registered } {
-	const seen: Registered = {
-		events: [], commands: [], tools: [], handlers: new Map(), eventHandlers: new Map(),
-	};
+function recordingApi(): { pi: ExtensionAPI; seen: Registered } {
+	const seen: Registered = { events: [], commands: [], tools: [], eventHandlers: new Map(), userMessages: [] };
 	const explode = (name: string) => () => {
 		throw new Error(`runtime action ${name} called during load`);
 	};
 	// The zod builder is only used to DESCRIBE parameter schemas at registration
 	// time; a self-returning proxy stands in for every chained call.
-	const zodStub: unknown = new Proxy(() => zodStub, {
-		get: () => zodStub,
-		apply: () => zodStub,
-	});
+	const zodStub: unknown = new Proxy(() => zodStub, { get: () => zodStub, apply: () => zodStub });
 	const stub = {
 		setLabel: (label: string) => {
 			seen.label = label;
@@ -48,317 +41,146 @@ function recordingApi(mode: "load" | "worker" = "load"): { pi: ExtensionAPI; see
 			handlers.push(handler);
 			seen.eventHandlers.set(event, handlers);
 		},
-		registerCommand: (name: string, definition: { handler: CommandHandler }) => {
+		registerCommand: (name: string) => {
 			seen.commands.push(name);
-			seen.handlers.set(name, definition.handler);
 		},
 		registerTool: (definition: { name: string }) => {
 			seen.tools.push(definition.name);
 		},
 		zod: zodStub,
-		logger: { error: () => { }, debug: () => { }, warn: () => { }, info: () => { } },
+		logger: { error: () => {}, debug: () => {}, warn: () => {}, info: () => {} },
 		sendMessage: explode("sendMessage"),
-		sendUserMessage: explode("sendUserMessage"),
+		sendUserMessage: (content: string) => {
+			seen.userMessages.push(content);
+		},
 		appendEntry: explode("appendEntry"),
-		getAllTools: mode === "worker" ? () => [{ name: "yield" }] : explode("getAllTools"),
+		getAllTools: explode("getAllTools"),
 		getActiveTools: explode("getActiveTools"),
 	};
 	return { pi: stub as unknown as ExtensionAPI, seen };
 }
-
+function fixture(mode: string | null): string {
+	const root = mkdtempSync(join(tmpdir(), "orc-index-"));
+	if (mode !== null) {
+		mkdirSync(join(root, ".beads"));
+		writeFileSync(join(root, ".beads", "metadata.json"), JSON.stringify({ dolt_mode: mode, dolt_database: "fx" }));
+	}
+	return root;
+}
 
 describe("extension factory", () => {
-	test("registers without invoking any runtime action", () => {
+	test("registers exactly three events and seven tools, no commands, and reaches no runtime action", () => {
 		const { pi, seen } = recordingApi();
-		expect(() => ompOrchestrate(pi)).not.toThrow();
-		expect(seen.label).toBe("Orchestrate");
-	});
-
-	test("registers the lifecycle entrypoints the host dispatches", () => {
-		const { pi, seen } = recordingApi();
-		ompOrchestrate(pi);
-		const registered = [...new Set(seen.events)];
-		// Every gate and watcher this plugin promises hangs off one of these.
-		const required = ["agent_end", "tool_call", "session_start", "session_switch", "session_branch", "goal_updated", "tool_result", "turn_end", "session_shutdown"];
-		expect(registered).toEqual(expect.arrayContaining(required));
-		// A name the host never emits registers a handler nothing calls. The two retry
-		// fallback events are the host's real names (`shared-events.ts`) and are subscribed
-		// by the assignment gate; they are known here so that registration is not a typo.
-		const known = [...required, "retry_fallback_applied", "retry_fallback_succeeded"];
-		expect(registered.filter(event => !known.includes(event))).toEqual([]);
-	});
-
- test("registers the seven commands and seven schema-visible tools", () => {
-  const { pi, seen } = recordingApi();
-  ompOrchestrate(pi);
-  expect(seen.commands.sort()).toEqual(
-   ["orchestrate-answer", "orchestrate-doctor", "orchestrate-resume", "orchestrate-roster", "orchestrate-start", "orchestrate-status", "orchestrate-stop"].sort(),
-  );
-  expect(seen.tools.sort()).toEqual(
-   ["orc_bot_review_probe", "orc_bot_review_request", "orc_conflict_probe", "orc_doctor", "orc_review_round_policy", "orc_run_status", "worktree_sweep"].sort(),
-  );
- });
-	test("keeps claim and exit state private to reused factory bindings", async () => {
-		const beads = new Map<string, BdBead>([
-			["orc-parent-1", { id: "orc-parent-1", status: "in_progress", assignee: "parent" }],
-			["orc-child-1", { id: "orc-child-1", status: "in_progress", assignee: "child" }],
-			["orc-child-2", { id: "orc-child-2", status: "open", assignee: "" }],
+		expect(() => orchestrateWithBd(pi)).not.toThrow();
+		expect(seen.label).toBe("Orchestrate with bd");
+		expect([...new Set(seen.events)].sort()).toEqual(["before_agent_start", "session_start", "todo_reminder"]);
+		expect(seen.commands).toEqual([]);
+		expect(seen.tools.sort()).toEqual([
+			"orc_bot_review_probe",
+			"orc_bot_review_request",
+			"orc_claim",
+			"orc_conflict_probe",
+			"orc_finish",
+			"orc_review_round_policy",
+			"orc_status",
 		]);
-		const showSpy = spyOn(actualBd, "bdShow").mockImplementation(async id => beads.get(id) ?? null);
-		// Three checkouts, each under the run: the gates arm on the marker, never on the role.
-		const root = await mkdtemp(join(tmpdir(), "orc-index-bindings-"));
-		const marked = async (name: string): Promise<string> => {
-			const cwd = join(root, name);
-			await mkdir(join(cwd, ".orchestration"), { recursive: true });
-			await writeFile(join(cwd, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
-			return cwd;
-		};
-		try {
-			const parent = recordingApi("worker");
-			const child = recordingApi("worker");
-			ompOrchestrate(parent.pi);
-			ompOrchestrate(child.pi);
-			const parentToolCall = parent.seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const childToolCall = child.seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const parentResult = parent.seen.eventHandlers.get("tool_result")!.at(-1)!;
-			const childResult = child.seen.eventHandlers.get("tool_result")!.at(-1)!;
-			const parentCtx = {
-				cwd: await marked("parent"),
-				getSystemPrompt: () => ["ORC-ROLE: implementer"],
-			} as unknown as ExtensionContext;
-			const childCtx = {
-				cwd: await marked("child"),
-				getSystemPrompt: () => ["ORC-ROLE: implementer"],
-			} as unknown as ExtensionContext;
-			const claimReport = (id: string, actor: string) => ({
-				toolName: "bash",
-				isError: false,
-				input: { command: "bd ready --parent orc-run --metadata-field role=implementer --claim --json" },
-				details: {},
-				content: [{ type: "text", text: JSON.stringify([{ id, status: "in_progress", assignee: actor }]) }],
-			});
-
-			await parentResult(claimReport("orc-parent-1", "parent"), parentCtx);
-			const qualityWrite = "bd update orc-parent-1 --set-metadata 'quality_results={\"bun test\":\"pass\"}'";
-			expect(await parentToolCall({ toolName: "bash", input: { command: qualityWrite } }, parentCtx)).toMatchObject({ block: true });
-			for (const [index, command] of ["(bun test)", "bun test | cat", "bun test > /tmp/result", "bash -c 'bun test'", "bd status", "true"].entries()) {
-				const toolCallId = `invalid-quality-${index}`;
-				const invalidWrite = `bd update orc-parent-1 --set-metadata ${JSON.stringify(`quality_results=${JSON.stringify({ [command]: "pass" })}`)}`;
-				await parentToolCall({ toolCallId, toolName: "bash", input: { command } }, parentCtx);
-				await parentResult({ toolCallId, toolName: "bash", isError: false, input: { command }, details: {}, content: [{ type: "text", text: "ok" }] }, parentCtx);
-				expect(await parentToolCall({ toolName: "bash", input: { command: invalidWrite } }, parentCtx)).toMatchObject({ block: true });
-			}
-			await parentToolCall({ toolCallId: "quality-1", toolName: "bash", input: { command: "bun test" } }, parentCtx);
-			await parentResult({ toolCallId: "quality-1", toolName: "bash", isError: false, input: { command: "bun test" }, details: {}, content: [{ type: "text", text: "ok" }] }, parentCtx);
-			expect((await parentToolCall({ toolName: "bash", input: { command: qualityWrite } }, parentCtx) as { block?: boolean } | undefined)?.block).toBeUndefined();
-			expect(await childToolCall(
-				{ toolName: "bash", input: { command: "bd ready --parent orc-run --metadata-field role=implementer --claim --json", env: { BEADS_ACTOR: "child" } } },
-				childCtx,
-			)).toBeUndefined();
-			expect(await parentToolCall(
-				{ toolName: "bash", input: { command: "bd update orc-parent-2 --claim" } },
-				parentCtx,
-			)).toMatchObject({ block: true, reason: expect.stringContaining("orc-parent-1") });
-
-			await childResult(claimReport("orc-child-1", "child"), childCtx);
-			// Under the marked run G6 prefixes the child's writes with its observed actor; the
-			// question here is only that its own claim state refuses nothing.
-			expect((await childToolCall(
-				{ toolName: "bash", input: { command: "bd update orc-child-1 --status open" } },
-				childCtx,
-			) as { block?: boolean } | undefined)?.block).toBeUndefined();
-			beads.set("orc-child-1", { id: "orc-child-1", status: "open", assignee: "" });
-			expect((await childToolCall(
-				{ toolName: "bash", input: { command: "bd update orc-child-2 --claim" } },
-				childCtx,
-			) as { block?: boolean } | undefined)?.block).toBeUndefined();
-			expect(await parentToolCall(
-				{ toolName: "bash", input: { command: "bd update orc-parent-2 --claim" } },
-				parentCtx,
-			)).toMatchObject({ block: true, reason: expect.stringContaining("orc-parent-1") });
-
-			beads.clear();
-			const unclaimedParent = recordingApi("worker");
-			const unclaimedChild = recordingApi("worker");
-			ompOrchestrate(unclaimedParent.pi);
-			ompOrchestrate(unclaimedChild.pi);
-			const unclaimedParentToolCall = unclaimedParent.seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const unclaimedChildToolCall = unclaimedChild.seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const unclaimedCtx = {
-				cwd: await marked("unclaimed"),
-				getSystemPrompt: () => ["ORC-ROLE: implementer"],
-			} as unknown as ExtensionContext;
-			const yieldEvent = { toolName: "yield", input: { result: { data: "finished" } } };
-			expect(await unclaimedParentToolCall(yieldEvent, unclaimedCtx)).toMatchObject({ block: true });
-			expect(await unclaimedParentToolCall(yieldEvent, unclaimedCtx)).toBeUndefined();
-			expect(await unclaimedChildToolCall(yieldEvent, unclaimedCtx)).toMatchObject({ block: true });
-		} finally {
-			showSpy.mockRestore();
-			await rm(root, { recursive: true, force: true });
-		}
 	});
 });
 
-describe("orchestrate-roster", () => {
-	function roster() {
+describe("session_start", () => {
+	async function start(root: string): Promise<{ seen: Registered; actor: string | undefined }> {
 		const { pi, seen } = recordingApi();
-		ompOrchestrate(pi);
-		const notifications: { message: string; level: string }[] = [];
-		const handler = seen.handlers.get("orchestrate-roster")!;
-		const ctx = {
-			ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
-		} as unknown as Parameters<CommandHandler>[1];
-		return { run: () => handler("", ctx), notifications };
+		orchestrateWithBd(pi);
+		const ctx = { cwd: root, sessionManager: { getSessionId: () => "sess-1" } };
+		for (const handler of seen.eventHandlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
+		return { seen, actor: process.env.BEADS_ACTOR };
 	}
 
-	test("reports complete mixed role queues with all five reads in flight", async () => {
-		const counts: Record<string, number> = {
-			architect: 2, implementer: 137, reviewer: 0, researcher: 1, shepherd: 3,
-		};
-		const exit = Promise.withResolvers<number>();
-		let started = 0;
-		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
-			started++;
-			const argv = args[0] as string[];
-			const role = argv[argv.indexOf("--metadata-field") + 1]!.split("=")[1]!;
-			const limitIndex = argv.indexOf("--limit");
-			const limit = limitIndex < 0 ? 100 : Number(argv[limitIndex + 1]);
-			const count = limit === 0 ? counts[role]! : Math.min(counts[role]!, limit);
-			const rows = Array.from({ length: count }, (_, index) => ({ id: `${role}-${index}` }));
-			return {
-				stdout: new Response(JSON.stringify({ schema_version: 1, data: rows })).body,
-				stderr: new Response("").body,
-				exited: exit.promise,
-				kill: () => { },
-			} as unknown as Bun.Subprocess;
-		});
-		try {
-			const command = roster();
-			const result = command.run();
-			try {
-				expect(started).toBe(5);
-				expect(command.notifications).toEqual([]);
-			} finally {
-				exit.resolve(0);
-				await result;
-			}
-			expect(command.notifications).toEqual([{
-				message: "architect: 2 ready\nimplementer: 137 ready\nreviewer: 0 ready\nresearcher: 1 ready\nshepherd: 3 ready",
-				level: "info",
-			}]);
-		} finally {
-			spawn.mockRestore();
-		}
-	});
-
-	test.each([
-		{ stdout: "[]", code: 1 },
-		{ stdout: '{"schema_version":1,"data":[{"title":"missing id"}]}', code: 0 },
-		{ stdout: '[{"id":"truncated"}', code: 0 },
-	])("keeps unavailable role evidence distinct from empty queues: %j", async failure => {
-		const spawn = spyOn(Bun, "spawn").mockImplementation((...args) => {
-			const argv = args[0] as string[];
-			const failed = argv.includes("role=implementer");
-			return {
-				stdout: new Response(failed ? failure.stdout : "[]").body,
-				stderr: new Response("").body,
-				exited: Promise.resolve(failed ? failure.code : 0),
-				kill: () => { },
-			} as unknown as Bun.Subprocess;
-		});
-		try {
-			const command = roster();
-			await command.run();
-			expect(command.notifications).toEqual([{
-				message: "architect: 0 ready\nimplementer: unavailable\nreviewer: 0 ready\nresearcher: 0 ready\nshepherd: 0 ready",
-				level: "warning",
-			}]);
-		} finally {
-			spawn.mockRestore();
-		}
+	test("sets the actor from the session id and drops a stale BD_ACTOR", async () => {
+		process.env.BD_ACTOR = "stale";
+		process.env.BEADS_ACTOR = "inherited";
+		const { actor } = await start(fixture("server"));
+		expect(actor).toBe("omp/sess-1");
+		expect(process.env.BD_ACTOR).toBeUndefined();
 	});
 });
 
-describe("the injected identity keeps claim gates active", () => {
-	async function activeRun(): Promise<{ root: string; prior: string | undefined }> {
-		const root = await mkdtemp(join(tmpdir(), "orc-index-actor-"));
-		await mkdir(join(root, ".orchestration"), { recursive: true });
-		await writeFile(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "orc-run" }));
-		const prior = process.env.ORCHESTRATE_MARKER_FILE;
-		process.env.ORCHESTRATE_MARKER_FILE = join(root, ".orchestration", ".active-run");
-		// G6 fires only under a marked run; the override points every cwd at this marker.
-		return { root, prior };
+describe("before_agent_start", () => {
+	async function header(root: string, prompt: string): Promise<unknown> {
+		const { pi, seen } = recordingApi();
+		orchestrateWithBd(pi);
+		const ctx = { cwd: root, sessionManager: { getSessionId: () => "sess-2" } };
+		for (const handler of seen.eventHandlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
+		let result: unknown;
+		for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) {
+			result = await handler({ type: "before_agent_start", prompt }, ctx);
+		}
+		return result;
 	}
 
-	function restoreMarker(prior: string | undefined): void {
-		if (prior === undefined) delete process.env.ORCHESTRATE_MARKER_FILE;
-		else process.env.ORCHESTRATE_MARKER_FILE = prior;
-	}
-
-	/** This session, registered as the spawned agent `worker-1`, the way the executor registers a child. */
-	const ctxFor = (root: string): ExtensionContext =>
-		({ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"], sessionManager: { getSessionId: () => "index-worker-session" } }) as unknown as ExtensionContext;
-	const registered = () => AgentRegistry.global().register({
-		id: "worker-1", displayName: "worker-1", kind: "sub",
-		session: { sessionManager: { getSessionId: () => "index-worker-session" } } as unknown as AgentSession,
+	test("injects the run header naming store and run for a prompt that says orchestrate", async () => {
+		const root = fixture("server");
+		writeLocator(root, "fx-epic");
+		const result = (await header(root, "please orchestrate the ready beads")) as {
+			message: { customType: string; display: boolean; attribution: string; content: string };
+		};
+		expect(result.message.customType).toBe("orc-run-header");
+		expect(result.message.display).toBe(false);
+		expect(result.message.attribution).toBe("user");
+		expect(result.message.content).toContain("run epic: fx-epic");
+		expect(result.message.content).toContain("store: fx (server mode)");
+		expect(result.message.content).toContain("actor: omp/sess-2");
+		expect(result.message.content).toContain("skill://orchestrate-with-bd");
 	});
 
-	test("still blocks an identified claim rejected by routing", async () => {
-		const { root, prior } = await activeRun();
-		registered();
-		const show = spyOn(actualBd, "bdShow").mockResolvedValue({ id: "orc-claim", labels: ["agent:reviewer"] });
-		try {
-			const { pi, seen } = recordingApi("worker");
-			ompOrchestrate(pi);
-			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const result = await toolCall(
-				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-route" },
-				ctxFor(root),
-			);
-			expect(result).toMatchObject({ block: true, reason: expect.stringContaining("reviewer") });
-		} finally {
-			show.mockRestore();
-			AgentRegistry.global().unregister("worker-1");
-			restoreMarker(prior);
-			await rm(root, { recursive: true, force: true });
-		}
+	test("stays silent for inline code, a file name, or a capitalised word", async () => {
+		const root = fixture("server");
+		expect(await header(root, "look at `orchestrate` here")).toBeUndefined();
+		expect(await header(root, "open orchestrate.ts")).toBeUndefined();
+		expect(await header(root, "Orchestrate the team")).toBeUndefined();
 	});
 
-	test("returns the call with this agent's identity in env after an eligible claim", async () => {
-		const { root, prior } = await activeRun();
-		registered();
-		const show = spyOn(actualBd, "bdShow").mockResolvedValue({ id: "orc-claim", labels: ["agent:implementer"] });
-		try {
-			const { pi, seen } = recordingApi("worker");
-			ompOrchestrate(pi);
-			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const result = await toolCall(
-				{ toolName: "bash", input: { command: "bd update orc-claim --claim" }, toolCallId: "claim-pass" },
-				ctxFor(root),
-			);
-			expect(result).toEqual({ input: { command: "bd update orc-claim --claim", env: { BEADS_ACTOR: "worker-1", BD_ACTOR: "worker-1", ORC_PUSH_REF: "omp/task/worker-1" } } });
-		} finally {
-			show.mockRestore();
-			AgentRegistry.global().unregister("worker-1");
-			restoreMarker(prior);
-			await rm(root, { recursive: true, force: true });
-		}
+	test("names the missing run when no locator is bound", () => {
+		expect(runHeader(fixture("server"), "omp/x")).toContain("no run epic yet");
 	});
+});
 
-	test("refuses a claim by a session the registry does not know", async () => {
-		const { root, prior } = await activeRun();
-		try {
-			const { pi, seen } = recordingApi("worker");
-			ompOrchestrate(pi);
-			const toolCall = seen.eventHandlers.get("tool_call")!.at(-1)!;
-			const result = await toolCall(
-				{ toolName: "bash", input: { command: "bd ready --claim --json" }, toolCallId: "claim-nobody" },
-				{ cwd: root, getSystemPrompt: () => ["ORC-ROLE: implementer"], sessionManager: { getSessionId: () => "unregistered" } } as unknown as ExtensionContext,
-			);
-			expect(result).toMatchObject({ block: true, reason: expect.stringContaining("no identity") });
-		} finally {
-			restoreMarker(prior);
-			await rm(root, { recursive: true, force: true });
-		}
+describe("mentionsOrchestrate", () => {
+	test("keyword boundary and code masking", () => {
+		expect(mentionsOrchestrate("orchestrate")).toBe(true);
+		expect(mentionsOrchestrate("we orchestrate. now")).toBe(true);
+		expect(mentionsOrchestrate("<brief>orchestrate this</brief>")).toBe(true);
+		expect(mentionsOrchestrate("```\norchestrate\n```")).toBe(false);
+		expect(mentionsOrchestrate("~~~sh\norchestrate\n~~~")).toBe(false);
+		expect(mentionsOrchestrate("run `orchestrate`")).toBe(false);
+		expect(mentionsOrchestrate("orchestrate()")).toBe(false);
+		expect(mentionsOrchestrate("src/orchestrate")).toBe(false);
+		expect(mentionsOrchestrate("re-orchestrate")).toBe(false);
+		expect(mentionsOrchestrate("ns::orchestrate")).toBe(false);
+		expect(mentionsOrchestrate("orchestrated")).toBe(false);
+		expect(mentionsOrchestrate("   ")).toBe(false);
+	});
+});
+
+describe("locator", () => {
+	test("round-trips, ignores garbage, and keeps the gitignore inside the root", () => {
+		const root = fixture(null);
+		expect(readLocator(root)).toBeNull();
+		writeLocator(root, "epic-1");
+		expect(readLocator(root)).toEqual({ schema_version: 1, run_id: "epic-1" });
+		expect(readFileSync(join(root, ".orchestration", ".gitignore"), "utf8")).toBe("*\n");
+		writeFileSync(join(root, ".orchestration", ".active-run"), "{not json");
+		expect(readLocator(root)).toBeNull();
+		writeFileSync(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 2, run_id: "x" }));
+		expect(readLocator(root)).toBeNull();
+		writeFileSync(join(root, ".orchestration", ".active-run"), JSON.stringify({ schema_version: 1, run_id: "" }));
+		expect(readLocator(root)).toBeNull();
+	});
+});
+
+describe("store mode refusal", () => {
+	test("the refusal text is the migration route and mentions no bd spawn", () => {
+		expect(NOT_SERVER_MODE).toContain("not in server mode");
+		expect(NOT_SERVER_MODE).toContain("bd init --shared-server --reinit-local");
 	});
 });

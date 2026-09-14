@@ -1,7 +1,7 @@
 {
-	"name": "@srobroek/omp-orchestrate",
+	"name": "@srobroek/orchestrate-with-bd",
 	"version": "0.3.15",
-	"description": "Beads-backed multi-agent orchestration for the OMP coding agent: pull dispatch, claim contracts, worktree-per-feature, supervision, and merge gating.",
+	"description": "Durable Beads ledger and role routing on top of native OMP task orchestration.",
 	"license": "Apache-2.0",
 	"author": {
 		"name": "Sjors Robroek"

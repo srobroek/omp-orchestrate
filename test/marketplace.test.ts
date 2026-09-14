@@ -50,7 +50,7 @@ describe("the marketplace catalog", () => {
   // Without this file the plugin lists but fails to install, because Claude installs FROM
   // it at the entry's source path.
   const manifest = JSON.parse(read(".claude-plugin/plugin.json"));
-  expect(manifest.name).toBe("orchestrate");
+  expect(manifest.name).toBe("orchestrate-with-bd");
  });
 
  test("release-please bumps every file that declares a version", () => {
