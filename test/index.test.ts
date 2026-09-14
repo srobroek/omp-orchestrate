@@ -260,6 +260,13 @@ describe("orc_finish done on an epic", () => {
 			const closed = await tools.get("orc_finish")?.execute("x", { bead: "E", state: "done", reason: "all done" }, undefined, undefined, ctx);
 			expect(closed?.isError ?? false).toBe(false);
 			expect(argvs.some(a => a[1] === "close")).toBe(true);
+			// Beyond the walk limit the check is blind, so it refuses rather than closes.
+			argvs.length = 0;
+			children = JSON.stringify(Array.from({ length: 501 }, (_, i) => ({ id: `E.${i}`, status: "closed" })));
+			const blind = await tools.get("orc_finish")?.execute("x", { bead: "E", state: "done", reason: "all done" }, undefined, undefined, ctx);
+			expect(blind?.isError).toBe(true);
+			expect(blind?.content[0]?.text).toContain("more than 500 descendants");
+			expect(argvs.some(a => a[1] === "close")).toBe(false);
 		} finally {
 			spawn.mockRestore();
 		}

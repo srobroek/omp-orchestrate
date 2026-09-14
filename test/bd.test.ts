@@ -94,15 +94,16 @@ describe("readyWave", () => {
 			argvs.push(argv);
 			// bd ready lists the root-level review and a stray ready task inside a closed epic.
 			return {
-				stdout: new Response('[{"id":"R.9","issue_type":"task","status":"open"},{"id":"R.1.7","issue_type":"task","status":"open"}]').body,
+				stdout: new Response('[{"id":"R.9","issue_type":"task","status":"open"},{"id":"R.1.7","issue_type":"task","status":"open"},{"id":"R.8","issue_type":"decision","status":"open"}]').body,
 				stderr: new Response("").body,
 				exited: Promise.resolve(0),
 				kill: () => undefined,
 			};
 		}) as unknown as typeof Bun.spawn);
 		const child = (id: string, parent: string, type: string, status: string) => ({ id, issue_type: type, status, dependencies: [{ depends_on_id: parent, type: "parent-child" }] });
-		const beads = [child("R.1", "R", "epic", "closed"), child("R.2", "R", "epic", "closed"), child("R.9", "R", "task", "open"), child("R.1.7", "R.1", "task", "closed")];
+		const beads = [child("R.1", "R", "epic", "closed"), child("R.2", "R", "epic", "closed"), child("R.9", "R", "task", "open"), child("R.1.7", "R.1", "task", "closed"), child("R.8", "R", "decision", "open")];
 		const wave = await readyWave("R", beads, "/tmp");
+		// R.8, an open root decision, is the lead's to close and never a reviewer's wave item.
 		expect(wave.map(bead => bead.id)).toEqual(["R.9"]);
 		// No epic-tier query: the epics are done, the wave is the run epic's own tasks.
 		expect(argvs.map(a => a.slice(1).join(" "))).toEqual(["ready --parent R --unassigned --limit 0 --json"]);
