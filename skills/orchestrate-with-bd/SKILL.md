@@ -41,8 +41,11 @@ the contract. This document is the procedure behind it.
 2. Plan. Rewrite your `todo` list from `orc_status.todo`. Every entry is a bead.
 3. Dispatch. One `task` call per wave of independent beads. Name the bead id in each brief.
    Implementers run `isolated: true`. Every other role runs without it.
-4. Integrate. Merge each accepted `omp/task/<id>` branch yourself and resolve conflicts in
-   your tree. Then `orc_status` again and redraw the `todo` list.
+4. Integrate. OMP captures each isolated agent's tree as `omp/task/<agent-name>` (the name
+   you gave the `task` call, not the bead id; an epic lead's branch is `omp/task/<lead-name>`).
+   Merge each accepted branch yourself after its review verdict and resolve conflicts in your
+   tree. A conflict in `.beads/interactions.jsonl` (bd's per-clone audit log) is resolved by
+   keeping both sides. Then `orc_status` again and redraw the `todo` list.
 5. Close. When every task is closed or blocked, `orc_finish` the epic.
 
 ## Rules
@@ -51,6 +54,9 @@ the contract. This document is the procedure behind it.
   Create a worktree for an agent; OMP's `isolated: true` is the worker's workspace.
 - MUST Keep the store in server mode. Native isolation clones the checkout, and an embedded
   Dolt store forks with it. Every ledger tool returns the migration text on an embedded store.
+- NOT Migrate a store, edit `.beads/`, or dispatch an agent to do so. On an embedded or
+  missing store, report the route from `references/beads-store.md` to the human and end the
+  turn; a human runs the migration.
 - NOT Claim a bead or edit product code as the lead. Workers claim; reviewers judge.
 - MUST Copy `todo` entries from `orc_status.todo`. On any disagreement re-read `orc_status`
   and rewrite the list. `todo done` redraws the view. `orc_finish` changes the state.

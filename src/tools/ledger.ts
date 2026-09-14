@@ -70,7 +70,7 @@ function refused<T>(reason: string): AgentToolResult<T> {
 
 /** Returned by every ledger tool while the store is not in server mode. */
 export const NOT_SERVER_MODE =
-	'Beads store is not in server mode; native isolation forks an embedded store. Migrate: bd export > issues.jsonl; bd backup init <dir> && bd backup sync; bd init --shared-server --reinit-local --skip-hooks --skip-agents --prefix <prefix>; set dolt_mode to "server" in .beads/metadata.json and add dolt.shared-server: true to .beads/config.yaml; bd backup restore --force <dir>';
+	'Beads store is not in server mode; native isolation forks an embedded store. STOP: report this to the human and end the turn. Do not migrate the store, edit .beads/, or dispatch anything; a human runs the migration: bd export > issues.jsonl; bd backup init <dir> && bd backup sync; bd init --shared-server --reinit-local --skip-hooks --skip-agents --prefix <prefix>; set dolt_mode to "server" in .beads/metadata.json and add dolt.shared-server: true to .beads/config.yaml; bd backup restore --force <dir>';
 
 /** Returned when the checkout has no readable `.beads/metadata.json`; unknown is not server mode. */
 export const NO_STORE =
@@ -123,7 +123,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_finish",
 		label: "Finish bead",
 		description:
-			"Record a terminal state on a Beads task: `done` closes it, `blocked` marks it blocked. An optional comment is written first so the rationale survives even if the transition fails.",
+			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. An optional comment is written first so the evidence survives even if the transition fails.",
 		approval: "write",
 		parameters: finishParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<FinishResult | undefined>> {
@@ -134,8 +134,14 @@ export function registerLedger(pi: ExtensionAPI): void {
 			if (input.comment !== undefined && input.comment.trim().length > 0) {
 				await bdJson(["comment", bead, input.comment], ctx.cwd, env);
 			}
-			if (input.state === "done") await bdJson(["close", bead, "--reason", input.reason, "--json"], ctx.cwd, env);
-			else await bdJson(["update", bead, "--status", "blocked", "--reason", input.reason, "--json"], ctx.cwd, env);
+			if (input.state === "done") {
+				await bdJson(["close", bead, "--reason", input.reason, "--json"], ctx.cwd, env);
+			} else {
+				// `bd update` has no `--reason` (bd 1.2.2), so the reason is recorded as a
+				// comment first; the transition follows only once that write has landed.
+				await bdJson(["comment", bead, `blocked: ${input.reason}`], ctx.cwd, env);
+				await bdJson(["update", bead, "--status", "blocked", "--json"], ctx.cwd, env);
+			}
 			return text<FinishResult>({ state: input.state, bead }, `orc_finish ${bead}: ${input.state}`);
 		},
 	});

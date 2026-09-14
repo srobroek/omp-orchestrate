@@ -47,16 +47,17 @@ export function runHeader(root: string, actor: string): string {
 	const store = readStoreMode(root);
 	const storeLine = store === null ? "no .beads/metadata.json" : `${store.database ?? "?"} (${store.mode || "?"} mode)`;
 	const run = readLocator(root)?.run_id ?? NO_RUN;
-	return [
-		"<system-notice>",
-		"orchestrate-with-bd run header",
-		`store: ${storeLine}`,
-		`run epic: ${run}`,
-		`actor: ${actor}`,
-		"",
-		CONTRACT,
-		"</system-notice>",
-	].join("\n");
+	const lines = ["<system-notice>", "orchestrate-with-bd run header", `store: ${storeLine}`, `run epic: ${run}`, `actor: ${actor}`, ""];
+	if (store === null || store.mode !== "server") {
+		// Observed 2026-09-14: given only the migration route, a lead migrated the human's
+		// store and committed the result on its own. The header says stop first.
+		lines.push(
+			"STOP. This checkout's Beads store is not on the shared server, so the ledger refuses every write and the run cannot start here. Report this to the human with the migration route from `skill://orchestrate-with-bd/references/beads-store.md` and end the turn. Never migrate a store, edit `.beads/`, or dispatch an agent to do so without an explicit human instruction.",
+			"",
+		);
+	}
+	lines.push(CONTRACT, "</system-notice>");
+	return lines.join("\n");
 }
 
 export default function orchestrateWithBd(pi: ExtensionAPI): void {

@@ -61,8 +61,11 @@ that has none. A plan whose steps outnumber its beads is not approved work.
 2. One `task` call per wave: every bead with no open dependency, in one array. Each brief
    names the bead id, the agent's role, and nothing the bead already says.
 3. Implementers and epic leads `isolated: true`; every other role without it.
-4. After the wave: read each `orc_finish` comment on its bead, merge accepted
-   `omp/task/<id>` branches into your tree, `orc_status` again, redraw the todo list.
+4. After the wave: read each `orc_finish` comment on its bead. Where a review bead exists,
+   wait for its verdict before merging. Merge accepted branches into your tree: OMP names a
+   captured branch `omp/task/<agent-name>` after the name you gave the `task` call, so name
+   the call after the bead (`Impl_<bead-id>`) when you want the branch to say which bead it
+   carries. Then `orc_status` again and redraw the todo list.
 5. A `changes` verdict from a reviewer becomes a new task bead under the same epic naming
    the findings; dispatch it in the next wave.
 

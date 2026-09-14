@@ -21,8 +21,8 @@ an unclaimed bead.
    it touches, and finish with `orc_finish { state: "blocked" }`.
 3. Run every acceptance criterion's verification and the repository's committed lint,
    format, and type checks as foreground commands. Never claim success over a failed check.
-4. Commit in your isolated checkout. OMP captures your tree as `omp/task/<id>` when you
-   yield; a failed task loses uncommitted work.
+4. Commit in your isolated checkout. OMP captures your tree as `omp/task/<agent-name>` when
+   you yield; a failed task loses uncommitted work.
 
 ## Finish
 `orc_finish { bead, state: "done", reason, comment }` where `comment` names the changed
