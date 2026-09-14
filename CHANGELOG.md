@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.9](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.8...v0.4.9) (2026-09-14)
+
+
+### Features
+
+* **reviewer:** security-reviewer helper; workers run their bead's checks; testing reference ([#166](https://github.com/srobroek/orchestrate-with-bd/issues/166)) ([eff7e84](https://github.com/srobroek/orchestrate-with-bd/commit/eff7e84028ab9704682e1258b91e24c38bd7917a))
+* **roles:** implementer tiers, built-in model roles, role preflight, dispatch routing ([#168](https://github.com/srobroek/orchestrate-with-bd/issues/168)) ([818140c](https://github.com/srobroek/orchestrate-with-bd/commit/818140c67d88fb209dfd5e9836d957555524d193))
+
 ## [0.4.8](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.7...v0.4.8) (2026-09-14)
 
 
