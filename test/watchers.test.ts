@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { chmod, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -1164,6 +1165,28 @@ describe("registerWatchers", () => {
 		expect(entries.map(entry => JSON.parse(entry).argv)).toEqual(["bd update bd-7 --status open"]);
 		await rig.fire("session_shutdown", {});
 		expect(rig.sweeps).toEqual([]);
+	});
+
+	test("W2 self-ignores the tree it creates", async () => {
+		// The audit path can be the first thing that creates `.orchestration/` in an
+		// activated run. Without the ignore, a repository whose children merely ran bd
+		// keeps an untracked directory that shows in git status for every actor.
+		execFileSync("git", ["init", "-q"], { cwd });
+		await marked(undefined, "pending");
+		const rig = harness();
+		registerWatchers(rig.pi);
+		await rig.fire("session_start", {});
+		await rig.emit("task:subagent:event", {
+			...(bashEnd("kid-1") as Record<string, unknown>),
+			event: {
+				type: "tool_execution_end", toolName: "bash", toolCallId: "call-1",
+				args: { command: "bd update bd-7 --status open" },
+				result: {}, isError: false,
+			},
+		});
+
+		await readFile(join(cwd, ".orchestration", "audit", "kid-1.bdlog"), "utf8");
+		expect(execFileSync("git", ["status", "--porcelain=v1"], { cwd, encoding: "utf8" }).trim()).toBe("");
 	});
 
 	test("W2 writes the ledger from live bus traffic", async () => {

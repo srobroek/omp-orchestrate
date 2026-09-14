@@ -95,6 +95,36 @@ export function markerPath(cwd: string): string {
 	return path.join(cwd, ".orchestration", ".active-run");
 }
 
+/** The directory name this plugin writes run state into. */
+const ORCHESTRATION_DIR = ".orchestration";
+
+/**
+ * Creates `dir`, and makes this repository's `.orchestration` tree ignore itself.
+ *
+ * Run state is written into the ORCHESTRATED repository, not this plugin's own,
+ * so without the ignore every project acquires an untracked `.orchestration/`
+ * that shows in `git status` for every actor and inflates their dirty-path
+ * counts. A per-directory `.gitignore` is the shape `.beads/` already uses: it
+ * needs no edit to a root `.gitignore` the repository owns, and two runs in
+ * different checkouts cannot conflict over it.
+ *
+ * The root is `cwd`'s own `.orchestration`, passed rather than inferred from
+ * `dir`. A marker or audit path redirected by `ORCHESTRATE_MARKER_FILE` or
+ * `ORCHESTRATE_AUDIT_DIR` therefore gets nothing: that territory belongs to
+ * whoever redirected it, and a stray ignore rule there would be litter.
+ *
+ * `wx` makes the write create-if-absent, so a rule someone tuned by hand
+ * survives, and a lost race with a concurrent run is not an error.
+ */
+export async function mkdirRunState(dir: string, cwd: string): Promise<void> {
+	await fs.mkdir(dir, { recursive: true });
+	const root = path.join(path.resolve(cwd), ORCHESTRATION_DIR);
+	const resolved = path.resolve(dir);
+	if (resolved !== root && !resolved.startsWith(root + path.sep)) return;
+	const body = `# Orchestration run state, recreated by omp-orchestrate as needed.\n# Never committed: it is per-checkout and per-run.\n*\n`;
+	await fs.writeFile(path.join(root, ".gitignore"), body, { encoding: "utf8", flag: "wx" }).catch(() => { });
+}
+
 /**
  * The marker as currently written, or `null` when there is none to read.
  *
@@ -251,8 +281,8 @@ export async function isBoundRunActive(cwd: string): Promise<boolean> {
 }
 
 /** Write the marker atomically, leaving no temporary behind on either path. */
-async function writeMarker(target: string, state: ActiveRun): Promise<void> {
-	await fs.mkdir(path.dirname(target), { recursive: true });
+async function writeMarker(target: string, state: ActiveRun, cwd: string): Promise<void> {
+	await mkdirRunState(path.dirname(target), cwd);
 	const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
 	try {
 		// Sorted keys keep the file byte-stable across rewrites, so an unchanged
@@ -268,7 +298,7 @@ async function writeMarker(target: string, state: ActiveRun): Promise<void> {
 /** Bounded cross-process exclusion; never steal a lock based on age or a guessed PID. */
 async function withMarkerLock<T>(cwd: string, action: () => Promise<T>): Promise<T> {
 	const target = markerPath(cwd);
-	await fs.mkdir(path.dirname(target), { recursive: true });
+	await mkdirRunState(path.dirname(target), cwd);
 	const lock = `${target}.lock`;
 	let handle: FileHandle | undefined;
 	for (let attempt = 0; attempt < 20; attempt++) {
@@ -419,7 +449,7 @@ export async function bindRun(cwd: string, runId: string, sessionId?: string, be
 		if (session !== undefined) state.session_id = session;
 		if (beads !== undefined) state.beads_dir = beads;
 		if (from !== undefined) state.store_origin = from;
-		await writeMarker(markerPath(cwd), state);
+		await writeMarker(markerPath(cwd), state, cwd);
 		return state;
 	});
 	const now = Date.now();
@@ -775,8 +805,8 @@ export async function startRun(cwd: string, sessionId: string, target: StartTarg
 	// directory the references describe; an adopted one keeps the operator's.
 	const fields: Record<string, unknown> = { schema: MARKER_SCHEMA };
 	if (created) {
-		const artifacts = path.join(cwd, ".orchestration", runId, "artifacts");
-		await fs.mkdir(artifacts, { recursive: true }).catch(() => { });
+		const artifacts = path.join(cwd, ORCHESTRATION_DIR, runId, "artifacts");
+		await mkdirRunState(artifacts, cwd).catch(() => { });
 		fields.run_id = runId;
 		fields.artifacts = artifacts;
 	}
@@ -878,7 +908,7 @@ export async function resumeRun(cwd: string, sessionId: string, now = Date.now()
 				const state: ActiveRun = { schema_version: MARKER_SCHEMA, run_id: run, session_id: sessionId };
 				if (marker.run.beads_dir !== undefined) state.beads_dir = marker.run.beads_dir;
 				if (marker.run.store_origin !== undefined) state.store_origin = marker.run.store_origin;
-				await writeMarker(markerPath(cwd), state);
+				await writeMarker(markerPath(cwd), state, cwd);
 			});
 		} catch (error) {
 			return { kind: "refused", reason: `adopted ${run} but the marker could not be rewritten: ${error instanceof Error ? error.message : String(error)}` };
