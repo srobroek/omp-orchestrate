@@ -10,7 +10,6 @@
  * The plugin never schedules, supervises, reaps, leases, captures, or discovers a store.
  */
 
-import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { readStoreMode } from "./dag";
 import { mentionsOrchestrate } from "./keyword";
@@ -18,7 +17,7 @@ import { readLocator } from "./run";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
 import { registerConflictProbe } from "./tools/conflict-probe";
-import { registerLedger, statusBeadIds } from "./tools/ledger";
+import { actorFor, registerLedger, statusBeadIds } from "./tools/ledger";
 import { registerReviewRoundPolicy } from "./tools/review-round-policy";
 
 /** Returned by every ledger tool while the store is not in server mode; computed once per session from the file alone. */
@@ -55,18 +54,17 @@ export function runHeader(root: string, actor: string): string {
 	].join("\n");
 }
 
-const processActor = `omp/anon-${randomUUID()}`;
-
 export default function orchestrateWithBd(pi: ExtensionAPI): void {
 	pi.setLabel("Orchestrate with bd");
 
-	let actor = processActor;
 	let refusal: string | null = null;
 
+	// The ledger tools carry their own per-call actor (`actorFor`). This process-wide
+	// export only serves `bd` commands the model runs through `bash`; with concurrent
+	// subagents in one process the last `session_start` wins there, which is why the
+	// ledger never reads it back.
 	pi.on("session_start", async (_event, ctx) => {
-		const sessionId = ctx.sessionManager.getSessionId();
-		actor = sessionId.length > 0 ? `omp/${sessionId}` : processActor;
-		process.env.BEADS_ACTOR = actor;
+		process.env.BEADS_ACTOR = actorFor(ctx);
 		delete process.env.BD_ACTOR;
 		const store = readStoreMode(ctx.cwd);
 		refusal = store !== null && store.mode !== "server" ? NOT_SERVER_MODE : null;
@@ -79,7 +77,7 @@ export default function orchestrateWithBd(pi: ExtensionAPI): void {
 				customType: "orc-run-header",
 				display: false,
 				attribution: "user",
-				content: runHeader(ctx.cwd, actor),
+				content: runHeader(ctx.cwd, actorFor(ctx)),
 			},
 		};
 	});
@@ -100,7 +98,7 @@ export default function orchestrateWithBd(pi: ExtensionAPI): void {
 		);
 	});
 
-	registerLedger(pi, { actor: () => actor, refusal: () => refusal });
+	registerLedger(pi, { refusal: () => refusal });
 	registerBotReviewProbe(pi);
 	registerBotReviewRequest(pi);
 	registerConflictProbe(pi);

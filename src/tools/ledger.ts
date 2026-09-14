@@ -1,13 +1,22 @@
-import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdJson, bdShow } from "../bd";
 import { beadIds, descendants, readStoreMode, todoStrings } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
-/** The plugin's actor string, set at `session_start`; `bd` refuses mutations without one. */
+/** What `index.ts` decided at `session_start`; the actor is not here because it is per call. */
 export interface LedgerContext {
-	actor(): string;
 	/** Non-`null` when the store is not in server mode: every ledger tool returns it unchanged. */
 	refusal(): string | null;
+}
+
+/**
+ * The actor for one tool call: `omp/<session id>` of the session that issued it. Every
+ * subagent has its own session, so concurrent children never share an actor even though
+ * they share one process. `bd` refuses mutations without an actor, so this is never empty.
+ */
+export function actorFor(ctx: ExtensionContext): string {
+	const id = ctx.sessionManager.getSessionId();
+	return `omp/${id.length > 0 ? id : "anon"}`;
 }
 
 export interface ClaimResult {
@@ -74,9 +83,10 @@ export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
 			const refusal = ledger.refusal();
 			if (refusal !== null) return refused(refusal);
 			const bead = input.bead.trim();
-			const actor = ledger.actor();
-			await bdJson(["update", bead, "--claim", "--json"], ctx.cwd).catch(() => undefined);
-			const observed = await bdShow(bead, ctx.cwd);
+			const actor = actorFor(ctx);
+			const env = { BEADS_ACTOR: actor };
+			await bdJson(["update", bead, "--claim", "--json"], ctx.cwd, env).catch(() => undefined);
+			const observed = await bdShow(bead, ctx.cwd, env);
 			if (observed.assignee !== actor) {
 				const holder = observed.assignee ?? "(unassigned)";
 				return text<ClaimResult>(
@@ -99,11 +109,12 @@ export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
 			const refusal = ledger.refusal();
 			if (refusal !== null) return refused(refusal);
 			const bead = input.bead.trim();
+			const env = { BEADS_ACTOR: actorFor(ctx) };
 			if (input.comment !== undefined && input.comment.trim().length > 0) {
-				await bdJson(["comment", bead, input.comment], ctx.cwd);
+				await bdJson(["comment", bead, input.comment], ctx.cwd, env);
 			}
-			if (input.state === "done") await bdJson(["close", bead, "--reason", input.reason, "--json"], ctx.cwd);
-			else await bdJson(["update", bead, "--status", "blocked", "--reason", input.reason, "--json"], ctx.cwd);
+			if (input.state === "done") await bdJson(["close", bead, "--reason", input.reason, "--json"], ctx.cwd, env);
+			else await bdJson(["update", bead, "--status", "blocked", "--reason", input.reason, "--json"], ctx.cwd, env);
 			return text<FinishResult>({ state: input.state, bead }, `orc_finish ${bead}: ${input.state}`);
 		},
 	});
@@ -126,7 +137,10 @@ export function registerLedger(pi: ExtensionAPI, ledger: LedgerContext): void {
 				const message = "no run bound; pass epic or create .orchestration/.active-run";
 				return text<StatusResult>({ run: null, store, beads: [], todo: [], message }, message);
 			}
-			if (locator === null) writeLocator(root, epic);
+			// Always rewrite: idempotent for a bound run, binds an unbound one, and adds the
+			// `.orchestration/.gitignore` a locator written by another tool may lack. An
+			// untracked, non-ignored file in the primary breaks OMP's isolation merge-back.
+			writeLocator(root, epic);
 			const walk = await descendants(epic, root);
 			lastStatusIds = beadIds(walk.beads);
 			const todo = todoStrings(walk.beads);

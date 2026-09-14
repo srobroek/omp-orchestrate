@@ -31,12 +31,21 @@ const BD_ENV: Record<string, string> = {
 	BD_NON_INTERACTIVE: "1",
 };
 
-/** Spawn `bd` and wait. Throws on a missing binary or a timeout; a non-zero exit is returned. */
-export async function bdRun(args: readonly string[], cwd: string, timeoutMs = 20_000): Promise<BdResult> {
+/**
+ * Spawn `bd` and wait. Throws on a missing binary or a timeout; a non-zero exit is returned.
+ * `env` is layered over the process environment: the ledger passes `BEADS_ACTOR` per call,
+ * because concurrent subagents share one process and a global actor would collide.
+ */
+export async function bdRun(
+	args: readonly string[],
+	cwd: string,
+	env: Record<string, string> = {},
+	timeoutMs = 20_000,
+): Promise<BdResult> {
 	const bin = process.env.BD_BIN ?? "bd";
 	let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
 	try {
-		proc = Bun.spawn([bin, ...args], { cwd, env: { ...process.env, ...BD_ENV }, stdout: "pipe", stderr: "pipe" });
+		proc = Bun.spawn([bin, ...args], { cwd, env: { ...process.env, ...env, ...BD_ENV }, stdout: "pipe", stderr: "pipe" });
 	} catch {
 		throw new Error("bd is not installed or not executable");
 	}
@@ -108,15 +117,15 @@ export function asBead(value: unknown): BdBead | null {
 }
 
 /** Run `bd <args>` and return the parsed payload; throws with `bd`'s stderr on a non-zero exit. */
-export async function bdJson(args: readonly string[], cwd: string): Promise<unknown> {
-	const result = await bdRun(args, cwd);
+export async function bdJson(args: readonly string[], cwd: string, env: Record<string, string> = {}): Promise<unknown> {
+	const result = await bdRun(args, cwd, env);
 	if (result.code !== 0) throw new Error(`bd ${args.join(" ")} exited ${result.code}: ${result.stderr.trim()}`);
 	return parsePayload(result.stdout);
 }
 
 /** `bd show <id> --json`; accepts an object or a one-element array. */
-export async function bdShow(id: string, cwd: string): Promise<BdBead> {
-	const payload = await bdJson(["show", id, "--json"], cwd);
+export async function bdShow(id: string, cwd: string, env: Record<string, string> = {}): Promise<BdBead> {
+	const payload = await bdJson(["show", id, "--json"], cwd, env);
 	const bead = asBead(Array.isArray(payload) && payload.length === 1 ? payload[0] : payload);
 	if (bead === null) throw new Error(`bd show ${id} returned no bead`);
 	return bead;
