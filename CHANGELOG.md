@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.3...v0.4.4) (2026-09-14)
+
+
+### Bug Fixes
+
+* **ledger:** fail closed on a truncated walk; final wave holds task beads only ([#155](https://github.com/srobroek/orchestrate-with-bd/issues/155)) ([860632f](https://github.com/srobroek/orchestrate-with-bd/commit/860632f4be0a130628a020b6dcc0ef8339dd6546))
+
 ## [0.4.3](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.2...v0.4.3) (2026-09-14)
 
 
