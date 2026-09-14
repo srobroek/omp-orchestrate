@@ -96,8 +96,8 @@ Three helpers exist, and none of them claims a bead, commits, or touches a PR.
 - `operator` (`build` plugin, `srobroek-omp` marketplace) performs one exact mechanical
   operation in the caller's checkout.
 - `security-reviewer` (ships with OMP) grades one security concern on a named diff.
- Before writing where a helper
-worked, the caller awaits the helper's terminal result.
+
+The caller awaits a helper's terminal result before writing where the helper worked.
 
 ## Briefs
 
@@ -107,4 +107,3 @@ keyword notice reaches any dispatched agent that has `task` and a brief with tha
 agents above are the whole surface. Nothing else in this plugin dispatches, claims, or
 reviews.
 
-That is the whole table.
