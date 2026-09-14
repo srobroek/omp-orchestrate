@@ -16,18 +16,21 @@ the epic bead's status; stop and report when the epic is closed or already carri
 in-progress children you did not dispatch.
 
 ## Dispatch
-- Work only from `orc_status.todo`; every entry is `<bead-id> <title>`. You have no todo
-  tool as a dispatched agent; the status result is your list.
-- Dispatch each ready task through `task`, naming the bead id. Implementers `isolated: true`;
-  reviewers and researchers not. Independent beads go in one `task` call.
+- `orc_status.ready` is the wave: one `task` call MUST carry every ready bead.
+- When a call contains fewer items than `ready`, state the reason in your report.
+- Implementers use `isolated: true`; reviewers and researchers do not.
 - A worker brief never contains the bare lowercase word `orchestrate`.
 - Never dispatch another `orc-lead`.
+- Apply these rules inside your epic exactly as written.
 
 ## Integrate
-After each reviewer verdict, merge the accepted branch into your working tree and resolve
-conflicts here, never in a worker. OMP names a captured branch `omp/task/<agent-name>` after
-the `task` call's name; a `.beads/interactions.jsonl` conflict is resolved by keeping both
-sides. Your final tree is captured as `omp/task/<your name>` for the root to merge.
+When the wave lands, merge every captured `omp/task/<agent-name>` branch into your tree and resolve conflicts here, never in a worker.
+OMP names a captured branch `omp/task/<agent-name>` after the `task` call's name; a `.beads/interactions.jsonl` conflict is resolved by keeping both sides.
+Then call `orc_status` again: the review beads, which depend on the landed tasks, are now the `ready` wave.
+Dispatch them in one `task` call, one `orc-reviewer` per review bead, naming the review bead, the reviewed bead, and the `merge-base..HEAD` range in each brief.
+A `changes` finding becomes a fix bead under your epic for the next wave.
+Your final tree is captured as `omp/task/<your name>` for the root to merge.
+
 
 ## Output
 When every task under the epic is closed or blocked, `orc_finish` the epic. Begin your reply

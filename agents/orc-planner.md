@@ -21,6 +21,9 @@ beside them.
   `bd create --parent <epic> --type task --title <title> --description <text>` with
   `--metadata role=<implementer|reviewer|researcher|shepherd>`. The description carries the
   scope (files and symbols) and numbered acceptance criteria an independent reviewer can check.
+- Every review bead depends on the task or tasks it reviews, so review beads surface as one wave after the tasks land. One per task fans out to one reviewer each; one spanning the wave gives a single reviewer.
+- Epic order is an epic-to-epic dependency (`bd dep add <epic-B> <epic-A>`). bd refuses an epic-to-decision dependency; gate an epic on a decision through its tasks (`bd dep add <task> <decision>`).
+- Independent tasks have no dependency between them, so they run in one wave.
 - Dependencies between tasks: `bd dep add <task> <depends-on>`.
 - A contract two epics share (an interface, a schema, a file both touch) becomes a `decision`
   bead before either epic is dispatched: LOAD `skill://orchestrate-with-bd/references/decisions.md`.
