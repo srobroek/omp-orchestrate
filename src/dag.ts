@@ -64,6 +64,47 @@ export function todoStrings(beads: readonly BdBead[]): string[] {
 	return out;
 }
 
+/** One dispatchable bead of the wave, with the agent the DAG routes it to. */
+export interface WaveItem {
+	bead: string;
+	title: string;
+	role: string;
+	/** Implementer tier from `metadata.tier`; absent for non-implementer roles. */
+	tier?: "basic" | "deep" | "max";
+	agent: string;
+	isolated: boolean;
+}
+
+const TIER_AGENT = { basic: "orc-implementer", deep: "orc-implementer-deep", max: "orc-implementer-max" } as const;
+
+/**
+ * Implementer tier from `metadata.tier`. A missing mark is `basic` (bounded work is the
+ * norm); an unrecognised value is `deep`, so a malformed mark never routes hard work down.
+ */
+export function tierOf(metadata: Record<string, unknown> | undefined): WaveItem["tier"] {
+	const raw = metadata?.tier;
+	if (raw === undefined || raw === null || raw === "") return "basic";
+	return raw === "basic" || raw === "deep" || raw === "max" ? raw : "deep";
+}
+
+/**
+ * Route one ready bead to an agent. Epics go to `orc-lead`; `metadata.role` picks reviewer,
+ * researcher, or shepherd; any other role (or none) is implementer work routed by tier and
+ * reported as written, so a misspelt role stays visible to the lead. Claim-holding
+ * implementers and epic leads are isolated; the judging and reading roles are not.
+ */
+export function waveItem(bead: BdBead): WaveItem {
+	const title = typeof bead.title === "string" ? bead.title : "";
+	const metadata = metadataRecord(bead.metadata);
+	if (bead.issue_type === "epic") return { bead: bead.id, title, role: "lead", agent: "orc-lead", isolated: true };
+	const role = typeof metadata?.role === "string" && metadata.role.length > 0 ? metadata.role : "implementer";
+	if (role === "reviewer") return { bead: bead.id, title, role, agent: "orc-reviewer", isolated: false };
+	if (role === "researcher") return { bead: bead.id, title, role, agent: "orc-researcher", isolated: false };
+	if (role === "shepherd") return { bead: bead.id, title, role, agent: "orc-shepherd", isolated: false };
+	const tier = tierOf(metadata);
+	return { bead: bead.id, title, role, tier, agent: TIER_AGENT[tier ?? "basic"], isolated: true };
+}
+
 /**
  * The run shape the DAG implies: three tiers when any direct child of the run epic is
  * itself an epic (one `orc-lead` per child epic), two tiers otherwise (workers dispatched

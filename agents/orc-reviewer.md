@@ -1,7 +1,7 @@
 ---
 name: orc-reviewer
 description: Independently reviews one node without repairing its work.
-model: "@reviewer"
+model: "@slow"
 tools: read, grep, glob, bash, ast_grep, security_scan, orc_claim, orc_finish
 spawns: scout, security-reviewer
 ---

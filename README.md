@@ -55,13 +55,22 @@ ledger tools return that route and write nothing.
 
 ## Agents
 
-- `orc-lead`, `orc-planner`
-- `orc-implementer`, `orc-reviewer`, `orc-researcher`, `orc-shepherd`
+- `orc-lead`, `orc-planner` on `@plan`
+- `orc-implementer` on `@task`, `orc-implementer-deep` on `@plan`, `orc-implementer-max` on `@slow`
+- `orc-reviewer` on `@slow`, `orc-researcher` on `@smol`, `orc-shepherd` on `@task`
 
-Implementers and epic leads run `isolated: true`. The skill
-`skill://orchestrate-with-bd` holds the procedure; `references/roles.md` holds the model,
-spawn, and depth table.
+Every model is one of OMP's built-in role aliases, so a fresh install needs no
+`modelRoles` entry. Remap an agent with OMP's `task.agentModelOverrides.<agent>`.
 
+- Preflight: when a prompt says `orchestrate`, the plugin resolves each alias through OMP's
+  resolver. If one has no callable model, the session stops and names the `modelRoles.<role>`
+  key to fix.
+- Tiers: the planner marks each implementer bead `metadata.tier` (`basic`, `deep`, `max`);
+  `orc_status.wave` names the agent for every ready bead.
+- Isolation: implementers and epic leads run `isolated: true`.
+
+The skill `skill://orchestrate-with-bd` holds the procedure; `references/roles.md` holds the
+model, tier, spawn, and depth table.
 ## License
 
 Apache-2.0.

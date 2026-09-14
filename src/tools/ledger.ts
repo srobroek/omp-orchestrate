@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdJson, bdShow } from "../bd";
-import { beadIds, DESCENDANT_LIMIT, descendants, readStoreMode, readyWave, runShape, todoStrings } from "../dag";
+import { beadIds, DESCENDANT_LIMIT, descendants, readStoreMode, readyWave, runShape, todoStrings, type WaveItem, waveItem } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
 /**
@@ -78,6 +78,8 @@ export interface StatusResult {
 	 * own ready tasks (the cross-epic review). Withheld when the walk was truncated.
 	 */
 	ready?: string[];
+	/** The same wave, one entry per `ready` item, with the agent and isolation each bead is routed to. */
+	wave?: WaveItem[];
 	store: string;
 	beads: BdBead[];
 	todo: string[];
@@ -94,6 +96,13 @@ const statusIdsBySession = new Map<string, Set<string>>();
 
 export function statusBeadIds(ctx: ExtensionContext): Set<string> | null {
 	return statusIdsBySession.get(ctx.sessionManager.getSessionId()) ?? null;
+}
+
+/** The wave each session's most recent `orc_status` returned, keyed by bead id, for the dispatch routing gate. */
+const statusWaveBySession = new Map<string, Map<string, WaveItem>>();
+
+export function statusWave(ctx: ExtensionContext): Map<string, WaveItem> | null {
+	return statusWaveBySession.get(ctx.sessionManager.getSessionId()) ?? null;
 }
 
 function text<T>(details: T, line: string, isError = false): AgentToolResult<T> {
@@ -209,7 +218,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_status",
 		label: "Run status",
 		description:
-			"Read the run epic's whole subtree from Beads. `ready` is the wave and one `task` call dispatches all of it: unblocked, unassigned tasks under the epic (two-tier), or the child epics that are unblocked, not yet bound by a lead, and hold at least one ready task, one `orc-lead` each (three-tier). Binding claims the epic for this lead's actor; an epic another actor holds refuses to bind. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
+			"Read the run epic's whole subtree from Beads. `ready` is the wave and one `task` call dispatches all of it; `wave` gives each item's `agent` and `isolated`, which the `task` call copies (implementer tier from the bead's `metadata.tier`): unblocked, unassigned tasks under the epic (two-tier), or the child epics that are unblocked, not yet bound by a lead, and hold at least one ready task, one `orc-lead` each (three-tier). Binding claims the epic for this lead's actor; an epic another actor holds refuses to bind. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
 		approval: "read",
 		parameters: statusParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<StatusResult | undefined>> {
@@ -262,8 +271,11 @@ export function registerLedger(pi: ExtensionAPI): void {
 			const shape = runShape(epic, walk.beads);
 			// A truncated walk is not a basis for a wave: the epic tier's terminal check and the
 			// two-tier task list both read the snapshot, so `ready` is withheld instead of guessed.
-			const ready = walk.truncated ? [] : todoStrings(await readyWave(epic, walk.beads, root));
-			const result: StatusResult = { run: epic, epic: epicBead, shape, ready, store, beads: walk.beads, todo };
+			const readyBeads = walk.truncated ? [] : await readyWave(epic, walk.beads, root);
+			const ready = todoStrings(readyBeads);
+			const wave = readyBeads.map(waveItem);
+			statusWaveBySession.set(ctx.sessionManager.getSessionId(), new Map(wave.map(item => [item.bead, item])));
+			const result: StatusResult = { run: epic, epic: epicBead, shape, ready, wave, store, beads: walk.beads, todo };
 			if (walk.truncated) {
 				result.truncated = true;
 				result.message = `subtree exceeds ${DESCENDANT_LIMIT} beads; ready is withheld. Orchestrate the child epics individually.`;
