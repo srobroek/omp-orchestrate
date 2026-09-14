@@ -45,7 +45,8 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
 6. Cross-epic review (three-tier only). Once the leads close every child epic and you merge
    every epic branch, `ready` turns to the tasks directly under the run epic. Dispatch that
    review wave over the merged run; each reviewer judges the run's `merge-base..HEAD` diff.
-7. Close. When every task is `closed` or `blocked`, `orc_finish` the epic.
+7. Close. When every task is `closed`, `orc_finish` the epic `done`. When a task stays
+   `blocked`, finish the epic `blocked` too: bd refuses to close an epic over a blocked child.
 
 ## Rules
 

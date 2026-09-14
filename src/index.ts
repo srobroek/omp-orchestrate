@@ -50,15 +50,50 @@ export function runHeader(root: string, actor: string): string {
 	const run = readLocator(root)?.run_id ?? NO_RUN;
 	const lines = ["<system-notice>", "orchestrate-with-bd run header", `store: ${storeLine}`, `run epic: ${run}`, `actor: ${actor}`, ""];
 	if (store === null || store.mode !== "server") {
-		// Observed 2026-09-14: given only the migration route, a lead migrated the human's
-		// store and committed the result on its own. The header says stop first.
+		// Observed twice (2026-09-14): given the contract and the skill, a lead on an embedded
+		// store followed the migration route itself. So the header carries no contract here and
+		// names no skill; it says what to tell the human and that the tools will refuse.
 		lines.push(
-			"STOP. This checkout's Beads store is not on the shared server, so the ledger refuses every write and the run cannot start here. Report this to the human with the migration route from `skill://orchestrate-with-bd/references/beads-store.md` and end the turn. Never migrate a store, edit `.beads/`, or dispatch an agent to do so without an explicit human instruction.",
-			"",
+			"STOP. This checkout's Beads store is not on the shared Dolt server, so this session cannot orchestrate here. Reply to the human with exactly this and end the turn: the store must be migrated to the shared server by a human (bd export, bd backup, bd init --shared-server --reinit-local, bd backup restore). Do not read any skill, do not run bd, do not edit .beads/, do not dispatch an agent. Every ledger tool and every store-changing command is refused in this session.",
+			"</system-notice>",
 		);
+		return lines.join("\n");
 	}
 	lines.push(CONTRACT, "</system-notice>");
 	return lines.join("\n");
+}
+
+/**
+ * Any `bd` invocation (by basename, so `/usr/bin/bd` counts) or any `.beads/` path. In a
+ * session that received the STOP header the ledger already refuses, so no `bd` command has a
+ * legitimate use there, and enumerating verbs would only leave gaps (the observed migration
+ * began with `bd export`).
+ */
+const BD_OR_STORE = /(?:^|[\s;&|(`'"=])(?:\S*\/)?bd(?=\s|$)|\.beads\//u;
+
+export function mutatesStore(command: string): boolean {
+	return BD_OR_STORE.test(command);
+}
+
+/** Sessions that received the STOP header: their store-changing commands are refused. */
+const stopped = new Set<string>();
+
+const STOP_REFUSAL =
+	"Refused: this orchestration session's Beads store is not on the shared server. A human runs the migration; report it and end the turn.";
+
+/** A block result when `toolName`/`input` would touch the store or dispatch, else `undefined`. */
+export function storeMutationBlock(toolName: string, input: unknown): { block: true; reason: string } | undefined {
+	if (input === null || typeof input !== "object") return undefined;
+	if (toolName === "bash") {
+		const command = "command" in input ? input.command : undefined;
+		return typeof command === "string" && mutatesStore(command) ? { block: true, reason: STOP_REFUSAL } : undefined;
+	}
+	if (toolName === "write" || toolName === "edit" || toolName === "ast_edit") {
+		const target = "path" in input ? input.path : "paths" in input ? JSON.stringify(input.paths) : "";
+		return typeof target === "string" && target.includes(".beads/") ? { block: true, reason: STOP_REFUSAL } : undefined;
+	}
+	if (toolName === "task") return { block: true, reason: STOP_REFUSAL };
+	return undefined;
 }
 
 export default function orchestrateWithBd(pi: ExtensionAPI): void {
@@ -68,6 +103,10 @@ export default function orchestrateWithBd(pi: ExtensionAPI): void {
 	// call itself. A process-wide `BEADS_ACTOR` would be last-session-wins, because
 	// concurrent subagents share one Bun process; a value the call already names is kept.
 	pi.on("tool_call", (event, ctx) => {
+		if (stopped.has(ctx.sessionManager.getSessionId())) {
+			const blocked = storeMutationBlock(event.toolName, event.input);
+			if (blocked !== undefined) return blocked;
+		}
 		if (event.toolName !== "bash") return undefined;
 		const revised = withActor(event.input, actorFor(ctx));
 		return revised === undefined ? undefined : { input: revised };
@@ -75,6 +114,8 @@ export default function orchestrateWithBd(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!mentionsOrchestrate(event.prompt)) return undefined;
+		const store = readStoreMode(ctx.cwd);
+		if (store === null || store.mode !== "server") stopped.add(ctx.sessionManager.getSessionId());
 		return {
 			message: {
 				customType: "orc-run-header",

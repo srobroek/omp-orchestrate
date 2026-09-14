@@ -129,7 +129,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_finish",
 		label: "Finish bead",
 		description:
-			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. An epic closes only when every bead under it is closed or blocked; otherwise `done` is refused and the unfinished ids are listed. An optional comment is written first so the evidence survives even if the transition fails.",
+			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. An epic closes only when every bead under it is closed; with an open or in-progress descendant `done` is refused and the ids are listed, and bd itself refuses to close over a blocked child, so finish such an epic `blocked`. An optional comment is written first so the evidence survives even if the transition fails.",
 		approval: "write",
 		parameters: finishParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<FinishResult | undefined>> {

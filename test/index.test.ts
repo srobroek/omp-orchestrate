@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import orchestrateWithBd, { runHeader } from "../src/index";
+import orchestrateWithBd, { mutatesStore, runHeader, storeMutationBlock } from "../src/index";
 import { mentionsOrchestrate } from "../src/keyword";
 import { readLocator, writeLocator } from "../src/run";
 import { NO_STORE, NOT_SERVER_MODE, storeRefusal } from "../src/tools/ledger";
@@ -153,12 +153,46 @@ describe("before_agent_start", () => {
 		expect(runHeader(fixture("server"), "omp/x")).toContain("no run epic yet");
 	});
 
-	test("an embedded or missing store makes the header say STOP before the contract", () => {
+	test("an embedded or missing store makes the header STOP-only: no contract, no skill to follow", () => {
 		const embedded = runHeader(fixture("embedded"), "omp/x");
 		expect(embedded).toContain("STOP.");
-		expect(embedded.indexOf("STOP.")).toBeLessThan(embedded.indexOf("Read `skill://orchestrate-with-bd`"));
+		expect(embedded).not.toContain("skill://");
+		expect(embedded).not.toContain("Work in waves");
 		expect(runHeader(fixture(null), "omp/x")).toContain("STOP.");
 		expect(runHeader(fixture("server"), "omp/x")).not.toContain("STOP.");
+	});
+});
+
+describe("store mutation gate in a stopped session", () => {
+	test("recognises every bd invocation and every .beads/ path, and nothing else", () => {
+		for (const cmd of ["bd init --shared-server --reinit-local", "env -u X bd export > i.jsonl && bd backup init /tmp/b", "bd export > issues.jsonl", "/usr/bin/bd bootstrap --yes", "cd x && bd dolt push", "bd list --json", "cat .beads/metadata.json", "echo '{}' > .beads/config.yaml"]) {
+			expect(mutatesStore(cmd), cmd).toBe(true);
+		}
+		for (const cmd of ["git status", "bun test", "ls -la", "echo bdx", "cat README.md"]) {
+			expect(mutatesStore(cmd), cmd).toBe(false);
+		}
+		expect(storeMutationBlock("bash", { command: "bd init --shared-server" })?.block).toBe(true);
+		expect(storeMutationBlock("write", { path: "/r/.beads/metadata.json", content: "{}" })?.block).toBe(true);
+		expect(storeMutationBlock("task", { tasks: [] })?.block).toBe(true);
+		expect(storeMutationBlock("bash", { command: "bd list --json" })?.block).toBe(true);
+		expect(storeMutationBlock("bash", { command: "git status" })).toBeUndefined();
+		expect(storeMutationBlock("read", { path: "/r/.beads/metadata.json" })).toBeUndefined();
+	});
+
+	test("only a session that received the STOP header is gated; a server-mode session is not", async () => {
+		const { pi, seen } = recordingApi();
+		orchestrateWithBd(pi);
+		const run = async (root: string, sessionId: string) => {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => sessionId } };
+			for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) await handler({ type: "before_agent_start", prompt: "orchestrate epic x" }, ctx);
+			let result: unknown;
+			for (const handler of seen.eventHandlers.get("tool_call") ?? []) result = await handler({ type: "tool_call", toolName: "bash", input: { command: "bd init --shared-server --reinit-local" } }, ctx);
+			return result as { block?: boolean; input?: unknown } | undefined;
+		};
+		expect((await run(fixture("embedded"), "stopped-1"))?.block).toBe(true);
+		const ok = await run(fixture("server"), "live-1");
+		expect(ok?.block).toBeUndefined();
+		expect((ok?.input as { env: { BEADS_ACTOR: string } }).env.BEADS_ACTOR).toBe("omp/live-1");
 	});
 });
 
