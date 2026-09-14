@@ -1,6 +1,9 @@
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { claimedBead, resetReadBudget } from "./bd";
-import type { ClaimState } from "./claim-state";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { acceptanceText } from "./acceptance";
+import { bdRun, bdShow, claimedBead, resetReadBudget } from "./bd";
+import type { ClaimState, ClaimObservation } from "./claim-state";
+import { beadRouting } from "./identity";
+import { runScope } from "./run-scope";
 import { type BdInvocation, effectiveSegments, parseBdInvocation } from "./shell";
 
 /**
@@ -295,9 +298,61 @@ function commandActor(invocation: BdInvocation, env: unknown): string | undefine
   const value = exported?.[variable];
   if (typeof value === "string" && value.length > 0) return value;
  }
+
  return undefined;
 }
+/**
+ * A successful claim is armed immediately, then checked against the live bead. A routed
+ * implementer/researcher bead without acceptance is released as the holder before the next
+ * turn can write code; the worker receives the reason as a steer rather than discovering a
+ * deferred claim only at exit.
+ */
+async function recordClaimAndBackstop(
+ pi: ExtensionAPI,
+ claims: ClaimState,
+ observation: ClaimObservation,
+ ctx: ExtensionContext | undefined,
+): Promise<void> {
+ claims.recordClaim(observation);
+ if (ctx === undefined || (await runScope(ctx)) === null) return;
+ for (const id of observation.beadIds) {
+  pi.logger.info("orchestrate claim observer: reading claimed bead for acceptance backstop", { bead: id, actor: observation.actor });
+  resetReadBudget();
+  const bead = await bdShow(id);
+  if (bead === null) {
+   pi.logger.warn("orchestrate claim observer: claimed bead could not be read; release skipped", { bead: id });
+   continue;
+  }
+  const role = beadRouting(bead)?.role;
+  if (role !== "implementer" && role !== "researcher") {
+   pi.logger.info("orchestrate claim observer: claimed bead is not an acceptance-routed role", { bead: id, role });
+   continue;
+  }
+  if (acceptanceText(bead) !== undefined) {
+   pi.logger.info("orchestrate claim observer: claimed bead carries acceptance", { bead: id, role });
+   continue;
+  }
+  pi.logger.warn("orchestrate claim observer: releasing claimed bead without acceptance", { bead: id, role, actor: observation.actor });
+  const released = await bdRun(["update", id, "--claim", "--assignee", "", "--status", "deferred", "--actor", observation.actor], undefined, ctx.cwd);
+  pi.logger.info("orchestrate claim observer: fenced release completed", { bead: id, code: released?.code, error: released === null });
+  if (released === null || released.code !== 0) continue;
+  const noted = await bdRun(["comment", id, "NOTE no-acceptance: released by gate; architect adds --acceptance and reopens with --status open", "--actor", observation.actor], undefined, ctx.cwd);
+  pi.logger.info("orchestrate claim observer: no-acceptance note written", { bead: id, code: noted?.code, error: noted === null });
+  claims.forgetClaim();
+  pi.logger.info("orchestrate claim observer: forgot released claim", { bead: id });
+  pi.sendMessage(
+   {
+    customType: CLAIM_UNOBSERVED_MESSAGE,
+    content: `Claimed bead '${id}' was released as deferred: it has no acceptance criteria. The architect must add --acceptance and reopen it with --status open before you claim again.`,
+    display: true,
+    attribution: "user",
+   },
+   { deliverAs: "steer" },
+  );
+  pi.logger.info("orchestrate claim observer: sent no-acceptance notice", { bead: id });
+ }
 
+}
 /**
  * Observe a `bash` result and record the claim it acquired.
  *
@@ -311,7 +366,7 @@ function commandActor(invocation: BdInvocation, env: unknown): string | undefine
  * With the actor on the command, the retry's report may be just as unreadable and still
  * binds, because the store answers.
  */
-export async function observeClaimResult(pi: ExtensionAPI, claims: ClaimState, event: ToolResultLike): Promise<void> {
+export async function observeClaimResult(pi: ExtensionAPI, claims: ClaimState, event: ToolResultLike, ctx?: ExtensionContext): Promise<void> {
  if (event.toolName !== "bash") return;
  const details = event.details !== null && typeof event.details === "object" ? event.details as BashDetailsLike : undefined;
  if (!plausiblySucceeded(event, details)) return;
@@ -335,7 +390,7 @@ export async function observeClaimResult(pi: ExtensionAPI, claims: ClaimState, e
 			}
 			if (claimed === "empty") return;
 			if (claimed !== undefined) {
-				claims.recordClaim(claimed);
+    await recordClaimAndBackstop(pi, claims, claimed, ctx);
 				return;
 			}
 			reason ??= "not a claim report";
@@ -349,7 +404,7 @@ export async function observeClaimResult(pi: ExtensionAPI, claims: ClaimState, e
   resetReadBudget();
   const bead = await claimedBead(actor);
   if (bead !== null) {
-   claims.recordClaim({ actor, beadIds: [bead.id] });
+   await recordClaimAndBackstop(pi, claims, { actor, beadIds: [bead.id] }, ctx);
    return;
   }
  }

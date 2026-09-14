@@ -15,7 +15,7 @@ pending ─ready─► working ─(BLOCKED wisp→researcher NOTE)─► working
    │                                                    │                   │ verdict=approve
    └──────────── deps closed + scope free ──────────────┘                   ▼
                                                                          approved
-                                             git: merge bead → shepherd   │ non-git: evidence accepted
+                                             git: merge bead → landing sweep   │ non-git: evidence accepted
                           BOUNCED reason=conflict ─► working (rebase)     │
                                                  │                        ▼
                                                  └────────► merged ───► dismissed
@@ -35,8 +35,8 @@ never stored as a bead state.
 | `reported → in_review` | the architect collects the successful terminal task result, verifies the pushed ref and head, integrates it, pushes the feature branch, re-stamps the epic's `head_sha`, then creates review-wisp shells. A pre-yield report alone is not integration |
 | `working` (blocked) | the worker writes `BLOCKED` on a linked escalation wisp and yields; a researcher pulls that wisp and answers it with a `NOTE` on the node |
 | `changes_requested → working` | after all required verdicts arrive, the architect follows the requeue procedure below to reopen the node unassigned; a fresh worker claims it and applies the combined findings |
-| `approved → merged` | the last approving reviewer closes the final review wisp and makes the PR ready; the architect creates the merge bead with `pr` and the reviewed `head_sha`; the plugin's landing sweep merges it at that head and writes `LANDED <sha>` |
-| `approved → dismissed` | non-git evidence only: the architect records the accepted evidence and closes with `--reason dismissed` |
+| `approved → merged` | the final approving reviewer closes the review wisp and makes the PR ready; the architect creates the merge bead with `pr` and reviewed `head_sha`; the landing sweep merges it, writes `LANDED <sha> merge=<merge-bead-id>` on the merge bead and covered nodes, then closes covered nodes and the feature with `--reason merged` |
+| `approved → dismissed` | non-git evidence only: the final approving reviewer closes the review wisp; the landing sweep closes the covered node with `--reason dismissed` |
 | `waiting_human` | an agent raised `ASK` on the bead and set its status `blocked`. The question is recorded in that comment. A bead not yet started also gets `bd gate create --type=human --blocks <bead>` |
 | `waiting_gate` | only an external machine gate remains (a release workflow, a bot round). A gate bead blocks the work bead, `BLOCKED` names it and how to resume, the claim is released, and nobody polls it. CI on a merge bead's PR is not a gate: the landing sweep observes it |
 | `failed` | unrecoverable: status `blocked` plus a `FAILED` comment, with the error recorded and surfaced |
@@ -135,6 +135,14 @@ approval does not transfer. While retaining sole PR-update ownership, the archit
 requests every configured provider at the exact head and records the request result before
 dispatching the shepherd.
 
+### Override
+
+When a landed node lacks feature-level acceptance coverage, the lead writes `NOTE override requested: <reason>` on that node. The landing sweep creates one ephemeral review wisp under the node with `role=reviewer`, `dimension=override` and `origin_bead=<node>`, keyed by `override:<node>:<hash>`. The reviewer writes `REVIEW <node> dimension=override verdict=approve|changes override=<live acceptance hash>`. Only an approve at the live hash lets the sweep close the node; nothing closes before that verdict.
+
+### Plan review
+
+After decomposition and DAG validation, the architect files one ephemeral review wisp under the epic with `dimension=plan`. The reviewer writes `REVIEW <epic> dimension=plan verdict=approve|changes plan=<live plan hash>`. The plan hash is recomputed from live children before each pull. Implementers cannot pull until an approve matches that hash; bounded review rounds end in `ASK`. Set `metadata.plan_review=off` only as a recorded escape.
+
 ### Landing
 
 The plugin lands. `/orchestrate-start` probes the repository once (`autoMergeAllowed`,
@@ -146,7 +154,7 @@ list` per repository, and acts:
 
 | Observation | Action |
 |---|---|
-| `MERGED` | stamp `merge_sha`, write `LANDED <sha>` on merge and origin, close the merge bead. A head other than `head_sha` lands as `LANDED ... UNGUARDED` with a review note on the origin |
+| `MERGED` | stamp `merge_sha`, write `LANDED <sha> merge=<merge-bead-id>` on merge and every covered origin node, close covered nodes with `--reason merged`, then close the feature when all `orc-node` children are closed. A head other than `head_sha` lands as `LANDED ... UNGUARDED` with a review note on the origin |
 | `CLOSED` unmerged | `BOUNCED reason=closed`, status `blocked` |
 | draft, `UNKNOWN`, checks running | wait, write nothing |
 | head is not `head_sha` | `BLOCKED` once; the architect re-reviews and re-stamps `head_sha` |
@@ -323,21 +331,17 @@ holder absent from that registry is unknown, never dead. The lead holds the same
 on the run epic (`lead_actor`, `lease_until`), renewed on its own activity; a second lead
 cannot start or resume the run while it is live, and `/orchestrate-status` prints it.
 
-**Merge-completeness scan.** Integration is cherry-pick, so ancestry proves nothing and
-patch-id containment is the primitive:
+**Merge-completeness scan.** Integration is cherry-pick, and PRs squash-merge, so ancestry does not prove containment. In the bare clone, fetch `origin/<branch>` and each candidate `omp/task/<id>` ref. For each node, run `git cherry <feature-head> <pushed_sha> <base>`, where `base` is the node or epic `base_sha`, or `git merge-base` of the two. Containment means no line starts with `+`.
 
 | Scan result | Bead state | Verdict |
 |---|---|---|
 | all `-` | terminal | cleanup candidate; only the architect, after this scan, may delete and stamp integration |
 | all `-` | open | integrated early -- flag it; the bead belongs in reported or review |
 | any `+` | open / `in_progress` | pending integration -- the architect's duty; teardown blocks on it |
-| any `+` | closed | inconsistency: closed but unmerged. Comment on the bead and treat it as a reopen candidate; the comment is the record, since neither `/orchestrate-status` nor `orc_run_status` runs the scan |
+| fetch or comparison failure | any | `unverified`; preserve the branch and block close-out |
+| any `+` | closed | inconsistency: closed but unmerged. Comment on the bead and treat it as a reopen candidate |
 
-The architect runs the scan before teardown. Only the architect stamps integration or
-deletes branches, after re-reading terminal state and patch containment; the reaper never
-does. Unreadable containment preserves the branch and reports unresolved cleanup.
-
-## Dead-claim recovery
+The auditor enforces this scan at teardown. `/orchestrate-stop` runs the same scan through `stopRun` → `closeRun`; non-forced stop refuses while any patch is uncontained or `unverified`. Only the architect stamps integration or deletes branches after the scan.
 
 The reaper releases dead claims; agents do not. A release needs one of two proofs: the
 holder's own terminal frame (`failed`/`aborted`) in the session that spawned it, or that

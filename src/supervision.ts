@@ -373,11 +373,11 @@ export async function branchIntegrated(
  return marks.every(mark => mark.startsWith("-")) ? "integrated" : "unknown";
 }
 
-/** The `require` predicates a role's exit is checked against. */
+/** The require predicates a role's exit is checked against. */
 interface CompletionCheck {
- check: string;
- require: string;
- when?: string | string[];
+	check: string;
+	require: string;
+	when?: string | string[] | { kind?: string | string[]; dimension?: string | string[] };
 }
 
 /** The two clauses the reaper reads. The gate owns the rest of the contract. */

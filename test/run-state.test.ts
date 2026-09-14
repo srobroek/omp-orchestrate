@@ -498,6 +498,49 @@ describe("closeRun", () => {
 		expect(await readActiveRun(cwd)).toBeNull();
 	});
 
+	test("refuses over pushed work the feature branch does not contain, unless forced; cherry-picked work counts as contained", async () => {
+		// Worker commits reach the feature branch by cherry-pick, so the check is patch
+		// identity, not ancestry: the same patch under a new sha is integrated, a patch
+		// origin/<branch> never received is not, and a sha this checkout has never fetched
+		// cannot be judged at all -- which is named, and blocks like an unintegrated one.
+		const git = (args: string[]) => execFileAsync("git", ["-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, timeout: 5000 });
+		await git(["init", "-q", "-b", "main"]);
+		await git(["commit", "-q", "--allow-empty", "-m", "base"]);
+		const base = (await git(["rev-parse", "HEAD"])).stdout.trim();
+		await writeFile(join(cwd, "a.txt"), "a\n");
+		await git(["add", "a.txt"]);
+		await git(["commit", "-q", "-m", "worker a"]);
+		const workerA = (await git(["rev-parse", "HEAD"])).stdout.trim();
+		await git(["checkout", "-q", "-b", "stray", base]);
+		await writeFile(join(cwd, "b.txt"), "b\n");
+		await git(["add", "b.txt"]);
+		await git(["commit", "-q", "-m", "worker b"]);
+		const workerB = (await git(["rev-parse", "HEAD"])).stdout.trim();
+		// The feature branch holds worker a's patch as a cherry-pick, never worker b's.
+		await git(["checkout", "-q", "-b", "feat/x", base]);
+		await git(["cherry-pick", workerA]);
+		await git(["update-ref", "refs/remotes/origin/feat/x", "HEAD"]);
+		await git(["checkout", "-q", "main"]);
+
+		await bindRun(cwd, "orc-7");
+		const node = (id: string, pushed: string) => ({ id, status: "open", parent: "orc-7.1", labels: ["orc-node"], metadata: { pushed_sha: pushed } });
+		store = [
+			{ id: "orc-7", status: "in_progress", metadata: { branch: "feat/x", base_sha: base } },
+			{ id: "orc-7.1", status: "open", parent: "orc-7" },
+			node("orc-7.1.1", workerA),
+			node("orc-7.1.2", workerB),
+			node("orc-7.1.3", "0123456789abcdef0123456789abcdef01234567"),
+			{ id: "orc-7.1.4", status: "closed", parent: "orc-7.1", labels: ["orc-node"], metadata: { pushed_sha: workerB } },
+		];
+		await expect(closeRun(cwd, "orc-7")).rejects.toThrow(
+			/2 pushed refs under orc-7 not integrated in the feature branch \(orc-7\.1\.2, orc-7\.1\.3 \(unverifiable: origin\/feat\/x or 0123456 not in this checkout\)\); integrate or record them, or pass --force/,
+		);
+		expect((await readActiveRun(cwd))?.run_id).toBe("orc-7");
+		store = store.filter(bead => bead.id !== "orc-7.1.2" && bead.id !== "orc-7.1.3");
+		await closeRun(cwd, "orc-7");
+		expect(await readActiveRun(cwd)).toBeNull();
+	}, 30_000);
+
 	test("refuses when the children cannot be read, unless forced; force skips the read entirely", async () => {
 		await bindRun(cwd, "orc-7");
 		store = null;

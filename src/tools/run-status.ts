@@ -13,8 +13,11 @@
  * a missing binary or a stalled read resolves to an error-flagged result.
  */
 
-import type { AgentToolResult, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdBlockedChecked, bdCyclesChecked, bdListChecked, metadataString, resetReadBudget } from "../bd";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { type BdBead, type BdComment, bdBlockedChecked, bdCommentsChecked, bdCyclesChecked, bdListChecked, commentVerb, metadataString, resetReadBudget } from "../bd";
+import { acceptanceText } from "../acceptance";
 import { sameCommit } from "../gates/exit";
 
 /**
@@ -146,10 +149,10 @@ export interface CloseOut {
  clean: boolean;
 }
 
-export type RunStatusDetails = (StatusTree & { closeOut: CloseOut }) | {
- incomplete: true;
- beads: BdBead[] | null;
- blocked: string[] | null;
+export type RunStatusDetails = (StatusTree & { closeOut: CloseOut; hygiene: HygieneRow[] }) | {
+	incomplete: true;
+	beads: BdBead[] | null;
+	blocked: string[] | null;
 };
 
 export interface StatusFilter {
@@ -163,7 +166,9 @@ export interface RenderOptions {
  full?: boolean;
  filter?: StatusFilter;
  /** Append the close-out gate. */
- closeOut?: CloseOut;
+	closeOut?: CloseOut;
+	/** Append the hygiene findings. */
+	hygiene?: readonly HygieneRow[];
 }
 
 /** Sibling ordering: the rollup reads top-down, so structure precedes work. */
@@ -477,6 +482,225 @@ export function buildCloseOut(beads: readonly BdBead[], tree: StatusTree, reads:
  };
 }
 
+/**
+ * One lifecycle inconsistency the graph itself shows, or one that a bead's comments
+ * record. `kind` is stable so a reader can filter; `detail` says what was seen; `recovery`
+ * is the command that repairs it when one exists.
+ */
+export interface HygieneRow {
+	kind:
+		| "closed-parent-open-child"
+		| "feature-children-closed"
+		| "orphan-node"
+		| "stranded-behind-failed"
+		| "no-acceptance"
+		| "deferred-no-acceptance"
+		| "landed-but-open"
+		| "landed-uncovered"
+		| "override-pending"
+		| "lead-override"
+		| "not-integrated"
+		| "integration-unverified";
+	id: string;
+	detail: string;
+	recovery?: string;
+}
+
+/** Where a node's pushed work stands against its feature branch, as `git cherry` answered. */
+export type Containment = "contained" | "uncontained" | "unverified";
+
+/**
+ * The reads the hygiene rows need beyond the bead list, each gathered only for the beads
+ * that are candidates for a row: comments for deferred nodes, landed merge beads and open
+ * nodes with a pushed ref; containment for open nodes with a pushed ref. A `null` comment
+ * read is "unknown" and produces no row, never a false one.
+ */
+export interface HygieneReads {
+	comments: ReadonlyMap<string, readonly BdComment[] | null>;
+	containment: ReadonlyMap<string, Containment>;
+}
+
+/** Roles whose beads are worked against a definition of done, and so must carry one. */
+const ACCEPTANCE_ROLES: Record<string, true> = { implementer: true, researcher: true };
+
+/** A `NOTE <marker>` comment, the bead id optionally between verb and marker. */
+function hasNote(comments: readonly BdComment[] | null | undefined, marker: string): boolean {
+	if (comments == null) return false;
+	const pattern = new RegExp(`^\\W*NOTE(?:\\s+\\S+)?\\s+${marker}`, "i");
+	return comments.some(comment => pattern.test(comment.text));
+}
+
+/**
+ * Open nodes that carry a pushed ref: the candidates whose comments and containment the
+ * hygiene rows read. Exported so the tool gathers reads for exactly these.
+ */
+export function hygieneCandidates(beads: readonly BdBead[]): { comments: string[]; containment: string[] } {
+	const comments: string[] = [];
+	const containment: string[] = [];
+	for (const bead of beads) {
+		const labels = bead.labels ?? [];
+		const isNode = labels.includes("orc-node");
+		const landedMerge = labels.includes("pr:merge") && metadataString(bead, "landing_state") === "landed" && bead.status !== "closed";
+		if (landedMerge || (isNode && bead.status === "deferred")) comments.push(bead.id);
+		if (isNode && bead.status !== "closed" && metadataString(bead, "pushed_sha") !== undefined) {
+			comments.push(bead.id);
+			containment.push(bead.id);
+		}
+		if (bead.status === "closed" && isNode) comments.push(bead.id);
+	}
+	return { comments, containment };
+}
+
+/**
+ * The hygiene rows over the beads a tree shows.
+ *
+ * Every row is a state two writers disagree about, or one nobody finished: a parent closed
+ * over an open child, a feature left open after its last child closed, a node no feature
+ * owns, dependents queued behind a node that failed, a routed node with no definition of
+ * done, a claim the gate released for that reason, a merge bead the sweep proved landed
+ * but could not close, a landed node the review never covered, an override awaiting its
+ * verdict, a lead override that bypassed coverage, and pushed work the feature branch does
+ * not contain. Reads only; the recovery column is the only place a command appears.
+ */
+export function buildHygiene(beads: readonly BdBead[], tree: StatusTree, reads: HygieneReads): HygieneRow[] {
+	const scope = treeIds(tree);
+	const byId = new Map(beads.map(bead => [bead.id, bead]));
+	const rows: HygieneRow[] = [];
+	for (const bead of beads) {
+		if (!scope.has(bead.id)) continue;
+		const labels = bead.labels ?? [];
+		const isNode = labels.includes("orc-node");
+		const status = bead.status ?? "";
+		const parent = typeof bead.parent === "string" ? byId.get(bead.parent) : undefined;
+		const comments = reads.comments.get(bead.id);
+
+		if (isNode && status !== "closed" && parent?.status === "closed") {
+			rows.push({ kind: "closed-parent-open-child", id: bead.id, detail: `parent ${parent.id} is closed`, recovery: `bd reopen ${parent.id}` });
+		}
+		if (isNode && bead.issue_type !== "feature" && bead.issue_type !== "epic") {
+			let owner: BdBead | undefined;
+			const seen = new Set<string>();
+			for (let ancestor = parent; ancestor !== undefined && !seen.has(ancestor.id); ancestor = typeof ancestor.parent === "string" ? byId.get(ancestor.parent) : undefined) {
+				seen.add(ancestor.id);
+				if (ancestor.issue_type === "feature" || ancestor.issue_type === "epic") {
+					owner = ancestor;
+					break;
+				}
+			}
+			if (owner === undefined) {
+				rows.push({
+					kind: "orphan-node",
+					id: bead.id,
+					detail: bead.parent === undefined ? "no parent" : parent === undefined ? `parent ${bead.parent} is not in the store` : "no feature or epic above it",
+					recovery: `bd update ${bead.id} --parent <feature>`,
+				});
+			}
+		}
+		if (bead.issue_type === "feature" && status !== "closed") {
+			const children = beads.filter(child => child.parent === bead.id && (child.labels ?? []).includes("orc-node"));
+			if (children.length > 0 && children.every(child => child.status === "closed")) {
+				rows.push({ kind: "feature-children-closed", id: bead.id, detail: `all ${children.length} children closed; the landing sweep closes it once their merge lands` });
+			}
+		}
+		if (isNode && status === "blocked") {
+			const dependents = (bead as Record<string, unknown>).dependent_count;
+			if (typeof dependents === "number" && dependents > 0) {
+				rows.push({ kind: "stranded-behind-failed", id: bead.id, detail: `${dependents} dependent${dependents === 1 ? "" : "s"} wait behind a blocked node`, recovery: `bd dep tree ${bead.id}` });
+			}
+		}
+		const role = metadataString(bead, "role");
+		if (isNode && role !== undefined && ACCEPTANCE_ROLES[role] === true && acceptanceText(bead) === undefined && status !== "closed") {
+			const released = status === "deferred" && hasNote(comments, "no-acceptance");
+			rows.push({
+				kind: released ? "deferred-no-acceptance" : "no-acceptance",
+				id: bead.id,
+				detail: released ? "claim released by the gate: no acceptance criteria" : "routed with no acceptance criteria",
+				recovery: `bd update ${bead.id} --acceptance "1. ..." --status open`,
+			});
+		}
+		if (labels.includes("pr:merge") && metadataString(bead, "landing_state") === "landed" && status !== "closed") {
+			const attempts = bead.metadata?.close_attempts;
+			const tried = typeof attempts === "number" || typeof attempts === "string" ? ` after ${attempts} attempts` : "";
+			rows.push({ kind: "landed-but-open", id: bead.id, detail: `merge_sha ${short(metadataString(bead, "merge_sha") ?? "?")} stamped, close not proven${tried}; the sweep retries` });
+		}
+		if (isNode && status !== "closed" && hasNote(comments, "landed uncovered")) {
+			const pending = beads.some(wisp => wisp.status !== "closed" && metadataString(wisp, "dimension") === "override" && metadataString(wisp, "origin_bead") === bead.id);
+			rows.push(pending
+				? { kind: "override-pending", id: bead.id, detail: "landed uncovered; override review wisp open" }
+				: { kind: "landed-uncovered", id: bead.id, detail: "landed, but no review covers its acceptance", recovery: `bd comment ${bead.id} "NOTE override requested: <reason>"` });
+		}
+		if (isNode && status === "closed") {
+			const reason = (bead as Record<string, unknown>).close_reason;
+			const override = typeof reason === "string" && /^\s*override:/i.test(reason)
+				? reason
+				: comments?.find(comment => commentVerb(comment.text) === "NOTE" && /\boverride:/i.test(comment.text) && /\bclos(?:ed|ing)\b/i.test(comment.text))?.text;
+			if (override !== undefined) rows.push({ kind: "lead-override", id: bead.id, detail: override.trim().slice(0, 120) });
+		}
+		if (isNode && status !== "closed" && metadataString(bead, "pushed_sha") !== undefined) {
+			const containment = reads.containment.get(bead.id);
+			if (containment === "uncontained") rows.push({ kind: "not-integrated", id: bead.id, detail: `pushed ${short(metadataString(bead, "pushed_sha") ?? "")} is not in the feature branch`, recovery: "architect integrates the capture and pushes the feature branch" });
+			if (containment === "unverified") rows.push({ kind: "integration-unverified", id: bead.id, detail: `pushed ${short(metadataString(bead, "pushed_sha") ?? "")} could not be compared with the feature branch from this checkout` });
+		}
+	}
+	return rows;
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * The reads {@link buildHygiene} needs, gathered for the candidates only and never for the
+ * whole store: comments per candidate through bd's read budget, and containment through a
+ * read-only `git cherry` against `origin/<branch>` as this checkout last fetched it. The
+ * branch is the nearest ancestor's `metadata.branch` (the epic's, under the architect
+ * runtime); worker commits reach it by cherry-pick, so patch ids are compared, not
+ * ancestry. Nothing is fetched: a comparison this checkout cannot make is `unverified`.
+ */
+export async function gatherHygieneReads(beads: readonly BdBead[], tree: StatusTree, cwd: string): Promise<HygieneReads> {
+	const scope = treeIds(tree);
+	const candidates = hygieneCandidates(beads.filter(bead => scope.has(bead.id)));
+	const comments = new Map<string, readonly BdComment[] | null>();
+	for (const id of candidates.comments) {
+		if (!comments.has(id)) comments.set(id, await bdCommentsChecked(id));
+	}
+	const byId = new Map(beads.map(bead => [bead.id, bead]));
+	const containment = new Map<string, Containment>();
+	const env = { ...process.env };
+	for (const name of Object.keys(env)) if (name.startsWith("GIT_")) delete env[name];
+	for (const id of candidates.containment) {
+		const bead = byId.get(id);
+		const pushed = bead === undefined ? undefined : metadataString(bead, "pushed_sha");
+		if (bead === undefined || pushed === undefined) continue;
+		let branch: string | undefined;
+		let base = metadataString(bead, "base_sha");
+		const seen = new Set<string>();
+		for (let ancestor = typeof bead.parent === "string" ? byId.get(bead.parent) : undefined; ancestor !== undefined && !seen.has(ancestor.id); ancestor = typeof ancestor.parent === "string" ? byId.get(ancestor.parent) : undefined) {
+			seen.add(ancestor.id);
+			branch ??= metadataString(ancestor, "branch");
+			base ??= metadataString(ancestor, "base_sha");
+		}
+		if (branch === undefined) {
+			containment.set(id, "unverified");
+			continue;
+		}
+		try {
+			const args = ["-C", cwd, "cherry", `origin/${branch}`, pushed, ...(base === undefined ? [] : [base])];
+			const { stdout } = await execFileAsync("git", args, { env, timeout: 10_000 });
+			containment.set(id, stdout.split("\n").some(line => line.startsWith("+")) ? "uncontained" : "contained");
+		} catch {
+			containment.set(id, "unverified");
+		}
+	}
+	return { comments, containment };
+}
+
+/** The hygiene section: one line when clean, otherwise one line per row. */
+function renderHygiene(rows: readonly HygieneRow[], lines: string[]): void {
+	lines.push("", `HYGIENE: ${rows.length === 0 ? "clean" : `${rows.length} finding${rows.length === 1 ? "" : "s"}`}`);
+	for (const row of rows) {
+		lines.push(`  ${row.kind} ${row.id}: ${row.detail}${row.recovery === undefined ? "" : ` -> ${row.recovery}`}`);
+	}
+}
+
 /** A sha as the report prints it: the first seven digits, or the text as written when it is not one. */
 function short(sha: string): string {
  return /^[0-9a-f]{7,40}$/i.test(sha) ? sha.slice(0, 7) : sha;
@@ -695,7 +919,8 @@ export function renderStatus(tree: StatusTree, opts: RenderOptions = {}): string
   }
  }
 
- if (opts.closeOut !== undefined) renderCloseOut(opts.closeOut, lines);
+	if (opts.closeOut !== undefined) renderCloseOut(opts.closeOut, lines);
+	if (opts.hygiene !== undefined) renderHygiene(opts.hygiene, lines);
 
  return lines.join("\n");
 }
@@ -725,7 +950,7 @@ export function registerRunStatus(pi: ExtensionAPI): void {
    actor: z.string().optional().describe("Report only what this actor holds, by assignee or metadata.actor."),
    full: z.boolean().optional().describe("Include one line per bead. Off, only rollups and counts."),
   }),
-  async execute(_toolCallId, params: StatusFilter & { full?: boolean }): Promise<AgentToolResult<RunStatusDetails>> {
+		async execute(_toolCallId, params: StatusFilter & { full?: boolean }, _signal?: AbortSignal, _onUpdate?: unknown, ctx?: Pick<ExtensionContext, "cwd">): Promise<AgentToolResult<RunStatusDetails>> {
    try {
     resetReadBudget();
     const [beads, blockedIds, readyBeads, cycles] = await Promise.all([
@@ -754,11 +979,12 @@ export function registerRunStatus(pi: ExtensionAPI): void {
     if (params.actor !== undefined) filter.actor = params.actor;
 
     const tree = filterTree(buildStatusTree(beads, blockedIds), filter);
-    const closeOut = buildCloseOut(beads, tree, { blocked: blockedIds, ready: readyBeads === null ? null : readyBeads.map(bead => bead.id), cycles });
-    return {
-     content: [{ type: "text" as const, text: renderStatus(tree, { full: params.full === true, filter, closeOut }) }],
-     details: { ...tree, closeOut },
-    };
+				const closeOut = buildCloseOut(beads, tree, { blocked: blockedIds, ready: readyBeads === null ? null : readyBeads.map(bead => bead.id), cycles });
+				const hygiene = buildHygiene(beads, tree, await gatherHygieneReads(beads, tree, ctx?.cwd ?? process.cwd()));
+				return {
+					content: [{ type: "text" as const, text: renderStatus(tree, { full: params.full === true, filter, closeOut, hygiene }) }],
+					details: { ...tree, closeOut, hygiene },
+				};
    } catch (error) {
     // A throw here would surface as a hard tool failure mid-run; degrade instead.
     return {

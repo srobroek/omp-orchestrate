@@ -30,7 +30,7 @@ import { gateBeadWriteFree, rebuildBashInput } from "./gates/readonly";
 import { gateRoleIsolation } from "./gates/spawn";
 import { GATED_WRITE_TOOLS, gateWorktreeScope } from "./gates/worktree";
 import { gateWorktrunkOwnership } from "./gates/wt-guard";
-import { orcRole, sessionRole } from "./identity";
+import { isBeadWriteFree, orcRole, sessionRole } from "./identity";
 import { sweepInstallTree } from "./install-hygiene";
 import { createLeaseRenewer } from "./lease";
 import { runScope } from "./run-scope";
@@ -165,7 +165,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
      return { block: true, reason: "a claim is already in flight this turn; wait for its result before claiming again" };
     }
 
-    const eligibility = await gateClaimEligibility(claims, ctx, input);
+    const eligibility = await gateClaimEligibility(claims, ctx, input, { helper: isBeadWriteFree(pi, ctx) });
     if (eligibility) return eligibility;
    }
 
@@ -258,7 +258,7 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  pi.on("tool_result", async (event, ctx) => {
   claimInFlight.settle(event.toolCallId);
   if ((await runScope(ctx)) === null) return;
-  await observeClaimResult(pi, claims, event);
+  await observeClaimResult(pi, claims, event, ctx);
  });
 
  // A claim call that was blocked downstream, or denied at approval, produces no result;

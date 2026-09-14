@@ -133,14 +133,14 @@ describe("extension factory", () => {
 			const claimReport = (id: string, actor: string) => ({
 				toolName: "bash",
 				isError: false,
-				input: { command: "bd ready --metadata-field role=implementer --claim --json" },
+				input: { command: "bd ready --parent orc-run --metadata-field role=implementer --claim --json" },
 				details: {},
 				content: [{ type: "text", text: JSON.stringify([{ id, status: "in_progress", assignee: actor }]) }],
 			});
 
 			await parentResult(claimReport("orc-parent-1", "parent"), parentCtx);
 			expect(await childToolCall(
-				{ toolName: "bash", input: { command: "bd ready --metadata-field role=implementer --claim --json", env: { BEADS_ACTOR: "child" } } },
+				{ toolName: "bash", input: { command: "bd ready --parent orc-run --metadata-field role=implementer --claim --json", env: { BEADS_ACTOR: "child" } } },
 				childCtx,
 			)).toBeUndefined();
 			expect(await parentToolCall(

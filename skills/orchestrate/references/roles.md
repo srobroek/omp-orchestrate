@@ -5,10 +5,11 @@ Five agents ship: `orc-architect`, `orc-implementer`, `orc-reviewer`, `orc-resea
 not raw provider selectors in agent files. Each role inherits its configured thinking level.
 
 `orc-reviewer` names `@reviewer`, which OMP does not ship, so `modelRoles.reviewer` is a
-run prerequisite like the other three roles: the operator sets it to any model in their own
-config, never in the overlay. Unset, OMP starts the reviewer with no model and fails it; the
-doctor fails the `modelRoles.reviewer` row and the spawn gate refuses the agent. The verdict
-comes from a separate agent; model-family separation requires an explicit model choice.
+run prerequisite. The configured reviewer role must be planning-capable because plan reviews
+judge live DAG scope, dependencies and acceptance hashes. Unset, OMP starts the reviewer with
+no model and fails it; the doctor fails the `modelRoles.reviewer` row and the spawn gate refuses
+the agent. The verdict comes from a separate agent; model-family separation requires an explicit
+model choice.
 
 Escalation is per-spawn `effort`, not a second agent. There is no deep variant of any role.
 
@@ -16,8 +17,7 @@ Escalation is per-spawn `effort`, not a second agent. There is no deep variant o
 |---|---|---|---|---|---|
 | Lead | you (this session) | session model | whole run | the primary checkout | never claims anything |
 | Architect | `orc-architect` | `@plan` | one activation per claim, bounded by the subagent wall-clock cap; replaced from origin | an isolated clone of the primary checkout; its feature branch is pushed to origin at creation and after every integration | one epic, pulled |
-| Implementer | `orc-implementer` | `@task` | ephemeral, one bead | an isolated clone of the architect's clone; commits captured on `omp/task/<id>` and pushed to origin before yield | one task bead, pulled |
-| Reviewer | `orc-reviewer` | `@reviewer` | ephemeral, one verdict | inspects the captured branch or feature tree without editing code; dispatch determines checkout isolation | one review wisp, pulled |
+| Reviewer | `orc-reviewer` | `@reviewer` | ephemeral, one verdict | inspects the captured branch or feature tree without editing code; dispatch determines checkout isolation | one review wisp, pulled; dimensions are `code`, `plan`, or `override` (`effort: hi` for `plan`) |
 | Researcher | `orc-researcher` | `@smol` | ephemeral, one answer | reads assigned sources without editing code; dispatch determines checkout isolation | one escalation wisp or research bead, pulled |
 | Shepherd | `orc-shepherd` | `@task` | ephemeral, one pass over a bot round | PR review state only; no content edits, no merge | merge beads (label `pr:merge`, metadata `role=shepherd`), pulled |
 | Helper | `scout`, or another non-claiming child its spawner's allowlist names | its loaded definition | ephemeral, inside its spawner's await | its spawner's checkout; mutation only when explicitly scoped and granted | nothing -- architect helpers are traced by a wisp; worker factual lookups return directly |

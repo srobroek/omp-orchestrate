@@ -21,13 +21,15 @@ Empty → report NO_WORK and yield. Claim errors follow the injected retry/stop 
 
 ## Task
 
-1. Read the linked node's scope, acceptance criteria and stamped evidence, then its diff.
-2. Check requested behavior, evidence validity and scope, then material correctness, edge cases and clarity. Cover your assigned dimension and project policy; do not expand into redundant specialist passes.
+1. Read the linked node's scope, numbered acceptance criteria and stamped evidence, then its diff. For `dimension=plan`, read the epic's live `orc-node` descendants, scopes, dependency edges and acceptance hashes. For `dimension=override`, read the node's live acceptance hash.
+2. Check requested behavior, evidence validity and scope, then material correctness, edge cases and clarity. Cover exactly your assigned dimension and project policy; do not expand into redundant specialist passes.
 3. Write `REVIEW` or `BLOCKED` on the linked node, not merely the claimed wisp, as one line in exactly this shape:
 
        REVIEW <node-id> dimension=<dimension> verdict=approve|changes head_sha=<sha> review_round=<n>
 
    `<sha>` and `<n>` are your claimed wisp's `metadata.head_sha` and `metadata.review_round`, copied verbatim; when the wisp lacks one, take it from the node. The exit gate reads only a `REVIEW` carrying both tokens for the current head and round; `head <sha>` or a missing token is refused, and the refusal names the token and the expected value. Never reuse historical evidence for another version.
+
+   Your dimension adds one coverage token to the same line, and the exit gate refuses an approve without it: `dimension=code` on a feature carries `nodes=<id>:<hash>:met|unmet,…` for every id in `metadata.integrated`, each with the node's live acceptance hash; `dimension=plan` carries `plan=<hash>` equal to the recomputed live plan hash; `dimension=override` carries `override=<hash>` equal to the node's live acceptance hash.
 4. Your `REVIEW` comment is the review outcome: nobody stores it again as a label or state. Before closing or releasing the wisp, LOAD `skill://orchestrate/references/lifecycle.md`. Close the review wisp as required; the final approving reviewer makes the draft PR ready only after all required review dimensions approve.
 
 ## Rules

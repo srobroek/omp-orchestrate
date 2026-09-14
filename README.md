@@ -18,7 +18,7 @@ answers the questions it raises, and stops it. Agents claim their own work from 
    yields, it pushes its result to origin: a worker to `omp/task/<id>`, the architect to the
    feature branch it integrates those refs into. One PR per feature. OMP deletes a clone
    when its agent finishes; origin is the only store that outlives one.
-4. The plugin merges each approved PR at its reviewed head. No agent merges.
+4. The landing sweep merges each approved PR at its reviewed head, writes `LANDED`, and closes covered nodes plus an all-closed feature. No agent merges.
 5. Ten tool-call gates hold every agent to its claim and run-scoped protocol. The operator's writes
    are `start`, `answer`, and `stop`.
 
