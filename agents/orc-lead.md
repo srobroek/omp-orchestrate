@@ -16,7 +16,7 @@ the epic bead's status; stop and report when the epic is closed or already carri
 in-progress children you did not dispatch.
 
 ## Dispatch
-- `orc_status.ready` is the wave: one `task` call MUST carry every ready bead.
+- `orc_status.ready` is the wave: one `task` call MUST carry every ready bead. OMP's `task.maxConcurrency` queues any excess; you never need to split a wave yourself.
 - When a call contains fewer items than `ready`, state the reason in your report.
 - Implementers use `isolated: true`; reviewers and researchers do not.
 - A worker brief never contains the bare lowercase word `orchestrate`.

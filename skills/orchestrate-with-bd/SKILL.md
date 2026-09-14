@@ -49,7 +49,8 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
 
 ## Rules
 
-- MUST Dispatch all of `orc_status.ready` in one `task` call.
+- MUST Dispatch all of `orc_status.ready` in one `task` call. OMP's `task.maxConcurrency`
+  (per lead, default 32) queues the excess; set it to bound each lead's parallel workers.
 - MUST Wait for the whole `task` call to return before treating a wave as landed. NOT Re-read
   `orc_status` on the first result.
 - MUST Merge a landed wave before dispatching the review wave that follows it.

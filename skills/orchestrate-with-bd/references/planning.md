@@ -45,9 +45,11 @@ tiers: the lead dispatches the epics' tasks directly.
   The description names the scope (paths and symbols) and numbered acceptance criteria a
   reviewer can check without asking.
 - `bd dep add <task> <depends-on>` for an order two tasks must keep.
-- Every review bead depends on the task or tasks it reviews. One bead per task fans out to
-  one reviewer each; one bead spanning the wave gives one reviewer. Both surface as one
-  review wave when the tasks land.
+- Every review bead depends on the task or tasks it reviews. DEFAULT One review bead per
+  task: the review wave fans out to one reviewer each, in one `task` call. A single bead
+  spanning the wave gives one reviewer over every implementation. Choose it for a wave of two
+  or three beads whose interaction matters more than speed. Both surface as one review wave
+  when the tasks land.
 - Epic order is an epic-to-epic dependency: `bd dep add <epic-B> <epic-A>`. bd 1.2.2 refuses
   an epic-to-decision dependency, so a decision gates an epic through its tasks:
   `bd dep add <task> <decision>` for each task that needs it.
@@ -78,6 +80,11 @@ a bead, create the bead. A plan whose steps outnumber its beads is not approved 
 ```
 
 ## Dispatch
+
+Each lead has its own `task.maxConcurrency` (OMP setting, default 32). OMP runs at most that
+many workers at once and queues the rest of a wider `task` call. A
+three-tier run can hold up to `root cap × (1 + child cap)` agents. Set the cap with that
+product in mind; 6 to 8 suits a machine that also runs the human's session.
 
 1. `orc_status` → read `orc_status.ready` as the current wave and rewrite the `todo` list.
 2. Dispatch every ready bead in one `task` call. State a reason when the call carries fewer
