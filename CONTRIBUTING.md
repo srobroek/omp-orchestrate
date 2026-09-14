@@ -80,6 +80,9 @@ policy, dispatches epic leads.
 
 ## Tests
 
+End-to-end scenarios, the harness that runs them, and what each run showed are in
+[docs/testing.md](docs/testing.md).
+
 `bun test` runs `test/*.test.ts` with `test/preload.ts`. The preload moves the process into
 an empty temporary directory and clears `BEADS_DIR`. Suites that need a repository path use
 `import.meta.dir`. `test/index.test.ts` drives the extension factory with a recording stub

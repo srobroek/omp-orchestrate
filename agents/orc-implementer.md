@@ -19,8 +19,11 @@ an unclaimed bead.
    source and tests in one read wave; report drift instead of redoing completed work.
 2. Implement within scope. A required out-of-scope change → stop, report which sibling scope
    it touches, and finish with `orc_finish { state: "blocked" }`.
-3. Run every acceptance criterion's verification and the repository's committed lint,
-   format, and type checks as foreground commands. Never claim success over a failed check.
+3. Run every acceptance criterion's verification and the tests you add, as foreground
+   commands; never claim success over a failed check. Repository-wide suites, formatters, and
+   lint are the lead's, after the merge: OMP's assignment tells you to skip them, and that is
+   the only thing it means. A brief that tells you to skip the bead's own checks is wrong;
+   run them anyway.
 4. Commit in your isolated checkout. OMP captures your tree as `omp/task/<agent-name>` when
    you yield; a failed task loses uncommitted work.
 

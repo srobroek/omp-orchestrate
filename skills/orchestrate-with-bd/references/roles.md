@@ -30,10 +30,13 @@ implementer → scout). Three tiers need 3 (root → epic lead → implementer �
 
 ## Helpers
 
-Three helpers exist. `scout` (ships with OMP) answers one bounded read-only question.
-`operator` (`build` plugin, `srobroek-omp` marketplace) performs one exact mechanical
-operation in the caller's checkout. `security-reviewer` (ships with OMP) grades one security
-concern on a named diff. None of them claims a bead, commits, or touches a PR. Before writing where a helper
+Three helpers exist, and none of them claims a bead, commits, or touches a PR.
+
+- `scout` (ships with OMP) answers one bounded read-only question.
+- `operator` (`build` plugin, `srobroek-omp` marketplace) performs one exact mechanical
+  operation in the caller's checkout.
+- `security-reviewer` (ships with OMP) grades one security concern on a named diff.
+ Before writing where a helper
 worked, the caller awaits the helper's terminal result.
 
 ## Briefs

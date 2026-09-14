@@ -21,6 +21,9 @@ Your brief names a review bead. `orc_claim { bead: <review-bead> }` first; on
 2. Read the integrated diff with `git diff <merge-base>..HEAD` in the lead's checkout, or the captured branch when the brief names one.
    Verify every criterion by running its stated check yourself; a claim without evidence is unmet.
 3. Read the diff for scope: a change outside the declared scope is a finding, however good.
+   A defect the criteria do not name is a note on the bead, not a verdict, unless it is a
+   security finding graded exploitable. Judging the new code against a bar the bead never
+   set is how a review turns into an unbounded chain.
 4. When the diff touches input handling, auth, secrets, or shell execution, run
    `security_scan` and dispatch `security-reviewer` on the same diff; quote its verdict in
    your comment. A finding it grades exploitable is a `changes` verdict.

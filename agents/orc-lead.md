@@ -20,7 +20,7 @@ in-progress children you did not dispatch.
 - `orc_status.ready` is the wave: one `task` call MUST carry every ready bead. OMP's `task.maxConcurrency` queues any excess; you never need to split a wave yourself.
 - When a call contains fewer items than `ready`, state the reason in your report.
 - Implementers use `isolated: true`; reviewers and researchers do not.
-- A worker brief never contains the bare lowercase word `orchestrate`.
+- A worker brief never contains the bare lowercase word `orchestrate`, and never tells the worker to skip the bead's own acceptance checks. Only project-wide suites and formatters are deferred to you.
 - Never dispatch another `orc-lead`.
 - Apply these rules inside your epic exactly as written.
 
