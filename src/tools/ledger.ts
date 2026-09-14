@@ -179,7 +179,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_status",
 		label: "Run status",
 		description:
-			"Read the run epic's whole subtree from Beads. `ready` is the wave and one `task` call dispatches all of it: unblocked, unassigned tasks under the epic (two-tier), or the child epics that are unblocked, not yet bound by a lead, and hold at least one ready task, one `orc-lead` each (three-tier). Binding marks the epic in_progress. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
+			"Read the run epic's whole subtree from Beads. `ready` is the wave and one `task` call dispatches all of it: unblocked, unassigned tasks under the epic (two-tier), or the child epics that are unblocked, not yet bound by a lead, and hold at least one ready task, one `orc-lead` each (three-tier). Binding claims the epic for this lead's actor; an epic another actor holds refuses to bind. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
 		approval: "read",
 		parameters: statusParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<StatusResult | undefined>> {
@@ -202,11 +202,18 @@ export function registerLedger(pi: ExtensionAPI): void {
 			// The epic must exist before anything is bound: `bd list --parent <typo>` exits 0
 			// with `[]`, which would otherwise persist a typo as an empty successful run.
 			let epicBead = await bdShow(epic, root);
-			if (locator === null && epicBead.status === "open") {
-				// Binding marks the epic in progress. `bd ready` excludes in_progress issues, so
-				// a root's `ready` no longer lists an epic whose lead is already running.
-				await bdJson(["update", epic, "--status", "in_progress", "--json"], root, { BEADS_ACTOR: actorFor(ctx) });
-				epicBead = await bdShow(epic, root);
+			if (locator === null) {
+				// Binding claims the epic: Beads' atomic assignee is the ownership record, so two
+				// leads cannot bind one epic, and `bd ready --unassigned` drops it for the root.
+				const actor = actorFor(ctx);
+				const env = { BEADS_ACTOR: actor };
+				if (!epicBead.assignee) await bdJson(["update", epic, "--claim", "--json"], root, env).catch(() => undefined);
+				epicBead = await bdShow(epic, root, env);
+				if (epicBead.assignee !== actor) {
+					const holder = epicBead.assignee ?? "(unassigned)";
+					const message = `epic ${epic} is held by ${holder}; a lead binds only the epic it claims`;
+					return text<StatusResult>({ run: null, store, beads: [], todo: [], message }, message, true);
+				}
 			}
 			// Idempotent for a bound run (and adds the `.orchestration/.gitignore` a locator
 			// written by another tool may lack: an untracked, non-ignored file in the primary

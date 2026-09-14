@@ -5,7 +5,7 @@ Six agents ship with the plugin. Every model is a role name OMP resolves through
 
 | Agent | Model | `isolated` | Spawns | Claims |
 |---|---|---|---|---|
-| `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator | never |
+| `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator | its epic, at bind |
 | `orc-planner` | `@plan` | no | none (`spawns: false`) | never |
 | `orc-implementer` | `@task` | yes | scout, operator | its task bead |
 | `orc-reviewer` | `@reviewer` | no | scout | its review bead |
