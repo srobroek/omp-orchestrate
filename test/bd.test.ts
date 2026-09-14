@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { asBead, bdList, bdShow, metadataRecord, parsePayload } from "../src/bd";
-import { readyWave } from "../src/dag";
+import { readyWave, tierOf, waveItem } from "../src/dag";
 
 describe("parsePayload", () => {
 	test("skips a warning line printed before the payload", () => {
@@ -169,5 +169,29 @@ describe("bdList", () => {
 		expect(bdList([], "/tmp")).rejects.toThrow("no JSON array");
 		answer('[{"id":"a"},{"title":"no id"}]');
 		expect(bdList([], "/tmp")).rejects.toThrow("without an id");
+	});
+});
+
+describe("waveItem", () => {
+	const bead = (over: Record<string, unknown>) => ({ id: "e-1", title: "t", issue_type: "task", ...over }) as Parameters<typeof waveItem>[0];
+
+	test("tier: missing is basic, unrecognised is deep, never routes hard work down", () => {
+		expect(tierOf(undefined)).toBe("basic");
+		expect(tierOf({ tier: "" })).toBe("basic");
+		expect(tierOf({ tier: "max" })).toBe("max");
+		expect(tierOf({ tier: "MAX" })).toBe("deep");
+		expect(tierOf({ tier: 3 })).toBe("deep");
+	});
+
+	test("routes by issue type, role, and tier; implementers and leads isolated, judging roles not", () => {
+		expect(waveItem(bead({ issue_type: "epic" }))).toMatchObject({ role: "lead", agent: "orc-lead", isolated: true });
+		expect(waveItem(bead({}))).toMatchObject({ role: "implementer", tier: "basic", agent: "orc-implementer", isolated: true });
+		expect(waveItem(bead({ metadata: { tier: "deep" } }))).toMatchObject({ tier: "deep", agent: "orc-implementer-deep", isolated: true });
+		expect(waveItem(bead({ metadata: '{"tier":"max","role":"implementer"}' }))).toMatchObject({ tier: "max", agent: "orc-implementer-max" });
+		expect(waveItem(bead({ metadata: { role: "reviewer", tier: "max" } }))).toMatchObject({ role: "reviewer", agent: "orc-reviewer", isolated: false });
+		expect(waveItem(bead({ metadata: { role: "reviewer" } })).tier).toBeUndefined();
+		expect(waveItem(bead({ metadata: { role: "researcher" } }))).toMatchObject({ agent: "orc-researcher", isolated: false });
+		expect(waveItem(bead({ metadata: { role: "shepherd" } }))).toMatchObject({ agent: "orc-shepherd", isolated: false });
+		expect(waveItem(bead({ metadata: { role: "unknown-role" } }))).toMatchObject({ role: "unknown-role", agent: "orc-implementer" });
 	});
 });

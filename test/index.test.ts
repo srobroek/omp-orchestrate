@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import orchestrateWithBd, { mutatesStore, runHeader, storeMutationBlock } from "../src/index";
+import orchestrateWithBd, { mutatesStore, routeDispatch, runHeader, STOP_REFUSAL, storeMutationBlock } from "../src/index";
 import { mentionsOrchestrate } from "../src/keyword";
 import { readLocator, writeLocator } from "../src/run";
 import { NO_STORE, NOT_SERVER_MODE, storeRefusal } from "../src/tools/ledger";
@@ -117,7 +117,7 @@ describe("before_agent_start", () => {
 	async function header(root: string, prompt: string): Promise<unknown> {
 		const { pi, seen } = recordingApi();
 		orchestrateWithBd(pi);
-		const ctx = { cwd: root, sessionManager: { getSessionId: () => "sess-2" } };
+		const ctx = { cwd: root, sessionManager: { getSessionId: () => "sess-2" }, models: { resolve: () => ({ id: "m" }) } };
 		let result: unknown;
 		for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) {
 			result = await handler({ type: "before_agent_start", prompt }, ctx);
@@ -174,6 +174,8 @@ describe("store mutation gate in a stopped session", () => {
 		expect(storeMutationBlock("bash", { command: "bd init --shared-server" })?.block).toBe(true);
 		expect(storeMutationBlock("write", { path: "/r/.beads/metadata.json", content: "{}" })?.block).toBe(true);
 		expect(storeMutationBlock("task", { tasks: [] })?.block).toBe(true);
+		expect(storeMutationBlock("orc_claim", { bead: "x" })?.reason).toBe(STOP_REFUSAL);
+		expect(storeMutationBlock("task", { tasks: [] }, "roles missing")?.reason).toBe("roles missing");
 		expect(storeMutationBlock("bash", { command: "bd list --json" })?.block).toBe(true);
 		expect(storeMutationBlock("bash", { command: "git status" })).toBeUndefined();
 		expect(storeMutationBlock("read", { path: "/r/.beads/metadata.json" })).toBeUndefined();
@@ -182,17 +184,43 @@ describe("store mutation gate in a stopped session", () => {
 	test("only a session that received the STOP header is gated; a server-mode session is not", async () => {
 		const { pi, seen } = recordingApi();
 		orchestrateWithBd(pi);
-		const run = async (root: string, sessionId: string) => {
-			const ctx = { cwd: root, sessionManager: { getSessionId: () => sessionId } };
-			for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) await handler({ type: "before_agent_start", prompt: "orchestrate epic x" }, ctx);
+		const resolveAll = { resolve: () => ({ id: "m" }) };
+		const run = async (root: string, sessionId: string, models: { resolve(spec: string): unknown } = resolveAll, toolName = "bash") => {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => sessionId }, models };
+			let header: string | undefined;
+			for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) header = ((await handler({ type: "before_agent_start", prompt: "orchestrate epic x" }, ctx)) as { message?: { content?: string } } | undefined)?.message?.content;
 			let result: unknown;
-			for (const handler of seen.eventHandlers.get("tool_call") ?? []) result = await handler({ type: "tool_call", toolName: "bash", input: { command: "bd init --shared-server --reinit-local" } }, ctx);
-			return result as { block?: boolean; input?: unknown } | undefined;
+			for (const handler of seen.eventHandlers.get("tool_call") ?? []) result = await handler({ type: "tool_call", toolName, input: toolName === "bash" ? { command: "bd init --shared-server --reinit-local" } : { tasks: [] } }, ctx);
+			return { header, result: result as { block?: boolean; reason?: string; input?: unknown } | undefined };
 		};
-		expect((await run(fixture("embedded"), "stopped-1"))?.block).toBe(true);
+		expect((await run(fixture("embedded"), "stopped-1")).result?.block).toBe(true);
 		const ok = await run(fixture("server"), "live-1");
-		expect(ok?.block).toBeUndefined();
-		expect((ok?.input as { env: { BEADS_ACTOR: string } }).env.BEADS_ACTOR).toBe("omp/live-1");
+		expect(ok.result?.block).toBeUndefined();
+		expect(ok.header).toContain("skill://orchestrate-with-bd");
+		expect((ok.result?.input as { env: { BEADS_ACTOR: string } }).env.BEADS_ACTOR).toBe("omp/live-1");
+	});
+
+	test("a server-mode session whose agents name an unresolvable alias gets the roles STOP and refuses dispatch", async () => {
+		const { pi, seen } = recordingApi();
+		orchestrateWithBd(pi);
+		const ctx = {
+			cwd: fixture("server"),
+			sessionManager: { getSessionId: () => "roles-1" },
+			models: { resolve: (spec: string) => (spec === "@slow" ? undefined : { id: "m" }) },
+		};
+		let header = "";
+		for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) header = ((await handler({ type: "before_agent_start", prompt: "orchestrate epic x" }, ctx)) as { message?: { content?: string } } | undefined)?.message?.content ?? "";
+		expect(header).toContain("STOP.");
+		expect(header).toContain("@slow (orc-implementer-max, orc-reviewer)");
+		expect(header).toContain("modelRoles.slow");
+		expect(header).not.toContain("skill://orchestrate-with-bd");
+		let result: { block?: boolean; reason?: string } | undefined;
+		for (const handler of seen.eventHandlers.get("tool_call") ?? []) result = (await handler({ type: "tool_call", toolName: "task", input: { tasks: [] } }, ctx)) as typeof result;
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("@slow");
+		// A read stays allowed: only dispatch, the ledger, bd, and .beads/ writes are refused.
+		for (const handler of seen.eventHandlers.get("tool_call") ?? []) result = (await handler({ type: "tool_call", toolName: "read", input: { path: "x" } }, ctx)) as typeof result;
+		expect(result).toBeUndefined();
 	});
 });
 
@@ -385,5 +413,41 @@ describe("store mode refusal", () => {
 		expect(storeRefusal(fixture("embedded"))).toBe(NOT_SERVER_MODE);
 		expect(storeRefusal(fixture(null))).toContain(NO_STORE);
 		expect(NOT_SERVER_MODE).toContain("bd init --shared-server --reinit-local");
+	});
+});
+
+describe("routeDispatch", () => {
+	const wave = new Map([
+		["e-1.1", { bead: "e-1.1", title: "a", role: "implementer", tier: "basic" as const, agent: "orc-implementer", isolated: true }],
+		["e-1.2", { bead: "e-1.2", title: "b", role: "implementer", tier: "deep" as const, agent: "orc-implementer-deep", isolated: true }],
+		["e-1.10", { bead: "e-1.10", title: "r", role: "reviewer", agent: "orc-reviewer", isolated: false }],
+	]);
+
+	test("an item naming one wave bead gets that entry's agent and isolation; others are untouched", () => {
+		const input = {
+			tasks: [
+				{ name: "A", agent: "orc-implementer", isolated: true, task: "Bead e-1.1: add subtract" },
+				{ name: "B", agent: "orc-implementer", isolated: true, task: "Bead e-1.2: add safeDivide" },
+				{ name: "R", agent: "orc-implementer", task: "Review bead e-1.10 against the merged diff" },
+				{ name: "H", agent: "scout", task: "where is OPERATIONS defined?" },
+			],
+		};
+		const routed = routeDispatch(input, wave) as { tasks: Array<Record<string, unknown>> };
+		expect(routed.tasks[0]).toEqual(input.tasks[0]);
+		expect(routed.tasks[1]).toMatchObject({ agent: "orc-implementer-deep", isolated: true });
+		expect(routed.tasks[2]).toMatchObject({ agent: "orc-reviewer", isolated: false });
+		expect(routed.tasks[3]).toEqual(input.tasks[3]);
+	});
+
+	test("bead ids match whole, so e-1.1 does not claim an item about e-1.10, and a brief naming two beads is left alone", () => {
+		expect(routeDispatch({ tasks: [{ agent: "orc-implementer", task: "e-1.10 only" }] }, wave)).toMatchObject({ tasks: [{ agent: "orc-reviewer" }] });
+		expect(routeDispatch({ tasks: [{ agent: "orc-implementer", task: "e-1.1 and e-1.2 together" }] }, wave)).toBeUndefined();
+	});
+
+	test("nothing to change, an empty wave, or a non-object input returns undefined; the single-item shape is routed too", () => {
+		expect(routeDispatch({ tasks: [{ agent: "orc-implementer-deep", isolated: true, task: "e-1.2" }] }, wave)).toBeUndefined();
+		expect(routeDispatch({ tasks: [{ agent: "orc-implementer", task: "e-1.2" }] }, new Map())).toBeUndefined();
+		expect(routeDispatch("x", wave)).toBeUndefined();
+		expect(routeDispatch({ agent: "orc-implementer", task: "e-1.2" }, wave)).toMatchObject({ agent: "orc-implementer-deep", isolated: true });
 	});
 });

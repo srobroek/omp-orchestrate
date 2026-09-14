@@ -1,16 +1,76 @@
 # Roles
 
-Six agents ship with the plugin. Every model is a role name OMP resolves through
-`modelRoles`; an agent with no `tools:` line inherits the whole inventory, including `task`.
+Eight agents ship with the plugin. Every model is one of OMP's built-in role aliases, so a
+fresh install needs no `modelRoles` entry. An agent with no `tools:` line inherits the whole
+inventory, including `task`.
 
 | Agent | Model | `isolated` | Spawns | Claims |
 |---|---|---|---|---|
-| `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator | its epic, at bind |
+| `orc-lead` | `@plan` | yes | planner, the three implementers, reviewer, researcher, shepherd, scout, operator | its epic, at bind |
 | `orc-planner` | `@plan` | no | none (`spawns: false`) | never |
-| `orc-implementer` | `@task` | yes | scout, operator | its task bead |
-| `orc-reviewer` | `@reviewer` | no | scout, security-reviewer | its review bead |
+| `orc-implementer` (basic) | `@task` | yes | scout, operator | its task bead |
+| `orc-implementer-deep` | `@plan` | yes | scout, operator | its task bead |
+| `orc-implementer-max` | `@slow` | yes | scout, operator | its task bead |
+| `orc-reviewer` | `@slow` | no | scout, security-reviewer | its review bead |
 | `orc-researcher` | `@smol` | no | none | its research bead |
 | `orc-shepherd` | `@task` | no | none | its PR bead |
+
+## Implementer tiers
+
+The planner marks a task bead `--metadata tier=<basic|deep|max>`. `orc_status.wave` names
+the tier and its agent. The lead dispatches that agent. A missing tier is `basic`. An
+unrecognised value is `deep`, so a malformed mark never routes hard work down.
+
+| Tier | Test the planner applies | Agent |
+|---|---|---|
+| `basic` | mechanical or pattern-following, criteria fully specified, no design decision | `orc-implementer` |
+| `deep` | judgment inside a fixed scope (see the list below) | `orc-implementer-deep` |
+| `max` | being wrong is expensive: a migration, an irreversible operation, a contract every epic depends on | `orc-implementer-max` |
+
+`deep` covers work that needs judgment inside its scope:
+
+- a hidden algorithm or invariant;
+- a surface that handles untrusted input or secrets;
+- a surface that handles authentication or the shell;
+- a contract other beads consume;
+- concurrency or error semantics.
+
+A bead that is not bounded (files unnamed, criteria not verifiable) has no tier. Split it, or
+add a `decision` or research bead. `deep` and `max` together stay a minority of a DAG. A DAG
+that is mostly `deep` is under-decomposed. If `@plan` and `@slow` resolve to the same model,
+the two upper tiers share one model until `modelRoles.slow` differs from `plan`.
+
+## Model overrides
+
+Remap any agent without touching the plugin through OMP's own per-agent setting:
+
+```yaml
+task:
+  agentModelOverrides:
+    orc-reviewer: "@reviewer"          # a custom alias you define in modelRoles
+    orc-implementer-max: "openai/gpt-5.6-sol:high"
+```
+
+## Model-role preflight
+
+When a prompt says `orchestrate`, the plugin resolves every alias the shipped agents name
+through OMP's resolver. Without this check, an alias with no callable model makes OMP run
+that agent on the caller's model without notice. Causes: no credentials for the role's
+providers, or a role pinned to a model this machine cannot call.
+
+On a failure the header says STOP and names:
+
+- the alias and the agents that name it;
+- the `modelRoles.<role>` key to set.
+
+Until a new session starts, the session refuses:
+
+- `task`;
+- the ledger tools;
+- `bd`;
+- `.beads/` writes.
+ The preflight reads the shipped frontmatter, not `task.agentModelOverrides`.
+An override that names a broken alias is outside its sight.
 
 ## Enforcement that is not prose
 
