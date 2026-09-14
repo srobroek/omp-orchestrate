@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type BdBead, bdJson, bdShow } from "../bd";
-import { beadIds, descendants, readStoreMode, todoStrings } from "../dag";
+import { beadIds, descendants, readStoreMode, runShape, todoStrings } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
 /**
@@ -40,6 +40,8 @@ export interface StatusResult {
 	run: string | null;
 	/** The run epic itself, so a lead can see its status without a second read. */
 	epic?: BdBead;
+	/** `three-tier` when a direct child of the epic is an epic (one `orc-lead` each), else `two-tier`. */
+	shape?: "two-tier" | "three-tier";
 	store: string;
 	beads: BdBead[];
 	todo: string[];
@@ -142,7 +144,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_status",
 		label: "Run status",
 		description:
-			"Read the run epic's whole subtree from Beads. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
+			"Read the run epic's whole subtree from Beads. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise (dispatch workers directly). Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
 		approval: "read",
 		parameters: statusParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<StatusResult | undefined>> {
@@ -172,11 +174,12 @@ export function registerLedger(pi: ExtensionAPI): void {
 			const walk = await descendants(epic, root);
 			statusIdsBySession.set(ctx.sessionManager.getSessionId(), beadIds(walk.beads));
 			const todo = todoStrings(walk.beads);
-			const result: StatusResult = { run: epic, epic: epicBead, store, beads: walk.beads, todo };
+			const shape = runShape(epic, walk.beads);
+			const result: StatusResult = { run: epic, epic: epicBead, shape, store, beads: walk.beads, todo };
 			if (walk.truncated) result.truncated = true;
 			return text(
 				result,
-				`orc_status ${epic} (${epicBead.status ?? "?"}): ${walk.beads.length} beads, ${todo.length} open${walk.truncated ? " (truncated)" : ""}\n${todo.join("\n")}`,
+				`orc_status ${epic} (${epicBead.status ?? "?"}, ${shape}): ${walk.beads.length} beads, ${todo.length} open${walk.truncated ? " (truncated)" : ""}\n${todo.join("\n")}`,
 			);
 		},
 	});

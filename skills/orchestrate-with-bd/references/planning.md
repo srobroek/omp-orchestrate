@@ -21,6 +21,12 @@ epic lead receives the same run header. Each epic lead runs the two-tier shape i
 clone; its final tree is captured as the epic branch, and the root merges the epic branches.
 `maxRecursionDepth` is 2 for two tiers and 3 for three.
 
+The DAG decides which shape applies, and `orc_status.shape` reports it: `three-tier` when a
+direct child of the run epic is itself an epic, `two-tier` otherwise. No separate human
+switch exists; the plan the human approved (its `## Beads` section names the child epics or
+does not) is the input. To force two tiers over a multi-epic DAG, say so in the prompt and
+the lead dispatches the epics' tasks directly.
+
 ## Write the DAG
 
 - One epic per independent deliverable. `bd create --type epic --title <t>`.

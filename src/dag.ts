@@ -64,6 +64,21 @@ export function todoStrings(beads: readonly BdBead[]): string[] {
 	return out;
 }
 
+/**
+ * The run shape the DAG implies: three tiers when any direct child of the run epic is
+ * itself an epic (one `orc-lead` per child epic), two tiers otherwise (workers dispatched
+ * directly). Derived from Beads, never from a flag, so the plan the human approved is the
+ * human input.
+ */
+export function runShape(epic: string, beads: readonly BdBead[]): "two-tier" | "three-tier" {
+	const childEpic = beads.some(bead => {
+		if (bead.issue_type !== "epic") return false;
+		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
+		return deps.some(dep => dep !== null && typeof dep === "object" && "depends_on_id" in dep && dep.depends_on_id === epic && "type" in dep && dep.type === "parent-child");
+	});
+	return childEpic ? "three-tier" : "two-tier";
+}
+
 export function beadIds(beads: readonly BdBead[]): Set<string> {
 	return new Set(beads.map(bead => bead.id));
 }
