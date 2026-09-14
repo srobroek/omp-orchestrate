@@ -42,11 +42,12 @@ import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BdBead } from "../bd";
-import { bdCommentsChecked, bdFailureText, bdList, bdShow, bdShowMany, commentVerb, lastBdFailure, metadataRecord, metadataString } from "../bd";
+import { bdCommentsChecked, bdFailureText, bdList, bdListChecked, bdShow, bdShowMany, commentVerb, lastBdFailure, metadataRecord, metadataString } from "../bd";
 import type { ClaimState } from "../claim-state";
 import { beadRouting, legacyRoleFromLabel, orcRole, ROUTING_KEY } from "../identity";
 import { runScope } from "../run-scope";
 import { scopeOf, scopesOverlap } from "../scope";
+import { nativeSecurityScanMatches } from "../security-evidence";
 import { BD_VALUE_FLAGS, type BdInvocation, bdInvocations, effectiveSegments, splitFlag } from "../shell";
 import { writesBeads } from "./bd";
 import { resourceKind } from "./exit";
@@ -161,6 +162,13 @@ interface MetadataWrite {
  keys: string[];
 }
 
+function opaqueMetadataWrite(write: MetadataWrite): boolean {
+ return write.operand === undefined
+  || write.keys.length === 0
+  || write.operand.startsWith("@")
+  || write.keys.some(key => !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key));
+}
+
 /**
  * Every metadata write this invocation performs.
  *
@@ -234,31 +242,146 @@ function routingWriteDenial(
  };
 }
 
-/** The metadata key the landing sweep stamps when a merge lands; the close check below reads it as proof. */
+/** Keep the architect's checker list immutable and bind pass results to observed execution. */
+function qualityCommandWriteDenial(invocation: BdInvocation, claims: ClaimState, sessionRoleName: string | undefined): ToolCallEventResult | undefined {
+ const writes = metadataWrites(invocation);
+ const commandsWrite = writeOf(invocation, "quality_commands");
+ const resultsWrite = writeOf(invocation, "quality_results");
+ if (sessionRoleName === undefined) return commandsWrite === undefined && resultsWrite === undefined ? undefined : { block: true, reason: "Roleless sessions may not author task quality commands or results." };
+ if (sessionRoleName !== "implementer") {
+  if (resultsWrite !== undefined) return { block: true, reason: `metadata.quality_results is written only by the claimed implementer after observed command success; ${sessionRoleName} may not author it.` };
+  return commandsWrite === undefined || sessionRoleName === "architect" ? undefined : { block: true, reason: `metadata.quality_commands is architect-owned; ${sessionRoleName} may not rewrite it.` };
+ }
+ const opaque = writes.find(opaqueMetadataWrite);
+ if (opaque !== undefined) return { block: true, reason: `Opaque '${opaque.flag} ${opaque.operand ?? ""}' could replace architect-owned metadata.quality_commands. Use explicit --set-metadata quality_results=<json>; implementers may not submit uninspectable metadata payloads.` };
+ const targets = claimTargets(invocation);
+ const claim = claims.observedClaim();
+ if (resultsWrite !== undefined && (targets.length !== 1 || claim?.beadIds.length !== 1 || claim.beadIds[0] !== targets[0])) return { block: true, reason: "metadata.quality_results may be written only on the sole bead held by this implementer claim." };
+ for (const write of writes) {
+  if (write.flag === "--unset-metadata" || write.operand === undefined) continue;
+  const resultValue = metadataPairs(write.operand).find(([key]) => key === "quality_results")?.[1];
+  if (resultValue === undefined) continue;
+  if (/[$`]/.test(write.operand)) return { block: true, reason: "metadata.quality_results cannot contain shell expansion; use one literal JSON object after each exact command succeeds." };
+  let results: unknown = resultValue;
+  if (typeof results === "string") {
+   try { results = JSON.parse(results) as unknown; } catch { return { block: true, reason: "metadata.quality_results must be an inspectable literal JSON object; shell-expanded or malformed values cannot prove execution." }; }
+  }
+  if (results === null || typeof results !== "object" || Array.isArray(results)) return { block: true, reason: "metadata.quality_results must be a literal JSON object mapping exact commands to results." };
+  const record = results as Record<string, unknown>;
+  const unproven = Object.entries(record).find(([command, result]) => result === "pass" && (targets.length !== 1 || !claims.ranSuccessfully(targets[0] as string, command)));
+  if (unproven !== undefined) return { block: true, reason: `metadata.quality_results may record pass for '${unproven[0]}' only after this claimed session runs that exact standalone command successfully.` };
+ }
+ if (commandsWrite === undefined) return undefined;
+ return { block: true, reason: `'${commandsWrite}' rewrites metadata.quality_commands, the architect-owned checker list. Record only metadata.quality_results. If the list is absent or wrong, park with ASK and give the architect the discovered exact commands.` };
+}
+
+function exactEvidenceToken(text: string, key: string, expected: string): boolean {
+ const values = text.split(/\s+/).filter(token => token.startsWith(`${key}=`)).map(token => token.slice(key.length + 1));
+ return values.length === 1 && values[0] === expected;
+}
+
+function metadataValuesWritten(invocation: BdInvocation, key: string): unknown[] {
+ const values: unknown[] = [];
+ for (const write of metadataWrites(invocation)) {
+  if (write.flag === "--unset-metadata" || write.operand === undefined) continue;
+  for (const [name, value] of metadataPairs(write.operand)) if (name === key) values.push(value);
+ }
+ return values;
+}
+
+async function reviewApprovalFailure(epic: BdBead, candidate: string, architectActor: string, cwd: string): Promise<string | undefined> {
+ const rawDimensions = epic.metadata?.review_dimensions;
+ const dimensions = Array.isArray(rawDimensions) && rawDimensions.every(value => typeof value === "string" && value.length > 0) ? [...new Set(rawDimensions as string[])] : [];
+ const round = metadataString(epic, "review_round");
+ if (dimensions.length === 0 || !dimensions.some(dimension => dimension.startsWith("baseline:")) || round === undefined) return "review_dimensions needs at least one baseline shard and review_round";
+ const targetId = metadataString(epic, "target_epic");
+ const target = targetId === undefined ? epic : await bdShow(targetId);
+ if (target === null) return `policy target ${targetId} could not be read`;
+ const securityRequired = metadataString(epic, "security_review") === "required" || metadataString(target, "security_review") === "required";
+ if (securityRequired && !dimensions.includes("security")) return "security review is required but not enumerated";
+ const children = await bdListChecked(["list", "--parent", epic.id, "--status", "all", "--include-infra", "--include-gates", "--limit", "0", "--json"]);
+ const comments = await bdCommentsChecked(epic.id);
+ if (children === null || comments === null) return "review evidence could not be read";
+ const reviewers = new Set<string>();
+ for (const dimension of dimensions) {
+  const wisp = children.find(child => child.ephemeral === true && metadataString(child, "role") === "reviewer" && metadataString(child, "dimension") === dimension && metadataString(child, "head_sha") === candidate && metadataString(child, "review_round") === round);
+  const reviewer = wisp?.assignee;
+  const scanRef = wisp === undefined ? undefined : metadataString(wisp, "security_scan_ref");
+  const matching = reviewer === undefined ? [] : comments.filter(comment => comment.author === reviewer && (commentVerb(comment.text) === "REVIEW" || commentVerb(comment.text) === "BLOCKED") && exactEvidenceToken(comment.text, "dimension", dimension) && exactEvidenceToken(comment.text, "head_sha", candidate) && exactEvidenceToken(comment.text, "review_round", round));
+  let approved = matching.length === 1 && commentVerb(matching[0]!.text) === "REVIEW" && exactEvidenceToken(matching[0]!.text, "verdict", "approve") && (dimension !== "security" || (scanRef !== undefined && metadataString(wisp as BdBead, "base_sha") !== undefined && metadataString(wisp as BdBead, "security_scan_head") === candidate && metadataString(epic, "security_scan_ref") === scanRef && metadataString(epic, "security_scan_head") === candidate && exactEvidenceToken(matching[0]!.text, "security_scan_ref", scanRef)));
+  if (approved && dimension === "security") approved = scanRef !== undefined && await nativeSecurityScanMatches(scanRef, cwd, metadataString(wisp as BdBead, "base_sha") ?? "", candidate);
+  if (wisp === undefined || wisp.status !== "closed" || !approved || reviewer === undefined || reviewer === architectActor || reviewers.has(reviewer)) return `dimension ${dimension} lacks one closed, independently authored, exact-head approve verdict`;
+  reviewers.add(reviewer);
+ }
+ return undefined;
+}
+
+/** A refresh architect may promote only the immutable candidate approved by every independent reviewer wisp. */
+async function refreshPromotionDenial(invocation: BdInvocation, invocations: BdInvocation[], claims: ClaimState, sessionRoleName: string | undefined, cwd: string): Promise<ToolCallEventResult | undefined> {
+ const writes = metadataWrites(invocation);
+ const opaque = writes.some(opaqueMetadataWrite);
+ const headTouched = writes.some(write => write.keys.includes("head_sha"));
+ if (!headTouched) return undefined;
+ const targets = claimTargets(invocation);
+ if (targets.length !== 1) return { block: true, reason: "Architect head metadata writes require one inspectable target." };
+ const merge = await bdShow(targets[0] as string);
+ if (merge === null) return { block: true, reason: `Target ${targets[0]} could not be read; architect head write fails closed.` };
+ const landingState = metadataString(merge, "landing_state");
+ if (landingState !== "refreshing" && landingState !== "refreshed") return undefined;
+ if (sessionRoleName !== "architect") return { block: true, reason: `Only the live refresh architect may stamp head_sha while merge ${merge.id} is in ${landingState} state.` };
+ const refreshId = metadataString(merge, "landing_refresh");
+ const claim = claims.observedClaim();
+ if (refreshId === undefined || claim?.beadIds.length !== 1 || claim.beadIds[0] !== refreshId) {
+  return { block: true, reason: `Merge ${merge.id} is in ${landingState} state; only its live claimed refresh architect may promote the head.` };
+ }
+ const epic = await bdShow(refreshId);
+ if (epic === null || epic.status !== "in_progress" || epic.assignee !== claim.actor || metadataString(epic, "stage") !== "review-refresh" || metadataString(epic, "origin_bead") !== merge.id) {
+  return { block: true, reason: `Refresh authorization ${refreshId} is not actively assigned to this architect or does not own merge ${merge.id}.` };
+ }
+ if (invocations.length !== 1) return { block: true, reason: `Refresh epic ${epic.id} must promote its reviewed head in one standalone bd update; batching can change review evidence before the promotion executes.` };
+ const candidate = metadataString(merge, "refresh_candidate");
+ const promoted = metadataValuesWritten(invocation, "head_sha");
+ if (opaque || candidate === undefined || metadataString(epic, "head_sha") !== candidate || promoted.length !== 1 || String(promoted[0]) !== candidate) {
+  return { block: true, reason: `Refresh epic ${epic.id} may stamp exactly one head_sha equal to merge ${merge.id}'s immutable refresh_candidate; opaque, duplicate or different writes are refused.` };
+ }
+ const approvalFailure = await reviewApprovalFailure(epic, candidate, claim.actor, cwd);
+ if (approvalFailure !== undefined) return { block: true, reason: `Refresh epic ${epic.id} cannot promote ${candidate}: ${approvalFailure}.` };
+ return undefined;
+}
+
+async function refreshEvidenceWriteDenial(invocation: BdInvocation, claims: ClaimState, sessionRoleName: string | undefined): Promise<ToolCallEventResult | undefined> {
+ if (sessionRoleName !== "architect") return undefined;
+ const writes = metadataWrites(invocation);
+ const keys = new Set(writes.flatMap(write => write.keys));
+ const relevant = ["origin_bead", "target_epic", "repo", "pr", "branch", "base_sha", "head_sha", "security_review", "execution_kind", "review_dimensions", "review_round"].some(key => keys.has(key));
+ if (!relevant) return undefined;
+ const targets = claimTargets(invocation);
+ if (targets.length !== 1) return undefined;
+ const epic = await bdShow(targets[0] as string);
+ if (epic === null || metadataString(epic, "stage") !== "review-refresh") return undefined;
+ if (writes.some(opaqueMetadataWrite)) return { block: true, reason: `Refresh epic ${epic.id} metadata writes must use explicit literal keys.` };
+ const immutable = ["origin_bead", "target_epic", "repo", "pr", "branch", "base_sha", "head_sha", "security_review", "execution_kind"].find(key => keys.has(key));
+ if (immutable !== undefined) return { block: true, reason: `Refresh epic ${epic.id} metadata.${immutable} is landing-owned and immutable.` };
+ const claim = claims.observedClaim();
+ if (claim?.beadIds.length !== 1 || claim.beadIds[0] !== epic.id || epic.status !== "in_progress" || epic.assignee !== claim.actor) return { block: true, reason: `Refresh epic ${epic.id} review metadata needs its live assigned architect claim.` };
+ const children = await bdListChecked(["list", "--parent", epic.id, "--status", "all", "--include-infra", "--include-gates", "--limit", "0", "--json"]);
+ if (children === null) return { block: true, reason: `Refresh epic ${epic.id} children could not be read; review metadata write fails closed.` };
+ return children.length === 0 ? undefined : { block: true, reason: `Refresh epic ${epic.id} review_dimensions and review_round are immutable after its first review wisp exists.` };
+}
+/** Metadata written only by the deterministic landing module. */
+const LANDING_KEYS: Record<string, true> = { landing_state: true, landing_refresh: true, landing_refresh_notice: true, landing_notice: true, refresh_candidate: true, refreshed_from: true, refreshed_head: true, landed_head: true, armed_head: true, armed_run: true, ci_rerun_head: true, ci_reruns: true, merge_sha: true };
 const LANDED_KEY = "merge_sha";
 
-/** Roles that may write `merge_sha`: the shepherd's contract owns it (`shepherd.json`); every other contract denies it. */
-const LANDING_WRITERS: Record<string, true> = { shepherd: true };
-
-/**
- * Refuse a `merge_sha` stamped by a role that never lands anything.
- *
- * The close check reads `merge_sha` as landing evidence, so the key is proof only while a
- * role that cannot land cannot write it. The exit contracts already deny it to those roles
- * on the bead they claimed; this is the same denial at the write seam, for every bead.
- */
 function landingWriteDenial(
  invocation: BdInvocation,
  sessionRoleName: string | undefined,
 ): ToolCallEventResult | undefined {
- if (sessionRoleName === undefined || LANDING_WRITERS[sessionRoleName] === true) return undefined;
- const written = writeOf(invocation, LANDED_KEY);
+ const written = metadataWrites(invocation).flatMap(write => write.keys).find(key => LANDING_KEYS[key] === true);
  if (written === undefined) return undefined;
+ if (written === "merge_sha" && sessionRoleName === "shepherd") return undefined;
  return {
   block: true,
-  reason:
-   `'${written}' stamps metadata.${LANDED_KEY}, which is the landing sweep's record that a merge landed, and ` +
-   `${sessionRoleName} does not land work. The sweep stamps it when the PR merges; a node without it is not landed.`,
+  reason: `metadata.${written} is written only by the deterministic landing module; ${sessionRoleName ?? "a roleless session"} may not forge landing state.`,
  };
 }
 
@@ -305,6 +428,8 @@ async function locationStampDenial(invocation: BdInvocation, claims: ClaimState)
    });
    continue;
   }
+  const kind = metadataString(bead, "execution_kind");
+  if (kind !== undefined && kind !== "git") continue;
   const missing = LOCATION_KEYS.filter(key => cleared.has(key) || (!stamped.has(key) && metadataString(bead, key) === undefined));
   if (missing.length === 0) continue;
   return {
@@ -1338,6 +1463,44 @@ async function planReviewDenial(
  /**
   * Refuse cross-role named claims and inspect named candidates for scope conflicts.
  */
+export async function gateRoleLandingCommands(claims: ClaimState, ctx: ExtensionContext, input: Record<string, unknown>): Promise<ToolCallEventResult | undefined> {
+ const role = orcRole(ctx);
+ const command = input.command;
+ if (role === undefined || typeof command !== "string") return undefined;
+ for (const segment of effectiveSegments(command)) {
+  const gh = segment.findIndex(token => token === "gh" || token.endsWith("/gh"));
+  if (gh < 0) continue;
+  const args = segment.slice(gh + 1);
+  const encoded = args.join(" ");
+  const prIndex = args.indexOf("pr");
+  const apiIndex = args.indexOf("api");
+  const apiMutatesPull = apiIndex >= 0 && /(?:^|\s)repos\/[^\s]+\/[^\s]+\/pulls\/[^\s]+/.test(encoded) && (/(?:^|\s)(?:--method|-X)\s*(?:POST|PUT|PATCH|DELETE)\b/i.test(encoded) || /(?:^|\s)(?:-f|--field|--raw-field)(?:\s|=)/.test(encoded));
+  if ((prIndex >= 0 && args[prIndex + 1] === "merge") || apiMutatesPull || /\b(?:mergePullRequest|enablePullRequestAutoMerge)\b/.test(encoded)) return { block: true, reason: "ORC roles may not mutate pull-request merge or auto-merge state; the landing module owns it." };
+  const ready = prIndex >= 0 && args[prIndex + 1] === "ready" || /\bmarkPullRequestReadyForReview\b/.test(encoded);
+  if (!ready) continue;
+  if (role !== "architect" || args.includes("--undo")) return { block: true, reason: "Only the live architect may make its fully reviewed exact pull request ready; draft holds belong to landing." };
+  const claim = claims.observedClaim();
+  if (claim?.beadIds.length !== 1) return { block: true, reason: "Making a pull request ready requires one live architect claim." };
+  const epic = await bdShow(claim.beadIds[0] as string);
+  if (epic === null || epic.status !== "in_progress" || epic.assignee !== claim.actor) return { block: true, reason: "Claimed architect epic is not actively assigned to this session; PR ready fails closed." };
+  const rawPr = metadataRecord(epic.metadata)?.pr;
+  const pr = typeof rawPr === "string" || typeof rawPr === "number" ? String(rawPr) : undefined;
+  const repo = metadataString(epic, "repo");
+  const candidate = metadataString(epic, "head_sha");
+  const repoFlag = args.findIndex(token => token === "--repo" || token === "-R");
+  const commandPr = prIndex < 0 ? undefined : args.slice(prIndex + 2).find(token => !token.startsWith("-"));
+  if (pr === undefined || repo === undefined || candidate === undefined || repoFlag < 0 || args[repoFlag + 1] !== repo || commandPr !== pr) return { block: true, reason: "PR ready must name the claimed epic's exact --repo and PR number." };
+  if (metadataString(epic, "stage") === "review-refresh") {
+   const mergeId = metadataString(epic, "origin_bead");
+   const merge = mergeId === undefined ? null : await bdShow(mergeId);
+   if (merge === null || metadataString(merge, "landing_state") !== "refreshed" || metadataString(merge, "landing_refresh") !== epic.id || metadataString(merge, "head_sha") !== candidate) return { block: true, reason: "Refresh PR ready requires the approval-gated candidate stamp on its merge bead." };
+  }
+  const approvalFailure = await reviewApprovalFailure(epic, candidate, claim.actor, ctx.cwd);
+  if (approvalFailure !== undefined) return { block: true, reason: `PR ready requires every exact-head approval: ${approvalFailure}.` };
+ }
+ return undefined;
+}
+
 export async function gateClaimEligibility(
 	claims: ClaimState,
 	ctx: ExtensionContext,
@@ -1345,8 +1508,7 @@ export async function gateClaimEligibility(
 	options: { helper?: boolean } = {},
 ): Promise<ToolCallEventResult | undefined> {
  const command = input.command;
- if (typeof command !== "string" || command.length === 0) return undefined;
-
+ if (typeof command !== "string") return undefined;
  const invocations = bdInvocations(command);
  if (invocations.length === 0) return undefined;
 
@@ -1365,8 +1527,6 @@ export async function gateClaimEligibility(
   if (sessionRoleName === "shepherd" && shepherdStateWrite(invocation)) {
    return { block: true, reason: "Shepherds may consume inherited approval and reporting states, but may not author approved, changes_requested, or reported states." };
   }
-  const denial = routingWriteDenial(invocation, sessionRoleName) ?? landingWriteDenial(invocation, sessionRoleName);
-  if (denial) return denial;
   const acceptanceAuthority = await acceptanceWriteAuthorityDenial(invocation, sessionRoleName, inRun);
   if (acceptanceAuthority) return acceptanceAuthority;
   if (sessionRoleName === "architect") {
@@ -1375,6 +1535,12 @@ export async function gateClaimEligibility(
   }
   const governance = await governanceWriteDenial(invocation, sessionRoleName, cwd);
   if (governance) return governance;
+  const refreshEvidence = await refreshEvidenceWriteDenial(invocation, claims, sessionRoleName);
+  if (refreshEvidence) return refreshEvidence;
+  const denial = routingWriteDenial(invocation, sessionRoleName) ?? landingWriteDenial(invocation, sessionRoleName) ?? qualityCommandWriteDenial(invocation, claims, sessionRoleName);
+  if (denial) return denial;
+  const promotion = await refreshPromotionDenial(invocation, invocations, claims, sessionRoleName, ctx.cwd);
+  if (promotion) return promotion;
   const closedParent = await closedParentDenial(invocation, sessionRoleName);
   if (closedParent) return closedParent;
   const acceptanceFiling = await acceptanceFilingDenial(invocation, inRun);

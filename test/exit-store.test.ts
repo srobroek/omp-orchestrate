@@ -123,7 +123,7 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 	/** The documented review wisp under `node`: a child, no other edge, stamped for round 1 at HEAD. */
 	function reviewWisp(node: string): Promise<string> {
 		return create(`Review ${node}`, "--parent", node, "--ephemeral", "-t", "task", "-p", "1", "--labels", "orc-node",
-			"--metadata", JSON.stringify({ role: "reviewer", head_sha: HEAD, review_round: 1, origin_bead: node }));
+			"--metadata", JSON.stringify({ role: "reviewer", head_sha: HEAD, review_round: 1, dimension: "behavior", origin_bead: node }));
 	}
 
 	/** The comment texts on `id`, as the store has them. */
@@ -143,7 +143,7 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 
 	/** A git task bead as the dispatcher routes it, with its base and head stamped. */
 	function task(title: string): Promise<string> {
-		return create(title, "--labels", "orc-node", "--metadata", JSON.stringify({ role: "implementer", execution_kind: "git", head_sha: HEAD, base_sha: BASE }));
+		return create(title, "--labels", "orc-node", "--metadata", JSON.stringify({ role: "implementer", execution_kind: "git", head_sha: HEAD, base_sha: BASE, quality_commands: [] }));
 	}
 
 	/** The implementer's pre-yield writes: the pushed token in REPORTED, the handoff label, the claim kept. */
@@ -313,7 +313,7 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 			const node = await create("node under review", "--labels", "orc-node", "--metadata", JSON.stringify({ role: "implementer", execution_kind: "git", head_sha: HEAD }));
 			// The shape lifecycle.md documents and the architect ran: a child wisp, no other edge.
 			const wisp = await create(`Review ${node}`, "--parent", node, "--ephemeral", "-t", "task", "-p", "1", "--labels", "orc-node",
-				"--metadata", JSON.stringify({ role: "reviewer", head_sha: HEAD, review_round: 1, origin_bead: node }));
+				"--metadata", JSON.stringify({ role: "reviewer", head_sha: HEAD, review_round: 1, dimension: "behavior", origin_bead: node }));
 			// The refusal the release re-test observed: the edge G4 used to read cannot be added.
 			const related = await bd("dep", "add", wisp, node, "--type", "relates-to");
 			expect(related.code).toBe(1);
@@ -356,7 +356,7 @@ describe.skipIf(!BD_AVAILABLE)("G4 on a store bd built", () => {
 			const first = await gate(ctx(root, "reviewer"));
 			expect(checks(first)).toEqual([{
 				check: "verdict",
-				detail: `unsatisfied: linked.comment.verb in [REVIEW, BLOCKED] -- REVIEW on ${node} lacks head_sha=${HEAD} and lacks review_round=1; the expected values are the claimed bead's metadata, else the node's`,
+				detail: `unsatisfied: linked.comment.verb in [REVIEW, BLOCKED] -- REVIEW on ${node} lacks head_sha=${HEAD} and lacks review_round=1 and carries dimension=behavior,evidence,scope, expected dimension=behavior; the expected values are the claimed bead's metadata, else the node's`,
 			}]);
 			expect(JSON.parse(first!.reason!).attempt).toBe(1);
 

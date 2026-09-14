@@ -64,6 +64,12 @@ deferral, so it never proves a run is healthy. Create a `bd swarm` marker only w
 coordinator discovery or an external scheduler needs a handle -- not to make the epic
 persistent, which it already is.
 
+## Discover quality commands
+
+Before creating implementation tasks, inspect the repository's committed execution entry points: CI workflows, task-runner files, package scripts and language manifests. Record on each task an ordered, duplicate-free `metadata.quality_commands` array containing only standalone direct lint, format-check, typecheck or quality invocations relevant to that task's scope. A quality entry never chains commands, backgrounds work, or mutates orchestration/Beads state. Behavioral acceptance commands remain in the acceptance criteria. An empty array is explicit evidence that no committed quality command covers the scope; never invent one from ecosystem convention.
+
+The implementer runs each command as its own foreground bash call after behavioral verification, then stamps `metadata.quality_results` as an exact-command-to-`pass` map with no extra keys. The G5 write gate accepts `pass` only after that same live claimed session dispatched the identical standalone command and observed it return success; claim release or replacement discards the receipt. The exit gate refuses duplicate or missing commands, missing or extra result entries, and any value other than `pass`. `quality_commands=[]` with no results is the explicit no-checker case. G5 also prevents implementers from changing the architect-owned command list. For a legacy or remediation bead with no list, the implementer discovers the committed entry points, writes `ASK` with the proposed list, and parks for the architect to stamp it.
+
 ## Routing envelope
 
 Write the route before dispatch, so recovery never has to infer it from prose.
@@ -76,6 +82,7 @@ Write the route before dispatch, so recovery never has to infer it from prose.
 | `origin_actor` metadata | the actor handle a bounce routes back to |
 | `role` metadata | the pull queue this bead sits in. Every ready query filters on it |
 | `orc-node` label | run-DAG membership |
+| `quality_commands` metadata | ordered array of committed lint, format-check, typecheck or quality commands relevant to this task; empty when none exists |
 
 `origin` carried three unrelated values and is split. `origin_actor` holds an actor handle.
 `origin_bead` holds a bead id -- the merge bead behind a fix, the feature behind a merge.

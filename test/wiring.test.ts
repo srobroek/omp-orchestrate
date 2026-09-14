@@ -460,8 +460,8 @@ describe("gate dispatcher wiring: a worker's calls reach every gate", () => {
    const { pi, handlers, errors } = workerApi();
    ompOrchestrate(pi);
 
-   // Attributed, so G6 has no actor to resolve and the only bead read in question is G5's.
-   const result = await verdict(handlers, call("claim-two", "BEADS_ACTOR=impl bd update orc-1 orc-2 --claim"), { cwd: dir, role: "implementer" });
+   // Match the authenticated session actor so G5 remains the first rejecting gate.
+   const result = await verdict(handlers, call("claim-two", "BEADS_ACTOR=wiring-agent bd update orc-1 orc-2 --claim"), { cwd: dir, role: "implementer" });
 
    expect(errors).toEqual([]);
    expect(result?.block).toBe(true);

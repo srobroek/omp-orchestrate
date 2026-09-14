@@ -92,18 +92,15 @@ commit, a placeholder branch, or a fake merge requirement.
 
 ### Review and merge handoff
 
-After verifying terminal capture, integrating branches and pushing the feature branch, the
-architect creates all required review-wisp shells before dispatch and opens the PR as a
-draft. Choose dimensions for material risks and project policy, not a mandatory specialist
-roster. Reviewers remain independent.
+After verifying terminal capture, integrating branches and pushing the feature branch, the architect opens the PR as a draft. It then LOADS `roles.md` → Review fan-out, partitions the exact integrated diff by weight and code locality, stamps the candidate head, review round and complete dimension list, creates every required baseline and specialist review-wisp shell, and dispatches bounded reviewer waves until every shell completes. Every wisp carries the same `head_sha` and `review_round`; reviewers remain independent. After every required approval is durable, the live architect makes the exact recorded PR ready with `gh pr ready <pr> --repo <repo>`; role command gates reserve merge and auto-merge mutations for the landing module.
+
+Security review is opt-in through `metadata.security_review=required`; refresh routing inherits that policy through the origin's parent chain. The architect creates a security review wisp carrying the refreshed base as `base_sha`, exact candidate `head_sha` and `review_round`. After claiming it, the reviewer runs an unfiltered native security scan against that exact base-to-head ref diff, waits for a completed full result with no exclusions, deferrals or open questions, and records the plan id, operation id, base, `security_scan_ref` and matching `security_scan_head` on the feature and wisp before spawning the read-only security specialist. REVIEW is accepted only when the native store confirms that operation provenance and every stamp; BLOCKED remains reportable without scan fields when preflight or publication fails. A repository release policy may require an additional aggregate pre-release scan on the release node with its own required security review wisp; it never replaces feature review. Accepted findings route to remediation tasks or bugs before another exact-head review round.
 
 Two edges hold the handoff:
 
 - The draft is the interlock. The merge eligibility probe ignores drafts, so nothing can
   land before review.
-- Readiness follows every required verdict, never a fix round alone. The final approving
-  reviewer closes the final wisp and makes the PR ready; that edge keeps an unreviewed PR
-  from going ready.
+- Readiness follows every required verdict, never a fix round alone. The live owning architect verifies the complete immutable approval set and makes only that epic's exact repository, PR and head ready; reviewers cannot mutate PR readiness.
 
 For CHANGES:
 
@@ -115,8 +112,9 @@ For CHANGES:
 3. Preserve the owning epic, scope and implementer route. Re-read current ownership;
    with the prior writer terminal and its claim released, set the node to `status=open`
    with an empty assignee: `bd update <node> --status open --assignee ""`.
-4. Dispatch a fresh implementer to pull its queue, never activate it with a bead-id
-   message. A changed head starts a new review round.
+4. Dispatch fresh implementers to pull their queue, never activate them with bead-id messages. For security findings, group accepted findings by disjoint ownership scope into task- or bug-level remediation beads under the existing epic, with `discovered-from` the security review wisp; never create a remediation epic. A changed head invalidates every prior verdict and security scan, then starts a new review round.
+
+A refresh review that returns CHANGES follows the same remediation rule, but its old review epic remains bound to its immutable head. The landing sweep draft-holds the new stable head, records it as `refresh_candidate`, and creates or reuses a replacement `review-refresh` epic for a fresh round; nobody rewrites the old envelope.
 
 A `REVIEW … verdict=changes` comment records the review disposition, not readiness to
 claim. The node stays `in_progress` and out of `bd ready` until the explicit reopen.
@@ -157,11 +155,13 @@ list` per repository, and acts:
 | `MERGED` | stamp `merge_sha`, write `LANDED <sha> merge=<merge-bead-id>` on merge and every covered origin node, close covered nodes with `--reason merged`, then close the feature when all `orc-node` children are closed. A head other than `head_sha` lands as `LANDED ... UNGUARDED` with a review note on the origin |
 | `CLOSED` unmerged | `BOUNCED reason=closed`, status `blocked` |
 | draft, `UNKNOWN`, checks running | wait, write nothing |
-| head is not `head_sha` | `BLOCKED` once; the architect re-reviews and re-stamps `head_sha` |
+| head is not `head_sha` | freshly read and disable any armed auto-merge, move the PR to draft, then `BLOCKED` once; the architect re-reviews and re-stamps `head_sha` |
 | `CLEAN` at `head_sha`, checks green | `auto`: `gh pr merge --auto --squash --match-head-commit <head>`; `direct`: `gh pr merge --squash --match-head-commit <head>`, then read the merge back |
-| `DIRTY` or `BEHIND` | `git merge-tree` precheck in a throwaway bare clone. Clean: commit the merged tree, fast-forward push it to the PR branch, stamp the new `head_sha`, `NOTE landing refreshed`. Conflicts: an implementer fix bead under the origin's feature, `blocks` the merge bead, `discovered-from` the origin; `role=architect` when a conflicting path leaves the origin's scope. `BOUNCED reason=conflict` |
+| `DIRTY` or `BEHIND` | `git merge-tree` precheck in a throwaway bare clone. Clean: disable auto-merge from a fresh PR read, move the PR to draft, record a recoverable candidate, commit and fast-forward push the merged tree, then verify the PR remains open, unarmed and draft-held at that candidate. Leave the merge bead's reviewed `head_sha` unchanged and create a run-level `role=architect`, `stage=review-refresh` comment-output epic that names the owning epic. The draft and old reviewed head prevent landing until the refresh epic approves the candidate and makes the PR ready. Conflicts: an implementer fix bead under the origin's feature, `blocks` the merge bead, `discovered-from` the origin; `role=architect` when a conflicting path leaves the origin's scope. `BOUNCED reason=conflict` |
 | a required (or, with none required, any) check failing | `gh run rerun --failed` once per head, then an implementer fix bead with the check, run and `--log-failed` pointer. `BOUNCED reason=ci` |
 | `BLOCKED` by branch rules with checks green | `BLOCKED` once, naming the rule class |
+
+CI evidence is versioned by head. After a landing refresh, CI fix, conflict fix or any other push, discard every prior green observation and review approval. Probe the PR's new head, run the full required review set, then let the architect stamp that head on the merge bead. Attempt a failed-run rerun at most once for each head; success on an older run or commit never advances landing.
 
 The sweep never merges with `--admin`, never force-pushes, and never arms `--auto` on a
 repository without a required check: there `gh` merges at once, `UNSTABLE` included. A

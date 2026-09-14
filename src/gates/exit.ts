@@ -56,6 +56,7 @@ import { beadRouting, orcRole } from "../identity";
 import { fenceRefused } from "../lease";
 import { type OriginHead, localState, originHead } from "../origin";
 import { runScope } from "../run-scope";
+import { nativeSecurityScanMatches } from "../security-evidence";
 
 import architect from "../contracts/architect.json";
 import generic from "../contracts/generic.json";
@@ -395,6 +396,25 @@ export function asksClone(predicate: string): "pushed" | "branch" | undefined {
  return undefined;
 }
 
+function qualityFailure(bead: BdBead): string | undefined {
+ const commands = bead.metadata?.quality_commands;
+ if (!Array.isArray(commands) || !commands.every(command => typeof command === "string" && command.length > 0)) {
+  return "metadata.quality_commands must be an explicit array of exact commands";
+ }
+ if (new Set(commands).size !== commands.length) return "metadata.quality_commands contains duplicate commands";
+ if (commands.length === 0 && bead.metadata?.quality_results === undefined) return undefined;
+ const results = bead.metadata?.quality_results;
+ if (results === null || typeof results !== "object" || Array.isArray(results)) {
+  return "metadata.quality_results must map every quality command to pass";
+ }
+ const record = results as Record<string, unknown>;
+ const resultKeys = Object.keys(record);
+ const missing = commands.filter(command => record[command] !== "pass");
+ const extra = resultKeys.filter(command => !commands.includes(command));
+ if (missing.length > 0) return `quality commands without pass evidence: ${missing.join(", ")}`;
+ return extra.length === 0 ? undefined : `quality results without architect commands: ${extra.join(", ")}`;
+}
+
 /**
  * Evaluate one supported `require` predicate; unknown predicates fail closed.
  *
@@ -478,6 +498,8 @@ export function satisfies(predicate: string, evidence: Evidence): boolean {
 		return pool.some(verb => verbSet.wanted.includes(verb));
 	}
 
+	if (trimmed === "metadata.quality_commands covered by metadata.quality_results") return qualityFailure(bead) === undefined;
+
 	return false;
 }
 
@@ -542,12 +564,11 @@ export function linkedEvidenceNeeds(contract: Contract): LinkedEvidenceNeeds {
  * `relates-to` from a child to its own parent (`already a child ... would create a
  * deadlock`, measured on 1.2.2), so the parent edge is the only link that wisp can have to
  * the node its verdict is written on. The hydrated bead already names it; no read is spent.
- *
- * An unreadable run epic is logged and leaves the base unknown rather than voiding the
+ * If the run epic cannot be read, the missing base does not discard all other linked
  * evidence: the rest of the contract is still judged, and the one predicate that wanted
  * the base fails open on its own.
  */
-export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNeeds = ALL_LINKED_EVIDENCE, runEpic?: string): Promise<Evidence | null> {
+export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNeeds = ALL_LINKED_EVIDENCE, runEpic?: string, cwd = process.cwd()): Promise<Evidence | null> {
 	const comments = await bdCommentsChecked(bead.id);
 	if (comments === null) return null;
 	const verbs = comments.map(comment => commentVerb(comment.text));
@@ -555,6 +576,10 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
 	const noChangeNoted = comments.some(comment => noChangeNote(comment.text, bead.id));
 	const pushed = pushedToken(comments.map(comment => comment.text));
 	const dimension = metadataString(bead, "dimension");
+	const scanBase = metadataString(bead, "base_sha");
+	const scanRef = metadataString(bead, "security_scan_ref");
+	const scanHead = metadataString(bead, "security_scan_head");
+	const reviewWisp = bead.ephemeral === true && (bead.wisp_type === "review" || metadataString(bead, "role") === "reviewer");
 	let baseSha = metadataString(bead, "base_sha");
 	if (baseSha === undefined && needs.base && runEpic !== undefined && metadataString(bead, "head_sha") !== undefined) {
 		const epic = await bdShow(runEpic);
@@ -608,14 +633,40 @@ export async function collectExitEvidence(bead: BdBead, needs: LinkedEvidenceNee
 				const value = bead.metadata?.[key] ?? candidate.metadata?.[key];
 				return { key, value: typeof value === "number" || typeof value === "string" ? String(value) : undefined };
 			});
+			const linkedScanRef = metadataString(candidate, "security_scan_ref");
+			const linkedScanHead = metadataString(candidate, "security_scan_head");
 			for (const comment of linkedComments) {
 				const tokens = comment.text.split(/\s+/);
+				// A token counts only when the comment carries it exactly once with the expected
+				// value: two `head_sha=` tokens are an ambiguous stamp, not a matching one.
+				const exactToken = (key: string, expected: string): { matches: boolean; found: string | undefined } => {
+					const values = tokens.filter(token => token.startsWith(`${key}=`)).map(token => token.slice(key.length + 1));
+					return { matches: values.length === 1 && values[0] === expected, found: values.length === 0 ? undefined : values.join(",") };
+				};
 				// Each version token the comment should carry and does not, with what it wrote instead.
 				const gaps = version.flatMap(({ key, value }) => {
-					if (value === undefined || tokens.includes(`${key}=${value}`)) return [];
-					return [{ key, expected: value, found: tokens.find(token => token.startsWith(`${key}=`))?.slice(key.length + 1) }];
+					if (value === undefined) return [];
+					const token = exactToken(key, value);
+					return token.matches ? [] : [{ key, expected: value, found: token.found }];
 				});
 				const verb = commentVerb(comment.text);
+				if (reviewWisp && (verb === "REVIEW" || verb === "BLOCKED")) {
+					const token = dimension === undefined ? { matches: false, found: exactToken("dimension", "").found } : exactToken("dimension", dimension);
+					if (!token.matches) gaps.push({ key: "dimension", expected: dimension ?? "<wisp metadata>", found: token.found });
+				}
+				if (reviewWisp && verb === "REVIEW" && dimension === "security") {
+					const expectedHead = version.find(token => token.key === "head_sha")?.value;
+					const token = scanRef === undefined ? { matches: false, found: exactToken("security_scan_ref", "").found } : exactToken("security_scan_ref", scanRef);
+					if (!token.matches) gaps.push({ key: "security_scan_ref", expected: scanRef ?? "<wisp metadata>", found: token.found });
+					if (scanHead === undefined || scanHead !== expectedHead) gaps.push({ key: "security_scan_head", expected: expectedHead ?? "<head_sha>", found: scanHead });
+					const native = scanRef !== undefined && scanBase !== undefined && expectedHead !== undefined
+						? await nativeSecurityScanMatches(scanRef, cwd, scanBase, expectedHead)
+						: false;
+					if (!native) gaps.push({ key: "native_security_scan", expected: `${scanBase ?? "<base_sha>"}..${expectedHead ?? "<head_sha>"}`, found: scanRef });
+					if (scanBase === undefined || metadataString(candidate, "base_sha") !== scanBase) gaps.push({ key: "node.base_sha", expected: scanBase ?? "<wisp base_sha>", found: metadataString(candidate, "base_sha") });
+					if (linkedScanRef === undefined || linkedScanRef !== scanRef) gaps.push({ key: "node.security_scan_ref", expected: scanRef ?? "<wisp metadata>", found: linkedScanRef });
+					if (linkedScanHead === undefined || linkedScanHead !== expectedHead) gaps.push({ key: "node.security_scan_head", expected: expectedHead ?? "<head_sha>", found: linkedScanHead });
+				}
 				if (gaps.length > 0) {
 					unstamped.push({ verb, bead: linkedId, tokens: gaps });
 					continue;
@@ -873,11 +924,10 @@ async function gateClaimedExit(
  const contract = (Object.hasOwn(CONTRACTS, role) ? CONTRACTS[role] : undefined) ?? CONTRACTS.generic;
  if (contract === undefined) return undefined;
 
- // The base a git head is compared against, when the bead stamps none: the run epic's,
  // named by the marker. `pending` names no epic yet.
  const scope = await runScope(ctx);
  const runEpic = scope === null || scope.runId === "pending" ? undefined : scope.runId;
- const evidence = await collectExitEvidence(bead, linkedEvidenceNeeds(contract), runEpic);
+ const evidence = await collectExitEvidence(bead, linkedEvidenceNeeds(contract), runEpic, ctx.cwd);
  if (evidence === null) {
   logger.warn("orchestrate exit contract unevaluated: evidence unreadable", {
    bead: beadId,
@@ -1018,6 +1068,10 @@ async function gateClaimedExit(
 function unsatisfied(require: string, evidence: Evidence): string {
 	const causes: string[] = [];
 	if (asksOrigin(require) !== undefined && evidence.origin !== undefined && !evidence.origin.matched) causes.push(evidence.origin.detail);
+	if (require === "metadata.quality_commands covered by metadata.quality_results") {
+		const quality = qualityFailure(evidence.bead);
+		if (quality !== undefined) causes.push(quality);
+	}
 	if (asksClone(require) !== undefined && evidence.cloneWork !== undefined && !evidence.cloneWork.matched) causes.push(evidence.cloneWork.detail);
 	const verbSet = verbPredicate(require);
 	if (verbSet?.linked === true) {

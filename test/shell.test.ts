@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bdInvocations, commandInvocations, editsVariable, effectiveSegments, invokesCommand, parseBdInvocation, splitSegments } from "../src/shell";
+import { bdInvocations, commandInvocations, editsVariable, effectiveSegments, invokesCommand, isStandaloneQualityCommand, parseBdInvocation, splitSegments } from "../src/shell";
 
 describe("splitSegments", () => {
 	test("splits on every shell operator", () => {
@@ -63,6 +63,21 @@ describe("splitSegments", () => {
 	test("continuations join words but quoted newlines remain operands", () => {
 		expect(splitSegments("b\\\nd ready")).toEqual([["bd", "ready"]]);
 		expect(splitSegments("printf 'a\\\nb'")).toEqual([["printf", "a\\\nb"]]);
+	});
+});
+
+describe("isStandaloneQualityCommand", () => {
+	test.each(["bun test", "FOO=1 bun run typecheck", "git diff --check"])('accepts direct foreground checker "%s"', command => {
+		expect(isStandaloneQualityCommand(command)).toBe(true);
+	});
+
+	test.each([
+		"(bun test)", "bun test | cat", "bun test > result", "bun test &", "bun test; echo done",
+		"echo $(bun test)", 'echo "$(bun test)"', "echo `bun test`", "bash -c 'bun test'", "env FOO=1 bun test",
+		"eval 'bun test'", "builtin eval 'bun test'", "source check.sh", ". check.sh", "time bun test", "sudo bun test",
+		"bd status", "omp --help", "true",
+	])('rejects composed or non-checker command "%s"', command => {
+		expect(isStandaloneQualityCommand(command)).toBe(false);
 	});
 });
 

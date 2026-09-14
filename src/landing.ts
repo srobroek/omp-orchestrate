@@ -27,11 +27,13 @@
  * `merge-tree`) never transitions anything. Never `--admin`, never a force push.
  *
  * Terminals: a `DIRTY`/`BEHIND` PR gets a `merge-tree` precheck in a throwaway bare
- * clone; a clean merge is committed with plumbing and fast-forward pushed to the PR
- * branch (the reviewed diff against the base is unchanged, so the new head is
- * re-stamped without a review round); conflicts become an implementer fix bead, or an
- * architect one when a conflicting path leaves the origin's scope. A failing check is
- * rerun once per head (`gh run rerun --failed`), then becomes an implementer fix bead.
+ * clone. A clean merge is committed with plumbing and fast-forward pushed after the
+ * sweep disables auto-merge and moves the PR to draft. The reviewed merge-bead head
+ * stays put; a routed architect epic owns replacement review of the candidate. The
+ * draft and older reviewed head prevent landing until that review approves. Conflicts
+ * become an implementer fix bead, or an architect one when a conflicting path leaves
+ * the origin's scope. A failing check is rerun once per head (`gh run rerun --failed`),
+ * then becomes an implementer fix bead.
  * Every terminal writes one verb comment on the merge bead: `LANDED <sha>` or
  * `BOUNCED reason=<cause>`.
  *
@@ -464,6 +466,7 @@ function short(sha: string): string {
 interface Io {
  exec: Exec;
  cwd: string;
+ runId: string;
  now: () => number;
 }
 
@@ -488,9 +491,10 @@ async function notice(io: Io, bead: BdBead, key: string, text: string): Promise<
 }
 
 /** Write the same verb on the merge bead and on the origin the architect watches. */
-async function disposition(io: Io, unit: MergeUnit, text: string): Promise<void> {
- await comment(io, unit.bead.id, text);
- if (unit.origin !== undefined) await comment(io, unit.origin, `${text} merge=${unit.bead.id}`);
+async function disposition(io: Io, unit: MergeUnit, text: string): Promise<boolean> {
+ const merge = await comment(io, unit.bead.id, text);
+ const origin = unit.origin === undefined || await comment(io, unit.origin, `${text} merge=${unit.bead.id}`);
+ return merge && origin;
 }
 
 // ============================================================================
@@ -826,11 +830,15 @@ async function closeout(io: Io, unit: MergeUnit, pr: PrView, sha: string): Promi
 
 async function landed(io: Io, unit: MergeUnit, pr: PrView, sha: string): Promise<Outcome> {
  const guarded = pr.headRefOid === unit.head;
- await stamp(io, unit.bead.id, { landing_state: "landed", merge_sha: sha, landed_head: pr.headRefOid });
- await disposition(io, unit, `LANDED ${sha} pr=${unit.pr} head=${short(pr.headRefOid)}${guarded ? "" : ` UNGUARDED reviewed=${short(unit.head)}`}`);
- if (!guarded && unit.origin !== undefined) {
-  await comment(io, unit.origin, `NOTE landing: PR #${unit.pr} merged at ${short(pr.headRefOid)}, not the reviewed head ${short(unit.head)}; review the landed diff`);
- }
+ // Every proof write is checked and idempotent, so a pass that died halfway resumes
+ // here without a second LANDED line; the close itself is read back and repaired on
+ // later passes rather than trusted.
+ const text = `LANDED ${sha} pr=${unit.pr} head=${short(pr.headRefOid)}${guarded ? "" : ` UNGUARDED reviewed=${short(unit.head)}`}`;
+ const comments = await bdCommentsChecked(unit.bead.id);
+ if (comments === null) return "unknown";
+ if (!(await stamp(io, unit.bead.id, { landing_state: "landed", merge_sha: sha, landed_head: pr.headRefOid }))) return "unknown";
+ if (!comments.some(comment => comment.text === text) && !(await disposition(io, unit, text))) return "unknown";
+ if (!guarded && unit.origin !== undefined) await comment(io, unit.origin, `NOTE landing: PR #${unit.pr} merged at ${short(pr.headRefOid)}, not the reviewed head ${short(unit.head)}; review the landed diff`);
  await closeReadBack(io, unit.bead, `LANDED ${sha}`);
  await closeout(io, unit, pr, sha);
  return "merged";
@@ -923,15 +931,136 @@ async function git(io: Io, argv: string[], cwd: string, timeoutMs = GIT_TIMEOUT_
  return await io.exec(["git", ...argv], { cwd, timeoutMs });
 }
 
-/**
- * Bring the PR branch up to its base without touching the lead's checkout: a bare
- * clone sharing the checkout's objects, both refs fetched from the remote, `merge-tree`
- * as the precheck and the merge, `commit-tree` for the commit, and a plain fast-forward
- * push of the result. A branch that moved under us is refused by the push itself. On
- * conflict, the paths route a fix bead by scope.
- */
+interface RefreshRoute {
+ origin: BdBead;
+ owner: BdBead;
+ securityRequired: boolean;
+}
+
+async function refreshRoute(io: Io, unit: MergeUnit): Promise<RefreshRoute | undefined> {
+ if (unit.origin === undefined) {
+  await notice(io, unit.bead, "origin:absent", `BLOCKED landing: PR #${unit.pr} cannot refresh without an origin_bead`);
+  return undefined;
+ }
+ const origin = await bdShow(unit.origin, undefined, io.cwd);
+ if (origin === null) {
+  await notice(io, unit.bead, `origin:${unit.origin}`, `BLOCKED landing: PR #${unit.pr} cannot refresh because origin ${unit.origin} could not be read`);
+  return undefined;
+ }
+ const seen = new Set<string>();
+ let securityRequired = false;
+ let current: BdBead | null = origin;
+ while (current !== null && !seen.has(current.id)) {
+  seen.add(current.id);
+  if (metadataString(current, "security_review") === "required") securityRequired = true;
+  if (current.issue_type === "epic" && metadataString(current, "role") === "architect") return { origin, owner: current, securityRequired };
+  const parent: unknown = current.parent;
+  current = typeof parent === "string" && parent.length > 0 ? await bdShow(parent, undefined, io.cwd) : null;
+ }
+ await notice(io, unit.bead, `owner:${unit.origin}`, `BLOCKED landing: PR #${unit.pr} cannot refresh because origin ${unit.origin} has no reachable architect epic`);
+ return undefined;
+}
+
+async function finishRefreshRoute(io: Io, unit: MergeUnit, candidate: string, branch: string | undefined): Promise<Outcome> {
+ if (branch === undefined) {
+  await notice(io, unit.bead, `refresh-branch:${candidate}`, `BLOCKED landing: PR #${unit.pr} refresh ${short(candidate)} has no branch for replacement review`);
+  return "blocked";
+ }
+ const route = await refreshRoute(io, unit);
+ if (route === undefined) return "blocked";
+ const children = await bdListChecked(
+  ["list", "--parent", io.runId, "--status", "all", "--include-infra", "--include-gates", "--limit", "0", "--json"],
+  undefined,
+  io.cwd,
+ );
+ if (children === null) {
+  await notice(io, unit.bead, `route:${candidate}`, `BLOCKED landing: architect queue ${io.runId} could not be read for refresh ${short(candidate)}`);
+  return "blocked";
+ }
+ let refresh = children.find(child =>
+  child.issue_type === "epic"
+  && child.status !== "closed"
+  && metadataString(child, "stage") === "review-refresh"
+  && metadataString(child, "origin_bead") === unit.bead.id
+  && metadataString(child, "head_sha") === candidate
+ );
+ if (refresh?.status === "blocked") {
+  await notice(io, unit.bead, `refresh-blocked:${refresh.id}`, `BLOCKED landing: existing refresh architect ${refresh.id} is blocked for ${short(candidate)}; unblock that owner instead of creating a duplicate`);
+  return "blocked";
+ }
+ if (refresh === undefined) {
+  const metadata = {
+   role: "architect", stage: "review-refresh", target_epic: route.owner.id, origin_bead: unit.bead.id,
+   execution_kind: "comment", base_sha: metadataString(unit.bead, "refreshed_from") ?? unit.head,
+   repo: unit.repo, pr: unit.pr, branch, head_sha: candidate,
+   ...(route.securityRequired ? { security_review: "required" } : {}),
+  };
+  const created = await bdRun([
+   "create", `review landing refresh for PR #${unit.pr}`,
+   "--type", "epic", "--priority", "0", "--parent", io.runId,
+   "--deps", `discovered-from:${unit.bead.id}`,
+   "--metadata", JSON.stringify(metadata),
+   "--description", `Own replacement review for PR #${unit.pr} at refreshed head ${candidate}. Run every required baseline and security review at this exact head. On approval, stamp ${unit.bead.id} head_sha=${candidate}, set output_ref to the durable review comment, add the reviewer handoff and REPORTED evidence, make the PR ready, then yield without closing this epic.`,
+  ], BD_WRITE_TIMEOUT_MS, io.cwd);
+  const id = created?.code === 0 ? created.stdout.trim() : "";
+  if (id.length === 0) {
+   await notice(io, unit.bead, `route:${candidate}`, `BLOCKED landing: refresh reached ${short(candidate)} but its architect review epic could not be created`);
+   return "blocked";
+  }
+  refresh = { id, status: "open", issue_type: "epic", parent: io.runId, metadata };
+ }
+ const noticeKey = `refresh:${refresh.id}`;
+ if (metadataString(unit.bead, "refresh_candidate") !== candidate && !(await stamp(io, unit.bead.id, { refresh_candidate: candidate }))) return "blocked";
+ if (metadataString(unit.bead, "landing_refresh_notice") !== noticeKey) {
+  const comments = await bdCommentsChecked(unit.bead.id);
+  if (comments === null) return "blocked";
+  const text = `BOUNCED reason=refresh architect=${refresh.id} head=${short(candidate)}: exact-head review required`;
+  if (!comments.some(existing => existing.text === text) && !(await comment(io, unit.bead.id, text))) return "blocked";
+  if (!(await stamp(io, unit.bead.id, { landing_refresh_notice: noticeKey }))) return "blocked";
+ }
+ const routed = metadataString(unit.bead, "landing_state") === "refreshed" && metadataString(unit.bead, "landing_refresh") === refresh.id;
+ if (!routed && !(await stamp(io, unit.bead.id, { landing_state: "refreshed", landing_refresh: refresh.id, landing_notice: "" }))) return "blocked";
+ return "refreshed";
+}
+
+async function safeToPushRefresh(io: Io, unit: MergeUnit, expectedHead: string): Promise<boolean> {
+ let latest = prView(await ghJson(io.exec, prViewArgv(unit.repo, unit.pr), io.cwd));
+ if (latest?.state !== "OPEN" || latest.headRefOid !== expectedHead) {
+  await notice(io, unit.bead, `refresh-head:${latest?.headRefOid ?? "unknown"}`, `BLOCKED landing: PR #${unit.pr} changed while its refresh was prepared`);
+  return false;
+ }
+ const recordedArmed = metadataString(unit.bead, "landing_state") === "armed" && metadataString(unit.bead, "armed_head") === expectedHead;
+ if (latest.armed || recordedArmed) {
+  const disabled = await io.exec(
+   ["gh", "pr", "merge", String(unit.pr), "--repo", unit.repo, "--disable-auto"],
+   { cwd: io.cwd, timeoutMs: GH_WRITE_TIMEOUT_MS },
+  );
+  latest = prView(await ghJson(io.exec, prViewArgv(unit.repo, unit.pr), io.cwd));
+  if ((disabled === null || disabled.code !== 0) && latest?.armed !== false) {
+   await notice(io, unit.bead, `disarm:${expectedHead}`, `BLOCKED landing: auto-merge on PR #${unit.pr} could not be disabled before refresh${disabled === null ? "" : `: ${disabled.stderr.trim()}`}`);
+   return false;
+  }
+ }
+ if (latest?.isDraft !== true) {
+  const drafted = await io.exec(
+   ["gh", "pr", "ready", String(unit.pr), "--repo", unit.repo, "--undo"],
+   { cwd: io.cwd, timeoutMs: GH_WRITE_TIMEOUT_MS },
+  );
+  latest = prView(await ghJson(io.exec, prViewArgv(unit.repo, unit.pr), io.cwd));
+  if ((drafted === null || drafted.code !== 0) && latest?.isDraft !== true) {
+   await notice(io, unit.bead, `draft:${expectedHead}`, `BLOCKED landing: PR #${unit.pr} could not enter draft review hold before refresh${drafted === null ? "" : `: ${drafted.stderr.trim()}`}`);
+   return false;
+  }
+ }
+ if (latest?.state !== "OPEN" || latest.headRefOid !== expectedHead || latest.armed || !latest.isDraft) {
+  await notice(io, unit.bead, `refresh-safe:${latest?.headRefOid ?? "unknown"}`, `BLOCKED landing: PR #${unit.pr} was not open, stable, unarmed and draft-held before refresh`);
+  return false;
+ }
+ return true;
+}
+
 export async function resolveDirty(io: Io, unit: MergeUnit, pr: PrView): Promise<Outcome> {
- const branch = unit.branch ?? pr.headRefName;
+ const branch = pr.headRefName;
  const base = pr.baseRefName;
  if (branch === undefined || base === undefined) {
   await notice(io, unit.bead, `refs:${pr.headRefOid}`, `BLOCKED landing: PR #${unit.pr} is ${pr.mergeStateStatus} and the merge bead names no branch to refresh`);
@@ -943,7 +1072,16 @@ export async function resolveDirty(io: Io, unit: MergeUnit, pr: PrView): Promise
   await notice(io, unit.bead, `remote:${unit.repo}`, `BLOCKED landing: PR #${unit.pr} is ${pr.mergeStateStatus} but this checkout's origin is not ${unit.repo}`);
   return "blocked";
  }
-
+ const originId = unit.origin;
+ if (originId === undefined) {
+  await notice(io, unit.bead, "origin:absent", `BLOCKED landing: merge bead ${unit.bead.id} has no origin for ${pr.mergeStateStatus} remediation`);
+  return "blocked";
+ }
+ const origin = await bdShow(originId, undefined, io.cwd);
+ if (origin === null) {
+  await notice(io, unit.bead, `origin:${originId}`, `BLOCKED landing: origin ${originId} could not be read for ${pr.mergeStateStatus} remediation`);
+  return "blocked";
+ }
  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "orc-landing-"));
  const clone = path.join(tmp, "repo.git");
  try {
@@ -966,28 +1104,32 @@ export async function resolveDirty(io: Io, unit: MergeUnit, pr: PrView): Promise
    const committed = await git(io, [
     "-c", "user.name=omp-orchestrate", "-c", "user.email=omp-orchestrate@localhost", "-c", "commit.gpgsign=false",
     "commit-tree", tree, "-p", branchHead, "-p", baseHead,
-    "-m", `Merge ${base} into ${branch}\n\nomp-orchestrate landing refresh for PR #${unit.pr}; the reviewed diff against ${base} is unchanged.`,
+    "-m", `Merge ${base} into ${branch}\n\nomp-orchestrate landing refresh for PR #${unit.pr}; exact-head review is required before landing.`,
    ], clone);
    const commit = committed?.code === 0 ? committed.stdout.trim() : "";
    if (!HEAD_RE.test(commit)) return "unknown";
+   const prepared = await stamp(io, unit.bead.id, { landing_state: "refreshing", refreshed_from: baseHead, refreshed_head: branchHead, refresh_candidate: commit, landing_notice: "" });
+   if (!prepared) return "blocked";
+   unit.bead.metadata = { ...unit.bead.metadata, landing_state: "refreshing", refreshed_from: baseHead, refreshed_head: branchHead, refresh_candidate: commit, landing_notice: "" };
+   if (!await safeToPushRefresh(io, unit, branchHead)) return "blocked";
    const pushed = await git(io, ["push", "--quiet", url, `${commit}:refs/heads/${branch}`], clone, GIT_FETCH_TIMEOUT_MS);
    if (pushed?.code !== 0) {
     await notice(io, unit.bead, `push:${pr.headRefOid}`, `BLOCKED landing: refresh of ${branch} from ${base} could not be pushed${pushed === null ? "" : `: ${pushed.stderr.trim()}`}`);
     return "blocked";
    }
-   // The plugin moved the head, and by construction the diff against the base is the
-   // reviewed one, so the reviewed head follows without a review round.
-   await stamp(io, unit.bead.id, { head_sha: commit, refreshed_from: baseHead, refreshed_head: branchHead, landing_notice: "" });
-   await comment(io, unit.bead.id, `NOTE landing refreshed ${branch} from ${base}@${short(baseHead)}: head ${short(branchHead)} -> ${short(commit)}; reviewed diff unchanged`);
-   return "refreshed";
+   const refreshed = prView(await ghJson(io.exec, prViewArgv(unit.repo, unit.pr), io.cwd));
+   if (refreshed?.state !== "OPEN" || refreshed.headRefOid !== commit || refreshed.armed || !refreshed.isDraft) {
+    await notice(io, unit.bead, `refresh-result:${refreshed?.headRefOid ?? "unknown"}`, `BLOCKED landing: PR #${unit.pr} did not remain open, unarmed and draft-held at refreshed head ${short(commit)}`);
+    return "blocked";
+   }
+   return await finishRefreshRoute(io, unit, commit, branch);
   }
   const { paths } = parseMergeTreeOutput(merge.stdout);
   if (paths.length === 0) {
    await notice(io, unit.bead, `merge-tree:${pr.headRefOid}`, `BLOCKED landing: merge-tree could not classify ${base} into ${branch} for PR #${unit.pr}: ${merge.stderr.trim()}`);
    return "blocked";
   }
-  const origin = unit.origin === undefined ? null : await bdShow(unit.origin, undefined, io.cwd);
-  const role = conflictRole(paths, scopeOf(metadataRecord(origin?.metadata)));
+  const role = conflictRole(paths, scopeOf(metadataRecord(origin.metadata)));
   return await bounce(io, unit, {
    role,
    reason: "conflict",
@@ -1060,11 +1202,18 @@ async function sweepUnit(io: Io, unit: MergeUnit, pr: PrView, caps: LandingCapab
  // A merged PR always carries its merge commit; one that does not yet is read again next sweep.
  if (pr.state === "MERGED") return pr.mergeCommit === undefined ? "unknown" : await landed(io, unit, pr, pr.mergeCommit);
  if (pr.state === "CLOSED") return await closedUnmerged(io, unit);
- if (pr.isDraft) return "draft";
+ const landingState = metadataString(unit.bead, "landing_state");
+ const refreshing = landingState === "refreshing";
+ const refreshActive = refreshing || landingState === "refreshed";
+ if (refreshing && pr.headRefOid === metadataString(unit.bead, "refreshed_head")) return await resolveDirty(io, unit, pr);
  if (pr.headRefOid !== unit.head) {
+  if (!await safeToPushRefresh(io, unit, pr.headRefOid)) return "blocked";
+  if (refreshActive) return await finishRefreshRoute(io, unit, pr.headRefOid, pr.headRefName);
   await notice(io, unit.bead, `head:${pr.headRefOid}`, `BLOCKED landing: PR #${unit.pr} head ${short(pr.headRefOid)} is not the reviewed head ${short(unit.head)}; re-review and stamp head_sha`);
   return "blocked";
  }
+ if (refreshing) return await finishRefreshRoute(io, unit, pr.headRefOid, pr.headRefName);
+ if (pr.isDraft) return "draft";
  const verdict = classifyChecks(pr.checks, caps.required_checks);
  switch (pr.mergeStateStatus) {
   case "UNKNOWN":
@@ -1110,8 +1259,9 @@ export function resetLanding(): void {
 }
 
 async function capabilitiesFor(io: Io, repo: string, recorded: LandingCapabilities | undefined, base: string | undefined): Promise<LandingCapabilities> {
- if (recorded !== undefined && recorded.repo.toLowerCase() === repo.toLowerCase()) return recorded;
- const known = probed.get(repo.toLowerCase());
+ const key = `${repo.toLowerCase()}#${base ?? ""}`;
+ if (recorded !== undefined && recorded.repo.toLowerCase() === repo.toLowerCase() && recorded.base === base) return recorded;
+ const known = probed.get(key);
  if (known !== undefined) return known;
  const probe = await probeLandingCapabilities(repo, base ?? recorded?.base ?? "main", io.exec, io.cwd, io.now);
  // An unprobeable repository is landed directly and only on CLEAN: the mode that
@@ -1119,7 +1269,7 @@ async function capabilitiesFor(io: Io, repo: string, recorded: LandingCapabiliti
  const caps: LandingCapabilities = probe.ok
   ? probe.caps
   : { repo, base: base ?? "main", mode: "direct", auto_merge_allowed: false, squash_allowed: true, required_checks: [], strict: false, queue: false, probed_at: new Date(io.now()).toISOString() };
- probed.set(repo.toLowerCase(), caps);
+ probed.set(key, caps);
  return caps;
 }
 
@@ -1141,7 +1291,7 @@ export async function landingSweep(options: SweepOptions): Promise<SweepEntry[]>
 }
 
 async function sweepOnce(options: SweepOptions): Promise<SweepEntry[]> {
- const io: Io = { exec: options.exec ?? spawnExec, cwd: options.cwd, now: options.now ?? Date.now };
+ const io: Io = { exec: options.exec ?? spawnExec, cwd: options.cwd, runId: options.runId, now: options.now ?? Date.now };
  resetReadBudget();
  const beads = await bdListChecked(["list", "--label", "pr:merge", "--status", "open,in_progress", "--limit", "0", "--json"], undefined, io.cwd);
  if (beads === null || beads.length === 0) return [];

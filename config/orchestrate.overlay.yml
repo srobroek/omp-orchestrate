@@ -1,5 +1,5 @@
-# omp-orchestrate settings overlay: the six constants every run needs, and the model
-# binding for each core agent.
+# omp-orchestrate settings overlay: the six constants every run needs, the model
+# binding for each core agent, and the opt-in native security capability.
 #
 # Apply it to the lead session with OMP's config overlay flag:
 #
@@ -53,3 +53,7 @@ bash:
 # `/orchestrate-doctor` fails the `modelRoles.reviewer` row, and the spawn gate refuses
 # the agent. It stays out of the overlay because an overlay layers above your config and
 # would override your choice.
+
+security:
+  # Makes `security_scan` discoverable; orc-reviewer's explicit grant lets the security-dimension reviewer run the exact-head operation.
+  enabled: true

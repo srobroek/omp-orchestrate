@@ -905,6 +905,14 @@ export async function gateBdDiscipline(
 	// this session is. Computed before the claim check, which judges the result.
 	const injected = envCarriesActor(input.env) ? undefined : sessionActor(ctx, claims);
 	const env = injected === undefined ? input.env : { ...(input.env !== null && typeof input.env === "object" ? input.env : {}), BEADS_ACTOR: injected, BD_ACTOR: injected };
+	const authenticated = sessionActor(ctx, claims);
+	if (authenticated !== undefined) {
+		for (const invocation of invocations) {
+			if (!writesBeads(invocation)) continue;
+			const actor = effectiveActor(invocation, env);
+			if (actor !== authenticated) return { block: true, reason: `bd write actor '${actor ?? "<absent>"}' does not match this authenticated session actor '${authenticated}'. Remove --actor and actor environment overrides.` };
+		}
+	}
 
 	// A claim is the write that creates an identity: refused when the actor it would
 	// record is nobody, or the name bd falls back to for nobody, since either leaves the

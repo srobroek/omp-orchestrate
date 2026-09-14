@@ -32,6 +32,8 @@ const REPO = "o/r";
 const RUN = "orc-run";
 const MERGE = "orc-m1";
 const ORIGIN = "orc-f1";
+const FEATURE = "orc-ft1";
+const TASK = "orc-t1";
 
 function out(stdout: string, code = 0, stderr = ""): ExecResult {
 	return { code, stdout, stderr };
@@ -128,6 +130,7 @@ interface FakeStore {
 	blocked: string[];
 	/** Every mutating argv, first word onward. */
 	writes: string[][];
+	failUpdates: Record<string, number>;
 	nextId: string;
 	restore: () => void;
 }
@@ -137,17 +140,21 @@ interface FakeStore {
  * the bead as bd does, so a second sweep reads what the first stamped; `create` answers
  * `nextId` as `--silent` prints it.
  */
-function fakeBd(beads: Record<string, BdBead>, blocked: string[] = []): FakeStore {
-	const store: FakeStore = { beads, blocked, writes: [], nextId: "orc-fix1", restore: () => { } };
+function fakeBd(beads: Record<string, BdBead>, blocked: string[] = [], failUpdates: Record<string, number> = {}): FakeStore {
+	const store: FakeStore = { beads, blocked, failUpdates: { ...failUpdates }, writes: [], nextId: "orc-fix1", restore: () => { } };
 	const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
 		const args = argv.slice(1);
 		let payload: unknown;
 		let code = 0;
 		let text: string | undefined;
 		switch (args[0]) {
-			case "list":
-				payload = args.includes("pr:merge") ? Object.values(store.beads).filter(bead => bead.labels?.includes("pr:merge")) : [];
+			case "list": {
+				const parent = args.indexOf("--parent");
+				payload = args.includes("pr:merge")
+					? Object.values(store.beads).filter(bead => bead.labels?.includes("pr:merge"))
+					: parent === -1 ? [] : Object.values(store.beads).filter(bead => bead.parent === args[parent + 1]);
 				break;
+			}
 			case "blocked":
 				payload = store.blocked.map(id => ({ id }));
 				break;
@@ -158,26 +165,48 @@ function fakeBd(beads: Record<string, BdBead>, blocked: string[] = []): FakeStor
 			case "update": {
 				store.writes.push(args);
 				const bead = store.beads[args[1]!];
+				const failures = store.failUpdates[args[1]!] ?? 0;
+				if (failures > 0) {
+					store.failUpdates[args[1]!] = failures - 1;
+					code = 1;
+					break;
+				}
 				const flag = args.indexOf("--metadata");
 				if (bead !== undefined && flag !== -1) {
 					bead.metadata = { ...bead.metadata, ...(JSON.parse(args[flag + 1]!) as Record<string, unknown>) };
 				}
+				const status = args.indexOf("--status");
+				if (bead !== undefined && status !== -1) bead.status = args[status + 1];
 				text = "";
 				break;
 			}
-			case "create":
+			case "create": {
 				store.writes.push(args);
+				const metadata = args.indexOf("--metadata");
+				const parent = args.indexOf("--parent");
+				const type = args.indexOf("--type");
+				store.beads[store.nextId] = {
+					id: store.nextId,
+					status: "open",
+					issue_type: type === -1 ? "task" : args[type + 1],
+					parent: parent === -1 ? undefined : args[parent + 1],
+					metadata: metadata === -1 ? {} : JSON.parse(args[metadata + 1]!),
+				};
 				text = `${store.nextId}\n`;
 				break;
-   case "comment":
-    store.writes.push(args);
-    text = "";
-    break;
-   case "close":
-    store.writes.push(args);
-    if (store.beads[args[1]!] !== undefined) store.beads[args[1]!]!.status = "closed";
-    text = "";
-    break;
+			}
+			case "comments":
+				payload = store.writes.filter(write => write[0] === "comment" && write[1] === args[1]).map(write => ({ text: write[2] }));
+				break;
+			case "comment":
+				store.writes.push(args);
+				text = "";
+				break;
+			case "close":
+				store.writes.push(args);
+				if (store.beads[args[1]!] !== undefined) store.beads[args[1]!]!.status = "closed";
+				text = "";
+				break;
 			default:
 				code = 1;
 		}
@@ -208,7 +237,7 @@ function runEpic(recorded: LandingCapabilities | null = caps()): BdBead {
 
 /** The origin feature; `null` declares no scope. */
 function origin(scope: unknown = ["src/api/*"]): BdBead {
-	return { id: ORIGIN, status: "in_progress", issue_type: "epic", metadata: scope === null ? {} : { scope } };
+	return { id: ORIGIN, status: "in_progress", issue_type: "epic", metadata: scope === null ? { role: "architect" } : { role: "architect", scope } };
 }
 
 /** Comments written on `id`, verb-first, in order. */
@@ -387,6 +416,7 @@ function rig(options: {
 	beads?: Record<string, BdBead>;
 	blocked?: string[];
 	recorded?: LandingCapabilities;
+	failUpdates?: Record<string, number>;
 	open?: Array<Record<string, unknown>>;
 	rules?: Array<[(argv: string[]) => boolean, ExecResult | (() => ExecResult)]>;
 	view?: Record<string, unknown>;
@@ -394,6 +424,7 @@ function rig(options: {
 	store = fakeBd(
 		options.beads ?? { [RUN]: runEpic(options.recorded), [MERGE]: mergeBead(), [ORIGIN]: origin() },
 		options.blocked,
+		options.failUpdates,
 	);
 	const rules: Array<[(argv: string[]) => boolean, ExecResult | (() => ExecResult)]> = [
 		[argvIs(prListArgv(REPO)), out(JSON.stringify(options.open ?? [pr()]))],
@@ -424,6 +455,14 @@ describe("landingSweep: direct mode", () => {
 		expect(r.store.writes.filter(args => args[0] === "close")).toEqual([["close", MERGE, "--reason", `LANDED ${MERGE_SHA}`]]);
 	});
 
+	test("a failed landed-state stamp retries without duplicating disposition", async () => {
+		const merged = pr({ state: "MERGED", mergeCommit: { oid: MERGE_SHA } });
+		const r = rig({ open: [], view: merged, failUpdates: { [MERGE]: 1 } });
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "unknown" }]);
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "merged" }]);
+		expect(commentsOn(r.store, MERGE)).toEqual([`LANDED ${MERGE_SHA} pr=7 head=${H.slice(0, 7)}`]);
+	});
+
 	test("waits on UNSTABLE with checks still running, and on UNKNOWN, writing nothing", async () => {
 		const r = rig({ open: [pr({ mergeStateStatus: "UNSTABLE", statusCheckRollup: [running("ts")] })] });
 		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "pending" }]);
@@ -435,7 +474,7 @@ describe("landingSweep: direct mode", () => {
 	});
 
 	test("never merges a head that is not the reviewed one, and says so once", async () => {
-		const r = rig({ open: [pr({ headRefOid: OTHER, statusCheckRollup: [green("ts")] })] });
+		const r = rig({ open: [pr({ headRefOid: OTHER, statusCheckRollup: [green("ts")] })], view: pr({ headRefOid: OTHER, isDraft: true }) });
 		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "blocked" }]);
 		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "blocked" }]);
 		expect(r.gh("merge")).toEqual([]);
@@ -552,30 +591,184 @@ describe("landingSweep: DIRTY", () => {
 		[gitVerb("fetch"), out("")],
 		[gitVerb("rev-parse"), out(`${BASE}\n${H}\n`)],
 	];
+	const views = (...fixtures: Array<Record<string, unknown>>): [(argv: string[]) => boolean, () => ExecResult] => {
+		let index = 0;
+		return [argvIs(prViewArgv(REPO, 7)), () => out(JSON.stringify(fixtures[Math.min(index++, fixtures.length - 1)]))];
+	};
 
-	test("a clean merge-tree is committed with plumbing and fast-forward pushed; the reviewed head follows", async () => {
+	const READY_UNDO = ["gh", "pr", "ready", "7", "--repo", REPO, "--undo"];
+
+	test("a clean merge-tree draft-holds the PR and routes exact-head review", async () => {
 		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ branch: undefined }), [ORIGIN]: origin() },
 			open: [pr({ mergeStateStatus: "DIRTY" })],
 			rules: [
 				...remoteRules(),
 				[gitVerb("merge-tree"), out(`${TREE}\n`)],
 				[gitVerb("commit-tree"), out(`${REFRESHED}\n`)],
 				[gitVerb("push"), out("")],
+				views(pr(), pr({ isDraft: true }), pr({ headRefOid: REFRESHED, isDraft: true })),
+				[argvIs(READY_UNDO), out("")],
 			],
 		});
 		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
 		const git = r.calls.filter(argv => argv[0] === "git").map(argv => argv.slice(1));
-		expect(git.find(argv => argv[0] === "clone")?.slice(0, 4)).toEqual(["clone", "--quiet", "--bare", "--shared"]);
-		expect(git.find(argv => argv[0] === "fetch")).toEqual(["fetch", "--quiet", "git@github.com:o/r.git", "+refs/heads/main:refs/landing/base", "+refs/heads/feat:refs/landing/branch"]);
-		expect(git.find(argv => argv.includes("merge-tree"))).toEqual(["merge-tree", "--write-tree", "--name-only", "refs/landing/base", "refs/landing/branch"]);
-		const commit = git.find(argv => argv.includes("commit-tree"))!;
-		expect(commit.slice(commit.indexOf("commit-tree"), commit.indexOf("commit-tree") + 6)).toEqual(["commit-tree", TREE, "-p", H, "-p", BASE]);
 		expect(git.find(argv => argv[0] === "push")).toEqual(["push", "--quiet", "git@github.com:o/r.git", `${REFRESHED}:refs/heads/feat`]);
-		expect(metadataWrites(r.store, MERGE)).toEqual([{ head_sha: REFRESHED, refreshed_from: BASE, refreshed_head: H, landing_notice: "" }]);
-		expect(commentsOn(r.store, MERGE)).toEqual([`NOTE landing refreshed feat from main@${BASE.slice(0, 7)}: head ${H.slice(0, 7)} -> ${REFRESHED.slice(0, 7)}; reviewed diff unchanged`]);
-		expect(r.store.writes.filter(args => args[0] === "create")).toEqual([]);
+		expect(metadataWrites(r.store, ORIGIN)).toEqual([]);
+		expect(r.store.beads[ORIGIN]!.metadata).not.toHaveProperty("head_sha");
+		expect(metadataWrites(r.store, MERGE)).toEqual([
+			{ landing_state: "refreshing", refreshed_from: BASE, refreshed_head: H, refresh_candidate: REFRESHED, landing_notice: "" },
+			{ landing_refresh_notice: "refresh:orc-fix1" },
+			{ landing_state: "refreshed", landing_refresh: "orc-fix1", landing_notice: "" },
+		]);
+		const create = r.store.writes.find(args => args[0] === "create")!;
+		expect(create.slice(create.indexOf("--parent"), create.indexOf("--parent") + 2)).toEqual(["--parent", RUN]);
+		expect(create.slice(create.indexOf("--deps"), create.indexOf("--deps") + 2)).toEqual(["--deps", `discovered-from:${MERGE}`]);
+		expect(JSON.parse(create[create.indexOf("--metadata") + 1]!)).toEqual({
+			role: "architect", stage: "review-refresh", target_epic: ORIGIN, origin_bead: MERGE, execution_kind: "comment", base_sha: BASE, repo: REPO, pr: 7, branch: "feat", head_sha: REFRESHED,
+		});
+		expect(commentsOn(r.store, MERGE)).toEqual([`BOUNCED reason=refresh architect=orc-fix1 head=${REFRESHED.slice(0, 7)}: exact-head review required`]);
 	});
 
+	test("a fresh read catches auto-merge armed after the poll before the draft hold", async () => {
+		const r = rig({
+			open: [pr({ mergeStateStatus: "DIRTY" })],
+			rules: [
+				...remoteRules(),
+				[gitVerb("merge-tree"), out(`${TREE}\n`)],
+				[gitVerb("commit-tree"), out(`${REFRESHED}\n`)],
+				views(pr({ autoMergeRequest: { enabledAt: "t" } }), pr(), pr({ isDraft: true }), pr({ headRefOid: REFRESHED, isDraft: true })),
+				[argvIs(["gh", "pr", "merge", "7", "--repo", REPO, "--disable-auto"]), out("")],
+				[argvIs(READY_UNDO), out("")],
+				[gitVerb("push"), out("")],
+			],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		const disable = r.calls.findIndex(argv => argvIs(["gh", "pr", "merge", "7", "--repo", REPO, "--disable-auto"])(argv));
+		const draft = r.calls.findIndex(argv => argvIs(READY_UNDO)(argv));
+		const push = r.calls.findIndex(argv => argv[0] === "git" && argv.includes("push"));
+		expect(disable).toBeGreaterThanOrEqual(0);
+		expect(draft).toBeGreaterThan(disable);
+		expect(push).toBeGreaterThan(draft);
+	});
+
+	test("a failed auto-merge disarm blocks before push", async () => {
+		const r = rig({
+			open: [pr({ mergeStateStatus: "DIRTY" })],
+			rules: [
+				...remoteRules(),
+				[gitVerb("merge-tree"), out(`${TREE}\n`)],
+				[gitVerb("commit-tree"), out(`${REFRESHED}\n`)],
+				views(pr({ autoMergeRequest: { enabledAt: "t" } }), pr({ autoMergeRequest: { enabledAt: "t" } })),
+				[argvIs(["gh", "pr", "merge", "7", "--repo", REPO, "--disable-auto"]), out("", 1, "denied")],
+			],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "blocked" }]);
+		expect(r.calls.some(argv => argv[0] === "git" && argv.includes("push"))).toBe(false);
+		expect(commentsOn(r.store, MERGE)[0]).toContain("auto-merge on PR #7 could not be disabled before refresh: denied");
+	});
+
+	test("a refresh interrupted before draft hold recomputes instead of merging the reviewed head", async () => {
+		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ landing_state: "refreshing", refreshed_from: BASE, refreshed_head: H, refresh_candidate: OTHER }), [ORIGIN]: origin() },
+			open: [pr({ mergeStateStatus: "DIRTY" })],
+			rules: [
+				...remoteRules(),
+				[gitVerb("merge-tree"), out(`${TREE}\n`)],
+				[gitVerb("commit-tree"), out(`${REFRESHED}\n`)],
+				views(pr(), pr({ isDraft: true }), pr({ headRefOid: REFRESHED, isDraft: true })),
+				[argvIs(READY_UNDO), out("")],
+				[gitVerb("push"), out("")],
+			],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		expect(r.store.beads[MERGE]!.metadata).toMatchObject({ landing_state: "refreshed", refresh_candidate: REFRESHED, landing_refresh: "orc-fix1" });
+	});
+
+	test("a stable raced head replaces the stale prepared candidate and receives review", async () => {
+		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ landing_state: "refreshing", refreshed_from: BASE, refreshed_head: OTHER, refresh_candidate: OTHER }), [ORIGIN]: origin() },
+			open: [pr({ headRefOid: REFRESHED, isDraft: true })],
+			rules: [views(pr({ headRefOid: REFRESHED, isDraft: true }))],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		expect(r.store.beads[MERGE]!.metadata).toMatchObject({ refresh_candidate: REFRESHED, landing_refresh: "orc-fix1" });
+		const create = r.store.writes.find(args => args[0] === "create")!;
+		expect(JSON.parse(create[create.indexOf("--metadata") + 1]!).head_sha).toBe(REFRESHED);
+	});
+
+	test("a remediated head after refresh CHANGES gets a replacement review epic", async () => {
+		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ landing_state: "refreshed", landing_refresh: "old-refresh", refreshed_from: BASE, refresh_candidate: OTHER }), [ORIGIN]: origin() },
+			open: [pr({ headRefOid: REFRESHED, isDraft: true })],
+			rules: [views(pr({ headRefOid: REFRESHED, isDraft: true }))],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		expect(r.store.beads[MERGE]!.metadata).toMatchObject({ refresh_candidate: REFRESHED, landing_refresh: "orc-fix1" });
+	});
+
+	test("a pushed draft candidate reuses its durable architect epic when merge metadata initially fails", async () => {
+		const r = rig({
+			beads: {
+				[RUN]: runEpic(),
+				[MERGE]: mergeBead({ landing_state: "refreshing", refresh_candidate: REFRESHED }),
+				[ORIGIN]: origin(),
+			},
+			open: [pr({ headRefOid: REFRESHED, isDraft: true })],
+			failUpdates: { [MERGE]: 1 },
+			rules: [views(pr({ headRefOid: REFRESHED, isDraft: true }))],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "blocked" }]);
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		expect(r.store.writes.filter(args => args[0] === "create")).toHaveLength(1);
+		expect(commentsOn(r.store, MERGE)).toHaveLength(1);
+		expect(r.store.beads[MERGE]!.metadata).toMatchObject({ landing_refresh_notice: "refresh:orc-fix1" });
+		expect(r.store.beads[MERGE]!.metadata).toMatchObject({ head_sha: H, landing_state: "refreshed", refresh_candidate: REFRESHED, landing_refresh: "orc-fix1" });
+	});
+
+	test("a blocked matching refresh owner is not duplicated", async () => {
+		const blocked = { id: "refresh-blocked", status: "blocked", issue_type: "epic", parent: RUN, metadata: { role: "architect", stage: "review-refresh", origin_bead: MERGE, head_sha: REFRESHED } } as BdBead;
+		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ landing_state: "refreshing", refreshed_from: BASE, refreshed_head: OTHER, refresh_candidate: REFRESHED }), [ORIGIN]: origin(), [blocked.id]: blocked },
+			open: [pr({ headRefOid: REFRESHED, isDraft: true })],
+			rules: [views(pr({ headRefOid: REFRESHED, isDraft: true }))],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "blocked" }]);
+		expect(r.store.writes.some(args => args[0] === "create")).toBe(false);
+	});
+
+	test("a task origin walks through its feature to target the owning architect epic", async () => {
+		const feature: BdBead = { id: FEATURE, status: "open", issue_type: "feature", parent: ORIGIN, metadata: { security_review: "required" } };
+		const task: BdBead = { id: TASK, status: "closed", issue_type: "task", parent: FEATURE, metadata: { role: "implementer" } };
+		const r = rig({
+			beads: {
+				[RUN]: runEpic(),
+				[MERGE]: mergeBead({ origin_bead: TASK, landing_state: "refreshing", refresh_candidate: REFRESHED }),
+				[ORIGIN]: origin(),
+				[FEATURE]: feature,
+				[TASK]: task,
+			},
+			open: [pr({ headRefOid: REFRESHED })],
+			rules: [views(pr({ headRefOid: REFRESHED }), pr({ headRefOid: REFRESHED, isDraft: true })), [argvIs(READY_UNDO), out("")]],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		expect(r.store.beads["orc-fix1"]!.metadata).toMatchObject({ role: "architect", stage: "review-refresh", target_epic: ORIGIN, security_review: "required" });
+		expect(metadataWrites(r.store, ORIGIN)).toEqual([]);
+	});
+
+	test("a live architect claim is untouched while a replacement-review epic is routed", async () => {
+		const claimed = origin();
+		claimed.assignee = "omp/orc-architect/session";
+		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ landing_state: "refreshing", refresh_candidate: REFRESHED }), [ORIGIN]: claimed },
+			open: [pr({ headRefOid: REFRESHED })],
+			rules: [views(pr({ headRefOid: REFRESHED }), pr({ headRefOid: REFRESHED, isDraft: true })), [argvIs(READY_UNDO), out("")]],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "refreshed" }]);
+		expect(metadataWrites(r.store, ORIGIN)).toEqual([]);
+		expect(r.store.beads[ORIGIN]!.assignee).toBe("omp/orc-architect/session");
+		expect(r.store.beads["orc-fix1"]!.parent).toBe(RUN);
+	});
 	test("conflicts inside the origin's scope file an implementer fix bead that blocks the merge", async () => {
 		const r = rig({
 			open: [pr({ mergeStateStatus: "DIRTY" })],
@@ -593,6 +786,19 @@ describe("landingSweep: DIRTY", () => {
 		expect(metadataWrites(r.store, MERGE)).toEqual([{ landing_state: "bounced", landing_fix: "orc-fix1", landing_notice: "" }]);
 		expect(commentsOn(r.store, MERGE)).toEqual([`BOUNCED reason=conflict fix=orc-fix1 pr=7 head=${H.slice(0, 7)} role=implementer: 2 conflicting paths: src/api/a.ts, src/api/b.ts`]);
 		expect(commentsOn(r.store, ORIGIN)).toHaveLength(1);
+	});
+
+	test("a conflict routes from its origin even when no architect epic is reachable", async () => {
+		const feature: BdBead = { id: FEATURE, status: "open", issue_type: "feature", parent: RUN, metadata: { scope: ["src/api/*"] } };
+		const r = rig({
+			beads: { [RUN]: runEpic(), [MERGE]: mergeBead({ origin_bead: FEATURE }), [FEATURE]: feature },
+			open: [pr({ mergeStateStatus: "DIRTY" })],
+			rules: [...remoteRules(), [gitVerb("merge-tree"), out(`${TREE}\nsrc/api/a.ts\n\nCONFLICT (content)\n`, 1)]],
+		});
+		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "dirty" }]);
+		const create = r.store.writes.find(args => args[0] === "create")!;
+		expect(create.slice(create.indexOf("--parent"), create.indexOf("--parent") + 2)).toEqual(["--parent", RUN]);
+		expect(JSON.parse(create[create.indexOf("--metadata") + 1]!)).toMatchObject({ role: "implementer", landing_reason: "conflict" });
 	});
 
 	test("a conflicting path outside the scope routes the fix to the architect without a scope", async () => {
@@ -655,11 +861,17 @@ describe("landingSweep: DIRTY", () => {
 				...remoteRules(),
 				[gitVerb("merge-tree"), out(`${TREE}\n`)],
 				[gitVerb("commit-tree"), out(`${REFRESHED}\n`)],
+				views(pr(), pr({ isDraft: true })),
+				[argvIs(READY_UNDO), out("")],
 				[gitVerb("push"), out("", 1, "! [rejected] non-fast-forward")],
 			],
 		});
 		expect(await r.sweep()).toEqual([{ bead: MERGE, pr: 7, outcome: "blocked" }]);
-		expect(metadataWrites(r.store, MERGE)).toEqual([{ landing_notice: `push:${H}` }]);
+		expect(metadataWrites(r.store, MERGE)).toEqual([
+			{ landing_state: "refreshing", refreshed_from: BASE, refreshed_head: H, refresh_candidate: REFRESHED, landing_notice: "" },
+			{ landing_notice: `push:${H}` },
+		]);
+		expect(r.store.beads[MERGE]!.metadata).toMatchObject({ head_sha: H, landing_state: "refreshing", refresh_candidate: REFRESHED });
 		expect(commentsOn(r.store, MERGE)[0]).toContain("could not be pushed: ! [rejected] non-fast-forward");
 	});
 });

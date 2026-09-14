@@ -39,6 +39,10 @@
       "when": "artifact"
     },
     {
+      "check": "quality",
+      "require": "metadata.quality_commands covered by metadata.quality_results"
+    },
+    {
       "check": "handoff",
       "require": "label ~ ^agent:reviewer$"
     },

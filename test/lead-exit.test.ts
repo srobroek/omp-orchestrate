@@ -18,6 +18,8 @@ function claims(observation?: ClaimObservation): ClaimState {
   recordClaim: () => { },
   observedClaim: () => observation,
   heldClaim: () => observation,
+  recordSuccessfulCommand: () => { },
+  ranSuccessfully: () => false,
   forgetClaim: () => { },
  };
 }
