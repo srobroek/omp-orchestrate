@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.2...v0.4.3) (2026-09-14)
+
+
+### Features
+
+* **status:** cross-epic review wave; epics close only over a terminal subtree ([#153](https://github.com/srobroek/orchestrate-with-bd/issues/153)) ([8ee0012](https://github.com/srobroek/orchestrate-with-bd/commit/8ee0012f94990ec489880dedc45a84eba20aa05a))
+
 ## [0.4.2](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.1...v0.4.2) (2026-09-14)
 
 
