@@ -321,7 +321,9 @@ describe("orc_status rebind in an isolated clone", () => {
 		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
 			const args = argv.slice(1).join(" ");
 			let body = "[]";
-			if (args.startsWith("show R.2 ")) body = '{"id":"R.2","issue_type":"epic","status":"open","assignee":"omp/me","dependencies":[{"depends_on_id":"R","type":"parent-child"}]}';
+			// The real `bd show` shape: a top-level `parent` and `{ id, dependency_type }` entries.
+			if (args.startsWith("show R.2 ")) body = '[{"id":"R.2","issue_type":"epic","status":"open","assignee":"omp/me","parent":"R","dependencies":[{"id":"R","issue_type":"epic","dependency_type":"parent-child"}]}]';
+			if (args.startsWith("show R.2.1 ")) body = '[{"id":"R.2.1","issue_type":"task","status":"open","assignee":"omp/me","dependencies":[{"id":"R.2","dependency_type":"parent-child"}]}]';
 			if (args.startsWith("show OTHER ")) body = '{"id":"OTHER","issue_type":"epic","status":"open","dependencies":[]}';
 			if (args.startsWith("update R.2 --claim")) body = '{"id":"R.2"}';
 			if (args.startsWith("ready")) body = "[]";
@@ -332,6 +334,11 @@ describe("orc_status rebind in an isolated clone", () => {
 			const child = await tools.get("orc_status")?.execute("x", { epic: "R.2" }, undefined, undefined, ctx);
 			expect(child?.isError ?? false).toBe(false);
 			expect(readLocator(root)?.run_id).toBe("R.2");
+			// Two levels down, with no top-level `parent` field: the dependency entry alone carries it.
+			writeLocator(root, "R");
+			const grandchild = await tools.get("orc_status")?.execute("x", { epic: "R.2.1" }, undefined, undefined, ctx);
+			expect(grandchild?.isError ?? false).toBe(false);
+			expect(readLocator(root)?.run_id).toBe("R.2.1");
 			writeLocator(root, "R");
 			const other = await tools.get("orc_status")?.execute("x", { epic: "OTHER" }, undefined, undefined, ctx);
 			expect(other?.isError).toBe(true);

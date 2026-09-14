@@ -4,16 +4,32 @@ import { type BdBead, bdJson, bdShow } from "../bd";
 import { beadIds, DESCENDANT_LIMIT, descendants, readStoreMode, readyWave, runShape, todoStrings } from "../dag";
 import { readLocator, writeLocator } from "../run";
 
+/**
+ * The parent id of a bead as `bd show` reports it: a top-level `parent`, else the
+ * parent-child dependency. `bd show` names that dependency `{ id, dependency_type }`
+ * while `bd list` names it `{ depends_on_id, type }`; both are read.
+ */
+export function parentOf(bead: BdBead): string | undefined {
+	if (typeof bead.parent === "string" && bead.parent.length > 0) return bead.parent;
+	const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
+	for (const dep of deps) {
+		if (dep === null || typeof dep !== "object") continue;
+		const type = "dependency_type" in dep ? dep.dependency_type : "type" in dep ? dep.type : undefined;
+		if (type !== "parent-child") continue;
+		const id = "depends_on_id" in dep ? dep.depends_on_id : "id" in dep ? dep.id : undefined;
+		if (typeof id === "string" && id.length > 0) return id;
+	}
+	return undefined;
+}
+
 /** Whether `epic` sits under `ancestor` through parent-child edges, walking at most four levels. */
 async function isDescendant(epic: string, ancestor: string, cwd: string): Promise<boolean> {
 	let current = epic;
 	for (let depth = 0; depth < 4; depth++) {
-		const bead = await bdShow(current, cwd);
-		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
-		const parent = deps.find(dep => dep !== null && typeof dep === "object" && "type" in dep && dep.type === "parent-child" && "depends_on_id" in dep);
-		if (parent === undefined || typeof parent.depends_on_id !== "string") return false;
-		if (parent.depends_on_id === ancestor) return true;
-		current = parent.depends_on_id;
+		const parent = parentOf(await bdShow(current, cwd));
+		if (parent === undefined) return false;
+		if (parent === ancestor) return true;
+		current = parent;
 	}
 	return false;
 }
