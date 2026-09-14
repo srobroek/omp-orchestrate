@@ -105,10 +105,7 @@ identity. Identity has one format: a spawned role is its OMP agent id, the name 
 tool registered it under; the lead is lead:<session id>. Your claim report prints that
 name as assignee.
 
-Under a run the plugin sets BEADS_ACTOR and BD_ACTOR to your identity in the environment
-of every bash call; never set them yourself. A claim under no identity is refused. So is a
-claim as the git user.name that unattributed writes fall back to, and so is a write
-attributed to anyone but you.
+Under a run the plugin authenticates the session actor and injects matching BEADS_ACTOR and BD_ACTOR values into every bash call; never set them yourself or pass `bd --actor`. A claim under no identity is refused. So is a claim as the git `user.name` that unattributed writes fall back to, or any Beads write whose flag or environment actor differs from the authenticated session actor.
 
 A role session's environment also carries ORC_PUSH_REF, the origin branch
 omp/task/<your id> that your capture is pushed to. Before you yield, commit and run
@@ -138,12 +135,18 @@ release by an agent.
 Review evidence is version-bound. A reviewer writes one line on the linked node:
 
     REVIEW <node> dimension=<d> verdict=approve|changes head_sha=<sha> review_round=<n>
+    BLOCKED <node> dimension=<d> reason=<cause> head_sha=<sha> review_round=<n>
 
-with head_sha and review_round copied from the claimed wisp's metadata, the node's when
-the wisp lacks one. The exit gate counts only a REVIEW carrying both tokens for the
-current head and round; its refusal names the missing or mismatched token and the values
-it expected. Closing or releasing the wisp does not end the claim: the yield stays bound
-to that verdict until it is written.
+with dimension, head_sha and review_round copied from the claimed wisp's metadata, the
+node's only for the version fields the wisp lacks. A security-dimension reviewer runs the
+native exact-head scan and stamps its published reference and head on the node and wisp.
+The exit gate counts only a REVIEW or BLOCKED verdict whose dimension and version tokens
+match that review wisp. A security REVIEW also carries its `security_scan_ref`; the wisp
+and linked node carry that reference plus `security_scan_head=head_sha`, and the native
+store must prove a completed full base-to-head ref-diff scan with operation provenance.
+A security BLOCKED may omit unavailable scan fields. Refusal names each missing or
+mismatched token and its expected value. Closing or releasing the wisp does not end the
+claim: the yield stays bound to that verdict until it is written.
 
 Handoff is a label. Add agent:<next-role>. Routing is different: metadata.role carries
 it, the architect that decomposed the epic writes it, and no other role may rewrite it.
@@ -158,8 +161,8 @@ commit, touch a PR or manage worktrees. Claiming is the line that matters: the q
 and the exit gate both depend on it.
 
 Read the spawning agent's own allowlist. The implementer grants scout and operator;
-the reviewer grants scout. A factual scout lookup returns directly, with no bead,
-wisp or consent. For an external-library question, name the package and version,
+the reviewer grants scout and security-reviewer. A factual scout lookup returns directly,
+with no bead, wisp or consent. For an external-library question, name the package and version,
 require installed source or official documentation, and ask for citations and excerpts
 in its optional report. Its schema has summary, files, architecture and optional report,
 not dedicated library-answer fields.

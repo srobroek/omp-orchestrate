@@ -39,7 +39,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - MUST Never pass `--db` or point `bd` at another `.beads` in any child; the run database is reached by redirect.
 - MUST Adopt existing SpecKit beads. Never pour a second graph beside them.
 - DEFAULT Check small facts directly. Delegate substantial work, not every lookup.
-- MUST Retain independent review. Add another specialist only for a material risk or unresolved gap, or when project policy requires it.
+- MUST Retain independent review. Fan baseline review out by exact-diff weight and code locality; add a specialist only for a material risk or unresolved gap, or when project policy requires it.
 - MUST Keep feature-tree writes under the architect's control. Only the architect or one scoped helper may write there at a time.
 - MUST Spawn the architect and every implementer `isolated: true` with apply=false. Before integration, verify the terminal result, `dod=` coverage and the pushed `omp/task/<id>` ref at its head. Integrate captures serially. After each integration, push the feature branch and stamp the feature's `metadata.integrated` node-id array.
 - MUST Confine helpers to the owner's checkout and scope. Keep their grants unchanged.
@@ -48,7 +48,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 - MUST Treat an architect's yield or death as a rollover when its epic remains actionable. A yielded architect has released its epic, and the reaper releases a dead one's claim. Spawn a fresh `orc-architect`, isolated, naming the run epic and role. It resumes from origin (`planning.md` → Replacement). Never restart from chat memory alone.
 - NOT Launch any role as an `omp` process, from `bash` or `hub start`, and NOT run a credential helper in a run. Roles are `task` subagents; G10 refuses both from every role session.
 - NOT Create a worktree for an agent. Worktrunk is the operator's tool. In a run, G7 refuses `wt switch --create` from every role session, and G3 refuses `git worktree add` from every session.
-- MUST Preserve required CI at the exact head. A closed gate does not prove success.
+- MUST Version CI and review evidence by exact head. Every push invalidates earlier green, review and security evidence; re-observe the new head before landing.
 - MUST Record external waits on the bead with the awaited id and resume steps. Take ready work or yield instead of polling a gate.
 - MUST Preserve held claims and captures after an incomplete exit. Neither a completed task nor an unevaluated exit proves acceptance.
 - MUST Leave dead-claim release to the reaper. It releases under the claim fence on the holder's terminal frame, or on registry `aborted` plus a lapsed lease read fresh; a lapsed lease alone proves nothing.
@@ -66,6 +66,7 @@ LOAD the named reference before entering its phase. Follow that reference's proc
 | Request a provider review | Architect only: `orc_bot_review_request`; retain sole PR-update ownership, use modes in `review-providers.md`, and pass the exact expected head |
 | Decide actionable-round bounce or escalation | `orc_review_round_policy`; pass only issues actionable at the exact head |
 | Run status | `orc_run_status`; use its rollup, not a hand-built `bd list` summary |
+| Exact-head security scan | `security_scan`; a security-dimension reviewer runs it when a feature has `metadata.security_review=required`, while a release review needs explicit repository policy on the release node. REVIEW needs a completed full native-store result with operation provenance and matching node/wisp stamps; BLOCKED may omit unavailable scan fields |
 
 | Status scope | Filter |
 |---|---|

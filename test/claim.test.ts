@@ -15,11 +15,12 @@ import os from "node:os";
 import path from "node:path";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { BdBead, BdFailure } from "../src/bd";
+import type { BdBead, BdComment, BdFailure } from "../src/bd";
 import * as actualBd from "../src/bd";
 import { planHashOf } from "../src/acceptance";
 import { createClaimState } from "../src/claim-state";
-import { gateClaimEligibility } from "../src/gates/claim";
+import { gateClaimEligibility, gateRoleLandingCommands } from "../src/gates/claim";
+import * as securityEvidence from "../src/security-evidence";
 import { markerPath } from "../src/run-state";
 
 /** Beads `bdShow` and `bdShowMany` resolve, by id. A missing key models an unreadable bead. */
@@ -29,6 +30,7 @@ let claims = createClaimState();
 let inFlight: BdBead[];
 let shown: string[];
 let listed: string[][];
+let checkedComments: Record<string, BdComment[] | null>;
 
 // Restore the original exports rather than installing another process-wide module
 // mock: later suites (notably watchers) must reach the real bd subprocess.
@@ -50,17 +52,26 @@ const listSpy = spyOn(actualBd, "bdList").mockImplementation(async (args: string
  listed.push(args);
  return inFlight;
 });
+const listCheckedSpy = spyOn(actualBd, "bdListChecked").mockImplementation(async (args: string[]) => {
+ listed.push(args);
+ return inFlight;
+});
+const commentsCheckedSpy = spyOn(actualBd, "bdCommentsChecked").mockImplementation(async (id: string) => Object.hasOwn(checkedComments, id) ? checkedComments[id]! : []);
 /** `logger.warn` calls, so every fail-open verdict can be asserted to have named its cause. */
 let warned: { message: string; data?: Record<string, unknown> }[] = [];
 const warnSpy = spyOn(logger, "warn").mockImplementation(((message: string, data?: Record<string, unknown>) => {
  warned.push({ message, data });
 }) as typeof logger.warn);
+const securitySpy = spyOn(securityEvidence, "nativeSecurityScanMatches").mockImplementation(async () => true);
 
 afterAll(() => {
  showSpy.mockRestore();
  showManySpy.mockRestore();
  listSpy.mockRestore();
+ listCheckedSpy.mockRestore();
+ commentsCheckedSpy.mockRestore();
  warnSpy.mockRestore();
+ securitySpy.mockRestore();
 });
 
 /** A checkout under a bound run: its marker names `orc-run`. */
@@ -101,6 +112,7 @@ beforeEach(() => {
  shown = [];
  listed = [];
  warned = [];
+ checkedComments = {};
  claims = createClaimState();
  // Every case states its own run scope through its cwd's marker.
  delete process.env.ORCHESTRATE_MARKER_FILE;
@@ -746,6 +758,120 @@ describe("G5 routing authority", () => {
   expect(await gateClaimEligibility(claims, ctxFor("architect"), { command: REPOINT })).toBeUndefined();
  });
 
+ test.each([
+  "bd update orc-7 --set-metadata 'quality_commands=[]'",
+  "bd update orc-7 --unset-metadata quality_commands",
+  `bd update orc-7 --metadata '{"quality_commands":[]}'`,
+  `bd create fix --metadata '{"role":"implementer","quality_commands":[]}'`,
+  "bd update orc-7 --metadata @quality.json",
+ "bd update orc-7 --set-metadata \"$Q\"",
+ "bd update orc-7 --unset-metadata \"$Q\"",
+ ])("an implementer may not rewrite the architect's quality command list: %s", async command => {
+  const result = await gateClaimEligibility(claims, ctxFor("implementer"), { command });
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("metadata.quality_commands");
+ });
+
+ test("the architect may set quality commands and implementers may record results", async () => {
+  expect(await gateClaimEligibility(claims, ctxFor("architect"), { command: "bd update orc-7 --set-metadata 'quality_commands=[]'" })).toBeUndefined();
+  claims.recordClaim({ actor: "impl", beadIds: ["orc-7"] });
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-7 --set-metadata 'quality_results={}'" })).toBeUndefined();
+ });
+
+ test("an implementer records pass only after that claimed session runs the exact command", async () => {
+  claims.recordClaim({ actor: "impl", beadIds: ["orc-7"] });
+  const write = "bd update orc-7 --set-metadata 'quality_results={\"bun test\":\"pass\"}'";
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-7 --set-metadata 'quality_results=$Q'" }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-7 --metadata '{\"quality_results\":{\"bun test\":\"$RESULT\"}}'" }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: write }))?.block).toBe(true);
+  claims.recordSuccessfulCommand("bun test");
+  expect(await gateClaimEligibility(claims, ctxFor("implementer"), { command: write })).toBeUndefined();
+ });
+
+ test("quality pass evidence cannot outlive or escape its claim", async () => {
+  claims.recordClaim({ actor: "impl", beadIds: ["orc-7"] });
+  claims.recordSuccessfulCommand("bun test");
+  claims.forgetClaim();
+  claims.recordClaim({ actor: "impl", beadIds: ["other"] });
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: "bd update orc-7 --set-metadata 'quality_results={\"bun test\":\"pass\"}'" }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor(undefined), { command: "bd update orc-7 --set-metadata 'quality_results={\"bun test\":\"pass\"}'" }))?.block).toBe(true);
+ });
+
+ test("a comment-output refresh architect may write without git location fields", async () => {
+  claims.recordClaim({ actor: "arch", beadIds: ["refresh"] });
+  beads.refresh = bead("refresh", { assignee: "arch", metadata: { role: "architect", stage: "review-refresh", execution_kind: "comment", origin_bead: "merge" } });
+  expect(await gateClaimEligibility(claims, ctxFor("architect"), { command: "bd comment refresh 'REPORTED refresh output_ref=bead://refresh#review'" })).toBeUndefined();
+ });
+
+ test("a refresh architect promotes only after every independently authored dimension approves", async () => {
+  const candidate = "a".repeat(40);
+  claims.recordClaim({ actor: "arch", beadIds: ["refresh"] });
+  beads.merge = bead("merge", { metadata: { landing_state: "refreshed", landing_refresh: "refresh", refresh_candidate: candidate } });
+  beads.refresh = bead("refresh", { status: "in_progress", assignee: "arch", metadata: { role: "architect", stage: "review-refresh", execution_kind: "comment", origin_bead: "merge", target_epic: "target", base_sha: "b".repeat(40), head_sha: candidate, review_round: "2", review_dimensions: ["baseline:core", "security"], security_review: "required", security_scan_ref: "security://scans/scan-2", security_scan_head: candidate } });
+  beads.target = bead("target", { metadata: { security_review: "required" } });
+  inFlight = [
+   bead("baseline", { status: "closed", assignee: "reviewer-a", ephemeral: true, parent: "refresh", metadata: { role: "reviewer", dimension: "baseline:core", head_sha: candidate, review_round: "2" } }),
+   bead("security", { status: "closed", assignee: "reviewer-b", ephemeral: true, parent: "refresh", metadata: { role: "reviewer", dimension: "security", base_sha: "b".repeat(40), head_sha: candidate, review_round: "2", security_scan_ref: "security://scans/scan-2", security_scan_head: candidate } }),
+  ];
+  checkedComments.refresh = [
+   { author: "reviewer-a", text: `REVIEW refresh dimension=baseline:core verdict=changes head_sha=${candidate} review_round=2` },
+   { author: "reviewer-b", text: `REVIEW refresh dimension=security verdict=approve head_sha=${candidate} review_round=2 security_scan_ref=security://scans/scan-2` },
+  ];
+  const command = `bd update merge --set-metadata head_sha=${candidate}`;
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command }))?.block).toBe(true);
+  checkedComments.refresh[0] = { author: "reviewer-a", text: `REVIEW refresh dimension=baseline:core verdict=approve head_sha=${candidate} review_round=2` };
+  expect(await gateClaimEligibility(claims, ctxFor("architect"), { command })).toBeUndefined();
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command: `${command} --set-metadata head_sha=${"c".repeat(40)}` }))?.block).toBe(true);
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command: "bd update merge --unset-metadata head_sha" }))?.block).toBe(true);
+ });
+
+ test("refresh routing metadata is landing-owned and review shape locks after dispatch", async () => {
+  claims.recordClaim({ actor: "arch", beadIds: ["refresh"] });
+  beads.refresh = bead("refresh", { status: "in_progress", assignee: "arch", metadata: { role: "architect", stage: "review-refresh", execution_kind: "comment", origin_bead: "merge", target_epic: "target", head_sha: "a".repeat(40) } });
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command: "bd update refresh --set-metadata target_epic=other" }))?.block).toBe(true);
+  expect(await gateClaimEligibility(claims, ctxFor("architect"), { command: "bd update refresh --set-metadata 'review_dimensions=[\"baseline:a\"]'" })).toBeUndefined();
+  inFlight = [bead("review", { ephemeral: true, parent: "refresh" })];
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command: "bd update refresh --set-metadata review_round=2" }))?.block).toBe(true);
+ });
+
+ test("a refreshing merge head cannot be promoted without its live refresh claim", async () => {
+  beads.merge = bead("merge", { metadata: { landing_state: "refreshing", landing_refresh: "refresh", refresh_candidate: "a".repeat(40) } });
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command: `bd update merge --set-metadata head_sha=${"a".repeat(40)}` }))?.block).toBe(true);
+ });
+
+ test("ORC roles cannot forge landing state and a released refresh claim cannot promote", async () => {
+  expect((await gateClaimEligibility(claims, ctxFor("reviewer"), { command: "bd update merge --set-metadata landing_state=landed" }))?.block).toBe(true);
+  const candidate = "a".repeat(40);
+  claims.recordClaim({ actor: "arch", beadIds: ["refresh"] });
+  beads.merge = bead("merge", { metadata: { landing_state: "refreshing", landing_refresh: "refresh", refresh_candidate: candidate } });
+  beads.refresh = bead("refresh", { status: "open", assignee: "", metadata: { role: "architect", stage: "review-refresh", origin_bead: "merge", head_sha: candidate } });
+  expect((await gateClaimEligibility(claims, ctxFor("architect"), { command: `bd update merge --set-metadata head_sha=${candidate}` }))?.block).toBe(true);
+ });
+
+ test("a normal architect can ready its exact fully reviewed draft", async () => {
+  const candidate = "a".repeat(40);
+  claims.recordClaim({ actor: "arch", beadIds: ["feature"] });
+  beads.feature = bead("feature", { status: "in_progress", assignee: "arch", metadata: { role: "architect", repo: "o/r", pr: 8, head_sha: candidate, review_dimensions: ["baseline:core"], review_round: "1" } });
+  inFlight = [bead("baseline", { status: "closed", assignee: "reviewer-a", ephemeral: true, parent: "feature", metadata: { role: "reviewer", dimension: "baseline:core", head_sha: candidate, review_round: "1" } })];
+  checkedComments.feature = [{ author: "reviewer-a", text: `REVIEW feature dimension=baseline:core verdict=approve head_sha=${candidate} review_round=1` }];
+  expect(await gateRoleLandingCommands(claims, ctxFor("architect"), { command: "gh --repo o/r pr ready 8" })).toBeUndefined();
+ });
+
+ test("ORC roles cannot merge and only a live fully reviewed architect can make the exact PR ready", async () => {
+  expect((await gateRoleLandingCommands(claims, ctxFor("shepherd"), { command: "/usr/bin/gh --repo o/r pr merge 7 --auto" }))?.block).toBe(true);
+  expect((await gateRoleLandingCommands(claims, ctxFor("shepherd"), { command: "gh api --method PUT repos/o/r/pulls/7/merge" }))?.block).toBe(true);
+  const candidate = "a".repeat(40);
+  claims.recordClaim({ actor: "arch", beadIds: ["refresh"] });
+  beads.refresh = bead("refresh", { status: "in_progress", assignee: "arch", metadata: { role: "architect", stage: "review-refresh", origin_bead: "merge", repo: "o/r", pr: 7, head_sha: candidate, review_dimensions: ["baseline:core"], review_round: "2" } });
+  beads.merge = bead("merge", { metadata: { landing_state: "refreshed", landing_refresh: "refresh", head_sha: candidate } });
+  inFlight = [bead("baseline", { status: "closed", assignee: "reviewer-a", ephemeral: true, parent: "refresh", metadata: { role: "reviewer", dimension: "baseline:core", head_sha: candidate, review_round: "2" } })];
+  checkedComments.refresh = [{ author: "reviewer-a", text: `REVIEW refresh dimension=baseline:core verdict=approve head_sha=${candidate} review_round=2` }];
+  expect(await gateRoleLandingCommands(claims, ctxFor("architect"), { command: "gh pr ready 7 --repo o/r" })).toBeUndefined();
+  expect((await gateRoleLandingCommands(claims, ctxFor("architect"), { command: "gh pr ready 7 --repo attacker/r" }))?.block).toBe(true);
+  beads.merge.metadata!.head_sha = "b".repeat(40);
+  expect((await gateRoleLandingCommands(claims, ctxFor("architect"), { command: "gh pr ready 7 --repo o/r" }))?.block).toBe(true);
+ });
+
  test("a session declaring no role is not checked", async () => {
   // The lead routes the whole DAG, and a contract-free helper is already behind
   // BD_READONLY=1, so it cannot write a bead at all.
@@ -1182,11 +1308,8 @@ describe("G5 close authority", () => {
  function task(overrides: Partial<BdBead> = {}): BdBead {
   return bead("orc-t", { issue_type: "task", status: "in_progress", assignee: "", labels: ["orc-node", "agent:reviewer"], metadata: { role: "implementer", execution_kind: "git", head_sha: "abc1234" }, ...overrides });
  }
- let comments: Record<string, { text: string }[]>;
- const commentsSpy = spyOn(actualBd, "bdCommentsChecked").mockImplementation(async (id: string) => comments[id] ?? null);
- afterAll(() => commentsSpy.mockRestore());
  beforeEach(() => {
-  comments = { "orc-t": [{ text: "REPORTED docs/faq.md changed; head_sha=abc1234" }, { text: "REVIEW verdict=approve head_sha=abc1234" }] };
+  checkedComments = { "orc-t": [{ text: "REPORTED docs/faq.md changed; head_sha=abc1234" }, { text: "REVIEW verdict=approve head_sha=abc1234" }] };
   beads["orc-t"] = task();
  });
 
@@ -1223,7 +1346,7 @@ describe("G5 close authority", () => {
 
  test.each([
   ["a merge_sha", () => { beads["orc-t"] = task({ metadata: { execution_kind: "git", merge_sha: "c86067b" } }); }],
-  ["a LANDED comment", () => { comments["orc-t"] = [{ text: "LANDED c86067b pr=2 head=abc1234 merge=orc-m" }]; }],
+  ["a LANDED comment", () => { checkedComments["orc-t"] = [{ text: "LANDED c86067b pr=2 head=abc1234 merge=orc-m" }]; }],
  ])("allows the close once the bead carries %s", async (_label, arrange) => {
   arrange();
   expect(await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" })).toBeUndefined();
@@ -1255,7 +1378,7 @@ describe("G5 close authority", () => {
 
  test.each([
   ["the bead", () => { delete beads["orc-t"]; }, "orc-t"],
-  ["its comments", () => { delete comments["orc-t"]; }, "orc-t"],
+  ["its comments", () => { checkedComments["orc-t"] = null; }, "orc-t"],
  ])("fails closed inside a run when %s cannot be read", async (_label, arrange, _warnedBead) => {
   arrange();
   const result = await gateClaimEligibility(claims, ctxFor("architect", runRoot), { command: "bd close orc-t --reason merged" });
@@ -1458,9 +1581,10 @@ describe("G5 decomposition scope", () => {
  });
 
  test("opacity is judged for the architect, whose write the overlap check reads", async () => {
-  for (const role of ["implementer", "shepherd", undefined]) {
+  for (const role of ["shepherd", undefined]) {
    expect(await gateClaimEligibility(claims, ctxFor(role), { command: `bd create "bug" --type bug --metadata "$M"` })).toBeUndefined();
   }
+  expect((await gateClaimEligibility(claims, ctxFor("implementer"), { command: `bd create "bug" --type bug --metadata "$M"` }))?.block).toBe(true);
  });
 });
 

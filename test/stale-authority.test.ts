@@ -382,7 +382,7 @@ function delivered(metadata: Record<string, unknown> = {}, overrides: Partial<Bd
   status: "in_progress",
   assignee: "orc-impl-1",
   labels: ["agent:reviewer"],
-  metadata: { worktree: "/tmp/wt", branch: "omp/task/orc-42", head_sha: DELIVERED_SHA, ...metadata },
+  metadata: { worktree: "/tmp/wt", branch: "omp/task/orc-42", head_sha: DELIVERED_SHA, quality_commands: [], ...metadata },
   ...overrides,
  };
 }
@@ -407,9 +407,9 @@ beforeEach(() => {
 
 describe("G4 replay of an earlier round's verdict", () => {
  test("a verdict scoped to an older review round cannot satisfy the current wisp", async () => {
-  reads.bead = { id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review", metadata: { review_round: "3" } };
+  reads.bead = { id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review", metadata: { review_round: "3", dimension: "behavior" } };
   reads.linked = [NODE];
-  reads.comments = { [WISP]: [], [NODE]: [{ text: "REVIEW verdict=approve review_round=1 head_sha=b0b0b0b" }] };
+  reads.comments = { [WISP]: [], [NODE]: [{ text: "REVIEW dimension=behavior verdict=approve review_round=1 head_sha=b0b0b0b" }] };
   freshSession();
   claims.recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
 
@@ -420,10 +420,10 @@ describe("G4 replay of an earlier round's verdict", () => {
  test("a review verdict scoped to the current round satisfies the review wisp", async () => {
   reads.bead = {
    id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review",
-   metadata: { review_round: "3", head_sha: HEAD },
+   metadata: { review_round: "3", head_sha: HEAD, dimension: "behavior" },
   };
   reads.linked = [NODE];
-  reads.comments = { [WISP]: [], [NODE]: [{ text: `REVIEW verdict=approve review_round=3 head_sha=${HEAD}` }] };
+  reads.comments = { [WISP]: [], [NODE]: [{ text: `REVIEW dimension=behavior verdict=approve review_round=3 head_sha=${HEAD}` }] };
   freshSession();
   claims.recordClaim({ actor: "orc-rev-1", beadIds: [WISP] });
   expect(await gateExitContract(roleCtx("reviewer"))).toBeUndefined();
@@ -431,7 +431,7 @@ describe("G4 replay of an earlier round's verdict", () => {
  });
 
  test("a review wisp without a verdict is refused", async () => {
-  reads.bead = { id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review", metadata: { review_round: "3" } };
+  reads.bead = { id: WISP, status: "in_progress", assignee: "", labels: [], ephemeral: true, wisp_type: "review", metadata: { review_round: "3", dimension: "behavior" } };
   reads.linked = [NODE];
   reads.comments = { [WISP]: [], [NODE]: [{ text: "note: read the diff, no opinion recorded" }] };
   freshSession();

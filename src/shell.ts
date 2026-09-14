@@ -265,6 +265,50 @@ function segmentize(command: string): Segment[] {
 	return segments;
 }
 
+const QUALITY_COMMAND_LAUNCHERS: Record<string, true> = { bash: true, sh: true, zsh: true, fish: true, env: true, command: true, exec: true, eval: true, builtin: true, source: true, ".": true, time: true, sudo: true, nohup: true, nice: true, timeout: true, xargs: true };
+const NON_CHECKERS: Record<string, true> = { bd: true, omp: true, true: true, false: true, ":": true };
+
+/** Reject command substitution and malformed quoting that argv tokenization alone erases. */
+function hasStaticWords(command: string): boolean {
+	let quote: "'" | '"' | undefined;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (ch === "\\") {
+			i += 1;
+			continue;
+		}
+		if (ch === '"') {
+			quote = quote === '"' ? undefined : '"';
+			continue;
+		}
+		if (quote === undefined && ch === "'") {
+			quote = "'";
+			continue;
+		}
+		if (ch === "`" || (ch === "$" && command[i + 1] === "(")) return false;
+	}
+	return quote === undefined;
+}
+
+/** One foreground checker invocation: no shell composition, redirects, launchers or orchestration commands. */
+export function isStandaloneQualityCommand(command: string): boolean {
+	if (!hasStaticWords(command)) return false;
+	const words: string[] = [];
+	for (const token of tokenize(command)) {
+		if (token.kind !== "word") return false;
+		words.push(token.text);
+	}
+	if (words.length === 0) return false;
+	const executable = words.find(word => !ASSIGNMENT.test(word));
+	if (executable === undefined) return false;
+	const name = executable.slice(executable.lastIndexOf("/") + 1).toLowerCase();
+	return QUALITY_COMMAND_LAUNCHERS[name] !== true && NON_CHECKERS[name] !== true;
+}
+
 /** The argv words of each command a shell would run separately; redirections are not words. */
 export function splitSegments(command: string): string[][] {
 	return segmentize(command).map(segment => segment.words);

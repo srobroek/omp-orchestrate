@@ -139,6 +139,18 @@ describe("extension factory", () => {
 			});
 
 			await parentResult(claimReport("orc-parent-1", "parent"), parentCtx);
+			const qualityWrite = "bd update orc-parent-1 --set-metadata 'quality_results={\"bun test\":\"pass\"}'";
+			expect(await parentToolCall({ toolName: "bash", input: { command: qualityWrite } }, parentCtx)).toMatchObject({ block: true });
+			for (const [index, command] of ["(bun test)", "bun test | cat", "bun test > /tmp/result", "bash -c 'bun test'", "bd status", "true"].entries()) {
+				const toolCallId = `invalid-quality-${index}`;
+				const invalidWrite = `bd update orc-parent-1 --set-metadata ${JSON.stringify(`quality_results=${JSON.stringify({ [command]: "pass" })}`)}`;
+				await parentToolCall({ toolCallId, toolName: "bash", input: { command } }, parentCtx);
+				await parentResult({ toolCallId, toolName: "bash", isError: false, input: { command }, details: {}, content: [{ type: "text", text: "ok" }] }, parentCtx);
+				expect(await parentToolCall({ toolName: "bash", input: { command: invalidWrite } }, parentCtx)).toMatchObject({ block: true });
+			}
+			await parentToolCall({ toolCallId: "quality-1", toolName: "bash", input: { command: "bun test" } }, parentCtx);
+			await parentResult({ toolCallId: "quality-1", toolName: "bash", isError: false, input: { command: "bun test" }, details: {}, content: [{ type: "text", text: "ok" }] }, parentCtx);
+			expect((await parentToolCall({ toolName: "bash", input: { command: qualityWrite } }, parentCtx) as { block?: boolean } | undefined)?.block).toBeUndefined();
 			expect(await childToolCall(
 				{ toolName: "bash", input: { command: "bd ready --parent orc-run --metadata-field role=implementer --claim --json", env: { BEADS_ACTOR: "child" } } },
 				childCtx,

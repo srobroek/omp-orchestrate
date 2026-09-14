@@ -9,6 +9,7 @@ import * as actualBd from "../src/bd";
 import * as origin from "../src/origin";
 import { createClaimState } from "../src/claim-state";
 import { createExitGuard } from "../src/gates/exit";
+import * as securityEvidence from "../src/security-evidence";
 import { markerPath } from "../src/run-state";
 
 const BEAD = "orc-42";
@@ -35,6 +36,7 @@ let local: origin.LocalState | undefined;
 let unreadableClone = false;
 let fixture: string;
 let claims = createClaimState();
+let scanValid: boolean;
 let gateExitContract: ReturnType<typeof createExitGuard>;
 const spies = [
  // The claimed beads and the linked beads both arrive through the one-call hydration; an
@@ -74,6 +76,7 @@ const spies = [
   const head = bead?.metadata?.head_sha;
   return { head: typeof head === "string" ? head : BASE, dirty: false };
  }),
+ spyOn(securityEvidence, "nativeSecurityScanMatches").mockImplementation(async () => scanValid),
  spyOn(logger, "warn").mockImplementation(((_message: string, data?: Record<string, unknown>) => {
   warned.push(data ?? {});
  }) as typeof logger.warn),
@@ -93,13 +96,14 @@ beforeEach(async () => {
  asked = [];
  local = undefined;
  unreadableClone = false;
- bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+ bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: "git", quality_commands: [], base_sha: BASE } };
  comments = [];
  linked = [];
  linkedBead = null;
  linkedComments = [];
  epic = { id: "orc-run", status: "in_progress", metadata: { base_sha: BASE } };
  claims.recordClaim({ actor: "A", beadIds: [BEAD] });
+ scanValid = true;
 });
 
 test("a released shepherd exit with a BLOCKED wait mutates nothing it inherited", async () => {
@@ -121,7 +125,7 @@ test("a released shepherd exit with a BLOCKED wait mutates nothing it inherited"
 test("a held bead is a valid exit: status blocked plus ASK, claim retained", async () => {
  // The human hold has one carrier. Without ASK in the escape clause the worker that
  // parked its bead correctly would be refused for lacking REPORTED.
- bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+ bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", quality_commands: [], base_sha: BASE } };
  comments = [{ text: `ASK ${BEAD} question: which API?` }];
  expect(await gateExitContract(CTX)).toBeUndefined();
  comments = [{ text: `NOTE ${BEAD} leaning towards the old API` }];
@@ -130,7 +134,7 @@ test("a held bead is a valid exit: status blocked plus ASK, claim retained", asy
 
 describe("G4 activation refusal budget", () => {
  test("repeated invalid exits are bounded without rewriting shared state, and the valve is loud", async () => {
-  bead!.metadata = { execution_kind: "git", stop_attempts: "bad" };
+  bead!.metadata = { execution_kind: "git", quality_commands: [], stop_attempts: "bad" };
   expect((await gateExitContract(CTX))?.block).toBe(true);
   expect(JSON.parse((await gateExitContract(CTX))!.reason!).attempt).toBe(2);
   expect(issued).toEqual([]);
@@ -198,7 +202,7 @@ describe("G4 checked evidence", () => {
  test("a review wisp linked to its node by the parent edge alone is judged on the node's verdict", async () => {
   // The documented shape: `bd create --parent <node> --ephemeral`, and bd refuses a
   // relates-to from a child to its parent, so no dep list answers with the node.
-  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1 } };
+  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1, dimension: "behavior" } };
   linked = [];
   linkedBead = { id: "node", metadata: { head_sha: "abc1234" } };
   linkedComments = [{ text: "REPORTED node src/api.ts" }];
@@ -229,7 +233,7 @@ describe("G4 checked evidence", () => {
   expect(issued).toEqual([]);
  });
  test("a git implementer whose pushed ref is at its head is stamped and released in one fenced write", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(asked).toEqual(["omp/task/A"]);
@@ -238,8 +242,21 @@ describe("G4 checked evidence", () => {
   delete bead.metadata!.head_sha;
   expect((await gateExitContract(CTX))?.block).toBe(true);
  });
+ test("an implementer cannot yield until every named quality command has pass evidence", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234", quality_commands: ["bun test", "bun run typecheck"], quality_results: { "bun test": "pass", "bun run typecheck": "fail" } } };
+  comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
+  let verdict = JSON.parse((await gateExitContract(CTX))!.reason!) as { failed_checks: { check: string; detail: string }[] };
+  expect(verdict.failed_checks).toEqual([{ check: "quality", detail: "unsatisfied: metadata.quality_commands covered by metadata.quality_results -- quality commands without pass evidence: bun run typecheck" }]);
+  (bead.metadata!.quality_results as Record<string, string>)["bun run typecheck"] = "pass";
+  expect(await gateExitContract(CTX)).toBeUndefined();
+ });
+ test("duplicate quality commands cannot share one pass receipt", async () => {
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234", quality_commands: ["bun test", "bun test"], quality_results: { "bun test": "pass" } } };
+  comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
+  expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("duplicate");
+ });
  test("a completed report with its pushed head on origin is still refused while the tree is dirty", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts committed abc1234 ${pushed("abc1234")}` }];
   local = { head: "abc1234abc1234abc1234abc1234abc1234abc12", dirty: true };
   const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
@@ -251,7 +268,7 @@ describe("G4 checked evidence", () => {
   expect(await gateExitContract(CTX)).toBeUndefined();
  });
  test("a REPORTED without a pushed token is refused before origin is asked", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: "REPORTED src/api.ts committed abc1234" }];
   const verdict: { failed_checks: { check: string; detail: string; recovery?: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
   expect(verdict.failed_checks.map(failure => failure.check)).toEqual(["pushed"]);
@@ -265,7 +282,7 @@ describe("G4 checked evidence", () => {
   ["origin has no such ref", { kind: "missing" } as origin.OriginHead, "origin has no omp/task/A"],
   ["origin does not answer", { kind: "unreachable", cause: "Could not resolve host" } as origin.OriginHead, "origin unreachable (Could not resolve host); retry `git push` and REPORTED, the worker stays alive until proven"],
  ])("an implementer whose pushed ref is not proven is refused: %s", async (_label, answer, text) => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
   remote = answer;
   const verdict: { failed_checks: { check: string; detail: string }[] } = JSON.parse((await gateExitContract(CTX))!.reason!);
@@ -274,7 +291,7 @@ describe("G4 checked evidence", () => {
   expect(issued).toEqual([]);
  });
  test("a pushed token contradicting head_sha is refused without asking origin", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts ${pushed("fedcba9")}` }];
   expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks[0].detail).toContain("but head_sha is abc1234");
   expect(asked).toEqual([]);
@@ -349,7 +366,7 @@ describe("G4 checked evidence", () => {
   });
  });
  test.each(["artifact", "comment", "external"])("%s writer completion requires handoff, and the gate releases the held claim", async kind => {
-  bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: kind, artifacts_dir: path.join(fixture, "artifacts"), output_ref: path.join(fixture, "artifacts/result") } };
+  bead = { id: BEAD, status: "in_progress", assignee: "A", metadata: { execution_kind: kind, quality_commands: [], artifacts_dir: path.join(fixture, "artifacts"), output_ref: path.join(fixture, "artifacts/result") } };
   comments = [{ text: "REPORTED result" }];
   const result = await gateExitContract(CTX);
   expect(JSON.parse(result!.reason!).failed_checks.map((failure: { check: string }) => failure.check)).toEqual(["handoff"]);
@@ -358,10 +375,10 @@ describe("G4 checked evidence", () => {
   expect(issued).toEqual([["update", BEAD, "--actor", "A", "--claim", "--assignee", "", "--status", "in_progress"]]);
  });
  test.each(["review", "escalation"])("claimed %s wisp reads its outgoing node verdict", async kind => {
-  bead = { id: BEAD, ephemeral: true, wisp_type: kind, assignee: "", status: "closed" };
+  bead = { id: BEAD, ephemeral: true, wisp_type: kind, assignee: "", status: "closed", metadata: kind === "review" ? { dimension: "behavior" } : {} };
   linked = ["node"];
   linkedBead = { id: "node" };
-  linkedComments = [{ text: kind === "review" ? "REVIEW approved" : "NOTE use the existing API" }];
+  linkedComments = [{ text: kind === "review" ? "REVIEW node dimension=behavior" : "NOTE use the existing API" }];
   const role = kind === "review" ? "reviewer" : "researcher";
   const ctx = { getSystemPrompt: () => [`ORC-ROLE: ${role}`] } as unknown as ExtensionContext;
   expect(await gateExitContract(ctx)).toBeUndefined();
@@ -369,10 +386,10 @@ describe("G4 checked evidence", () => {
   expect((await gateExitContract(ctx))?.block).toBe(true);
  });
  test("historical linked verdict cannot satisfy the current head and round, and the refusal names the mismatch", async () => {
-  bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2 } };
+  bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2, dimension: "behavior" } };
   linked = ["node"];
   linkedBead = { id: "node", metadata: { head_sha: "old", review_round: 1 } };
-  linkedComments = [{ text: "REVIEW node head_sha=old review_round=1" }];
+  linkedComments = [{ text: "REVIEW node dimension=behavior head_sha=old review_round=1" }];
   const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
   const refused = await gateExitContract(ctx);
   expect(refused?.block).toBe(true);
@@ -381,13 +398,79 @@ describe("G4 checked evidence", () => {
    check: "verdict",
    detail: "unsatisfied: linked.comment.verb in [REVIEW, BLOCKED] -- REVIEW on node carries head_sha=old, expected head_sha=new and carries review_round=1, expected review_round=2; the expected values are the claimed bead's metadata, else the node's",
   }]);
-  linkedComments = [{ text: "REVIEW node head_sha=new review_round=2" }];
+  linkedComments = [{ text: "REVIEW node dimension=behavior head_sha=new review_round=2" }];
   expect(await gateExitContract(ctx)).toBeUndefined();
  });
+test("a dimensionless review wisp cannot opt out of shard binding", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review" };
+ linked = ["node"];
+ linkedBead = { id: "node" };
+ linkedComments = [{ text: "REVIEW node dimension=baseline:a" }];
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+});
+test("one review shard cannot satisfy another shard's wisp", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2, dimension: "baseline:b" } };
+ linked = ["node"];
+ linkedBead = { id: "node" };
+ linkedComments = [{ text: "REVIEW node dimension=baseline:a verdict=approve head_sha=new review_round=2" }];
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+ linkedComments = [{ text: "BLOCKED node dimension=baseline:a head_sha=new review_round=2" }];
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+ linkedComments = [{ text: "REVIEW node dimension=baseline:b verdict=approve head_sha=new review_round=2" }];
+ expect(await gateExitContract(ctx)).toBeUndefined();
+});
+test("a correctly stamped BLOCKED verdict satisfies its own shard wisp", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2, dimension: "baseline:b" } };
+ linked = ["node"];
+ linkedBead = { id: "node" };
+ linkedComments = [{ text: "BLOCKED node dimension=baseline:b head_sha=new review_round=2" }];
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ expect(await gateExitContract(ctx)).toBeUndefined();
+});
+test("contradictory duplicate review tokens are rejected", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2, dimension: "baseline:b" } };
+ linked = ["node"];
+ linkedBead = { id: "node" };
+ linkedComments = [{ text: "REVIEW node dimension=baseline:b dimension=security verdict=approve head_sha=old head_sha=new review_round=2 review_round=1" }];
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+});
+test("a security approval requires node-bound trusted exact-head native scan evidence", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { base_sha: "base", head_sha: "new", review_round: 2, dimension: "security", security_scan_ref: "security://scans/scan-7", security_scan_head: "new" } };
+ linked = ["node"];
+ linkedBead = { id: "node", metadata: { base_sha: "base", security_scan_ref: "security://scans/scan-7", security_scan_head: "new" } };
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ linkedComments = [{ text: "REVIEW node dimension=security verdict=approve head_sha=new review_round=2" }];
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+ bead.metadata!.security_scan_head = "old";
+ linkedComments = [{ text: "REVIEW node dimension=security verdict=approve head_sha=new review_round=2 security_scan_ref=security://scans/scan-7" }];
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+ bead.metadata!.security_scan_head = "new";
+ expect(await gateExitContract(ctx)).toBeUndefined();
+});
+test("a self-consistent security reference without a native scan is rejected", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { base_sha: "base", head_sha: "new", review_round: 2, dimension: "security", security_scan_ref: "security://scans/forged", security_scan_head: "new" } };
+ linked = ["node"];
+ linkedBead = { id: "node", metadata: { base_sha: "base", security_scan_ref: "security://scans/forged", security_scan_head: "new" } };
+ linkedComments = [{ text: "REVIEW node dimension=security verdict=approve head_sha=new review_round=2 security_scan_ref=security://scans/forged" }];
+ scanValid = false;
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ expect((await gateExitContract(ctx))?.block).toBe(true);
+});
+test("a security BLOCKED verdict remains reportable when no scan was published", async () => {
+ bead = { id: BEAD, ephemeral: true, wisp_type: "review", metadata: { head_sha: "new", review_round: 2, dimension: "security" } };
+ linked = ["node"];
+ linkedBead = { id: "node" };
+ const ctx = { getSystemPrompt: () => ["ORC-ROLE: reviewer"] } as unknown as ExtensionContext;
+ linkedComments = [{ text: "BLOCKED node dimension=security head_sha=new review_round=2 reason=scan-failed" }];
+ expect(await gateExitContract(ctx)).toBeUndefined();
+});
  test("a verdict written without the version tokens is refused naming each token it lacks", async () => {
   // Measured (omp-orchestrate-gqx): the reviewer wrote `head 73018a2`, and the bare
   // predicate gave it nothing to fix. A comment with a verb outside the set is not named.
-  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1 } };
+  bead = { id: BEAD, ephemeral: true, parent: "node", assignee: "A", status: "in_progress", metadata: { role: "reviewer", head_sha: "abc1234", review_round: 1, dimension: "behavior" } };
   linked = [];
   linkedBead = { id: "node", metadata: { head_sha: "abc1234" } };
   linkedComments = [
@@ -406,7 +489,7 @@ describe("G4 checked evidence", () => {
   await symlink(path.join(fixture, "outside"), path.join(fixture, "artifacts/link"));
   const output = kind === "traversal" ? `${fixture}/artifacts/../outside`
    : path.join(fixture, "artifacts", kind === "symlink" ? "link" : "missing");
-  bead = { id: BEAD, assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "artifact", artifacts_dir: path.join(fixture, "artifacts"), output_ref: output } };
+  bead = { id: BEAD, assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "artifact", quality_commands: [], artifacts_dir: path.join(fixture, "artifacts"), output_ref: output } };
   comments = [{ text: "REPORTED artifact" }];
   expect(JSON.parse((await gateExitContract(CTX))!.reason!).failed_checks.map((failure: { check: string }) => failure.check)).toEqual(["artifact_path"]);
  });
@@ -474,7 +557,7 @@ describe("G4 checked evidence", () => {
   });
  });
  test("a successor's claim by the time of the write refuses the exit and stamps nothing on its bead", async () => {
-  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "A", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
   const run = spyOn(actualBd, "bdRun").mockImplementation(async (args: string[]) => {
    issued.push(args);
@@ -498,11 +581,19 @@ describe("G4 checked evidence", () => {
  test("a bead released before the proof is accepted with no write; the missing stamp is logged", async () => {
   // bd 1.2.2 claims nothing that is not `open`, so a released `in_progress` bead has no
   // fence for anyone. An unfenced stamp could land on a successor's claim, so none is written.
-  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", head_sha: "abc1234" } };
+  bead = { id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"], metadata: { execution_kind: "git", quality_commands: [], head_sha: "abc1234" } };
   comments = [{ text: `REPORTED src/api.ts ${pushed("abc1234")}` }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(issued).toEqual([]);
   expect(warned).toEqual([{ bead: BEAD, sha: "abc1234", cause: "released before proof" }]);
+ });
+ test("a researcher BLOCKED escalation does not inherit review dimensions", async () => {
+  bead = { id: BEAD, ephemeral: true, wisp_type: "escalation" };
+  linked = ["node"];
+  linkedBead = { id: "node" };
+  linkedComments = [{ text: "BLOCKED node reason=missing-source" }];
+  const ctx = { getSystemPrompt: () => ["ORC-ROLE: researcher"] } as unknown as ExtensionContext;
+  expect(await gateExitContract(ctx)).toBeUndefined();
  });
 });
 
@@ -541,7 +632,7 @@ describe("G4 zero-work report", () => {
  function released(head: string, ownBase?: string): BdBead {
   return {
    id: BEAD, status: "in_progress", assignee: "", labels: ["agent:reviewer"],
-   metadata: { execution_kind: "git", head_sha: head, ...(ownBase === undefined ? {} : { base_sha: ownBase }) },
+   metadata: { execution_kind: "git", quality_commands: [], head_sha: head, ...(ownBase === undefined ? {} : { base_sha: ownBase }) },
   };
  }
 
@@ -663,7 +754,7 @@ describe("G4 unclaimed exit", () => {
   // the yield after that was accepted with the contract never judged.
   claims.recordClaim({ actor: "A", beadIds: [BEAD] });
   claims.forgetClaim();
-  bead = { id: BEAD, status: "closed", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+  bead = { id: BEAD, status: "closed", assignee: "A", metadata: { execution_kind: "git", quality_commands: [], base_sha: BASE } };
   const first = await gateExitContract(CTX, { result: { data: "done" } });
   expect(first?.block).toBe(true);
   expect(JSON.parse(first!.reason!)).toMatchObject({ bead: BEAD, attempt: 1 });
@@ -680,8 +771,8 @@ describe("G4 unclaimed exit", () => {
   claims.forgetClaim();
   claims.recordClaim({ actor: "A", beadIds: [BEAD] });
   // Were "first" still bound it would be refused: held, unreported.
-  linkedBead = { id: "first", status: "in_progress", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
-  bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", base_sha: BASE } };
+  linkedBead = { id: "first", status: "in_progress", assignee: "A", metadata: { execution_kind: "git", quality_commands: [], base_sha: BASE } };
+  bead = { id: BEAD, status: "blocked", assignee: "A", metadata: { execution_kind: "git", quality_commands: [], base_sha: BASE } };
   comments = [{ text: `ASK ${BEAD} question: which API?` }];
   expect(await gateExitContract(CTX)).toBeUndefined();
   expect(issued).toEqual([]);

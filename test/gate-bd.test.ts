@@ -733,11 +733,11 @@ describe("G6 inside a run", () => {
 		}
 	});
 
-	test("leaves a caller-named actor alone but still supplies, and overwrites, the push ref", async () => {
+	test("refuses caller actor overrides that do not match the authenticated session", async () => {
 		const { ctx, unregister } = registeredSession();
 		try {
-			expect(await gateBdDiscipline(pi, ctx, { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen" } }, "env-actor"))
-				.toEqual({ input: { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen", ORC_PUSH_REF: "omp/task/impl-7" } } });
+			expect(await gateBdDiscipline(pi, ctx, { command: "bd update orc-1", env: { BEADS_ACTOR: "chosen" } }, "env-actor")).toMatchObject({ block: true });
+			expect(await gateBdDiscipline(pi, ctx, { command: "bd --actor forged update orc-1" }, "flag-actor")).toMatchObject({ block: true });
 			expect(await gateBdDiscipline(pi, ctx, { command: "git push origin HEAD:$ORC_PUSH_REF", env: { ORC_PUSH_REF: "main" } }, "env-ref"))
 				.toEqual({ input: { command: "git push origin HEAD:$ORC_PUSH_REF", env: { ORC_PUSH_REF: "omp/task/impl-7", BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7" } } });
 			expect(await gateBdDiscipline(pi, ctx, { command: "git status", env: { BEADS_ACTOR: "impl-7", BD_ACTOR: "impl-7", ORC_PUSH_REF: "omp/task/impl-7" } }, "settled")).toBeUndefined();

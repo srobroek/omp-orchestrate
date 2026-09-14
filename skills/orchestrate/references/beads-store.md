@@ -361,11 +361,17 @@ provenance, never a gate, and it is the evidence a dead-claim recovery reads fir
   `repo`, `base`, `mode` (`auto` or `direct`), `auto_merge_allowed`, `squash_allowed`,
   `required_checks`, `strict`, `queue`, `viewer_permission`, `probed_at`. The sweep
   re-derives `mode` from the flags on every read.
-- **Merge bead state:** the sweep stamps `landing_state` (`armed`, `bounced`, `landed`,
+- **Merge bead state:** the sweep stamps `landing_state` (`armed`, `bounced`, `refreshing`, `refreshed`, `landed`,
   `closed`), `armed_head`, `armed_at`, `ci_rerun_head`, `ci_reruns`, `landing_fix`,
-  `refreshed_from`, `refreshed_head`, `landing_notice` and, on landing, `merge_sha` and
-  `landed_head`. The architect owns `head_sha`: the sweep moves it only for its own
-  base refresh.
+  `landing_refresh`, `landing_refresh_notice`, `refreshed_from`, `refreshed_head`, `refresh_candidate`, `landing_notice`
+  and, on landing, `merge_sha` and `landed_head`. The architect alone changes the merge
+  bead's reviewed `head_sha`. After a clean base refresh, the sweep records
+  `refresh_candidate`, disables armed auto-merge from a fresh PR read, and moves the PR to
+  draft before it pushes. It verifies the PR remains open, unarmed and draft-held at the candidate.
+  The sweep walks the origin's parent chain to identify the owning architect epic. It then creates one run-level
+  `role=architect`, `stage=review-refresh`, comment-output epic with `target_epic=<owner>`.
+  The draft PR and older merge-bead `head_sha` hold landing until that epic finishes every exact-head review,
+  stamps the candidate as reviewed, makes the PR ready, reports its output and yields. Neither the owner epic nor its claim is mutated.
 - **Fix beads:** `bd create --parent <origin's feature> --deps discovered-from:<origin>,blocks:<merge>`
   with `metadata.role`, `stage=fix`, `origin_bead=<merge>`, `landing_reason` (`conflict`
   or `ci`) and, for the implementer, the origin's `scope`. The `blocks` edge is what

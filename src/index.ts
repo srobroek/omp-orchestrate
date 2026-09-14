@@ -16,11 +16,11 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import { bdListChecked, resetReadBudget } from "./bd";
 import { observeClaimResult } from "./claim-observer";
-import { createClaimInFlight, createClaimState } from "./claim-state";
+import { createClaimInFlight, createClaimState, type ClaimObservation } from "./claim-state";
 import { adoptAtCwd, adoptionRefusalNotice } from "./clone-adopt";
 import { DISPATCH_CONTRACT } from "./contract";
 import { gateBdDiscipline } from "./gates/bd";
-import { gateClaimEligibility } from "./gates/claim";
+import { gateClaimEligibility, gateRoleLandingCommands } from "./gates/claim";
 import { createExitGuard } from "./gates/exit";
 import { gateLeadContract } from "./gates/lead";
 import { createLeadExitWatch } from "./gates/lead-exit";
@@ -35,7 +35,7 @@ import { sweepInstallTree } from "./install-hygiene";
 import { createLeaseRenewer } from "./lease";
 import { runScope } from "./run-scope";
 import { injectLeadContract, isBoundRunActive, isLeadSession, registerRunCommands, renewLeadLease } from "./run-state";
-import { bdInvocations } from "./shell";
+import { bdInvocations, isStandaloneQualityCommand } from "./shell";
 import { registerSupervision } from "./supervision";
 import { registerBotReviewProbe } from "./tools/bot-review-probe";
 import { registerBotReviewRequest } from "./tools/bot-review-request";
@@ -51,6 +51,7 @@ const GATED_TOOLS: Record<string, true> = { bash: true, edit: true, write: true,
 export default function ompOrchestrate(pi: ExtensionAPI): void {
  const claims = createClaimState();
  const claimInFlight = createClaimInFlight();
+ const qualityCalls = new Map<string, { claim: ClaimObservation; command: string }>();
  const gateExitContract = createExitGuard(claims);
  const leadExitWatch = createLeadExitWatch(claims, process.cwd(), pi.sendMessage.bind(pi));
  const leases = createLeaseRenewer(pi, claims, renewLeadLease);
@@ -155,6 +156,8 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     // then the epic, only once a command is known to push.
     const push = await gatePush(ctx, input);
     if (push) return push;
+    const roleLanding = await gateRoleLandingCommands(claims, ctx, input);
+    if (roleLanding) return roleLanding;
 
     const command = input.command;
     claiming = typeof command === "string" && command.length > 0 &&
@@ -186,6 +189,9 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
     // Marked only now, once every refusal above has had its say: a refused claim runs
     // nothing and would leave a mark no result ever lifts.
     if (claiming) claimInFlight.begin(event.toolCallId);
+    const active = claims.observedClaim();
+    const command = input.command;
+    if (!claiming && active?.beadIds.length === 1 && typeof command === "string" && isStandaloneQualityCommand(command)) qualityCalls.set(event.toolCallId, { claim: active, command });
     result = sandbox ?? (inputRevised ? { input: rebuildBashInput(input) } : undefined);
    }
 
@@ -258,6 +264,13 @@ export default function ompOrchestrate(pi: ExtensionAPI): void {
  pi.on("tool_result", async (event, ctx) => {
   claimInFlight.settle(event.toolCallId);
   if ((await runScope(ctx)) === null) return;
+  const quality = qualityCalls.get(event.toolCallId);
+  qualityCalls.delete(event.toolCallId);
+  if (event.toolName === "bash" && event.isError !== true && quality !== undefined) {
+   const details = event.details as { exitCode?: unknown; timedOut?: unknown; async?: unknown } | undefined;
+   const active = claims.observedClaim();
+   if ((details?.exitCode === undefined || details.exitCode === 0) && details?.timedOut !== true && details?.async !== true && active === quality.claim) claims.recordSuccessfulCommand(quality.command);
+  }
   await observeClaimResult(pi, claims, event, ctx);
  });
 

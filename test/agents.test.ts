@@ -271,6 +271,10 @@ describe("agent definitions", () => {
  });
 });
 
+test("the reviewer can run the native security operation", () => {
+ expect(parsed.get("orc-reviewer.md")?.tools).toContain("security_scan");
+});
+
 describe("runtime discovery preflight", () => {
  const definition = (
   name: string,

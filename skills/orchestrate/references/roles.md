@@ -68,8 +68,7 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 - **Architects use the single native triage advisor.** The advisor is `@smol:low`,
   reports one actionable finding per update and loads one playbook on demand.
   Implementers, researchers, reviewers and shepherds remain advisor-free.
-- **Integrated work still gets one independent `orc-reviewer` wisp.** Add another
-  specialist only for a material risk or project policy; never dispatch a fixed roster.
+- **Integrated work gets independent baseline `orc-reviewer` wisps sized and partitioned by Review fan-out.** Add a specialist dimension only for a material risk or project policy. Never dispatch a fixed roster.
 - **Design or debug uncertainty routes to `role=researcher`.** The researcher's contract is
   one durable `NOTE` answer on the bead. Never answer your own escalation.
 - **Product intent is an `ASK` wisp plus a human gate.** Neither a reviewer nor researcher
@@ -82,7 +81,7 @@ Neither is a spawned agent. The duties survive without a per-turn reviewer on ev
 | Lead | run epics, their metadata, wakes | architects | coordination and bounded factual inspection; delegates implementation and substantive domain investigation |
 | Architect | its feature branch in its clone, commits, pushes of that branch to origin, draft PR, review requests, decomposition beads | exactly the names in its own `spawns:` allowlist | owns feature-branch and PR-content mutations, directly or through one awaited scoped helper; explicitly cherry-picks captures and pushes after each; never merges a PR |
 | Implementer | code inside `metadata.scope`, in its isolated clone; one push of its head to `omp/task/<own id>` | `scout`, `operator` | operator is write-capable; its exact targets stay inside the claimed scope and isolated checkout |
-| Reviewer | comments and verdicts | `scout` | reads the captured branch or feature tree without editing code; dispatch determines checkout isolation |
+| Reviewer | comments and verdicts | `scout`, `security-reviewer` | reads the captured branch or feature tree without editing code; dispatch determines checkout isolation |
 | Researcher | comments (`NOTE` answers), artifacts under `<artifacts>` | nothing | investigation only; never edits code |
 | Shepherd | fix beads for an actionable bot round, `BOUNCED`/`ESCALATED`/`BLOCKED` | nothing | observes provider requests and reviews; never merges: the plugin's landing sweep merges, refreshes, reruns CI and files conflict and CI fix beads |
 | Helper | only explicitly scoped files in its spawner's checkout when write-capable | only its own allowlist within the depth limit | no bead, no commit, no PR, no worktree. An architect's helper outcome is promoted to a feature comment before its trace wisp can be compacted |
@@ -233,6 +232,30 @@ Do not change the global ceiling to handle one model.
 Never upgrade a whole role to paper over one hard case, and never wait live on a peer at any
 rung: record what you need, yield, and let the run wake you.
 
+## Review fan-out
+
+Size baseline review from the exact integrated diff. Exclude lockfiles, generated output, binaries, snapshots and vendored files. Changed lines are additions plus deletions. The ceiling is:
+
+| Reviewable diff | Baseline reviewer ceiling |
+|---|---:|
+| fewer than 100 lines and at most 2 files | 1 |
+| fewer than 500 lines | 2 |
+| fewer than 2,000 lines | 4 |
+| fewer than 5,000 lines | 8 |
+| 5,000 lines or more | 16 |
+
+The required reviewer count is the smaller of the ceiling and the number of coherent locality groups.
+
+- If concurrency is lower, schedule required shards across successive waves. Never reduce their count.
+- Group implementation with its tests.
+- Keep one module or directory together.
+- Keep a shared interface with its direct callers.
+- Never split files round-robin or create an empty shard.
+- Before creating any shell, stamp the owning epic with the exact candidate `head_sha`, a new `review_round`, and the complete `review_dimensions` list. Stamp every required wisp with those same head and round values, one unique `dimension=baseline:<stable-shard>`, and its path scope. The envelope is immutable after the first shell exists; a changed head gets a fresh round, and refresh remediation gets a replacement review epic.
+- Create every shell before dispatch. The exit gate binds each verdict to that wisp's dimension. Refresh promotion additionally requires the comment author to equal that closed wisp's assignee and every required dimension to have a distinct reviewer actor. Another shard's or actor's REVIEW cannot satisfy it; every shard must approve.
+
+Specialist dimensions are additional required wisps, not baseline shards. `dimension=security` needs either `metadata.security_review=required` on a feature or explicit repository policy on a release node; refresh routing inherits feature policy and uses the refreshed base. The claimed reviewer runs native `security_scan` over an unfiltered exact base-to-head ref diff and accepts only a completed full result with no includes, excludes, deferred surfaces or open questions. It stamps the plan id, operation id, `base_sha`, published `security_scan_ref` and exact `security_scan_head` on the node and wisp, and requires the latter to equal `head_sha`. Its REVIEW appends the matching reference; the exit and promotion gates resolve it through the native store and require the same complete scope and operation provenance. BLOCKED may omit scan fields when no result was published. The `orc-reviewer` then spawns `security-reviewer` as read-only evidence, retains judgment, and routes accepted findings to remediation tasks or bugs.
+
 ## Optional specialist briefs
 
 Select review dimensions for material risks or project policy. Independent node review
@@ -241,7 +264,7 @@ remains required; a fixed roster of additional guards does not.
 | Helper | When and required input |
 |---|---|
 | `adversarial-challenger` | unresolved material claim/decision; give facts, evidence and attempts without leading reasoning |
-| `security-reviewer` | material trust-boundary risk; give scoped paths, entry points and trust assumptions |
+| `security-reviewer` | required `dimension=security`; give scoped paths, entry points, trust assumptions, the reviewer-published native scan reference and matching exact head |
 | `docs-guard`, `lint-guard` | existing command findings need judgment; first run the repo command and supply a bounded `lint_report` artifact with node, bead, scope and files. They cannot run the command themselves |
 | `pr-reviewer` | PR-level risks or project policy require a pass; give PR number, repository and conventions. Its verdict informs landing, never authorizes a merge |
 

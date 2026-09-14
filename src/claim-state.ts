@@ -28,6 +28,9 @@ export interface ClaimState {
  observedClaim(): ClaimObservation | undefined;
  /** The claim the exit gate judges: the observed one, kept through a forget until the next claim replaces it. */
  heldClaim(): ClaimObservation | undefined;
+ /** Record one synchronous bash command that returned exit zero while this claim was held. */
+ recordSuccessfulCommand(command: string): void;
+ ranSuccessfully(beadId: string, command: string): boolean;
  forgetClaim(): void;
 }
 
@@ -35,6 +38,7 @@ export interface ClaimState {
 export function createClaimState(): ClaimState {
  let observed: ClaimObservation | undefined;
  let held: ClaimObservation | undefined;
+ const successful = new Map<string, Set<string>>();
 
  return {
   recordClaim(observation: ClaimObservation): void {
@@ -43,6 +47,9 @@ export function createClaimState(): ClaimState {
     // A claim after a forget is new work; the forgotten one is the reaper's to judge.
     observed = { actor: observation.actor, beadIds: [...new Set(observation.beadIds)] };
     held = observed;
+    for (const beadId of observed.beadIds) {
+     successful.delete(beadId);
+    }
    } else if (observed.actor === observation.actor) {
     // One session has one identity: a second actor's claim is ignored.
     observed = { actor: observed.actor, beadIds: [...new Set([...observed.beadIds, ...observation.beadIds])] };
@@ -54,6 +61,16 @@ export function createClaimState(): ClaimState {
   },
   heldClaim(): ClaimObservation | undefined {
    return held;
+  },
+  recordSuccessfulCommand(command: string): void {
+   if (observed?.beadIds.length !== 1 || command.length === 0) return;
+   const beadId = observed.beadIds[0] as string;
+   const commands = successful.get(beadId) ?? new Set<string>();
+   commands.add(command);
+   successful.set(beadId, commands);
+  },
+  ranSuccessfully(beadId: string, command: string): boolean {
+   return successful.get(beadId)?.has(command) === true;
   },
   forgetClaim(): void {
    observed = undefined;
