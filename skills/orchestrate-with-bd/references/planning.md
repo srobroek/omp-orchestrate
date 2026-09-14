@@ -26,8 +26,8 @@ task-to-epic dependency, so `orc_status.ready` gates it instead:
 
 - While any child epic stays open, `ready` holds epics.
 - Once the leads close every child epic, `ready` holds the run epic's own `task` beads.
-- The root merges the epic branches first, then dispatches that review wave over the run's
-  `merge-base..HEAD` diff.
+- The root merges the epic branches first.
+- Then the root dispatches that review wave over the run's `merge-base..HEAD` diff.
 - A `decision` bead under the run epic is never a wave item; the root closes it with
   `orc_finish` once the leads have read it.
 
