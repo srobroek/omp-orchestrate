@@ -9,10 +9,10 @@ Two tiers by default: the lead dispatches workers directly and integrates their 
 ```
 lead (root session, or orc-lead for one epic)
 ├─ orc-planner        writes the DAG, returns          not isolated
-├─ orc-implementer    one task bead each               isolated: true
-├─ orc-reviewer       one review bead each             not isolated
-├─ orc-researcher     one question each                not isolated
-└─ orc-shepherd       one PR bead each                 not isolated
+├─ orc-implementer    ready task beads per wave          isolated: true
+├─ orc-reviewer       one review bead each, in review waves     not isolated
+├─ orc-researcher     one question each                  not isolated
+└─ orc-shepherd       one PR bead each                   not isolated
 ```
 
 Three tiers for a multi-epic run. The root session dispatches one `orc-lead` per epic with
@@ -35,6 +35,18 @@ tiers: the lead dispatches the epics' tasks directly.
   The description names the scope (paths and symbols) and numbered acceptance criteria a
   reviewer can check without asking.
 - `bd dep add <task> <depends-on>` for an order two tasks must keep.
+- Every review bead depends on the task or tasks it reviews. One bead per task fans out to
+  one reviewer each; one bead spanning the wave gives one reviewer. Both surface as one
+  review wave when the tasks land.
+- Epic order is an epic-to-epic dependency: `bd dep add <epic-B> <epic-A>`. bd 1.2.2 refuses
+  an epic-to-decision dependency, so a decision gates an epic through its tasks:
+  `bd dep add <task> <decision>` for each task that needs it.
+- At the epic tier, `orc_status.ready` lists a child epic under three conditions. `bd ready`
+  reports it unblocked. No lead has bound it (binding sets `in_progress`). At least one of
+  its tasks is ready. An epic with no tasks stays in the wave; its lead plans it.
+- `bd ready --parent <epic> --unassigned` is what `orc_status.ready` reads. A dependency is
+  the only thing that keeps a task out of a wave.
+- Independent tasks have no dependency between them.
 - Before either epic runs, record a contract two epics share as a `decision` bead:
   LOAD `skill://orchestrate-with-bd/references/decisions.md`.
 - Adopt beads that already exist under the epic. NOT Build a parallel DAG beside them.
@@ -57,18 +69,17 @@ a bead, create the bead. A plan whose steps outnumber its beads is not approved 
 
 ## Dispatch
 
-1. `orc_status` → rewrite the `todo` list from `orc_status.todo`.
-2. One `task` call per wave: every bead with no open dependency, in one array. Each brief
-   names the bead id, the agent's role, and nothing the bead already says.
-3. Implementers and epic leads `isolated: true`; every other role without it.
-4. After the wave, read each `orc_finish` comment on its bead.
-5. If a review bead exists, its verdict comes first and the merge second.
-6. Merge accepted branches into your tree. OMP names a captured branch
-   `omp/task/<agent-name>` after the name you gave the `task` call. To make the branch name
-   carry the bead id, name the call `Impl_<bead-id>`.
-7. `orc_status` again and redraw the `todo` list.
-8. A `changes` verdict from a reviewer becomes a new task bead under the same epic naming
-   the findings. Dispatch it in the next wave.
+1. `orc_status` → read `orc_status.ready` as the current wave and rewrite the `todo` list.
+2. Dispatch every ready bead in one `task` call. State a reason when the call carries fewer
+   items than `ready`.
+3. When the wave lands, merge every captured `omp/task/<agent-name>` branch into your tree.
+   Resolve conflicts there. When `.beads/interactions.jsonl` conflicts, keep both sides.
+4. Run `orc_status` again. The review beads, which depend on the landed tasks, are now the
+   `ready` wave.
+5. Dispatch them in one `task` call, one `orc-reviewer` per review bead. Each reviewer judges
+   its bead against the integrated `merge-base..HEAD` diff.
+6. Turn every `changes` finding into a fix bead for the next wave.
+7. Run `orc_status` again and redraw the `todo` list.
 
 ## The `todo` list
 

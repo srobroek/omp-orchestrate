@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { type BdBead, bdList, metadataRecord } from "./bd";
+import { asBead, type BdBead, bdJson, bdList, metadataRecord } from "./bd";
 
 /** What `.beads/metadata.json` says about the store. */
 export type StoreMode = { mode: string; database: string | null };
@@ -71,12 +71,85 @@ export function todoStrings(beads: readonly BdBead[]): string[] {
  * human input.
  */
 export function runShape(epic: string, beads: readonly BdBead[]): "two-tier" | "three-tier" {
-	const childEpic = beads.some(bead => {
+	return childEpics(epic, beads).length > 0 ? "three-tier" : "two-tier";
+}
+
+/** Direct child epics of `epic` (parent-child dependency on it), in the order given. */
+export function childEpics(epic: string, beads: readonly BdBead[]): BdBead[] {
+	return beads.filter(bead => {
 		if (bead.issue_type !== "epic") return false;
 		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
 		return deps.some(dep => dep !== null && typeof dep === "object" && "depends_on_id" in dep && dep.depends_on_id === epic && "type" in dep && dep.type === "parent-child");
 	});
-	return childEpic ? "three-tier" : "two-tier";
+}
+
+/** Ids of every bead under `root` in `beads` (transitive parent-child), excluding `root`. */
+export function subtreeIds(root: string, beads: readonly BdBead[]): Set<string> {
+	const children = new Map<string, string[]>();
+	for (const bead of beads) {
+		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
+		for (const dep of deps) {
+			if (dep === null || typeof dep !== "object" || !("depends_on_id" in dep) || !("type" in dep) || dep.type !== "parent-child") continue;
+			const parent = dep.depends_on_id;
+			if (typeof parent !== "string") continue;
+			const list = children.get(parent) ?? [];
+			list.push(bead.id);
+			children.set(parent, list);
+		}
+	}
+	const out = new Set<string>();
+	const queue = [root];
+	for (let cursor = 0; cursor < queue.length; cursor++) {
+		for (const child of children.get(queue[cursor] as string) ?? []) {
+			if (out.has(child)) continue;
+			out.add(child);
+			queue.push(child);
+		}
+	}
+	return out;
+}
+
+async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<BdBead[]> {
+	const args = ["ready", ...(type === undefined ? [] : ["--type", type]), "--parent", parent, "--unassigned", "--limit", "0", "--json"];
+	const payload = await bdJson(args, cwd);
+	const entries = Array.isArray(payload) ? payload : payload === undefined ? [] : [payload];
+	const out: BdBead[] = [];
+	for (const entry of entries) {
+		const bead = asBead(entry);
+		if (bead !== null) out.push(bead);
+	}
+	return out;
+}
+
+/**
+ * The current wave for this tier, dependency-aware through `bd ready`, which honours
+ * `blocks` edges and excludes `in_progress` issues.
+ *
+ * Two-tier: every task under `epic` that `bd ready` reports as unblocked and unassigned.
+ *
+ * Three-tier: the direct child epics that `bd ready` reports as ready (epic-to-epic blockers
+ * honoured; an epic a lead has bound is `in_progress` and drops out), minus any epic whose
+ * open tasks are all blocked. bd 1.2.2 refuses an epic-to-decision dependency, so a decision
+ * gates an epic through its tasks; an epic with no tasks at all stays in the wave, because
+ * its lead plans it.
+ */
+export async function readyWave(epic: string, beads: readonly BdBead[], cwd: string): Promise<BdBead[]> {
+	const epics = childEpics(epic, beads);
+	if (epics.length === 0) return (await readyUnder(epic, cwd)).filter(bead => bead.issue_type !== "epic");
+	const direct = new Set(epics.map(bead => bead.id));
+	const candidates = (await readyUnder(epic, cwd, "epic")).filter(bead => direct.has(bead.id));
+	const wave: BdBead[] = [];
+	for (const candidate of candidates) {
+		const inside = subtreeIds(candidate.id, beads);
+		const openTasks = beads.filter(bead => inside.has(bead.id) && bead.issue_type !== "epic" && (bead.status === "open" || bead.status === "in_progress"));
+		if (openTasks.length === 0) {
+			wave.push(candidate);
+			continue;
+		}
+		const readyTasks = await readyUnder(candidate.id, cwd);
+		if (readyTasks.some(bead => bead.issue_type !== "epic")) wave.push(candidate);
+	}
+	return wave;
 }
 
 export function beadIds(beads: readonly BdBead[]): Set<string> {

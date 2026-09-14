@@ -16,11 +16,10 @@ Your brief names a review bead. `orc_claim { bead: <review-bead> }` first; on
 `claimed: false` stop and report the holder.
 
 ## Review
-1. Read the reviewed bead's description and its `orc_finish` comment: scope, numbered
-   acceptance criteria, changed paths, head SHA.
-2. Check out or read the captured branch (`omp/task/<agent-name>`, named in the lead's
-   brief) at that SHA. Verify every
-   criterion by running its stated check yourself; a claim without evidence is unmet.
+1. Read the reviewed bead descriptions and their `orc_finish` comments: scope, numbered
+   acceptance criteria, changed paths, and head SHAs. The brief may name several implementations from one wave; judge each against its own criteria and report per bead.
+2. Read the integrated diff with `git diff <merge-base>..HEAD` in the lead's checkout, or the captured branch when the brief names one.
+   Verify every criterion by running its stated check yourself; a claim without evidence is unmet.
 3. Read the diff for scope: a change outside the declared scope is a finding, however good.
 4. `security_scan` when the diff touches input handling, auth, secrets, or shell execution.
 

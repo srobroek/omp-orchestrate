@@ -11,19 +11,13 @@ TRIGGER
   the prompt to receive the header, then `orc_status {}` reads the bound run.
 - One bounded task with no independent slices: execute it directly.
 
-You are the lead. OMP owns the agents and their workspaces. Beads records what work exists
-and what state it is in. The run header the plugin injected on your prompt is the contract.
-This document is the procedure behind it.
+You are the lead. OMP owns the agents and their workspaces. Beads records what work exists and what state it is in. The run header the plugin injected on your prompt is the contract.
 
 ## Three facts nobody re-derives
 
-1. OMP sends its own notice to a dispatched agent that has `task` and reads `orchestrate`
-   in its brief. `orc-lead` receives the contract that way. A brief for any other agent
-   never contains the word.
-2. Workers have no `todo` list. OMP withholds the `todo` tool from every dispatched agent.
-   A worker tracks nothing outside its bead, and `orc_finish` is its only progress record.
-3. Beads outranks both the plan and the `todo` list. A plan-mode plan names its beads in a
-   `## Beads` section. A `todo` entry is `<bead-id> <title>` copied from `orc_status.todo`.
+1. OMP sends its own notice to a dispatched agent that has `task` and reads `orchestrate` in its brief. `orc-lead` receives the contract that way. A brief for any other agent never contains the word.
+2. Workers have no `todo` list. OMP withholds the `todo` tool from every dispatched agent. A worker tracks nothing outside its bead, and `orc_finish` is its only progress record.
+3. Beads outranks both the plan and the `todo` list. A plan-mode plan names its beads in a `## Beads` section. A `todo` entry is `<bead-id> <title>` copied from `orc_status.todo`.
 
 ## Workflow
 
@@ -39,17 +33,29 @@ This document is the procedure behind it.
    under the epic. No epic yet: `bd create --type epic`, or dispatch `orc-planner` when the
    domain is unfamiliar, then bind.
 2. Plan. Rewrite your `todo` list from `orc_status.todo`. Every entry is a bead.
-3. Dispatch. One `task` call per wave of independent beads. Name the bead id in each brief.
-   Implementers run `isolated: true`. Every other role runs without it.
-4. Integrate. OMP captures each isolated agent's tree as `omp/task/<agent-name>` (the name
-   you gave the `task` call, not the bead id; an epic lead's branch is `omp/task/<lead-name>`).
-   Merge each accepted branch yourself after its review verdict and resolve conflicts in your
-   tree. When `.beads/interactions.jsonl` (bd's per-clone audit log) conflicts, keep both
-   sides. Then `orc_status` again and redraw the `todo` list.
-5. Close. When every task is `closed` or `blocked`, `orc_finish` the epic.
+3. Dispatch. `orc_status.ready` is the wave. Dispatch every ready bead in one `task` call.
+   When the call carries fewer items than `ready`, state the reason.
+4. Integrate. When the wave lands, merge every captured `omp/task/<agent-name>` branch into
+   your tree and resolve conflicts there. When `.beads/interactions.jsonl` (bd's per-clone
+   audit log) conflicts, keep both sides.
+5. Review. Review beads depend on their tasks, so they become the next `ready` wave together.
+   Dispatch them in one `task` call, one `orc-reviewer` per review bead. Each reviewer judges
+   its bead against the integrated `merge-base..HEAD` diff. Turn every `changes` finding into
+   a fix bead for the following `ready`.
+6. Close. When every task is `closed` or `blocked`, `orc_finish` the epic.
 
 ## Rules
 
+- MUST Dispatch all of `orc_status.ready` in one `task` call.
+- MUST Merge a landed wave before dispatching the review wave that follows it.
+- MUST Dispatch the review wave in one `task` call, one reviewer for each bead in it.
+- NOT Pair an implementer with an immediate reviewer.
+- MUST Turn `changes` findings into fix beads for the next wave.
+- MUST Give every review bead a dependency on the task or tasks it reviews, so review beads
+  surface as one wave after the tasks land.
+- MUST Apply the wave rules inside an epic as a sub-lead. The root dispatches all epic leads
+  in one call. At the epic tier, `ready` already applies the readiness rules in
+  `references/planning.md`.
 - MUST Dispatch through the native `task` tool. NOT Start a nested `omp` process. NOT
   Create a worktree for an agent; OMP's `isolated: true` is the worker's workspace.
 - MUST Keep the store in server mode. Native isolation clones the checkout, and an embedded
@@ -73,7 +79,7 @@ This document is the procedure behind it.
 
 | Need | Tool |
 |---|---|
-| Bind the run, read the DAG, source the `todo` list | `orc_status` |
+| Bind the run; `ready` is the wave, `todo` is the list | `orc_status` |
 | Take a bead (workers) | `orc_claim`; `claimed: false` names the holder |
 | Close or block a bead with evidence (workers, lead for the epic) | `orc_finish` |
 | Bot round at the exact PR head | `orc_bot_review_probe`; `unknown` and `declined` are never clean |

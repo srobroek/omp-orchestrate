@@ -138,6 +138,8 @@ describe("before_agent_start", () => {
 		expect(result.message.content).toContain("store: fx (server mode)");
 		expect(result.message.content).toContain("actor: omp/sess-2");
 		expect(result.message.content).toContain("skill://orchestrate-with-bd");
+		expect(result.message.content).toContain("orc_status.ready");
+		expect(result.message.content).toContain("Never implementer, then its reviewer, then the next implementer");
 	});
 
 	test("stays silent for inline code, a file name, or a capitalised word", async () => {
