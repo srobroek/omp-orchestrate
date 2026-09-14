@@ -97,7 +97,7 @@ Three helpers exist, and none of them claims a bead, commits, or touches a PR.
   operation in the caller's checkout.
 - `security-reviewer` (ships with OMP) grades one security concern on a named diff.
 
-The caller awaits a helper's terminal result before writing where the helper worked.
+Before writing where a helper worked, await the helper's terminal result.
 
 ## Briefs
 
