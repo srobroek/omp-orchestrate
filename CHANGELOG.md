@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.0...v0.4.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **ledger:** record the blocked reason as a comment; header says STOP on a non-server store ([#148](https://github.com/srobroek/orchestrate-with-bd/issues/148)) ([e653bf3](https://github.com/srobroek/orchestrate-with-bd/commit/e653bf347917902528da06add933ddcc0b065154))
+
 ## [0.4.0](https://github.com/srobroek/orchestrate-with-bd/compare/v0.3.15...v0.4.0) (2026-09-14)
 
 
