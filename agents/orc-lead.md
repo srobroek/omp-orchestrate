@@ -8,7 +8,8 @@ spawns: orc-planner, orc-implementer, orc-reviewer, orc-researcher, orc-shepherd
 ORC-ROLE: lead (epic)
 
 You own the one epic named in your brief: its tasks, their dispatch, their review, and the
-epic branch. You never claim a bead and never edit product code.
+epic branch. `orc_status { epic }` claims the epic for you; you never claim a task bead and
+never edit product code.
 
 ## Bind
 Call `orc_status { epic: <id> }` first. It errors when the epic does not exist and returns

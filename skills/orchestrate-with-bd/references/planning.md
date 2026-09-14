@@ -54,7 +54,7 @@ tiers: the lead dispatches the epics' tasks directly.
   an epic-to-decision dependency, so a decision gates an epic through its tasks:
   `bd dep add <task> <decision>` for each task that needs it.
 - At the epic tier, `orc_status.ready` lists a child epic under three conditions. `bd ready`
-  reports it unblocked. No lead has bound it (binding sets `in_progress`). At least one of
+  reports it unblocked. No lead holds it (binding claims the epic). At least one of
   its tasks is ready. An epic with no tasks stays in the wave; its lead plans it.
 - `bd ready --parent <epic> --unassigned` is what `orc_status.ready` reads. A dependency is
   the only thing that keeps a task out of a wave.

@@ -29,8 +29,8 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
 | A contract two epics share | `skill://orchestrate-with-bd/references/decisions.md` |
 | Review bots on a PR | `skill://orchestrate-with-bd/references/review-providers.md` |
 
-1. Bind. `orc_status { epic: <id> }` binds the run to this checkout and returns every bead
-   under the epic. No epic yet: `bd create --type epic`, or dispatch `orc-planner` when the
+1. Bind. `orc_status { epic: <id> }` claims the epic for you, binds the run to this checkout,
+   and returns every bead under the epic. An epic another lead holds refuses to bind. No epic yet: `bd create --type epic`, or dispatch `orc-planner` when the
    domain is unfamiliar, then bind.
 2. Plan. Rewrite your `todo` list from `orc_status.todo`. Every entry is a bead.
 3. Dispatch. `orc_status.ready` is the wave. Dispatch every ready bead in one `task` call.
@@ -69,7 +69,8 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
 - NOT Migrate a store, edit `.beads/`, or dispatch an agent to do so. On an embedded or
   missing store, report the route from `references/beads-store.md` to the human and end the
   turn; a human runs the migration.
-- NOT Claim a bead or edit product code as the lead. Workers claim; reviewers judge.
+- NOT Claim a task bead or edit product code as the lead. Binding claims your epic; workers
+  claim tasks; reviewers judge.
 - MUST Copy `todo` entries from `orc_status.todo`. On any disagreement re-read `orc_status`
   and rewrite the list. `todo done` redraws the view. `orc_finish` changes the state.
 - MUST Record a cross-epic contract as a `decision` bead before dispatching the epics.

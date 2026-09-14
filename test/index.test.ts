@@ -273,6 +273,35 @@ describe("orc_finish done on an epic", () => {
 	});
 });
 
+describe("orc_status bind claims the epic", () => {
+	test("refuses to bind an epic another actor holds and writes no locator", async () => {
+		const root = fixture("server");
+		const { pi, seen } = recordingApi();
+		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }> }>();
+		(pi as unknown as { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean }> }) => void }).registerTool = t => {
+			seen.tools.push(t.name);
+			tools.set(t.name, t);
+		};
+		orchestrateWithBd(pi);
+		const argvs: string[][] = [];
+		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+			argvs.push(argv);
+			return { stdout: new Response('{"id":"E","issue_type":"epic","status":"in_progress","assignee":"omp/other"}').body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+		}) as unknown as typeof Bun.spawn);
+		try {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => "me" } };
+			const result = await tools.get("orc_status")?.execute("x", { epic: "E" }, undefined, undefined, ctx);
+			expect(result?.isError).toBe(true);
+			expect(result?.content[0]?.text).toContain("held by omp/other");
+			// Already assigned: no claim attempted, no list walk, no locator.
+			expect(argvs.some(a => a.includes("--claim"))).toBe(false);
+			expect(readLocator(root)).toBeNull();
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+});
+
 describe("store mode refusal", () => {
 	test("server mode passes; embedded and a missing store refuse, from the file alone", () => {
 		expect(storeRefusal(fixture("server"))).toBeNull();
