@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/orchestrate-with-bd/compare/v0.3.15...v0.4.0) (2026-09-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* rewrite as orchestrate-with-bd, a Beads ledger on native OMP orchestration ([#145](https://github.com/srobroek/orchestrate-with-bd/issues/145))
+
+### Features
+
+* **orchestrate:** add exact-head quality adapters ([#139](https://github.com/srobroek/orchestrate-with-bd/issues/139)) ([d21e9f9](https://github.com/srobroek/orchestrate-with-bd/commit/d21e9f9aff42b212918bb517da829003c1f44e43))
+* **orchestrate:** close nodes as they land, require acceptance criteria, gate on plan review ([#142](https://github.com/srobroek/orchestrate-with-bd/issues/142)) ([b546853](https://github.com/srobroek/orchestrate-with-bd/commit/b54685338bb228e9216fbec01b78cc8ff796c196))
+
+
+### Bug Fixes
+
+* **gates:** keep a closed or forgotten claim bound to its exit contract; spell the REVIEW line ([#140](https://github.com/srobroek/orchestrate-with-bd/issues/140)) ([96d560f](https://github.com/srobroek/orchestrate-with-bd/commit/96d560f8640c0f69685a0f410bde503b2a4f556a))
+* **run-state:** make the .orchestration tree ignore itself ([#97](https://github.com/srobroek/orchestrate-with-bd/issues/97)) ([56adc55](https://github.com/srobroek/orchestrate-with-bd/commit/56adc55e32563c5766cd3d5c4b99cc69a112cd78))
+* **run-state:** read epic and blocked-bead comments at the run's cwd ([#143](https://github.com/srobroek/orchestrate-with-bd/issues/143)) ([3cc710c](https://github.com/srobroek/orchestrate-with-bd/commit/3cc710cf7c68aa854b812b463a2c1de583d5c5f0))
+
+
+### Code Refactoring
+
+* rewrite as orchestrate-with-bd, a Beads ledger on native OMP orchestration ([#145](https://github.com/srobroek/orchestrate-with-bd/issues/145)) ([5e21fef](https://github.com/srobroek/orchestrate-with-bd/commit/5e21fef69f3d335c8bacc1f364f32e285df7f7d6))
+
 ## [0.3.15](https://github.com/srobroek/omp-orchestrate/compare/v0.3.14...v0.3.15) (2026-09-13)
 
 
