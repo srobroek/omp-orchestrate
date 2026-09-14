@@ -4,7 +4,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "component": "omp-orchestrate",
+      "component": "orchestrate-with-bd",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false,
       "prerelease": true,

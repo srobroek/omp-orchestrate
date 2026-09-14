@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@srobroek/omp-orchestrate",
+      "name": "@srobroek/orchestrate-with-bd",
       "devDependencies": {
         "@oh-my-pi/pi-coding-agent": "^18.1.14",
         "@oh-my-pi/pi-natives": "^18.1.14",

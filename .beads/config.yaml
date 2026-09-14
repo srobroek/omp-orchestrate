@@ -66,4 +66,7 @@ issue-prefix: "omp-orchestrate"
 # - linear.api_key  → use LINEAR_API_KEY env var instead
 # - github.token    → use GITHUB_TOKEN env var instead
 
-sync.remote: "git+https://github.com/srobroek/omp-orchestrate.git"
+sync.remote: "git+https://github.com/srobroek/orchestrate-with-bd.git"
+
+dolt:
+  shared-server: true
