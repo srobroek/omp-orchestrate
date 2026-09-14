@@ -38,6 +38,8 @@ export interface FinishResult {
 
 export interface StatusResult {
 	run: string | null;
+	/** The run epic itself, so a lead can see its status without a second read. */
+	epic?: BdBead;
 	store: string;
 	beads: BdBead[];
 	todo: string[];
@@ -45,11 +47,15 @@ export interface StatusResult {
 	message?: string;
 }
 
-/** Bead ids from the most recent `orc_status`, for the todo drift advisory. Empty until then. */
-let lastStatusIds: Set<string> | null = null;
+/**
+ * Bead ids from each session's most recent `orc_status`, for the todo drift advisory.
+ * Keyed by session id because subagents share one process: an epic lead's status must not
+ * redraw the root's baseline.
+ */
+const statusIdsBySession = new Map<string, Set<string>>();
 
-export function statusBeadIds(): Set<string> | null {
-	return lastStatusIds;
+export function statusBeadIds(ctx: ExtensionContext): Set<string> | null {
+	return statusIdsBySession.get(ctx.sessionManager.getSessionId()) ?? null;
 }
 
 function text<T>(details: T, line: string, isError = false): AgentToolResult<T> {
@@ -58,11 +64,6 @@ function text<T>(details: T, line: string, isError = false): AgentToolResult<T> 
 
 function refused<T>(reason: string): AgentToolResult<T> {
 	return { content: [{ type: "text", text: reason }], details: undefined as T, isError: true };
-}
-
-function storeLabel(root: string): string {
-	const mode = readStoreMode(root);
-	return mode === null ? "no .beads/metadata.json" : `${mode.database ?? "?"} (${mode.mode || "?"})`;
 }
 
 /** Returned by every ledger tool while the store is not in server mode. */
@@ -141,32 +142,41 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_status",
 		label: "Run status",
 		description:
-			"Read the run epic's whole subtree from Beads. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. Pass `epic` once to bind the run for this checkout.",
+			"Read the run epic's whole subtree from Beads. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
 		approval: "read",
 		parameters: statusParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<StatusResult | undefined>> {
 			const refusal = storeRefusal(ctx.cwd);
 			if (refusal !== null) return refused(refusal);
 			const root = ctx.cwd;
-			const store = storeLabel(root);
+			const mode = readStoreMode(root);
+			const store = mode === null ? "no .beads/metadata.json" : `${mode.database ?? "?"} (${mode.mode || "?"})`;
 			const locator = readLocator(root);
-			const epic = input.epic?.trim() || locator?.run_id;
+			const requested = input.epic?.trim() || undefined;
+			if (requested !== undefined && locator !== null && locator.run_id !== requested) {
+				const message = `run already bound to ${locator.run_id}; call orc_status without epic, or remove .orchestration/.active-run to rebind`;
+				return text<StatusResult>({ run: locator.run_id, store, beads: [], todo: [], message }, message, true);
+			}
+			const epic = requested ?? locator?.run_id;
 			if (epic === undefined) {
 				const message = "no run bound; pass epic or create .orchestration/.active-run";
 				return text<StatusResult>({ run: null, store, beads: [], todo: [], message }, message);
 			}
-			// Always rewrite: idempotent for a bound run, binds an unbound one, and adds the
-			// `.orchestration/.gitignore` a locator written by another tool may lack. An
-			// untracked, non-ignored file in the primary breaks OMP's isolation merge-back.
+			// The epic must exist before anything is bound: `bd list --parent <typo>` exits 0
+			// with `[]`, which would otherwise persist a typo as an empty successful run.
+			const epicBead = await bdShow(epic, root);
+			// Idempotent for a bound run (and adds the `.orchestration/.gitignore` a locator
+			// written by another tool may lack: an untracked, non-ignored file in the primary
+			// breaks OMP's isolation merge-back), binding for an unbound one.
 			writeLocator(root, epic);
 			const walk = await descendants(epic, root);
-			lastStatusIds = beadIds(walk.beads);
+			statusIdsBySession.set(ctx.sessionManager.getSessionId(), beadIds(walk.beads));
 			const todo = todoStrings(walk.beads);
-			const result: StatusResult = { run: epic, store, beads: walk.beads, todo };
+			const result: StatusResult = { run: epic, epic: epicBead, store, beads: walk.beads, todo };
 			if (walk.truncated) result.truncated = true;
 			return text(
 				result,
-				`orc_status ${epic}: ${walk.beads.length} beads, ${todo.length} open${walk.truncated ? " (truncated)" : ""}\n${todo.join("\n")}`,
+				`orc_status ${epic} (${epicBead.status ?? "?"}): ${walk.beads.length} beads, ${todo.length} open${walk.truncated ? " (truncated)" : ""}\n${todo.join("\n")}`,
 			);
 		},
 	});

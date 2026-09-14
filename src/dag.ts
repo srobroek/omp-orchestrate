@@ -40,8 +40,8 @@ export async function descendants(epic: string, cwd: string): Promise<Descendant
 	const seen = new Set<string>([epic]);
 	const beads: BdBead[] = [];
 	const queue = [epic];
-	while (queue.length > 0) {
-		const parent = queue.shift() as string;
+	for (let cursor = 0; cursor < queue.length; cursor++) {
+		const parent = queue[cursor] as string;
 		for (const child of await bdList(["--parent", parent, "--all"], cwd)) {
 			if (seen.has(child.id)) continue;
 			seen.add(child.id);

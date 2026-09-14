@@ -26,21 +26,11 @@
 # never serve from. A linked worktree resolves the primary checkout's database natively (bd
 # reads the common git dir), so there is nothing local to refresh.
 
-# Scope of the sync hooks below: they DO reach the primary checkout's database from a
-# worktree. `.worktreeinclude` excludes `.beads/`, so a worktree holds no store of its own, and
-# `bd` in a linked worktree resolves the primary's `.beads` through the common git dir. Each
-# hook therefore runs a Dolt engine against the one store every session shares -- and through
-# the `bd` router that engine runs inside the colima guest, whose `flock` the host never sees.
-# Seven `wt switch` pulls from fixer worktrees overlapping host claims is how the journal was
-# corrupted on 2026-09-12 (`scratch/audit/research/ResCorruption.md`). Hence:
-#
-# - no `post-switch` pull at all: a branch switch does not change which beads exist in a
-#   shared database, so the hook bought nothing and ran the most often;
-# - `post-commit` and `post-merge` sync only while no orchestrate run is active, read from the
-#   primary's `.orchestration/.active-run` (the locator `src/run.ts` writes). During a run
-#   the lead syncs once, after every agent has yielded.
-#
-# These remain human conveniences that usually run, never an invariant: a plain `git commit`
+# Scope of the sync hooks below: they reach the shared Dolt server from any worktree, because
+# `bd` resolves the store from the tracked `.beads/metadata.json`. The hooks skip while a run
+# locator exists (`.orchestration/.active-run`, written by `src/run.ts` through `orc_status`)
+# so that a run's writes are pushed once, deliberately, rather than on every commit.
+# They remain human conveniences that usually run, never an invariant: a plain `git commit`
 # bypasses them, and `--no-hooks` skips them.
 
 [post-commit]

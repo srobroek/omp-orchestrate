@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { asBead, bdShow, metadataRecord, parsePayload } from "../src/bd";
+import { asBead, bdList, bdShow, metadataRecord, parsePayload } from "../src/bd";
 
 describe("parsePayload", () => {
 	test("skips a warning line printed before the payload", () => {
@@ -58,5 +58,37 @@ describe("bdShow", () => {
 	test("throws when the payload yields no bead", async () => {
 		answer("[]");
 		expect(bdShow("a", "/tmp")).rejects.toThrow("returned no bead");
+	});
+});
+
+describe("bdList", () => {
+	const spawn = spyOn(Bun, "spawn");
+	afterEach(() => spawn.mockReset());
+
+	function answer(stdout: string): void {
+		spawn.mockImplementation(
+			(() => ({
+				stdout: new Response(stdout).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+				kill: () => undefined,
+			})) as unknown as typeof Bun.spawn,
+		);
+	}
+
+	test("an explicit empty array is the only empty list", async () => {
+		answer("[]");
+		expect(await bdList(["--parent", "x"], "/tmp")).toEqual([]);
+		answer('{"id":"only"}');
+		expect((await bdList([], "/tmp")).map(bead => bead.id)).toEqual(["only"]);
+	});
+
+	test("no payload, a truncated payload, or a row without an id throws", async () => {
+		answer("");
+		expect(bdList([], "/tmp")).rejects.toThrow("no JSON array");
+		answer('[{"id":"a"},{"id":"b"');
+		expect(bdList([], "/tmp")).rejects.toThrow("no JSON array");
+		answer('[{"id":"a"},{"title":"no id"}]');
+		expect(bdList([], "/tmp")).rejects.toThrow("without an id");
 	});
 });

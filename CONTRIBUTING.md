@@ -29,7 +29,8 @@ hand.
 ## Architecture
 
 `src/index.ts` is the single registration site: three event handlers and seven tools. The
-plugin registers no slash command and no `tool_call` gate.
+plugin registers no slash command; its one `tool_call` handler adds an environment variable
+to bash calls and blocks nothing.
 
 | Module | Owns |
 | --- | --- |
@@ -42,9 +43,11 @@ plugin registers no slash command and no `tool_call` gate.
 
 ### Handlers
 
-- `session_start` sets `BEADS_ACTOR` to `omp/<session id>` and deletes `BD_ACTOR`. It reads
-  `.beads/metadata.json` once. A `dolt_mode` other than `server` makes every ledger tool
-  return the migration text without spawning `bd`.
+- `tool_call` on `bash` adds `BEADS_ACTOR=omp/<session id>` to the call's `env` unless the
+  call names one. Subagents share one process, so a process-wide value would be
+  last-session-wins. The ledger tools derive the same actor per call and read
+  `.beads/metadata.json` per call; a `dolt_mode` other than `server`, or no store, makes
+  them return the migration text without spawning `bd`.
 - `before_agent_start` injects the run header (`customType: "orc-run-header"`) when the
   prompt contains the standalone lowercase word `orchestrate` outside code. The header names
   the store, the bound epic or the absence of one, the actor, and the lead contract.
@@ -54,10 +57,11 @@ plugin registers no slash command and no `tool_call` gate.
 
 ### Store
 
-The plugin passes no store selector to `bd`: no `--db`, no `BEADS_DIR`, no redirect file.
-`bd` resolves the shared Dolt server from the tracked `.beads/metadata.json`. Every isolated
-clone carries that file. The ledger returns the migration text on an embedded store because
-a clone would fork it.
+The plugin passes no store selector to `bd`: no `--db`, no redirect file, and it removes an
+inherited `BEADS_DIR` from its own `bd` spawns (the `beads` plugin pins that variable
+process-wide to the first session's checkout). `bd` resolves the shared Dolt server from the
+tracked `.beads/metadata.json`, which every isolated clone carries. The ledger returns the
+migration text on an embedded store because a clone would fork it.
 
 ### Agents
 
@@ -66,7 +70,7 @@ a clone would fork it.
 | `orc-lead` | `@plan` | yes | planner, implementer, reviewer, researcher, shepherd, scout, operator |
 | `orc-planner` | `@plan` | no | nothing |
 | `orc-implementer` | `@task` | yes | `scout`, `operator` |
-| `orc-reviewer` | `@reviewer` | no | `scout`, `security-reviewer` |
+| `orc-reviewer` | `@reviewer` | no | `scout` |
 | `orc-researcher` | `@smol` | no | nothing |
 | `orc-shepherd` | `@task` | no | nothing |
 

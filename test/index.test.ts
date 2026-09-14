@@ -74,7 +74,7 @@ describe("extension factory", () => {
 		const { pi, seen } = recordingApi();
 		expect(() => orchestrateWithBd(pi)).not.toThrow();
 		expect(seen.label).toBe("Orchestrate with bd");
-		expect([...new Set(seen.events)].sort()).toEqual(["before_agent_start", "session_start", "todo_reminder"]);
+		expect([...new Set(seen.events)].sort()).toEqual(["before_agent_start", "todo_reminder", "tool_call"]);
 		expect(seen.commands).toEqual([]);
 		expect(seen.tools.sort()).toEqual([
 			"orc_bot_review_probe",
@@ -88,21 +88,28 @@ describe("extension factory", () => {
 	});
 });
 
-describe("session_start", () => {
-	async function start(root: string): Promise<{ seen: Registered; actor: string | undefined }> {
+describe("tool_call actor injection", () => {
+	async function bash(input: Record<string, unknown>, sessionId: string): Promise<unknown> {
 		const { pi, seen } = recordingApi();
 		orchestrateWithBd(pi);
-		const ctx = { cwd: root, sessionManager: { getSessionId: () => "sess-1" } };
-		for (const handler of seen.eventHandlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
-		return { seen, actor: process.env.BEADS_ACTOR };
+		const ctx = { cwd: "/tmp", sessionManager: { getSessionId: () => sessionId } };
+		let result: unknown;
+		for (const handler of seen.eventHandlers.get("tool_call") ?? []) result = await handler({ type: "tool_call", toolName: "bash", input }, ctx);
+		return result;
 	}
 
-	test("sets the actor from the session id and drops a stale BD_ACTOR", async () => {
-		process.env.BD_ACTOR = "stale";
-		process.env.BEADS_ACTOR = "inherited";
-		const { actor } = await start(fixture("server"));
-		expect(actor).toBe("omp/sess-1");
-		expect(process.env.BD_ACTOR).toBeUndefined();
+	test("adds the calling session's actor to a bash call and keeps one the call already names", async () => {
+		expect(await bash({ command: "bd list" }, "sess-1")).toEqual({ input: { command: "bd list", env: { BEADS_ACTOR: "omp/sess-1" } } });
+		expect(await bash({ command: "bd list", env: { FOO: "1" } }, "sess-2")).toEqual({
+			input: { command: "bd list", env: { FOO: "1", BEADS_ACTOR: "omp/sess-2" } },
+		});
+		expect(await bash({ command: "bd list", env: { BEADS_ACTOR: "human" } }, "sess-3")).toBeUndefined();
+	});
+
+	test("two sessions in one process get two actors", async () => {
+		const a = (await bash({ command: "bd list" }, "a")) as { input: { env: { BEADS_ACTOR: string } } };
+		const b = (await bash({ command: "bd list" }, "b")) as { input: { env: { BEADS_ACTOR: string } } };
+		expect(a.input.env.BEADS_ACTOR).not.toBe(b.input.env.BEADS_ACTOR);
 	});
 });
 
@@ -111,7 +118,6 @@ describe("before_agent_start", () => {
 		const { pi, seen } = recordingApi();
 		orchestrateWithBd(pi);
 		const ctx = { cwd: root, sessionManager: { getSessionId: () => "sess-2" } };
-		for (const handler of seen.eventHandlers.get("session_start") ?? []) await handler({ type: "session_start" }, ctx);
 		let result: unknown;
 		for (const handler of seen.eventHandlers.get("before_agent_start") ?? []) {
 			result = await handler({ type: "before_agent_start", prompt }, ctx);

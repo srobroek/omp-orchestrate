@@ -35,6 +35,9 @@ const BD_ENV: Record<string, string> = {
  * Spawn `bd` and wait. Throws on a missing binary or a timeout; a non-zero exit is returned.
  * `env` is layered over the process environment: the ledger passes `BEADS_ACTOR` per call,
  * because concurrent subagents share one process and a global actor would collide.
+ * `BEADS_DIR` is removed for the same reason: the beads plugin pins it process-wide to the
+ * first session's checkout, and a second session's ledger call must resolve its own store
+ * from `cwd` (the tracked `.beads/metadata.json` every clone carries).
  */
 export async function bdRun(
 	args: readonly string[],
@@ -45,7 +48,8 @@ export async function bdRun(
 	const bin = process.env.BD_BIN ?? "bd";
 	let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
 	try {
-		proc = Bun.spawn([bin, ...args], { cwd, env: { ...process.env, ...env, ...BD_ENV }, stdout: "pipe", stderr: "pipe" });
+		const { BEADS_DIR: _pin, ...inherited } = process.env;
+		proc = Bun.spawn([bin, ...args], { cwd, env: { ...inherited, ...env, ...BD_ENV }, stdout: "pipe", stderr: "pipe" });
 	} catch {
 		throw new Error("bd is not installed or not executable");
 	}
@@ -131,14 +135,20 @@ export async function bdShow(id: string, cwd: string, env: Record<string, string
 	return bead;
 }
 
-/** `bd list <args> --json`; a lone object is a list of one. */
+/**
+ * `bd list <args> --json`; a lone object is a list of one. An empty list is only ever an
+ * explicit `[]`: no payload, a non-array payload, or a row without a string id throws,
+ * because a zero exit with truncated output must not read as "no work".
+ */
 export async function bdList(args: readonly string[], cwd: string): Promise<BdBead[]> {
 	const payload = await bdJson(["list", ...args, "--json"], cwd);
-	const entries = Array.isArray(payload) ? payload : payload === undefined ? [] : [payload];
+	const entries = Array.isArray(payload) ? payload : payload !== undefined && payload !== null && typeof payload === "object" ? [payload] : null;
+	if (entries === null) throw new Error(`bd list ${args.join(" ")} returned no JSON array`);
 	const beads: BdBead[] = [];
 	for (const entry of entries) {
 		const bead = asBead(entry);
-		if (bead !== null) beads.push(bead);
+		if (bead === null) throw new Error(`bd list ${args.join(" ")} returned a row without an id`);
+		beads.push(bead);
 	}
 	return beads;
 }

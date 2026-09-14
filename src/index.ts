@@ -2,8 +2,8 @@
  * orchestrate-with-bd — a durable Beads ledger beside OMP's native `orchestrate` keyword.
  *
  * OMP owns scheduling, agent lifecycle, isolated workspaces, capture, cancellation, and
- * landing. This plugin owns three things: the actor every `bd` mutation is attributed to,
- * a run header injected when a prompt says `orchestrate`, and the ledger tools
+ * landing. This plugin owns three things: the per-session actor every `bd` mutation is
+ * attributed to, a run header injected when a prompt says `orchestrate`, and the ledger tools
  * (`orc_claim`, `orc_finish`, `orc_status`) that make Beads the source of truth for what
  * work exists and what state it is in. Four review-bot tools ride along untouched.
  *
@@ -31,6 +31,16 @@ const CONTRACT = [
 	"- You never claim a bead and never edit product code. A worker brief must not contain the bare lowercase word `orchestrate`.",
 ].join("\n");
 
+/** The bash input with `BEADS_ACTOR` added to its `env`, or `undefined` when nothing changes. */
+function withActor(input: unknown, actor: string): Record<string, unknown> | undefined {
+	if (input === null || typeof input !== "object") return undefined;
+	const env = "env" in input ? input.env : undefined;
+	if (env !== undefined && (env === null || typeof env !== "object" || Array.isArray(env))) return undefined;
+	const current = env === undefined ? undefined : (env as Record<string, unknown>).BEADS_ACTOR;
+	if (typeof current === "string" && current.length > 0) return undefined;
+	return { ...(input as Record<string, unknown>), env: { ...((env as Record<string, unknown> | undefined) ?? {}), BEADS_ACTOR: actor } };
+}
+
 const NO_RUN = "no run epic yet — create the epic, then call orc_status { epic } to bind it";
 
 /** Build the run header for one prompt. Exported for the keyword tests; `index.ts` is the only registration site. */
@@ -53,13 +63,13 @@ export function runHeader(root: string, actor: string): string {
 export default function orchestrateWithBd(pi: ExtensionAPI): void {
 	pi.setLabel("Orchestrate with bd");
 
-	// The ledger tools carry their own per-call actor (`actorFor`) and store check
-	// (`storeRefusal`). This process-wide export only serves `bd` commands the model runs
-	// through `bash`; with concurrent subagents in one process the last `session_start`
-	// wins there, which is why the ledger never reads process state back.
-	pi.on("session_start", async (_event, ctx) => {
-		process.env.BEADS_ACTOR = actorFor(ctx);
-		delete process.env.BD_ACTOR;
+	// Every `bd` the model runs through bash carries the calling session's actor on the
+	// call itself. A process-wide `BEADS_ACTOR` would be last-session-wins, because
+	// concurrent subagents share one Bun process; a value the call already names is kept.
+	pi.on("tool_call", (event, ctx) => {
+		if (event.toolName !== "bash") return undefined;
+		const revised = withActor(event.input, actorFor(ctx));
+		return revised === undefined ? undefined : { input: revised };
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -75,10 +85,10 @@ export default function orchestrateWithBd(pi: ExtensionAPI): void {
 	});
 
 	// Advisory drift detector, deliberately non-blocking: it never spawns a process and
-	// holds no state beyond the id set the most recent `orc_status` cached.
+	// holds no state beyond the id set this session's most recent `orc_status` cached.
 	pi.on("todo_reminder", async (event, ctx) => {
 		if (readLocator(ctx.cwd) === null) return;
-		const ids = statusBeadIds();
+		const ids = statusBeadIds(ctx);
 		if (ids === null) return;
 		const drifted = event.todos
 			.map(todo => todo.content)
