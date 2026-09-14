@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.1...v0.4.2) (2026-09-14)
+
+
+### Features
+
+* **status:** ready is the wave; leads dispatch and review by wave ([#151](https://github.com/srobroek/orchestrate-with-bd/issues/151)) ([bb9805a](https://github.com/srobroek/orchestrate-with-bd/commit/bb9805aa15d4ebd228d6608db73aa82855a9685b))
+
 ## [0.4.1](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.0...v0.4.1) (2026-09-14)
 
 
