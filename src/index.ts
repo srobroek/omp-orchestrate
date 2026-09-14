@@ -43,9 +43,11 @@ function withActor(input: unknown, actor: string): Record<string, unknown> | und
 }
 
 /**
- * Route each `task` item to the agent its bead's wave entry names. An item that names
- * exactly one wave bead in its brief gets that entry's `agent` and `isolated`; an item that
- * names none (a helper, a planner brief) or several is left alone. Returns the revised input,
+ * Route each `task` item to the agent its bead's wave entry names. An item whose agent is an
+ * `orc-*` role (or unset) and whose brief names exactly one wave bead gets that entry's
+ * `agent` and `isolated`. A helper (`scout`, `operator`, `security-reviewer`, anything not
+ * `orc-*`) is never rerouted, even when its brief cites the bead it helps with; an item that
+ * names no wave bead or several is left alone. Returns the revised input,
  * or `undefined` when nothing changes. This is the enforcement behind "copy `agent` and
  * `isolated` from `orc_status.wave`": observed live (2026-09-14), a lead read a wave naming
  * `orc-implementer-deep` and dispatched `orc-implementer` anyway.
@@ -57,12 +59,13 @@ export function routeDispatch(input: unknown, wave: ReadonlyMap<string, WaveItem
 	let changed = false;
 	const routed = items.map(item => {
 		if (item === null || typeof item !== "object") return item;
-		const brief = (item as Record<string, unknown>).task;
+		const current = item as Record<string, unknown>;
+		const brief = current.task;
 		if (typeof brief !== "string") return item;
+		if (current.agent !== undefined && !(typeof current.agent === "string" && current.agent.startsWith("orc-"))) return item;
 		const named = [...wave.values()].filter(entry => new RegExp(`(?<![\\w.-])${entry.bead.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?![\\w-])`, "u").test(brief));
 		if (named.length !== 1) return item;
 		const [entry] = named;
-		const current = item as Record<string, unknown>;
 		if (current.agent === entry.agent && current.isolated === entry.isolated) return item;
 		changed = true;
 		return { ...current, agent: entry.agent, isolated: entry.isolated };

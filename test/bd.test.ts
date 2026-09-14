@@ -88,6 +88,18 @@ describe("readyWave", () => {
 		expect(argvs.slice(1).map(a => a[3])).toEqual(["R.1", "R.2"]);
 	});
 
+	test("two-tier: ready task beads only; an open decision under the epic is never dispatched", async () => {
+		spawn.mockImplementation((() => ({
+			stdout: new Response('[{"id":"E.1","issue_type":"task","status":"open"},{"id":"E.2","issue_type":"decision","status":"open"},{"id":"E.3","issue_type":"task","status":"open"}]').body,
+			stderr: new Response("").body,
+			exited: Promise.resolve(0),
+			kill: () => undefined,
+		})) as unknown as typeof Bun.spawn);
+		const child = (id: string, type: string) => ({ id, issue_type: type, status: "open", dependencies: [{ depends_on_id: "E", type: "parent-child" }] });
+		const wave = await readyWave("E", [child("E.1", "task"), child("E.2", "decision"), child("E.3", "task")], "/tmp");
+		expect(wave.map(bead => bead.id)).toEqual(["E.1", "E.3"]);
+	});
+
 	test("three-tier, all child epics closed: the wave is the ready tasks directly under the run epic", async () => {
 		const argvs: string[][] = [];
 		spawn.mockImplementation(((argv: string[]) => {

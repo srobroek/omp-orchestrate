@@ -439,6 +439,23 @@ describe("routeDispatch", () => {
 		expect(routed.tasks[3]).toEqual(input.tasks[3]);
 	});
 
+	test("a helper whose brief cites a wave bead is never rerouted; an item with no agent is", () => {
+		const input = {
+			tasks: [
+				{ name: "S", agent: "scout", task: "For bead e-1.2: where is OPERATIONS defined?" },
+				{ name: "O", agent: "operator", isolated: false, task: "Bead e-1.2: rename x to y" },
+				{ name: "SR", agent: "security-reviewer", task: "Review the diff for e-1.2" },
+				{ name: "N", task: "Bead e-1.2: add safeDivide" },
+			],
+		};
+		const routed = routeDispatch(input, wave) as { tasks: Array<Record<string, unknown>> };
+		expect(routed.tasks[0]).toEqual(input.tasks[0]);
+		expect(routed.tasks[1]).toEqual(input.tasks[1]);
+		expect(routed.tasks[2]).toEqual(input.tasks[2]);
+		expect(routed.tasks[3]).toMatchObject({ agent: "orc-implementer-deep", isolated: true });
+		expect(routeDispatch({ tasks: [{ agent: "scout", task: "e-1.2" }] }, wave)).toBeUndefined();
+	});
+
 	test("bead ids match whole, so e-1.1 does not claim an item about e-1.10, and a brief naming two beads is left alone", () => {
 		expect(routeDispatch({ tasks: [{ agent: "orc-implementer", task: "e-1.10 only" }] }, wave)).toMatchObject({ tasks: [{ agent: "orc-reviewer" }] });
 		expect(routeDispatch({ tasks: [{ agent: "orc-implementer", task: "e-1.1 and e-1.2 together" }] }, wave)).toBeUndefined();
