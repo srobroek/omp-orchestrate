@@ -67,6 +67,12 @@ Every model is one of OMP's built-in role aliases, so a fresh install needs no
   key to fix.
 - Tiers: the planner marks each implementer bead `metadata.tier` (`basic`, `deep`, `max`);
   `orc_status.wave` names the agent for every ready bead.
+- Verdicts: a review bead finishes with `approve`, `fix` (local findings; the same
+  implementer re-runs), or `changes` (a fix bead one tier up; at `max`, a planner bead).
+- DAG review: one reviewer judges the DAG against the planner guard-rails before the first
+  implementation wave; `orc_status` withholds the wave until that bead exists.
+- Marketplace installs drop agent `model:` lines; list the plugin under `extensions:` or set
+  `task.agentModelOverrides` for the eight `orc-*` agents (`references/roles.md`).
 - Isolation: implementers and epic leads run `isolated: true`.
 
 The skill `skill://orchestrate-with-bd` holds the procedure; `references/roles.md` holds the

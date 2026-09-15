@@ -1,26 +1,9 @@
 import path from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type BdBead, bdJson, bdShow } from "../bd";
+import { type BdBead, bdJson, bdShow, metadataRecord, parentOf } from "../bd";
 import { beadIds, DESCENDANT_LIMIT, descendants, readStoreMode, readyWave, runShape, todoStrings, type WaveItem, waveItem } from "../dag";
+import { applyVerdict, dagReviewCommand, isDagReview, REVIEW_ROLES, type Verdict, type VerdictOutcome } from "../verdict";
 import { readLocator, writeLocator } from "../run";
-
-/**
- * The parent id of a bead as `bd show` reports it: a top-level `parent`, else the
- * parent-child dependency. `bd show` names that dependency `{ id, dependency_type }`
- * while `bd list` names it `{ depends_on_id, type }`; both are read.
- */
-export function parentOf(bead: BdBead): string | undefined {
-	if (typeof bead.parent === "string" && bead.parent.length > 0) return bead.parent;
-	const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
-	for (const dep of deps) {
-		if (dep === null || typeof dep !== "object") continue;
-		const type = "dependency_type" in dep ? dep.dependency_type : "type" in dep ? dep.type : undefined;
-		if (type !== "parent-child") continue;
-		const id = "depends_on_id" in dep ? dep.depends_on_id : "id" in dep ? dep.id : undefined;
-		if (typeof id === "string" && id.length > 0) return id;
-	}
-	return undefined;
-}
 
 /** Whether `epic` sits under `ancestor` through parent-child edges, walking at most four levels. */
 async function isDescendant(epic: string, ancestor: string, cwd: string): Promise<boolean> {
@@ -64,6 +47,8 @@ export interface ClaimResult {
 export interface FinishResult {
 	state: "done" | "blocked";
 	bead: string;
+	/** Present when the bead is a review bead: what the verdict did. */
+	verdict?: VerdictOutcome;
 }
 
 export interface StatusResult {
@@ -130,7 +115,14 @@ export function registerLedger(pi: ExtensionAPI): void {
 		bead: z.string().describe("bead id"),
 		state: z.enum(["done", "blocked"]),
 		reason: z.string().describe("one-line reason recorded on the transition"),
-		comment: z.string().optional().describe("evidence or rationale, stored as a bead comment"),
+		comment: z.string().optional().describe("evidence or rationale, stored as a bead comment; for a review bead, the findings"),
+		verdict: z
+			.enum(["approve", "fix", "changes"])
+			.optional()
+			.describe(
+				"review beads only, required with `done`: `approve` closes; `fix` (every finding local) reopens the reviewed tasks for the same implementer; `changes` (criterion misread, design/contract, or exploitable security) creates a fix bead one tier up, or sends a max-tier task to orc-planner",
+			),
+		targets: z.array(z.string()).optional().describe("review beads: the task ids the verdict applies to; defaults to the review bead's task dependencies"),
 	});
 	const statusParams = z.object({ epic: z.string().optional().describe("run epic id; binds the run when no locator exists") });
 
@@ -168,7 +160,7 @@ export function registerLedger(pi: ExtensionAPI): void {
 		name: "orc_finish",
 		label: "Finish bead",
 		description:
-			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. An epic closes only when every bead under it is closed; with an open or in-progress descendant `done` is refused and the ids are listed, and bd itself refuses to close over a blocked child, so finish such an epic `blocked`. An optional comment is written first so the evidence survives even if the transition fails.",
+			"Record a terminal state on a Beads task: `done` closes it with the reason, `blocked` records the reason as a comment and sets the status. A review bead (`metadata.role` reviewer or dag-reviewer) finishes `done` with a `verdict`: `approve` closes it; `fix` reopens the reviewed tasks with the findings for the same implementer at the same tier; `changes` creates a fix bead one tier up that the review depends on, or marks a max-tier task for orc-planner; on a DAG review anything but `approve` sends the lead to orc-planner. After `fix` or `changes` the review bead stays open and re-enters the wave when its dependencies close. An epic closes only when every bead under it is closed; with an open or in-progress descendant `done` is refused and the ids are listed, and bd itself refuses to close over a blocked child, so finish such an epic `blocked`. An optional comment is written first so the evidence survives even if the transition fails.",
 		approval: "write",
 		parameters: finishParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<FinishResult | undefined>> {
@@ -184,6 +176,32 @@ export function registerLedger(pi: ExtensionAPI): void {
 				// lead closed its epic with two review beads still open, and the root had to reopen
 				// it and dispatch a recovery lead.
 				const current = await bdShow(bead, ctx.cwd, env);
+				const role = metadataRecord(current.metadata)?.role;
+				if (typeof role === "string" && REVIEW_ROLES[role] === true) {
+					// A review finishes with a graded verdict, never a bare close: the verdict is what
+					// routes the next wave (same implementer, a tier up, or the planner).
+					if (input.verdict === undefined) {
+						return text<FinishResult>({ state: "done", bead }, `orc_finish ${bead}: refused, a review bead finishes with a verdict (approve, fix, or changes)`, true);
+					}
+					let outcome: VerdictOutcome;
+					try {
+						outcome = await applyVerdict({
+							review: current,
+							verdict: input.verdict as Verdict,
+							reason: input.reason,
+							findings: input.comment ?? "",
+							targets: input.targets,
+							show: id => bdShow(id, ctx.cwd, env),
+							bd: args => bdJson(args, ctx.cwd, env),
+						});
+					} catch (error) {
+						return text<FinishResult>({ state: "done", bead }, error instanceof Error ? error.message : String(error), true);
+					}
+					return text<FinishResult>({ state: "done", bead, verdict: outcome }, outcome.line);
+				}
+				if (input.verdict !== undefined) {
+					return text<FinishResult>({ state: "done", bead }, `orc_finish ${bead}: refused, a verdict applies to a review bead; this bead's role is ${typeof role === "string" && role.length > 0 ? role : "(none)"}`, true);
+				}
 				if (current.issue_type === "epic") {
 					const walk = await descendants(bead, ctx.cwd);
 					if (walk.truncated) {
@@ -266,12 +284,18 @@ export function registerLedger(pi: ExtensionAPI): void {
 			// breaks OMP's isolation merge-back), binding for an unbound one.
 			writeLocator(root, epic);
 			const walk = await descendants(epic, root);
+			// One DAG review per run gates every implementation wave (see readyWave). This tool
+			// reads; it does not create the bead. When the root's tree has tasks but no review
+			// bead, the wave is withheld and the exact create command is returned. A sub-lead's
+			// epic is a descendant of the bound run, not the run itself, so it needs none.
+			const isRoot = locator === null || locator.run_id === epic;
+			const dagReviewMissing = isRoot && !walk.truncated && !walk.beads.some(isDagReview) && walk.beads.some(bead => bead.issue_type === "task");
 			statusIdsBySession.set(ctx.sessionManager.getSessionId(), beadIds(walk.beads));
 			const todo = todoStrings(walk.beads);
 			const shape = runShape(epic, walk.beads);
 			// A truncated walk is not a basis for a wave: the epic tier's terminal check and the
 			// two-tier task list both read the snapshot, so `ready` is withheld instead of guessed.
-			const readyBeads = walk.truncated ? [] : await readyWave(epic, walk.beads, root);
+			const readyBeads = walk.truncated || dagReviewMissing ? [] : await readyWave(epic, walk.beads, root);
 			const ready = todoStrings(readyBeads);
 			const wave = readyBeads.map(waveItem);
 			statusWaveBySession.set(ctx.sessionManager.getSessionId(), new Map(wave.map(item => [item.bead, item])));
@@ -279,10 +303,12 @@ export function registerLedger(pi: ExtensionAPI): void {
 			if (walk.truncated) {
 				result.truncated = true;
 				result.message = `subtree exceeds ${DESCENDANT_LIMIT} beads; ready is withheld. Orchestrate the child epics individually.`;
+			} else if (dagReviewMissing) {
+				result.message = `DAG review required before any implementation wave; ready is withheld. Create it, then call orc_status again: ${dagReviewCommand(epic)}`;
 			}
 			return text(
 				result,
-				`orc_status ${epic} (${epicBead.status ?? "?"}, ${shape}): ${walk.beads.length} beads, ${todo.length} open, ${ready.length} ready${walk.truncated ? " (truncated)" : ""}\nready:\n${ready.join("\n") || "(none)"}\ntodo:\n${todo.join("\n")}`,
+				`orc_status ${epic} (${epicBead.status ?? "?"}, ${shape}): ${walk.beads.length} beads, ${todo.length} open, ${ready.length} ready${walk.truncated ? " (truncated)" : ""}${result.message === undefined ? "" : `\n${result.message}`}\nready:\n${ready.join("\n") || "(none)"}\ntodo:\n${todo.join("\n")}`,
 			);
 		},
 	});

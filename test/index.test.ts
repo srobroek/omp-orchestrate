@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
@@ -466,5 +466,88 @@ describe("routeDispatch", () => {
 		expect(routeDispatch({ tasks: [{ agent: "orc-implementer", task: "e-1.2" }] }, new Map())).toBeUndefined();
 		expect(routeDispatch("x", wave)).toBeUndefined();
 		expect(routeDispatch({ agent: "orc-implementer", task: "e-1.2" }, wave)).toMatchObject({ agent: "orc-implementer-deep", isolated: true });
+	});
+});
+
+describe("orc_status and orc_finish over the review lifecycle", () => {
+	type Tool = { execute: (...args: unknown[]) => Promise<{ content: { text: string }[]; isError?: boolean; details?: unknown }> };
+	test("the DAG review gates the wave, a review bead needs a verdict, and fix makes the reopened task the next wave", async () => {
+		const root = fixture("server");
+		const { pi, seen } = recordingApi();
+		const tools = new Map<string, Tool>();
+		(pi as unknown as { registerTool: (t: { name: string } & Tool) => void }).registerTool = t => {
+			seen.tools.push(t.name);
+			tools.set(t.name, t);
+		};
+		orchestrateWithBd(pi);
+		// A tiny stateful store: the epic E, task E.1 (closed by an implementer), review E.9 held by a reviewer.
+		const beads: Record<string, Record<string, unknown>> = {
+			E: { id: "E", issue_type: "epic", status: "in_progress", assignee: "omp/s" },
+			"E.1": { id: "E.1", issue_type: "task", title: "Add subtract", status: "closed", assignee: "impl", metadata: { role: "implementer", tier: "basic" }, dependencies: [{ depends_on_id: "E", type: "parent-child" }] },
+			"E.9": { id: "E.9", issue_type: "task", title: "Review", status: "in_progress", assignee: "rev", metadata: { role: "reviewer" }, dependencies: [{ depends_on_id: "E", type: "parent-child" }, { depends_on_id: "E.1", type: "blocks" }] },
+		};
+		const argvs: string[][] = [];
+		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+			const args = argv.slice(1);
+			argvs.push(args);
+			let body: unknown = null;
+			const [verb, id] = args;
+			if (verb === "show") body = beads[id as string];
+			else if (verb === "list") body = Object.values(beads).filter(b => (b.dependencies as Array<{ depends_on_id: string; type: string }> | undefined)?.some(d => d.type === "parent-child" && d.depends_on_id === args[2]));
+			else if (verb === "ready") body = Object.values(beads).filter(b => b.status === "open" && !b.assignee && ((b.dependencies as Array<{ depends_on_id: string; type: string }>) ?? []).every(d => d.type === "parent-child" || beads[d.depends_on_id]?.status === "closed"));
+			else if (verb === "reopen") beads[id as string]!.status = "open";
+			else if (verb === "update") {
+				const b = beads[id as string]!;
+				for (let i = 2; i < args.length; i++) {
+					if (args[i] === "--status") b.status = args[++i];
+					else if (args[i] === "--assignee") b.assignee = args[++i] || undefined;
+					else if (args[i] === "--set-metadata") {
+						const [k, ...rest] = (args[++i] as string).split("=");
+						b.metadata = { ...(b.metadata as Record<string, unknown>), [k as string]: rest.join("=") };
+					}
+				}
+				body = b;
+			} else if (verb === "create") {
+				const created = { id: "E.0", issue_type: args[args.indexOf("--type") + 1], title: args[args.indexOf("--title") + 1], status: "open", metadata: JSON.parse(args[args.indexOf("--metadata") + 1] as string), dependencies: [{ depends_on_id: args[args.indexOf("--parent") + 1], type: "parent-child" }] };
+				beads[created.id] = created;
+				body = created;
+			}
+			return { stdout: new Response(JSON.stringify(body)).body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+		}) as unknown as typeof Bun.spawn);
+		try {
+			const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" } };
+			// 1. No DAG review yet: the wave is withheld and the create command is returned; nothing is created by the read.
+			const status1 = await tools.get("orc_status")?.execute("x", { epic: "E" }, undefined, undefined, ctx);
+			expect(status1?.content[0]?.text).toContain("DAG review required");
+			expect(status1?.content[0]?.text).toContain("bd create --type task --parent E");
+			expect((status1?.details as { ready: string[] }).ready).toEqual([]);
+			expect(argvs.some(a => a[0] === "create")).toBe(false);
+			// The lead runs the command; the review is now the wave.
+			beads["E.0"] = { id: "E.0", issue_type: "task", title: "Review the DAG", status: "open", metadata: { role: "dag-reviewer" }, dependencies: [{ depends_on_id: "E", type: "parent-child" }] };
+			const status2 = await tools.get("orc_status")?.execute("x", {}, undefined, undefined, ctx);
+			expect((status2?.details as { wave: Array<{ bead: string; agent: string }> }).wave).toEqual([expect.objectContaining({ bead: "E.0", agent: "orc-reviewer", isolated: false })]);
+			beads["E.0"]!.status = "closed";
+			// 2. A review bead cannot finish done without a verdict; a task cannot carry one.
+			const bare = await tools.get("orc_finish")?.execute("x", { bead: "E.9", state: "done", reason: "ok" }, undefined, undefined, ctx);
+			expect(bare?.isError).toBe(true);
+			expect(bare?.content[0]?.text).toContain("verdict");
+			const misuse = await tools.get("orc_finish")?.execute("x", { bead: "E.1", state: "done", reason: "ok", verdict: "approve" }, undefined, undefined, ctx);
+			expect(misuse?.isError).toBe(true);
+			// 3. fix: the task is reopened for the same tier and is the next wave; the review is open, unassigned, and blocked by it.
+			const fix = await tools.get("orc_finish")?.execute("x", { bead: "E.9", state: "done", verdict: "fix", reason: "two nits", comment: "narrow the type" }, undefined, undefined, ctx);
+			expect(fix?.isError ?? false).toBe(false);
+			expect(beads["E.9"]).toMatchObject({ status: "open", assignee: undefined });
+			const status3 = await tools.get("orc_status")?.execute("x", {}, undefined, undefined, ctx);
+			const wave3 = (status3?.details as { wave: Array<Record<string, unknown>> }).wave;
+			expect(wave3).toEqual([expect.objectContaining({ bead: "E.1", agent: "orc-implementer", fix: expect.objectContaining({ from: "E.9", findings: "narrow the type" }) })]);
+			// The implementer finishes; the review is ready again.
+			beads["E.1"]!.status = "closed";
+			beads["E.1"]!.assignee = "impl";
+			const status4 = await tools.get("orc_status")?.execute("x", {}, undefined, undefined, ctx);
+			expect((status4?.details as { ready: string[] }).ready).toEqual(["E.9 Review"]);
+		} finally {
+			spawn.mockRestore();
+			rmSync(join(root, ".orchestration"), { recursive: true, force: true });
+		}
 	});
 });

@@ -64,7 +64,7 @@ Never stop the shared server; another project's run may be writing to it.
 ## Scenarios
 
 Each row names its setup (the DAG where one applies), the prompt, and what the transcript must
-show. "Observed" columns record the 2026-09-14 runs on 0.4.2 to 0.4.10.
+show. "Observed" columns record the 2026-09-14 and 2026-09-15 runs on 0.4.2 to 0.4.11.
 
 ### Single tier
 
@@ -98,6 +98,10 @@ show. "Observed" columns record the 2026-09-14 runs on 0.4.2 to 0.4.10.
 | Mixed-role wave | as above | as above | first wave carries researcher and implementers in one call; the dependent task waits; answer lands as a bead comment | WORKS |
 | Implementer helpers | task spanning many files: "first dispatch `scout` to list call sites, then `operator` for the rename, quote both receipts" | `finish every task under it.` | implementer spawns `scout`, then `operator`; receipts in the `orc_finish` comment | WORKS (operator after malformed retries) |
 | Reviewer helper | review bead: "confirm by dispatching `scout` to grep for `X`" | same | reviewer spawns `scout`; receipt quoted | WORKS |
+| DAG review | three tasks and three review beads, no DAG-review bead | `finish everything under it, integrate into main, and close the run epic.` | `orc_status` withholds `ready` with the `bd create`. The lead runs it. One `orc-reviewer` runs before any implementer. On `changes` a planner bead follows, then the re-review, then the implementation wave | WORKS (0.4.11). The first review returned `changes`: a shared REGISTRY contract hid in one task. The planner added a decision bead and split the task. The re-review approved. Three implementers ran in one call |
+| Verdict `fix` | review bead instructed to return `fix` on its first pass | same | the task reopens with `fix_from`, `fix_round`, `fix_findings`; the same agent re-runs it; the review returns to `ready` and approves | WORKS (0.4.11): `orc-implementer` re-ran the task, the review re-entered and approved |
+| Verdict `changes` | review bead instructed to return `changes` on a `basic` task | same | a fix bead one tier up with `escalated_from`; the review depends on it; `orc-implementer-deep` runs it; the review re-enters and approves | WORKS (0.4.11) |
+| `max` bounce | review bead instructed to return `changes` on a `max` task | same | the task gets `bounce=max` and a planner bead `Decompose: <title>`. `orc-planner` splits it and makes the review depend on the parts. The parts run and the review approves | WORKS (0.4.11). Two `deep` parts, both on `orc-implementer-deep`. The whole drill took 22 min, 11/11 closed |
 | Implementer tiers | two tasks, `metadata.tier` `basic` and `deep`, one review bead depending on both | `finish everything under it, integrate into main, and close the run epic.` | `orc_status.wave` names `orc-implementer` and `orc-implementer-deep`; the child transcripts show those agents ran; reviewer over the merged diff | FAIL then WORKS on 0.4.9: the first run dispatched `orc-implementer` for the deep bead despite the wave (see defects); with the routing gate the deep child ran `orc-implementer-deep` |
 | Shepherd (simulated bots) | PR bead with `pr`, `head_sha`, `bot_review_requests`; a `gh` shim first on `PATH` answering canned JSON per a `SCENARIO` file | `shepherd the PR bead, act on the outcome...` | actionable → policy `bounce` → fix bead with thread URLs → implementer → re-probe clean → closed; pending → request posted → `blocked` naming the provider | WORKS WITH DEVIATIONS (shim) |
 
@@ -134,3 +138,4 @@ show. "Observed" columns record the 2026-09-14 runs on 0.4.2 to 0.4.10.
 | 0.4.9 | reviewer judged each fix against defects the bead never named, producing an unbounded review chain | reviewer: a defect outside the criteria is a note, not a verdict, unless it is an exploitable security finding |
 | 0.4.9 | lead read a wave naming `orc-implementer-deep` and dispatched `orc-implementer` | `tool_call` on `task` routes each item that names one wave bead to that entry's `agent` and `isolated` |
 | 0.4.9 | `orc-reviewer` named the custom alias `@reviewer`; on a machine without `modelRoles.reviewer` OMP runs it on the caller's model without notice | every shipped agent names a built-in role; the preflight resolves each alias through `ctx.models.resolve` and stops the session when one has no callable model |
+| 0.4.11 | a session lost its provider credentials mid-run (`stopReason: error`, DNS failure in the credential process); the lead stopped after the merge with the reviews undispatched | environmental; a new `orchestrate epic <id>: resume` session rebound the run and finished it in 7 minutes |

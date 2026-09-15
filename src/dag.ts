@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { asBead, type BdBead, bdJson, bdList, metadataRecord } from "./bd";
+import { asBead, type BdBead, bdJson, bdList, edgesOf, metadataRecord } from "./bd";
 
 /** What `.beads/metadata.json` says about the store. */
 export type StoreMode = { mode: string; database: string | null };
@@ -73,6 +73,10 @@ export interface WaveItem {
 	tier?: "basic" | "deep" | "max";
 	agent: string;
 	isolated: boolean;
+	/** Set when a review returned `fix`: the same agent re-runs this bead with these findings. */
+	fix?: { from: string; round: number; findings: string };
+	/** Set on a fix bead a `changes` verdict created one tier up from this task. */
+	escalatedFrom?: string;
 }
 
 const TIER_AGENT = { basic: "orc-implementer", deep: "orc-implementer-deep", max: "orc-implementer-max" } as const;
@@ -98,11 +102,21 @@ export function waveItem(bead: BdBead): WaveItem {
 	const metadata = metadataRecord(bead.metadata);
 	if (bead.issue_type === "epic") return { bead: bead.id, title, role: "lead", agent: "orc-lead", isolated: true };
 	const role = typeof metadata?.role === "string" && metadata.role.length > 0 ? metadata.role : "implementer";
-	if (role === "reviewer") return { bead: bead.id, title, role, agent: "orc-reviewer", isolated: false };
+	if (role === "reviewer" || role === "dag-reviewer") return { bead: bead.id, title, role, agent: "orc-reviewer", isolated: false };
+	if (role === "planner") return { bead: bead.id, title, role, agent: "orc-planner", isolated: false };
 	if (role === "researcher") return { bead: bead.id, title, role, agent: "orc-researcher", isolated: false };
 	if (role === "shepherd") return { bead: bead.id, title, role, agent: "orc-shepherd", isolated: false };
 	const tier = tierOf(metadata);
-	return { bead: bead.id, title, role, tier, agent: TIER_AGENT[tier ?? "basic"], isolated: true };
+	const item: WaveItem = { bead: bead.id, title, role, tier, agent: TIER_AGENT[tier ?? "basic"], isolated: true };
+	if (typeof metadata?.fix_from === "string") {
+		item.fix = {
+			from: metadata.fix_from,
+			round: Number(metadata.fix_round ?? 1),
+			findings: typeof metadata.fix_findings === "string" ? metadata.fix_findings : "",
+		};
+	}
+	if (typeof metadata?.escalated_from === "string") item.escalatedFrom = metadata.escalated_from;
+	return item;
 }
 
 /**
@@ -118,8 +132,7 @@ export function runShape(epic: string, beads: readonly BdBead[]): "two-tier" | "
 /** Direct children of `epic` (parent-child dependency on it), in the order given. */
 export function directChildren(epic: string, beads: readonly BdBead[]): BdBead[] {
 	return beads.filter(bead => {
-		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
-		return deps.some(dep => dep !== null && typeof dep === "object" && "depends_on_id" in dep && dep.depends_on_id === epic && "type" in dep && dep.type === "parent-child");
+		return edgesOf(bead).some(edge => edge.type === "parent-child" && edge.id === epic);
 	});
 }
 
@@ -132,14 +145,11 @@ export function childEpics(epic: string, beads: readonly BdBead[]): BdBead[] {
 export function subtreeIds(root: string, beads: readonly BdBead[]): Set<string> {
 	const children = new Map<string, string[]>();
 	for (const bead of beads) {
-		const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
-		for (const dep of deps) {
-			if (dep === null || typeof dep !== "object" || !("depends_on_id" in dep) || !("type" in dep) || dep.type !== "parent-child") continue;
-			const parent = dep.depends_on_id;
-			if (typeof parent !== "string") continue;
-			const list = children.get(parent) ?? [];
+		for (const edge of edgesOf(bead)) {
+			if (edge.type !== "parent-child") continue;
+			const list = children.get(edge.id) ?? [];
 			list.push(bead.id);
-			children.set(parent, list);
+			children.set(edge.id, list);
 		}
 	}
 	const out = new Set<string>();
@@ -170,6 +180,9 @@ async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<B
  * The current wave for this tier, dependency-aware through `bd ready`, which honours
  * `blocks` edges and excludes `in_progress` issues.
  *
+ * Any tier: while a `dag-reviewer` bead under `epic` is open, the wave holds only it or the
+ * planner beads it depends on.
+ *
  * Two-tier: every `task` bead under `epic` that `bd ready` reports as unblocked and unassigned.
  *
  * Three-tier, while a child epic is still open: the direct child epics that `bd ready`
@@ -184,6 +197,15 @@ async function readyUnder(parent: string, cwd: string, type?: "epic"): Promise<B
  * out of the first wave. Root-level tasks are therefore the run's final wave by definition.
  */
 export async function readyWave(epic: string, beads: readonly BdBead[], cwd: string): Promise<BdBead[]> {
+	// The DAG review gates every implementation wave: while it is open the wave is that bead
+	// alone (or nothing, while a reviewer holds it). A sub-lead's walk never contains the
+	// root's review bead, so child epics are unaffected.
+	const dagReview = beads.find(bead => bead.issue_type !== "epic" && metadataRecord(bead.metadata)?.role === "dag-reviewer" && (bead.status === "open" || bead.status === "in_progress"));
+	if (dagReview !== undefined) {
+		// While the review is open, the only dispatchable work is the review itself or a planner
+		// bead it depends on (a DAG revision); `bd ready` decides which is unblocked.
+		return (await readyUnder(epic, cwd)).filter(bead => bead.id === dagReview.id || metadataRecord(bead.metadata)?.role === "planner");
+	}
 	const epics = childEpics(epic, beads);
 	// Task beads only, as in the terminal three-tier branch: an open `decision` is recorded by
 	// the lead or a human, never dispatched, and would otherwise route to an implementer.
