@@ -203,8 +203,10 @@ export async function readyWave(epic: string, beads: readonly BdBead[], cwd: str
 	const dagReview = beads.find(bead => bead.issue_type !== "epic" && metadataRecord(bead.metadata)?.role === "dag-reviewer" && (bead.status === "open" || bead.status === "in_progress"));
 	if (dagReview !== undefined) {
 		// While the review is open, the only dispatchable work is the review itself or a planner
-		// bead it depends on (a DAG revision); `bd ready` decides which is unblocked.
-		return (await readyUnder(epic, cwd)).filter(bead => bead.id === dagReview.id || metadataRecord(bead.metadata)?.role === "planner");
+		// bead it depends on (a DAG revision); `bd ready` decides which is unblocked. An
+		// unrelated planner bead under the epic waits like everything else.
+		const revisions = new Set(edgesOf(dagReview).filter(edge => edge.type !== "parent-child").map(edge => edge.id));
+		return (await readyUnder(epic, cwd)).filter(bead => bead.id === dagReview.id || revisions.has(bead.id));
 	}
 	const epics = childEpics(epic, beads);
 	// Task beads only, as in the terminal three-tier branch: an open `decision` is recorded by

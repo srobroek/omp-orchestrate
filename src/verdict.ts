@@ -84,6 +84,7 @@ export async function applyVerdict(input: VerdictInput): Promise<VerdictOutcome>
 	const { review, verdict, reason, findings, bd, show } = input;
 	const role = roleOf(review);
 	if (REVIEW_ROLES[role] !== true) throw new Error(`orc_finish ${review.id}: a verdict applies to a review bead; this bead's role is ${role || "(none)"}`);
+	if (role === "dag-reviewer" && verdict === "fix") throw new Error(`orc_finish ${review.id}: a DAG review is approve or changes; there is no local fix for a DAG`);
 	const outcome: VerdictOutcome = { verdict, reopened: [], escalated: [], planner: [], line: "" };
 	if (verdict === "approve") {
 		await bd(["close", review.id, "--reason", reason, "--json"]);

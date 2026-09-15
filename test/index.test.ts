@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { type BdBead, edgesOf } from "../src/bd";
 import orchestrateWithBd, { mutatesStore, routeDispatch, runHeader, STOP_REFUSAL, storeMutationBlock } from "../src/index";
 import { mentionsOrchestrate } from "../src/keyword";
 import { readLocator, writeLocator } from "../src/run";
@@ -483,8 +484,9 @@ describe("orc_status and orc_finish over the review lifecycle", () => {
 		// A tiny stateful store: the epic E, task E.1 (closed by an implementer), review E.9 held by a reviewer.
 		const beads: Record<string, Record<string, unknown>> = {
 			E: { id: "E", issue_type: "epic", status: "in_progress", assignee: "omp/s" },
-			"E.1": { id: "E.1", issue_type: "task", title: "Add subtract", status: "closed", assignee: "impl", metadata: { role: "implementer", tier: "basic" }, dependencies: [{ depends_on_id: "E", type: "parent-child" }] },
-			"E.9": { id: "E.9", issue_type: "task", title: "Review", status: "in_progress", assignee: "rev", metadata: { role: "reviewer" }, dependencies: [{ depends_on_id: "E", type: "parent-child" }, { depends_on_id: "E.1", type: "blocks" }] },
+			// `bd show` shape for edges: { id, dependency_type }.
+			"E.1": { id: "E.1", issue_type: "task", title: "Add subtract", status: "closed", assignee: "impl", metadata: { role: "implementer", tier: "basic" }, dependencies: [{ id: "E", dependency_type: "parent-child" }] },
+			"E.9": { id: "E.9", issue_type: "task", title: "Review", status: "in_progress", assignee: "rev", metadata: { role: "reviewer" }, dependencies: [{ id: "E", dependency_type: "parent-child" }, { id: "E.1", dependency_type: "blocks" }] },
 		};
 		const argvs: string[][] = [];
 		const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
@@ -493,8 +495,8 @@ describe("orc_status and orc_finish over the review lifecycle", () => {
 			let body: unknown = null;
 			const [verb, id] = args;
 			if (verb === "show") body = beads[id as string];
-			else if (verb === "list") body = Object.values(beads).filter(b => (b.dependencies as Array<{ depends_on_id: string; type: string }> | undefined)?.some(d => d.type === "parent-child" && d.depends_on_id === args[2]));
-			else if (verb === "ready") body = Object.values(beads).filter(b => b.status === "open" && !b.assignee && ((b.dependencies as Array<{ depends_on_id: string; type: string }>) ?? []).every(d => d.type === "parent-child" || beads[d.depends_on_id]?.status === "closed"));
+			else if (verb === "list") body = Object.values(beads).filter(b => edgesOf(b as BdBead).some(d => d.type === "parent-child" && d.id === args[2]));
+			else if (verb === "ready") body = Object.values(beads).filter(b => b.status === "open" && !b.assignee && edgesOf(b as BdBead).every(d => d.type === "parent-child" || beads[d.id]?.status === "closed"));
 			else if (verb === "reopen") beads[id as string]!.status = "open";
 			else if (verb === "update") {
 				const b = beads[id as string]!;
@@ -508,7 +510,7 @@ describe("orc_status and orc_finish over the review lifecycle", () => {
 				}
 				body = b;
 			} else if (verb === "create") {
-				const created = { id: "E.0", issue_type: args[args.indexOf("--type") + 1], title: args[args.indexOf("--title") + 1], status: "open", metadata: JSON.parse(args[args.indexOf("--metadata") + 1] as string), dependencies: [{ depends_on_id: args[args.indexOf("--parent") + 1], type: "parent-child" }] };
+				const created = { id: "E.0", issue_type: args[args.indexOf("--type") + 1], title: args[args.indexOf("--title") + 1], status: "open", metadata: JSON.parse(args[args.indexOf("--metadata") + 1] as string), dependencies: [{ id: args[args.indexOf("--parent") + 1], dependency_type: "parent-child" }] };
 				beads[created.id] = created;
 				body = created;
 			}
@@ -523,7 +525,7 @@ describe("orc_status and orc_finish over the review lifecycle", () => {
 			expect((status1?.details as { ready: string[] }).ready).toEqual([]);
 			expect(argvs.some(a => a[0] === "create")).toBe(false);
 			// The lead runs the command; the review is now the wave.
-			beads["E.0"] = { id: "E.0", issue_type: "task", title: "Review the DAG", status: "open", metadata: { role: "dag-reviewer" }, dependencies: [{ depends_on_id: "E", type: "parent-child" }] };
+			beads["E.0"] = { id: "E.0", issue_type: "task", title: "Review the DAG", status: "open", metadata: { role: "dag-reviewer" }, dependencies: [{ id: "E", dependency_type: "parent-child" }] };
 			const status2 = await tools.get("orc_status")?.execute("x", {}, undefined, undefined, ctx);
 			expect((status2?.details as { wave: Array<{ bead: string; agent: string }> }).wave).toEqual([expect.objectContaining({ bead: "E.0", agent: "orc-reviewer", isolated: false })]);
 			beads["E.0"]!.status = "closed";
@@ -534,6 +536,7 @@ describe("orc_status and orc_finish over the review lifecycle", () => {
 			const misuse = await tools.get("orc_finish")?.execute("x", { bead: "E.1", state: "done", reason: "ok", verdict: "approve" }, undefined, undefined, ctx);
 			expect(misuse?.isError).toBe(true);
 			// 3. fix: the task is reopened for the same tier and is the next wave; the review is open, unassigned, and blocked by it.
+			// No `targets`: the default reads the review's task edges in the `bd show` shape.
 			const fix = await tools.get("orc_finish")?.execute("x", { bead: "E.9", state: "done", verdict: "fix", reason: "two nits", comment: "narrow the type" }, undefined, undefined, ctx);
 			expect(fix?.isError ?? false).toBe(false);
 			expect(beads["E.9"]).toMatchObject({ status: "open", assignee: undefined });

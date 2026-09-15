@@ -210,6 +210,10 @@ describe("verdict lifecycle against a stateful store", () => {
 		dag.status = "in_progress";
 		// Claimed: nothing else is dispatchable.
 		expect(await store.wave("e")).toEqual([]);
+		// An unrelated ready planner bead under the epic is not part of the gate.
+		store.add({ id: "e.5", issue_type: "task", title: "Plan something else", metadata: { role: "planner" }, dependencies: [{ id: "e", dependency_type: "parent-child" }] });
+		expect(await store.wave("e")).toEqual([]);
+		await expect(store.verdict("e.0", "fix")).rejects.toThrow("approve or changes");
 		const out = await store.verdict("e.0", "changes");
 		const revise = out.planner[0] as string;
 		expect(await store.wave("e")).toEqual([revise]);
@@ -218,6 +222,6 @@ describe("verdict lifecycle against a stateful store", () => {
 		dag.assignee = "reviewer";
 		dag.status = "in_progress";
 		await store.verdict("e.0", "approve");
-		expect(await store.wave("e")).toEqual(["e.1"]);
+		expect(await store.wave("e")).toEqual(["e.1", "e.5"]);
 	});
 });
