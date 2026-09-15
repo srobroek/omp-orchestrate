@@ -270,6 +270,10 @@ export function registerLedger(pi: ExtensionAPI): void {
 			const actor = actorFor(ctx);
 			const env = { BEADS_ACTOR: actor };
 			let epicBead = await bdShow(epic, root, env);
+			if (epicBead.issue_type !== "epic") {
+				const message = `${epic} is a ${epicBead.issue_type ?? "bead of unknown type"}, not an epic; a run binds an epic`;
+				return text<BindResult>({ run: null, root: rootId, message }, message, true);
+			}
 			if (!epicBead.assignee) await bdJson(["update", epic, "--claim", "--json"], root, env).catch(() => undefined);
 			epicBead = await bdShow(epic, root, env);
 			if (epicBead.assignee !== actor) {

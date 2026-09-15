@@ -410,6 +410,16 @@ describe("orc_bind claims the epic", () => {
 			// Already assigned: no claim attempted, no list walk, no locator.
 			expect(argvs.some(a => a.includes("--claim"))).toBe(false);
 			expect(readLocator(root)).toBeNull();
+			// A task id is refused before any claim or locator write: a run binds an epic.
+			spawn.mockImplementation(((argv: string[]) => {
+				argvs.push(argv);
+				return { stdout: new Response('{"id":"T","issue_type":"task","status":"open"}').body, stderr: new Response("").body, exited: Promise.resolve(0), kill: () => undefined };
+			}) as unknown as typeof Bun.spawn);
+			const task = await tools.get("orc_bind")?.execute("x", { epic: "T" }, undefined, undefined, ctx);
+			expect(task?.isError).toBe(true);
+			expect(task?.content[0]?.text).toContain("not an epic");
+			expect(argvs.some(a => a.includes("--claim"))).toBe(false);
+			expect(readLocator(root)).toBeNull();
 		} finally {
 			spawn.mockRestore();
 		}
