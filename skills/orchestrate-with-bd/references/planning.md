@@ -54,8 +54,9 @@ tiers: the lead dispatches the epics' tasks directly.
   an epic-to-decision dependency, so a decision gates an epic through its tasks:
   `bd dep add <task> <decision>` for each task that needs it.
 - An isolated clone carries the root's locator. When a sub-lead calls
-  `orc_status { epic: <child> }` for an epic under the inherited run, the clone rebinds to
-  that child. For any other epic, `orc_status` refuses: that is a different run.
+  `orc_bind { epic: <child> }` for an epic under the inherited run, the clone rebinds to
+  that child and keeps the run root. For any other epic, `orc_bind` refuses: that is a
+  different run.
 - At the epic tier, `orc_status.ready` lists a child epic under three conditions. `bd ready`
   reports it unblocked. No lead holds it (binding claims the epic). At least one of
   its tasks is ready. An epic with no tasks stays in the wave; its lead plans it.

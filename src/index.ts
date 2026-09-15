@@ -30,7 +30,7 @@ const CONTRACT = [
 	"- The DAG decides the shape and `orc_status.shape` states it: `two-tier` (no child epic) means dispatch workers directly; `three-tier` (a direct child of the run epic is an epic) means dispatch one `orc-lead` per child epic with `isolated: true`, each brief naming its epic and containing the word `orchestrate` so the epic lead receives this same contract, then merge the returned epic branches yourself. Once every child epic is closed, `ready` turns to the tasks directly under the run epic: the cross-epic review, dispatched as a wave over the merged run (`merge-base..HEAD`). Record cross-epic contracts as a `decision` bead before any epic lead starts. Dispatch `orc-planner` first only when the DAG does not exist yet or the domain is unfamiliar; it writes beads and returns.",
 	"- Each `task` item copies `agent` and `isolated` from the matching `orc_status.wave` entry; you never choose an agent at dispatch time. Implementer tier comes from the bead's `metadata.tier` (`basic` -> `orc-implementer`, `deep` -> `orc-implementer-deep`, `max` -> `orc-implementer-max`); claim-holding implementers and epic leads run `isolated: true`; planner, reviewer, researcher, and shepherd do not. A wave item with `fix` is a same-tier re-run: put its `fix.findings` in the brief. A `planner` item dispatches `orc-planner` with the bead's description.",
 	"- The DAG review comes first. When `orc_status` reports `DAG review required`, run the `bd create` it gives you, then call `orc_status` again: the review bead is the wave, one `orc-reviewer`, before any implementation. Every review bead finishes through `orc_finish` with a `verdict`: `approve` closes it; `fix` (every finding local) reopens the reviewed tasks with the findings for the same implementer; `changes` (a criterion misread, a design or contract change, or an exploitable security finding) creates a fix bead one tier up, or a planner bead when the task was already `max`. After `fix` or `changes` the review bead stays open and returns to `ready` once those beads close. You create no fix beads yourself; a `blocked` implementer whose blocker is a missing prerequisite gets a prerequisite bead at the same tier, which you do create.",
-	"- Binding through `orc_status { epic }` claims the epic for you; you never claim a task bead and never edit product code. A worker brief must not contain the bare lowercase word `orchestrate`, and it never tells a worker to skip the bead's own acceptance checks: implementers run every criterion's check and the tests they add; only project-wide suites and formatters are deferred to you.",
+	"- Bind first with `orc_bind { epic }`: it claims the epic for you and is the only ledger write outside `orc_claim`/`orc_finish`; `orc_status` reads. You never claim a task bead and never edit product code. A worker brief must not contain the bare lowercase word `orchestrate`, and it never tells a worker to skip the bead's own acceptance checks: implementers run every criterion's check and the tests they add; only project-wide suites and formatters are deferred to you.",
 ].join("\n");
 
 /** The bash input with `BEADS_ACTOR` added to its `env`, or `undefined` when nothing changes. */
@@ -75,7 +75,7 @@ export function routeDispatch(input: unknown, wave: ReadonlyMap<string, WaveItem
 	return Array.isArray(record.tasks) ? { ...record, tasks: routed } : (routed[0] as Record<string, unknown>);
 }
 
-const NO_RUN = "no run epic yet — create the epic, then call orc_status { epic } to bind it";
+const NO_RUN = "no run epic yet — create the epic, then call orc_bind { epic } to bind it";
 
 /** Build the run header for one prompt. Exported for the keyword tests; `index.ts` is the only registration site. */
 export function runHeader(root: string, actor: string, stop?: string): string {
@@ -119,7 +119,7 @@ const stopped = new Map<string, string>();
 export const STOP_REFUSAL =
 	"Refused: this orchestration session's Beads store is not on the shared server. A human runs the migration; report it and end the turn.";
 
-const LEDGER_TOOLS = new Set(["task", "orc_claim", "orc_finish", "orc_status"]);
+const LEDGER_TOOLS: Record<string, true> = { task: true, orc_bind: true, orc_claim: true, orc_finish: true, orc_status: true };
 
 /** A block result when `toolName`/`input` would touch the store, the ledger, or dispatch, else `undefined`. */
 export function storeMutationBlock(
@@ -136,7 +136,7 @@ export function storeMutationBlock(
 		const target = "path" in input ? input.path : "paths" in input ? JSON.stringify(input.paths) : "";
 		return typeof target === "string" && target.includes(".beads/") ? { block: true, reason } : undefined;
 	}
-	if (LEDGER_TOOLS.has(toolName)) return { block: true, reason };
+	if (LEDGER_TOOLS[toolName] === true) return { block: true, reason };
 	return undefined;
 }
 

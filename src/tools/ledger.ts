@@ -44,6 +44,13 @@ export interface ClaimResult {
 	reason?: string;
 }
 
+export interface BindResult {
+	run: string | null;
+	root: string;
+	epic?: BdBead;
+	message?: string;
+}
+
 export interface FinishResult {
 	state: "done" | "blocked";
 	bead: string;
@@ -124,7 +131,10 @@ export function registerLedger(pi: ExtensionAPI): void {
 			),
 		targets: z.array(z.string()).optional().describe("review beads: the task ids the verdict applies to; defaults to the review bead's task dependencies"),
 	});
-	const statusParams = z.object({ epic: z.string().optional().describe("run epic id; binds the run when no locator exists") });
+	const bindParams = z.object({
+		epic: z.string().describe("run epic id to bind this checkout to"),
+	});
+	const statusParams = z.object({ epic: z.string().optional().describe("the bound run epic id, for an explicit check; binding is orc_bind") });
 
 	pi.registerTool({
 		name: "orc_claim",
@@ -233,10 +243,54 @@ export function registerLedger(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "orc_bind",
+		label: "Bind run",
+		description:
+			"Bind this checkout to a run epic: claims the epic for this lead's actor (Beads' atomic assignee is the ownership record, so two leads cannot bind one epic) and writes `.orchestration/.active-run`. An isolated clone inherits the root's locator; a sub-lead binds a child epic of that run, which rebinds the clone to the child and keeps the run root. Any other epic is a different run and is refused. Idempotent for the bound epic. Call it once, before `orc_status`.",
+		approval: "write",
+		parameters: bindParams,
+		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<BindResult | undefined>> {
+			const refusal = storeRefusal(ctx.cwd);
+			if (refusal !== null) return refused(refusal);
+			const root = ctx.cwd;
+			const epic = input.epic.trim();
+			const locator = readLocator(root);
+			let rootId = epic;
+			if (locator !== null && locator.run_id !== epic) {
+				if (!(await isDescendant(epic, locator.root_id, root))) {
+					const message = `run already bound to ${locator.run_id}; a clone rebinds only to a child epic of its run (root ${locator.root_id}); remove .orchestration/.active-run to start another run`;
+					return text<BindResult>({ run: locator.run_id, root: locator.root_id, message }, message, true);
+				}
+				rootId = locator.root_id;
+			} else if (locator !== null) {
+				rootId = locator.root_id;
+			}
+			// The epic must exist before anything is bound: `bd list --parent <typo>` exits 0
+			// with `[]`, which would otherwise persist a typo as an empty successful run.
+			const actor = actorFor(ctx);
+			const env = { BEADS_ACTOR: actor };
+			let epicBead = await bdShow(epic, root, env);
+			if (epicBead.issue_type !== "epic") {
+				const message = `${epic} is a ${epicBead.issue_type ?? "bead of unknown type"}, not an epic; a run binds an epic`;
+				return text<BindResult>({ run: null, root: rootId, message }, message, true);
+			}
+			if (!epicBead.assignee) await bdJson(["update", epic, "--claim", "--json"], root, env).catch(() => undefined);
+			epicBead = await bdShow(epic, root, env);
+			if (epicBead.assignee !== actor) {
+				const holder = epicBead.assignee ?? "(unassigned)";
+				const message = `epic ${epic} is held by ${holder}; a lead binds only the epic it claims`;
+				return text<BindResult>({ run: null, root: rootId, message }, message, true);
+			}
+			writeLocator(root, epic, rootId);
+			return text<BindResult>({ run: epic, root: rootId, epic: epicBead }, `orc_bind ${epic}: bound (run root ${rootId}, actor ${actor})`);
+		},
+	});
+
+	pi.registerTool({
 		name: "orc_status",
 		label: "Run status",
 		description:
-			"Read the run epic's whole subtree from Beads. `ready` is the wave and one `task` call dispatches all of it; `wave` gives each item's `agent` and `isolated`, which the `task` call copies (implementer tier from the bead's `metadata.tier`): unblocked, unassigned tasks under the epic (two-tier), or the child epics that are unblocked, not yet bound by a lead, and hold at least one ready task, one `orc-lead` each (three-tier). Binding claims the epic for this lead's actor; an epic another actor holds refuses to bind. `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise. Pass `epic` once to bind the run for this checkout; the epic must exist, and a bound run refuses a different epic.",
+			"Read the bound run's whole subtree from Beads; this tool writes nothing, bind first with `orc_bind`. `ready` is the wave and one `task` call dispatches all of it; `wave` gives each item's `agent` and `isolated`, which the `task` call copies (implementer tier from the bead's `metadata.tier`): unblocked, unassigned tasks under the epic (two-tier), or the child epics that are unblocked, not yet bound by a lead, and hold at least one ready task, one `orc-lead` each (three-tier). `todo` holds `<bead-id> <title>` for every open or in-progress bead and is the only legitimate source of todo items. `shape` is `three-tier` when a direct child of the epic is an epic (dispatch one `orc-lead` per child epic) and `two-tier` otherwise. `epic`, when passed, must be the bound run.",
 		approval: "read",
 		parameters: statusParams,
 		async execute(_id, input, _signal, _update, ctx): Promise<AgentToolResult<StatusResult | undefined>> {
@@ -247,48 +301,22 @@ export function registerLedger(pi: ExtensionAPI): void {
 			const store = mode === null ? "no .beads/metadata.json" : `${mode.database ?? "?"} (${mode.mode || "?"})`;
 			const locator = readLocator(root);
 			const requested = input.epic?.trim() || undefined;
-			let bound = locator;
-			if (requested !== undefined && locator !== null && locator.run_id !== requested) {
-				// An isolated clone carries the root's locator. A sub-lead binding a child epic
-				// of that run is the intended three-tier case, so the descendant rebinds; any
-				// other epic is a different run and refuses.
-				if (!(await isDescendant(requested, locator.run_id, root))) {
-					const message = `run already bound to ${locator.run_id}; call orc_status without epic, or remove .orchestration/.active-run to rebind`;
-					return text<StatusResult>({ run: locator.run_id, store, beads: [], todo: [], message }, message, true);
-				}
-				bound = null;
+			if (locator === null) {
+				const message = requested === undefined ? "no run bound; call orc_bind { epic } first" : `no run bound; call orc_bind { epic: "${requested}" } first`;
+				return text<StatusResult>({ run: null, store, beads: [], todo: [], message }, message, true);
 			}
-			const epic = requested ?? locator?.run_id;
-			if (epic === undefined) {
-				const message = "no run bound; pass epic or create .orchestration/.active-run";
-				return text<StatusResult>({ run: null, store, beads: [], todo: [], message }, message);
+			if (requested !== undefined && requested !== locator.run_id) {
+				const message = `run is bound to ${locator.run_id}; call orc_status without epic, or orc_bind { epic: "${requested}" } to rebind a child epic`;
+				return text<StatusResult>({ run: locator.run_id, store, beads: [], todo: [], message }, message, true);
 			}
-			// The epic must exist before anything is bound: `bd list --parent <typo>` exits 0
-			// with `[]`, which would otherwise persist a typo as an empty successful run.
-			let epicBead = await bdShow(epic, root);
-			if (bound === null) {
-				// Binding claims the epic: Beads' atomic assignee is the ownership record, so two
-				// leads cannot bind one epic, and `bd ready --unassigned` drops it for the root.
-				const actor = actorFor(ctx);
-				const env = { BEADS_ACTOR: actor };
-				if (!epicBead.assignee) await bdJson(["update", epic, "--claim", "--json"], root, env).catch(() => undefined);
-				epicBead = await bdShow(epic, root, env);
-				if (epicBead.assignee !== actor) {
-					const holder = epicBead.assignee ?? "(unassigned)";
-					const message = `epic ${epic} is held by ${holder}; a lead binds only the epic it claims`;
-					return text<StatusResult>({ run: null, store, beads: [], todo: [], message }, message, true);
-				}
-			}
-			// Idempotent for a bound run (and adds the `.orchestration/.gitignore` a locator
-			// written by another tool may lack: an untracked, non-ignored file in the primary
-			// breaks OMP's isolation merge-back), binding for an unbound one.
-			writeLocator(root, epic);
+			const epic = locator.run_id;
+			const epicBead = await bdShow(epic, root);
 			const walk = await descendants(epic, root);
 			// One DAG review per run gates every implementation wave (see readyWave). This tool
 			// reads; it does not create the bead. When the root's tree has tasks but no review
 			// bead, the wave is withheld and the exact create command is returned. A sub-lead's
-			// epic is a descendant of the bound run, not the run itself, so it needs none.
-			const isRoot = locator === null || locator.run_id === epic;
+			// epic is a descendant of the run root, so it needs none.
+			const isRoot = locator.root_id === epic;
 			const dagReviewMissing = isRoot && !walk.truncated && !walk.beads.some(isDagReview) && walk.beads.some(bead => bead.issue_type === "task");
 			statusIdsBySession.set(ctx.sessionManager.getSessionId(), beadIds(walk.beads));
 			const todo = todoStrings(walk.beads);
