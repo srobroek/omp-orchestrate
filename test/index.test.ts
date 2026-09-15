@@ -353,7 +353,8 @@ describe("orc_bind rebind in an isolated clone", () => {
 			let body = "[]";
 			// The real `bd show` shape: a top-level `parent` and `{ id, dependency_type }` entries.
 			if (args.startsWith("show R.2 ")) body = '[{"id":"R.2","issue_type":"epic","status":"open","assignee":"omp/me","parent":"R","dependencies":[{"id":"R","issue_type":"epic","dependency_type":"parent-child"}]}]';
-			if (args.startsWith("show R.2.1 ")) body = '[{"id":"R.2.1","issue_type":"task","status":"open","assignee":"omp/me","dependencies":[{"id":"R.2","dependency_type":"parent-child"}]}]';
+			if (args.startsWith("show R.2.1 ")) body = '[{"id":"R.2.1","issue_type":"epic","status":"open","assignee":"omp/me","dependencies":[{"id":"R.2","dependency_type":"parent-child"}]}]';
+			if (args.startsWith("show R.2.9 ")) body = '[{"id":"R.2.9","issue_type":"task","status":"open","dependencies":[{"id":"R.2","dependency_type":"parent-child"}]}]';
 			if (args.startsWith("show OTHER ")) body = '{"id":"OTHER","issue_type":"epic","status":"open","dependencies":[]}';
 			if (args.startsWith("update R.2 --claim")) body = '{"id":"R.2"}';
 			if (args.startsWith("ready")) body = "[]";
@@ -370,6 +371,12 @@ describe("orc_bind rebind in an isolated clone", () => {
 			const grandchild = await tools.get("orc_bind")?.execute("x", { epic: "R.2.1" }, undefined, undefined, ctx);
 			expect(grandchild?.isError ?? false).toBe(false);
 			expect(readLocator(root)).toEqual({ schema_version: 1, run_id: "R.2.1", root_id: "R" });
+			// A task under the run is not a run: refused before any claim or write.
+			writeLocator(root, "R");
+			const taskUnderRun = await tools.get("orc_bind")?.execute("x", { epic: "R.2.9" }, undefined, undefined, ctx);
+			expect(taskUnderRun?.isError).toBe(true);
+			expect(taskUnderRun?.content[0]?.text).toContain("not an epic");
+			expect(readLocator(root)?.run_id).toBe("R");
 			writeLocator(root, "R");
 			const other = await tools.get("orc_bind")?.execute("x", { epic: "OTHER" }, undefined, undefined, ctx);
 			expect(other?.isError).toBe(true);
