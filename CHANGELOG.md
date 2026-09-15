@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.13](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.12...v0.4.13) (2026-09-15)
+
+
+### Features
+
+* **ledger:** orc_bind writes, orc_status reads ([#178](https://github.com/srobroek/orchestrate-with-bd/issues/178)) ([ccac920](https://github.com/srobroek/orchestrate-with-bd/commit/ccac9206e12f9c25b2adb8bd219563a774f8c17b))
+
 ## [0.4.12](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.11...v0.4.12) (2026-09-15)
 
 
