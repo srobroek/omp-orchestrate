@@ -71,8 +71,9 @@ Every model is one of OMP's built-in role aliases, so a fresh install needs no
   implementer re-runs), or `changes` (a fix bead one tier up; at `max`, a planner bead).
 - DAG review: one reviewer judges the DAG against the planner guard-rails before the first
   implementation wave; `orc_status` withholds the wave until that bead exists.
-- Marketplace installs drop agent `model:` lines; list the plugin under `extensions:` or set
-  `task.agentModelOverrides` for the eight `orc-*` agents (`references/roles.md`).
+- The marketplace install form (`name@marketplace`) drops agent `model:` lines; list the
+  plugin under `extensions:` or set `task.agentModelOverrides` for the eight `orc-*` agents.
+  npm and `omp plugin link` installs keep them (`references/roles.md`).
 - Isolation: implementers and epic leads run `isolated: true`.
 
 The skill `skill://orchestrate-with-bd` holds the procedure; `references/roles.md` holds the

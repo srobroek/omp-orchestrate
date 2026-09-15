@@ -62,9 +62,11 @@ task:
 
 ## Marketplace installs
 
-`omp plugin install orchestrate-with-bd@<marketplace>` discovers the agents through OMP's
-claude-plugins lane, which drops every `model:` line (`task/discovery.ts`, `ignoreModel`).
-Without one of the two settings below, the agents run on the caller's model:
+The marketplace form, `omp plugin install orchestrate-with-bd@<marketplace>`, discovers
+the agents through OMP's claude-plugins lane, which drops every `model:` line
+(`task/discovery.ts`, `ignoreModel`). An npm or `omp plugin link` install is an extension
+root and keeps the frontmatter. Under the marketplace form, without one of the two
+settings below, the agents run on the caller's model:
 
 - `extensions:` in the OMP config lists the plugin path
   (`~/.omp/plugins/node_modules/@srobroek/orchestrate-with-bd`), so the agents load through
