@@ -45,7 +45,8 @@ ledger tools return that route and write nothing.
 
 | Tool | Does |
 | --- | --- |
-| `orc_status` | reads every bead under the run epic; `todo` holds `<bead-id> <title>` for the open ones; binds the run when passed `epic` |
+| `orc_bind` | claims the run epic for this lead and writes the locator; the one write outside claim and finish |
+| `orc_status` | reads every bead under the bound run; `todo` holds `<bead-id> <title>` for the open ones; writes nothing |
 | `orc_claim` | `bd update <bead> --claim`, then reads the assignee back |
 | `orc_finish` | writes the comment, then `bd close` or `bd update --status blocked` |
 | `orc_bot_review_probe` | classifies a PR's review-bot round at its exact head |

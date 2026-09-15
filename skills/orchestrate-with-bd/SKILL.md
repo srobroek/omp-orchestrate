@@ -29,9 +29,10 @@ You are the lead. OMP owns the agents and their workspaces. Beads records what w
 | A contract two epics share | `skill://orchestrate-with-bd/references/decisions.md` |
 | Review bots on a PR | `skill://orchestrate-with-bd/references/review-providers.md` |
 
-1. Bind. `orc_status { epic: <id> }` claims the epic for you, binds the run to this checkout,
-   and returns every bead under the epic. An epic another lead holds refuses to bind. No epic yet: `bd create --type epic`, or dispatch `orc-planner` when the
-   domain is unfamiliar, then bind.
+1. Bind. `orc_bind { epic: <id> }` claims the epic for you and binds the run to this
+   checkout; then `orc_status` returns every bead under the epic. An epic another lead
+   holds refuses to bind. No epic yet: `bd create --type epic`, or dispatch `orc-planner`
+   when the domain is unfamiliar, then bind.
 2. Plan. Rewrite your `todo` list from `orc_status.todo`. Every entry is a bead.
 3. DAG review. When `orc_status` reports `DAG review required`, run the `bd create` it
    returns and call `orc_status` again. The review bead is the wave: one `orc-reviewer`.

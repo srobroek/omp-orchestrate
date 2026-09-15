@@ -71,13 +71,14 @@ function fixture(mode: string | null): string {
 }
 
 describe("extension factory", () => {
-	test("registers exactly three events and seven tools, no commands, and reaches no runtime action", () => {
+	test("registers exactly three events and eight tools, no commands, and reaches no runtime action", () => {
 		const { pi, seen } = recordingApi();
 		expect(() => orchestrateWithBd(pi)).not.toThrow();
 		expect(seen.label).toBe("Orchestrate with bd");
 		expect([...new Set(seen.events)].sort()).toEqual(["before_agent_start", "todo_reminder", "tool_call"]);
 		expect(seen.commands).toEqual([]);
 		expect(seen.tools.sort()).toEqual([
+			"orc_bind",
 			"orc_bot_review_probe",
 			"orc_bot_review_request",
 			"orc_claim",
@@ -256,7 +257,7 @@ describe("locator", () => {
 		const root = fixture(null);
 		expect(readLocator(root)).toBeNull();
 		writeLocator(root, "epic-1");
-		expect(readLocator(root)).toEqual({ schema_version: 1, run_id: "epic-1" });
+		expect(readLocator(root)).toEqual({ schema_version: 1, run_id: "epic-1", root_id: "epic-1" });
 		expect(readFileSync(join(root, ".orchestration", ".gitignore"), "utf8")).toBe("*\n");
 		writeFileSync(join(root, ".orchestration", ".active-run"), "{not json");
 		expect(readLocator(root)).toBeNull();
@@ -336,7 +337,7 @@ describe("orc_finish done on an epic", () => {
 	});
 });
 
-describe("orc_status rebind in an isolated clone", () => {
+describe("orc_bind rebind in an isolated clone", () => {
 	test("a child epic of the inherited run rebinds; an unrelated epic is refused", async () => {
 		const root = fixture("server");
 		writeLocator(root, "R");
@@ -360,26 +361,33 @@ describe("orc_status rebind in an isolated clone", () => {
 		}) as unknown as typeof Bun.spawn);
 		try {
 			const ctx = { cwd: root, sessionManager: { getSessionId: () => "me" } };
-			const child = await tools.get("orc_status")?.execute("x", { epic: "R.2" }, undefined, undefined, ctx);
+			const child = await tools.get("orc_bind")?.execute("x", { epic: "R.2" }, undefined, undefined, ctx);
 			expect(child?.isError ?? false).toBe(false);
-			expect(readLocator(root)?.run_id).toBe("R.2");
+			// The clone now runs R.2 but the run root stays R, so R.2 is never asked for a DAG review.
+			expect(readLocator(root)).toEqual({ schema_version: 1, run_id: "R.2", root_id: "R" });
 			// Two levels down, with no top-level `parent` field: the dependency entry alone carries it.
 			writeLocator(root, "R");
-			const grandchild = await tools.get("orc_status")?.execute("x", { epic: "R.2.1" }, undefined, undefined, ctx);
+			const grandchild = await tools.get("orc_bind")?.execute("x", { epic: "R.2.1" }, undefined, undefined, ctx);
 			expect(grandchild?.isError ?? false).toBe(false);
-			expect(readLocator(root)?.run_id).toBe("R.2.1");
+			expect(readLocator(root)).toEqual({ schema_version: 1, run_id: "R.2.1", root_id: "R" });
 			writeLocator(root, "R");
-			const other = await tools.get("orc_status")?.execute("x", { epic: "OTHER" }, undefined, undefined, ctx);
+			const other = await tools.get("orc_bind")?.execute("x", { epic: "OTHER" }, undefined, undefined, ctx);
 			expect(other?.isError).toBe(true);
 			expect(other?.content[0]?.text).toContain("already bound to R");
 			expect(readLocator(root)?.run_id).toBe("R");
+			// orc_status is a read: it never binds, and it names the bind tool when nothing is bound.
+			rmSync(join(root, ".orchestration"), { recursive: true, force: true });
+			const unbound = await tools.get("orc_status")?.execute("x", { epic: "R" }, undefined, undefined, ctx);
+			expect(unbound?.isError).toBe(true);
+			expect(unbound?.content[0]?.text).toContain("orc_bind");
+			expect(readLocator(root)).toBeNull();
 		} finally {
 			spawn.mockRestore();
 		}
 	});
 });
 
-describe("orc_status bind claims the epic", () => {
+describe("orc_bind claims the epic", () => {
 	test("refuses to bind an epic another actor holds and writes no locator", async () => {
 		const root = fixture("server");
 		const { pi, seen } = recordingApi();
@@ -396,7 +404,7 @@ describe("orc_status bind claims the epic", () => {
 		}) as unknown as typeof Bun.spawn);
 		try {
 			const ctx = { cwd: root, sessionManager: { getSessionId: () => "me" } };
-			const result = await tools.get("orc_status")?.execute("x", { epic: "E" }, undefined, undefined, ctx);
+			const result = await tools.get("orc_bind")?.execute("x", { epic: "E" }, undefined, undefined, ctx);
 			expect(result?.isError).toBe(true);
 			expect(result?.content[0]?.text).toContain("held by omp/other");
 			// Already assigned: no claim attempted, no list walk, no locator.
@@ -518,8 +526,11 @@ describe("orc_status and orc_finish over the review lifecycle", () => {
 		}) as unknown as typeof Bun.spawn);
 		try {
 			const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" } };
+			// 0. Bind (the one write), then read.
+			const bound = await tools.get("orc_bind")?.execute("x", { epic: "E" }, undefined, undefined, ctx);
+			expect(bound?.isError ?? false).toBe(false);
 			// 1. No DAG review yet: the wave is withheld and the create command is returned; nothing is created by the read.
-			const status1 = await tools.get("orc_status")?.execute("x", { epic: "E" }, undefined, undefined, ctx);
+			const status1 = await tools.get("orc_status")?.execute("x", {}, undefined, undefined, ctx);
 			expect(status1?.content[0]?.text).toContain("DAG review required");
 			expect(status1?.content[0]?.text).toContain("bd create --type task --parent E");
 			expect((status1?.details as { ready: string[] }).ready).toEqual([]);
