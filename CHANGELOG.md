@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.11](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.10...v0.4.11) (2026-09-15)
+
+
+### Features
+
+* **review:** graded verdicts, escalation ladder, DAG review ([#174](https://github.com/srobroek/orchestrate-with-bd/issues/174)) ([b73a7e2](https://github.com/srobroek/orchestrate-with-bd/commit/b73a7e2b55b3f21e2ab5984817cbd8d8c53de7e4))
+
 ## [0.4.10](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.9...v0.4.10) (2026-09-14)
 
 
