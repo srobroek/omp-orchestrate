@@ -69,6 +69,61 @@ tiers: the lead dispatches the epics' tasks directly.
 When the domain is unfamiliar or the DAG does not exist, dispatch `orc-planner`. It creates
 the beads and returns their ids. Otherwise write them yourself.
 
+## DAG review
+
+Before implementation starts, one `orc-reviewer` judges the run's DAG; the author of the DAG
+(planner or human) makes no difference. Until a bead with `metadata.role` `dag-reviewer` exists under a
+root run that has task beads, `orc_status` withholds `ready` and returns the `bd create` for
+that bead. The lead runs that command. On the next `orc_status` the review bead is the wave:
+one `orc-reviewer`, not isolated. Its description lists the six guard-rails:
+
+1. Every task names its paths or symbols and carries criteria a reviewer can verify; the
+   implementer makes no design decision.
+2. A task hides no decision.
+3. Every review bead depends on the tasks it reviews.
+4. Dependencies exist only for true ordering.
+5. Every implementer bead carries a justified `metadata.tier`; `deep` and `max` are a minority.
+6. A contract two or more epics share is a `decision` bead before those epics start.
+
+`approve` closes the bead; `ready` then holds the implementation wave. `changes` creates a
+planner bead (`metadata.role` `planner`) that the review depends on. The next wave is
+`orc-planner`. It revises the beads and closes the planner bead; the review re-runs on the
+result. A child epic's lead sees no DAG review: the root review covers the tree.
+
+## Verdicts and escalation
+
+A review bead finishes through `orc_finish` with a `verdict`. The tool routes the next wave.
+
+| Verdict | Meaning | What `orc_finish` does |
+|---|---|---|
+| `approve` | every criterion met | closes the review bead |
+| `fix` | every finding is local | reopens the reviewed tasks unassigned with `fix_from`, `fix_round`, and `fix_findings` in their metadata; returns the review bead to open and unassigned |
+| `changes` | a criterion misread, a design or contract change, or an exploitable security finding | creates `Fix: <title>` one tier up under the task's parent with `escalated_from`; the review bead depends on it and returns to open and unassigned |
+
+Local findings are of these kinds:
+
+- a type narrowing;
+- a missing or flaky test;
+- a null check;
+- a name.
+
+The grade is by kind, never by count. A finding the criteria do not name is a comment on
+the bead, never a verdict, unless the reviewer grades it exploitable.
+
+The ladder is `basic` -> `deep` -> `max`. On a `max` task, `changes` creates no fix bead.
+Instead `orc_finish`:
+
+- sets `bounce=max` on the task;
+- creates a planner bead `Decompose: <title>`;
+- makes the review depend on that bead.
+
+`orc-planner` then splits the task into bounded beads, makes the review depend on each, and
+closes the planner bead.
+
+A `fix` re-run reaches the same agent at the same tier. The wave item carries `fix.findings`
+for the brief. When an implementer finishes `blocked` on a missing prerequisite, the DAG has
+a gap. The lead creates the prerequisite at the same tier. The blocked task depends on it.
+
 ## Plan mode
 
 A plan-mode plan for a run has a `## Beads` section. It lists the epic id and every task
@@ -97,7 +152,10 @@ product in mind; 6 to 8 suits a machine that also runs the human's session.
 4. Run `orc_status` again. The review beads, which depend on the landed tasks, are now the
    `ready` wave.
 5. Dispatch them in one `task` call, one `orc-reviewer` per review bead. Each reviewer judges
-   its bead against the integrated `merge-base..HEAD` diff.
+   its bead against the integrated `merge-base..HEAD` diff and finishes with a verdict.
+6. Run `orc_status` again. A `fix` shows the reopened task with `fix.findings`; a `changes`
+   shows the fix bead one tier up, or a planner bead. Dispatch that wave; the review bead
+   follows once it closes.
 6. Turn every `changes` finding into a fix bead for the next wave.
 7. Run `orc_status` again and redraw the `todo` list.
 

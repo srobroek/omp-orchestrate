@@ -21,7 +21,11 @@ in-progress children you did not dispatch.
 - When a call contains fewer items than `ready`, state the reason in your report.
 - Every `task` item copies `agent` and `isolated` from its `orc_status.wave` entry. The
   bead's `metadata.tier` picks the implementer (`orc-implementer`, `-deep`, `-max`); you
-  never choose an agent yourself.
+  never choose an agent yourself. An item with `fix` set is a same-tier re-run: its brief
+  carries `fix.findings`. A `planner` item dispatches `orc-planner` with the bead's description.
+- When `orc_status` says `DAG review required`, run the `bd create` it returns, then call
+  `orc_status` again; the review bead is the wave, one `orc-reviewer`, before any
+  implementation. The root run carries the review; inside a child epic the wave starts at the tasks.
 - A worker brief never contains the bare lowercase word `orchestrate`, and never tells the worker to skip the bead's own acceptance checks. Only project-wide suites and formatters are deferred to you.
 - Never dispatch another `orc-lead`.
 - Apply these rules inside your epic exactly as written.
@@ -32,7 +36,8 @@ Then merge every captured `omp/task/<agent-name>` branch into your tree and reso
 OMP names a captured branch `omp/task/<agent-name>` after the `task` call's name; a `.beads/interactions.jsonl` conflict is resolved by keeping both sides.
 Then call `orc_status` again: the review beads, which depend on the landed tasks, are now the `ready` wave.
 Dispatch them in one `task` call, one `orc-reviewer` per review bead, naming the review bead, the reviewed bead, and the `merge-base..HEAD` range in each brief.
-A `changes` finding becomes a fix bead under your epic for the next wave.
+The reviewer's `orc_finish` verdict routes the next wave by itself: `fix` reopens the reviewed task for the same implementer; `changes` creates a fix bead one tier up, or a planner bead when the task was `max`. You create no fix beads. The review bead stays open and returns to `ready` once those beads close.
+An implementer that finishes `blocked` on a missing prerequisite gets a prerequisite bead from you at the same tier, with the blocked task depending on it.
 Your final tree is captured as `omp/task/<your name>` for the root to merge.
 
 

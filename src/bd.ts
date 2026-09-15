@@ -152,3 +152,31 @@ export async function bdList(args: readonly string[], cwd: string): Promise<BdBe
 	}
 	return beads;
 }
+
+/** One dependency edge, whichever shape bd printed. */
+export interface BdEdge {
+	id: string;
+	type: string;
+}
+
+/**
+ * A bead's dependency edges. `bd show` prints `{ id, dependency_type }`, `bd list` prints
+ * `{ depends_on_id, type }`; both are read, so every caller sees `{ id, type }`.
+ */
+export function edgesOf(bead: BdBead): BdEdge[] {
+	const deps = Array.isArray(bead.dependencies) ? bead.dependencies : [];
+	const out: BdEdge[] = [];
+	for (const dep of deps) {
+		if (dep === null || typeof dep !== "object") continue;
+		const type = "dependency_type" in dep ? dep.dependency_type : "type" in dep ? dep.type : undefined;
+		const id = "depends_on_id" in dep ? dep.depends_on_id : "id" in dep ? dep.id : undefined;
+		if (typeof id === "string" && id.length > 0 && typeof type === "string") out.push({ id, type });
+	}
+	return out;
+}
+
+/** The parent id: a top-level `parent` field when bd prints one, else the parent-child edge. */
+export function parentOf(bead: BdBead): string | undefined {
+	if (typeof bead.parent === "string" && bead.parent.length > 0) return bead.parent;
+	return edgesOf(bead).find(edge => edge.type === "parent-child")?.id;
+}

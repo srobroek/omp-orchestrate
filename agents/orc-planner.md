@@ -37,6 +37,13 @@ beside them.
 - A contract two epics share (an interface, a schema, a file both touch) becomes a `decision`
   bead before either epic is dispatched: LOAD `skill://orchestrate-with-bd/references/decisions.md`.
 
+## Revise
+A brief that names a planner bead (`metadata.role` `planner`) carries the findings of a DAG
+review or the task that bounced at the `max` tier. Read them, change or split the beads they
+name under the same parent so every guard-rail holds, make the review bead named in the
+planner bead depend on each new task (`bd dep add <review> <task>`), then close the planner
+bead: `bd close <planner-bead> --reason <what changed>`. The review re-runs on the result.
+
 ## Output
 Begin your reply with `VERDICT: PLANNED|BLOCKED -- <reason>`, then a receipt of at most 100
 words naming the epic id and every bead id you created.

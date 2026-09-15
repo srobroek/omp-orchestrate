@@ -11,7 +11,7 @@ inventory, including `task`.
 | `orc-implementer` (basic) | `@task` | yes | scout, operator | its task bead |
 | `orc-implementer-deep` | `@plan` | yes | scout, operator | its task bead |
 | `orc-implementer-max` | `@slow` | yes | scout, operator | its task bead |
-| `orc-reviewer` | `@slow` | no | scout, security-reviewer | its review bead |
+| `orc-reviewer` | `@slow` | no | scout, security-reviewer | its review bead, or the run's DAG review |
 | `orc-researcher` | `@smol` | no | none | its research bead |
 | `orc-shepherd` | `@task` | no | none | its PR bead |
 
@@ -40,6 +40,15 @@ add a `decision` or research bead. `deep` and `max` together stay a minority of 
 that is mostly `deep` is under-decomposed. If `@plan` and `@slow` resolve to the same model,
 the two upper tiers share one model until `modelRoles.slow` differs from `plan`.
 
+## Review roles
+
+Two review beads exist. A bead with `metadata.role` `reviewer` judges the tasks it depends
+on. A bead with `metadata.role` `dag-reviewer` judges the run's DAG; `orc_status` returns
+the command that creates it and withholds the wave until it exists. A bead with
+`metadata.role` `planner` is planner work `orc_finish` created (a DAG revision, or the
+decomposition of a task that bounced at `max`); the wave dispatches `orc-planner` for it.
+The verdict table and the escalation ladder are in `references/planning.md`.
+
 ## Model overrides
 
 Remap any agent without touching the plugin through OMP's own per-agent setting:
@@ -50,6 +59,20 @@ task:
     orc-reviewer: "@reviewer"          # a custom alias you define in modelRoles
     orc-implementer-max: "openai/gpt-5.6-sol:high"
 ```
+
+## Marketplace installs
+
+`omp plugin install orchestrate-with-bd@<marketplace>` discovers the agents through OMP's
+claude-plugins lane, which drops every `model:` line (`task/discovery.ts`, `ignoreModel`).
+Without one of the two settings below, the agents run on the caller's model:
+
+- `extensions:` in the OMP config lists the plugin path
+  (`~/.omp/plugins/node_modules/@srobroek/orchestrate-with-bd`), so the agents load through
+  the extension lane with their frontmatter intact.
+- `task.agentModelOverrides` names each of the eight `orc-*` agents with the alias from the
+  table above.
+
+The preflight below does not detect this case.
 
 ## Model-role preflight
 
