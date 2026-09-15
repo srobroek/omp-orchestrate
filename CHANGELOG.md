@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.12](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.11...v0.4.12) (2026-09-15)
+
+
+### Bug Fixes
+
+* **review:** DAG gate admits only the review's own revisions; no fix verdict on a DAG ([#176](https://github.com/srobroek/orchestrate-with-bd/issues/176)) ([1916c4b](https://github.com/srobroek/orchestrate-with-bd/commit/1916c4b596e3ab6aab443d90504f28971a5ed903))
+
 ## [0.4.11](https://github.com/srobroek/orchestrate-with-bd/compare/v0.4.10...v0.4.11) (2026-09-15)
 
 
